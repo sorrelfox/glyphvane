@@ -1,0 +1,14 @@
+[package]
+name = "gv-canvas"
+description = "JSON Canvas 1.0 model that preserves unknown keys."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,101 @@
+# cargo-deny configuration (schema of cargo-deny 0.20).
+# Run with: cargo deny check
+#
+# Dependency policy (NFR-LIC-02). Any exception to this file requires an ADR.
+
+[graph]
+# Check every feature combination, not only the default one.
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+[advisories]
+# Vulnerability advisories always fail the check (not configurable in 0.20).
+#
+# Unmaintained advisories: cargo-deny 0.20 has no warn level for these, only a
+# scope. "workspace" fails only when one of our crates depends *directly* on an
+# unmaintained crate; unmaintained crates deeper in the tree (common under
+# GPUI) are not reported. Use `cargo deny check -W unmaintained` to see them
+# as warnings across the whole graph.
+unmaintained = "workspace"
+# Unsound advisories for direct dependencies fail the check.
+unsound = "workspace"
+# Yanked crate versions are a warning.
+yanked = "warn"
+# Ignored advisories need a reason and an ADR reference.
+ignore = [
+    #{ id = "RUSTSEC-0000-0000", reason = "ADR-NNN: why" },
+]
+
+# ---------------------------------------------------------------------------
+[licenses]
+# Only licenses compatible with distributing Glyphvane under
+# GPL-3.0-or-later. Everything not listed is denied, including (by omission):
+#   - EPL-2.0 (accepted only via an SPDX expression that offers a listed
+#     license as an alternative, e.g. "EPL-2.0 OR GPL-2.0-or-later")
+#   - AGPL-3.0 (any variant), SSPL-1.0
+#   - non-commercial licenses (e.g. CC-BY-NC-*, PolyForm-Noncommercial)
+#   - unknown or unparseable licenses
+# Exceptions (the `exceptions` list below) require an ADR.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "Unlicense",
+    "BSL-1.0",
+    # Fonts only.
+    "OFL-1.1",
+]
+confidence-threshold = 0.93
+# Per-crate exceptions; each entry needs an ADR reference in a comment.
+exceptions = [
+    #{ allow = ["EPL-2.0"], crate = "example", reason = "ADR-NNN" },
+]
+# Not every allowed license is in use yet.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates are unpublished (publish = false) and GPL-3.0-or-later;
+# they are not subject to this check.
+ignore = true
+
+# ---------------------------------------------------------------------------
+[bans]
+# GPUI pulls in many duplicate versions; report them but do not fail.
+multiple-versions = "warn"
+# Version requirements of `*` are denied...
+wildcards = "deny"
+# ...except for path dependencies inside this workspace.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+[sources]
+# Only crates.io by default.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Git sources. If ADR-013 selects the Zed git pin for GPUI, the Zed
+# repository URL is added here (and only here).
+allow-git = []

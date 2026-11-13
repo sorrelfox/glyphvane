@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/sorrelfox/glyphvane"
+
+[workspace.dependencies]
+# Internal crates
+gv-text = { path = "crates/gv-text" }
+gv-syntax = { path = "crates/gv-syntax" }
+gv-model = { path = "crates/gv-model" }
+gv-vault = { path = "crates/gv-vault" }
+gv-search = { path = "crates/gv-search" }
+gv-render-tree = { path = "crates/gv-render-tree" }
+gv-html = { path = "crates/gv-html" }
+gv-highlight = { path = "crates/gv-highlight" }
+gv-math = { path = "crates/gv-math" }
+gv-diagram = { path = "crates/gv-diagram" }
+gv-media = { path = "crates/gv-media" }
+gv-bases = { path = "crates/gv-bases" }
+gv-canvas = { path = "crates/gv-canvas" }
+gv-export = { path = "crates/gv-export" }
+gv-editor = { path = "crates/gv-editor" }
+gv-spell = { path = "crates/gv-spell" }
+gv-ui = { path = "crates/gv-ui" }
+gv-helper = { path = "crates/gv-helper" }
+
+# Third-party crates: add shared versions here and use `{ workspace = true }` in crates.
+clap = { version = "4.6", features = ["derive"] }
+# GPUI through the GPUI Kit facade (ADR-013, option A). The kit pins the matching
+# `gpui-pre` snapshot exactly, so bump the two together by bumping this pin.
+gpui = { package = "gpui-kit", version = "=0.9.1" }
+# The GPUI snapshot the kit pins, named only so tests can switch on its
+# `test-support` feature (renamed so its `gpui` library does not clash with the
+# kit). The kit's own `test-support` feature does not resolve:
+# it names the kit's optional `gpui-fast` backend, whose exact `taffy` pin
+# conflicts with this snapshot's.
+gpui-pre = { package = "gpui-pre", version = "=0.3.12" }
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "1.2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1

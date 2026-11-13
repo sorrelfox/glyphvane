@@ -1,0 +1,14 @@
+[package]
+name = "gv-html"
+description = "Raw HTML regions, sanitizer, HTML to render nodes, HTML to Markdown for paste."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

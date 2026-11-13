@@ -1,0 +1,6 @@
+# Keep in sync with `rust-version` in the root Cargo.toml.
+msrv = "1.95"
+# `unwrap_used` is warned on workspace-wide; tests may unwrap freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
