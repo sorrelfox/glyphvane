@@ -9,6 +9,17 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+arc-swap.workspace = true
+caseless.workspace = true
+ignore.workspace = true
+serde.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
