@@ -138,8 +138,8 @@ pub mod spacing {
         pub const GAP: f32 = 5.0;
     }
 
-    /// The sidebar head (Windows and Linux): padding `0 6`, gap 8; the panel
-    /// switcher's buttons are 2 apart.
+    /// The sidebar head: padding `0 6`, gap 8; the panel switcher's buttons
+    /// are 2 apart. On macOS the window controls take the left of the head.
     pub mod sidebar_head {
         pub const PAD_X: f32 = 6.0;
         pub const GAP: f32 = 8.0;
@@ -167,6 +167,33 @@ pub mod spacing {
         pub const INSET_RIGHT: f32 = 8.0;
         pub const MARGIN_LEFT: f32 = 10.0;
         pub const GLYPH: f32 = 10.0;
+    }
+
+    /// The macOS window controls ("traffic lights"), drawn by the system:
+    /// three 12 px circles, 8 apart, 13 from the window's left edge and
+    /// centred in the title row. The window keeps their space free.
+    pub mod macos_controls {
+        pub const DIAMETER: f32 = 12.0;
+        pub const GAP: f32 = 8.0;
+        pub const INSET_LEFT: f32 = 13.0;
+        /// Space after the controls at the start of the title row, when the
+        /// sidebar is hidden.
+        pub const MARGIN_RIGHT: f32 = 10.0;
+        /// The three circles and the two gaps between them.
+        pub const WIDTH: f32 = 3.0 * DIAMETER + 2.0 * GAP;
+        /// AppKit's standard window button: a 14 × 16 frame with the circle
+        /// centred in it. GPUI positions the frame, not the circle.
+        pub const BUTTON_FRAME_WIDTH: f32 = 14.0;
+        pub const BUTTON_FRAME_HEIGHT: f32 = 16.0;
+    }
+
+    /// The Windows caption buttons, drawn by the application: 46 wide, the
+    /// full height of the title row, at its far right, 4 after the panel
+    /// toggle. Glyphs 12, stroke 1.5 on the 24 grid.
+    pub mod windows_controls {
+        pub const WIDTH: f32 = 46.0;
+        pub const MARGIN_LEFT: f32 = 4.0;
+        pub const GLYPH: f32 = 12.0;
     }
 }
 

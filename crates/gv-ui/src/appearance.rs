@@ -7,6 +7,7 @@
 use gpui::component::{Theme as ComponentTheme, ThemeMode};
 use gpui::{App, Fill, Global, Hsla, Rgba, SharedString, WindowAppearance, px};
 
+use crate::chrome::WindowChrome;
 use crate::metrics::{font, radius, text};
 use crate::theme::{Color, OsAppearance, PreferredLight, Scheme, Theme, ThemeChoice, ThemeId};
 
@@ -122,19 +123,9 @@ impl Appearance {
             component.font_size = px(text::UI.size);
             component.radius = px(radius::CONTROL);
             component.radius_lg = px(radius::POPOVER);
-            component.window_radius = px(window_radius());
+            component.window_radius = px(WindowChrome::current().window_radius());
             map_colors(theme, component);
         });
-    }
-}
-
-fn window_radius() -> f32 {
-    if cfg!(target_os = "macos") {
-        radius::window::MACOS
-    } else if cfg!(target_os = "windows") {
-        radius::window::WINDOWS
-    } else {
-        radius::window::LINUX
     }
 }
 

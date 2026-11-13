@@ -4,6 +4,7 @@
 //! GPUI views: workspace, panes, editor and reader elements, panels, theming.
 
 pub mod appearance;
+pub mod chrome;
 pub mod icons;
 pub mod metrics;
 pub mod shell;
@@ -12,11 +13,12 @@ pub mod theme;
 use std::path::PathBuf;
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, Result, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, KeyBinding, Result, WindowBounds, WindowOptions,
+    px, size,
 };
 
 pub use appearance::Appearance;
+pub use chrome::WindowChrome;
 pub use icons::Assets;
 pub use theme::{ThemeChoice, ThemeId};
 
@@ -83,37 +85,30 @@ pub fn init(cx: &mut App, theme: ThemeChoice) {
 
 /// Opens a main window for `path`, as when the file is passed on the command
 /// line: Preview mode, both side panels hidden.
-pub fn open_file_window(cx: &mut App, path: Option<PathBuf>) -> Result<()> {
+pub fn open_file_window(cx: &mut App, path: Option<PathBuf>) -> Result<AnyWindowHandle> {
     let file_name = shell::FileLabel::new(path.as_deref());
+    let options = main_window_options(WindowChrome::current(), file_name.window_title().into(), cx);
+    let (window, _) = gpui::open_window(options, cx, |window, cx| {
+        cx.new(|cx| Workspace::new(file_name, window, cx))
+    })?;
+    cx.activate(true);
+    Ok(window)
+}
+
+/// A main window with the platform's chrome: no system title bar, so the
+/// title row is the only row of chrome above the document.
+fn main_window_options(chrome: WindowChrome, title: gpui::SharedString, cx: &App) -> WindowOptions {
     let bounds = Bounds::centered(
         None,
         size(px(sz::MAIN_WINDOW_WIDTH), px(sz::MAIN_WINDOW_HEIGHT)),
         cx,
     );
-    let options = WindowOptions {
+    WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(file_name.window_title().into()),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
-        window_decorations: Some(window_decorations()),
+        titlebar: Some(chrome.titlebar(title)),
+        window_decorations: Some(chrome.decorations()),
+        app_owns_titlebar_drag: chrome.app_owns_titlebar_drag(),
         app_id: Some(APP_ID.to_owned()),
         ..WindowOptions::default()
-    };
-    gpui::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Workspace::new(file_name, window, cx))
-    })?;
-    cx.activate(true);
-    Ok(())
-}
-
-/// Linux draws its own title row with window controls; macOS and Windows keep
-/// the system title bar for now.
-fn window_decorations() -> WindowDecorations {
-    if cfg!(target_os = "linux") {
-        WindowDecorations::Client
-    } else {
-        WindowDecorations::Server
     }
 }

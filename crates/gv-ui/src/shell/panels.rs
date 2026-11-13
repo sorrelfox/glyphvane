@@ -6,12 +6,11 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, Corners, Div, FontWeight, InteractiveElement as _, ParentElement as _, Pixels,
-    Stateful, Styled as _, div, px,
+    Stateful, Styled as _, Window, div, px,
 };
 
 use super::Workspace;
-use super::controls::icon_button;
-use super::title_row::{HAS_MENU_BUTTON, menu_button};
+use super::controls::{RowStart, icon_button};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::icon_button as button;
@@ -24,13 +23,14 @@ impl Workspace {
     /// switcher in a head that lines up with the title row.
     pub(super) fn render_sidebar(
         &self,
-        client_decorated: bool,
         radii: Corners<Pixels>,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> Stateful<Div> {
         let theme = Appearance::theme(cx);
         div()
             .id("sidebar")
+            .debug_selector(|| "sidebar".into())
             .w(px(size::SIDEBAR_WIDTH))
             .flex_none()
             .h_full()
@@ -48,8 +48,8 @@ impl Workspace {
                     .items_center()
                     .gap(px(sidebar_head::GAP))
                     .px(px(sidebar_head::PAD_X))
-                    .when(HAS_MENU_BUTTON, |head| head.child(menu_button(theme)))
-                    .child(self.drag_region("sidebar-drag", client_decorated, cx))
+                    .children(self.row_start(RowStart::SidebarHead, theme, window, cx))
+                    .child(self.drag_region("sidebar-drag", window, cx).flex_1())
                     .child(panel_switcher(theme)),
             )
             .child(panel_head("Files", theme))

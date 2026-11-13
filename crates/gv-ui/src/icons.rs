@@ -116,9 +116,69 @@ impl Icon {
     }
 }
 
+/// Wraps caption glyph paths in an SVG on the 24 grid with the design's
+/// stroke of 1.5.
+macro_rules! caption_svg {
+    ($paths:literal) => {
+        concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">"#,
+            $paths,
+            "</svg>"
+        )
+    };
+}
+
+/// The glyphs of the Windows caption buttons. They are not Lucide icons: the
+/// design draws them as thin lines on the 24 grid, stroke 1.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionGlyph {
+    Minimize,
+    Maximize,
+    /// Not in the design. Windows' convention: two offset squares.
+    Restore,
+    Close,
+}
+
+impl CaptionGlyph {
+    pub const ALL: [Self; 4] = [Self::Minimize, Self::Maximize, Self::Restore, Self::Close];
+
+    /// The glyph as an element of `size` logical pixels, drawn in the current
+    /// text colour.
+    pub fn sized(self, size: f32) -> gpui::component::Icon {
+        gpui::component::Icon::empty()
+            .path(self.path())
+            .size(px(size))
+    }
+
+    /// The glyph's path in the application's asset source.
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Minimize => "icons/glyphvane/caption-minimize.svg",
+            Self::Maximize => "icons/glyphvane/caption-maximize.svg",
+            Self::Restore => "icons/glyphvane/caption-restore.svg",
+            Self::Close => "icons/glyphvane/caption-close.svg",
+        }
+    }
+
+    fn svg(self) -> &'static str {
+        match self {
+            Self::Minimize => caption_svg!(r#"<path d="M3 12h18"/>"#),
+            Self::Maximize => caption_svg!(r#"<path d="M4 4h16v16H4z"/>"#),
+            Self::Restore => {
+                caption_svg!(r#"<path d="M4 8h12v12H4z"/><path d="M8 8V4h12v12h-4"/>"#)
+            }
+            Self::Close => caption_svg!(r#"<path d="M3 3l18 18M21 3 3 21"/>"#),
+        }
+    }
+
+    fn from_path(path: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|glyph| glyph.path() == path)
+    }
+}
+
 /// The application's asset source: GPUI Kit's default component icons plus
 /// the design's extra Lucide icons, every Lucide icon drawn with the design's
-/// stroke width.
+/// stroke width, and the Windows caption glyphs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Assets;
 
@@ -128,6 +188,9 @@ const DESIGN_STROKE: &str = "stroke-width=\"1.75\"";
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(glyph) = CaptionGlyph::from_path(path) {
+            return Ok(Some(Cow::Borrowed(glyph.svg().as_bytes())));
+        }
         let data = match DesignIcons.load(path)? {
             Some(data) => Some(data),
             None => gpui::assets::Assets.load(path)?,
@@ -138,6 +201,13 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = DesignIcons.list(path)?;
         paths.extend(gpui::assets::Assets.list(path)?);
+        paths.extend(
+            CaptionGlyph::ALL
+                .map(CaptionGlyph::path)
+                .into_iter()
+                .filter(|glyph| glyph.starts_with(path))
+                .map(SharedString::from),
+        );
         paths.sort();
         paths.dedup();
         Ok(paths)
@@ -195,6 +265,22 @@ mod tests {
             assert!(
                 data.is_some(),
                 "{icon:?} ({path}) is not in the asset source"
+            );
+        }
+    }
+
+    #[test]
+    fn caption_glyphs_are_served_with_their_own_stroke() {
+        for glyph in CaptionGlyph::ALL {
+            let data = Assets.load(glyph.path()).ok().flatten().unwrap_or_default();
+            let svg = String::from_utf8_lossy(&data);
+            assert!(svg.contains("stroke-width=\"1.5\""), "{glyph:?}: {svg}");
+            assert!(
+                Assets
+                    .list("icons/")
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|p| p == glyph.path())
             );
         }
     }

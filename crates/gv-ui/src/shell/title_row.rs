@@ -5,40 +5,26 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Corners, Div, FontWeight, InteractiveElement as _, ParentElement as _, Pixels,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px, transparent_black,
+    Context, Corners, Decorations, Div, FontWeight, InteractiveElement as _, ParentElement as _,
+    Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    transparent_black,
 };
 
-use super::controls::{disabled_icon_button, icon_button, linux_window_controls};
+use super::controls::{
+    RowStart, disabled_icon_button, icon_button, linux_window_controls, windows_caption_buttons,
+};
 use super::{FileLabel, ViewMode, Workspace};
 use crate::appearance::Appearance;
+use crate::chrome::WindowChrome;
 use crate::icons::Icon;
 use crate::metrics::size::{icon_button as button, segment, tab};
 use crate::metrics::spacing::{linux_controls, mode_switch, tab as tab_spacing, title_row};
 use crate::metrics::{HAIRLINE, icon, radius, size, text};
 use crate::theme::Theme;
 
-/// Windows and Linux show an application menu button at the start of the
-/// sidebar head, or of the title row while the sidebar is hidden. macOS uses
-/// the system menu bar.
-pub(super) const HAS_MENU_BUTTON: bool = !cfg!(target_os = "macos");
-
-/// The application menu button. The menu itself is not designed yet.
-pub(super) fn menu_button(theme: &Theme) -> Stateful<Div> {
-    icon_button(
-        "app-menu",
-        Icon::Menu,
-        icon::TOOLBAR,
-        (button::MENU_WIDTH, button::HEIGHT),
-        theme,
-    )
-    .text_color(theme.text.primary)
-}
-
 impl Workspace {
     pub(super) fn render_title_row(
         &self,
-        client_decorated: bool,
         radii: Corners<Pixels>,
         window: &Window,
         cx: &mut Context<'_, Self>,
@@ -46,22 +32,28 @@ impl Workspace {
         let theme = Appearance::theme(cx);
         let wide = (button::WIDTH, button::HEIGHT);
         let square = (button::SQUARE, button::SQUARE);
+        let caption_buttons = self.chrome.has_caption_buttons();
+        let draws_linux_controls = self.chrome == WindowChrome::Linux
+            && matches!(window.window_decorations(), Decorations::Client { .. });
 
         div()
             .id("title-row")
+            .debug_selector(|| "title-row".into())
             .h(px(size::TITLE_ROW))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(title_row::GAP))
-            .px(px(title_row::PAD_X))
+            .pl(px(title_row::PAD_X))
+            // The caption buttons run to the window's right edge.
+            .when(!caption_buttons, |row| row.pr(px(title_row::PAD_X)))
             .bg(theme.surface.window)
             .border_b_1()
             .border_color(theme.border.default)
             .rounded_tr(radii.top_right)
             .when(!self.sidebar_open, |row| {
                 row.rounded_tl(radii.top_left)
-                    .when(HAS_MENU_BUTTON, |row| row.child(menu_button(theme)))
+                    .children(self.row_start(RowStart::TitleRow, theme, window, cx))
             })
             .child(
                 icon_button(
@@ -71,6 +63,7 @@ impl Workspace {
                     wide,
                     theme,
                 )
+                .debug_selector(|| "toggle-sidebar".into())
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .child(disabled_icon_button(
@@ -94,7 +87,8 @@ impl Workspace {
                 theme,
             ))
             .child(
-                self.drag_region("title-drag", client_decorated, cx)
+                self.drag_region("title-drag", window, cx)
+                    .flex_1()
                     .min_w(px(title_row::DRAG_MIN)),
             )
             .child(self.mode_switch(theme, cx))
@@ -116,9 +110,13 @@ impl Workspace {
                     wide,
                     theme,
                 )
+                .debug_selector(|| "toggle-panel".into())
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
             )
-            .when(client_decorated && cfg!(target_os = "linux"), |row| {
+            .when(caption_buttons, |row| {
+                row.child(windows_caption_buttons(window, theme))
+            })
+            .when(draws_linux_controls, |row| {
                 row.child(
                     linux_window_controls(window, theme)
                         .mr(px(linux_controls::INSET_RIGHT - title_row::PAD_X)),

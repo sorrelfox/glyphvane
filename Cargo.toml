@@ -32,6 +32,7 @@ gv-ui = { path = "crates/gv-ui" }
 gv-helper = { path = "crates/gv-helper" }
 
 # Third-party crates: add shared versions here and use `{ workspace = true }` in crates.
+anyhow = "1.0.100"
 clap = { version = "4.6", features = ["derive"] }
 # GPUI through the GPUI Kit facade (ADR-013, option A). The kit pins the matching
 # `gpui-pre` snapshot exactly, so bump the two together by bumping this pin.
@@ -44,6 +45,15 @@ gpui = { package = "gpui-kit", version = "=0.9.1" }
 gpui-pre = { package = "gpui-pre", version = "=0.3.12" }
 serde = { version = "1.0.219", features = ["derive"] }
 toml = "1.2"
+# Logging (tracing). `tracing-log` forwards the `log` records of GPUI and wgpu.
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+  "ansi",
+  "env-filter",
+  "fmt",
+  "std",
+  "tracing-log",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

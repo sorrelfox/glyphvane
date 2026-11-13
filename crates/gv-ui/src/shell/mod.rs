@@ -17,11 +17,12 @@ use std::path::Path;
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Decorations, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Window, div, px,
+    Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div, px,
 };
 
 use crate::appearance::Appearance;
+use crate::chrome::WindowChrome;
 use crate::metrics::text;
 use crate::{ToggleEditMode, TogglePanel, ToggleSidebar};
 
@@ -69,6 +70,7 @@ impl FileLabel {
 /// A main window's content.
 pub struct Workspace {
     focus: FocusHandle,
+    chrome: WindowChrome,
     file: FileLabel,
     mode: ViewMode,
     /// Side panels start hidden: a window opened for a file shows only the
@@ -84,6 +86,7 @@ pub struct Workspace {
 impl fmt::Debug for Workspace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Workspace")
+            .field("chrome", &self.chrome)
             .field("file", &self.file)
             .field("mode", &self.mode)
             .field("sidebar_open", &self.sidebar_open)
@@ -94,6 +97,17 @@ impl fmt::Debug for Workspace {
 
 impl Workspace {
     pub fn new(file: FileLabel, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        Self::with_chrome(file, WindowChrome::current(), window, cx)
+    }
+
+    /// A workspace drawn with another platform's chrome. Only the window's
+    /// own platform behaves natively; the others are for layout tests.
+    pub fn with_chrome(
+        file: FileLabel,
+        chrome: WindowChrome,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Appearance::set_os_appearance(cx, window.appearance());
@@ -102,6 +116,7 @@ impl Workspace {
         });
         Self {
             focus,
+            chrome,
             file,
             mode: ViewMode::default(),
             sidebar_open: false,
@@ -139,7 +154,6 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
         let radii = window_corner_radii(window, cx);
-        let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
 
         // The window root (GPUI Component's `Root`) draws the frame of a
         // client-decorated window: shadow, border, rounded corners and resize
@@ -168,7 +182,7 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .when(self.sidebar_open, |row| {
-                        row.child(self.render_sidebar(client_decorated, radii, cx))
+                        row.child(self.render_sidebar(radii, window, cx))
                     })
                     .child(
                         div()
@@ -176,7 +190,7 @@ impl Render for Workspace {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(self.render_title_row(client_decorated, radii, window, cx))
+                            .child(self.render_title_row(radii, window, cx))
                             .child(
                                 div()
                                     .flex_1()
