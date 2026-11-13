@@ -1,2 +1,2 @@
-# Quillvane
+# Glyphvane
 Markdown editor/viewer
