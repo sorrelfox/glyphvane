@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+#
+# git-cliff configuration: https://git-cliff.org/docs/configuration
+# Generates the changelog from Conventional Commits. Output is edited by hand
+# for release notes.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to Glyphvane are listed here. The format follows
+Conventional Commits, and versions follow Semantic Versioning.
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
+commit_preprocessors = [
+  # Drop issue/PR references in the form " (#123)" left by squash merges.
+  { pattern = '\s*\(#[0-9]+\)$', replace = "" },
+]
+# Order of groups is set by the HTML comment prefix, which `striptags` removes.
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore\\(deps\\)", skip = true },
+  { message = "^chore\\(ci\\)", group = "<!-- 6 -->CI" },
+  { message = "^feat\\((parser|syntax|profiles?)\\)", group = "<!-- 4 -->Parser and profiles" },
+  { message = "^fix\\((parser|syntax|profiles?)\\)", group = "<!-- 4 -->Parser and profiles" },
+  { message = "^feat", group = "<!-- 1 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Fixes" },
+  { message = "^perf", group = "<!-- 3 -->Performance" },
+  { message = "^docs", group = "<!-- 5 -->Docs" },
+  { message = "^ci", group = "<!-- 6 -->CI" },
+  { message = "^build", group = "<!-- 6 -->CI" },
+  { message = ".*", group = "<!-- 7 -->Other" },
+]
