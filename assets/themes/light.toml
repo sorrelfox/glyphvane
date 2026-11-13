@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Glyphvane theme: Light
+# Generated from the design tokens, which are the source of truth. Do not edit by hand.
+# Colours are #RRGGBB, or #RRGGBBAA where transparency matters.
+
+id = "light"
+name = "Light"
+scheme = "light"   # which variant theme-aware content gets: light or dark
+
+[surface]
+window = "#EBEEF0"
+panel = "#F3F5F7"
+page = "#FDFDFE"
+raised = "#FFFFFF"
+sunken = "#EFF2F4"
+
+[state]
+hover = "#1018200E"   # #101820 at 5.5%, drawn over any surface
+press = "#1018201A"   # #101820 at 10%, drawn over any surface
+
+[border]
+default = "#D9DDDF"
+strong = "#C0C5C8"
+
+[text]
+primary = "#191F23"
+secondary = "#4A5156"
+tertiary = "#62696D"
+
+[accent]
+default = "#007378"
+tint = "#CCEEEF"
+line = "#90CACD"
+on = "#FFFFFF"
+
+[status]
+error = "#B51F1F"
+error_tint = "#FFE7E4"
+warning = "#8F5300"
+warning_tint = "#FDEFCF"
+success = "#1D7339"
+success_tint = "#DCF7E1"
+info = "#2460A8"
+info_tint = "#E2F0FF"
+
+[selection]
+text = "#B6E1E6"
+
+[syntax]
+key = "#454EAD"
+string = "#146D34"
+number = "#925000"
+tag = "#7C3D96"
+url = "#215DA5"
+code = "#A8372E"
+
+[[shadow.popover]]
+x = 0
+y = 10
+blur = 30
+spread = 0
+color = "#10182029"
+
+[[shadow.popover]]
+x = 0
+y = 1
+blur = 3
+spread = 0
+color = "#1018201A"

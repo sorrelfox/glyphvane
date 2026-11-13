@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Glyphvane contributors
+
+//! Sizes of the design, in logical pixels at 100% zoom.
+//!
+//! These are the design, not suggestions: compactness is a requirement, so do
+//! not round them up. View code takes every size from here instead of writing
+//! numbers inline. A size that is missing belongs in the design tokens first.
+
+/// Fixed regions of the window and of its components.
+pub mod size {
+    /// Default size of a main window.
+    pub const MAIN_WINDOW_WIDTH: f32 = 1280.0;
+    pub const MAIN_WINDOW_HEIGHT: f32 = 800.0;
+    pub const TITLE_ROW: f32 = 36.0;
+    pub const STATUS_BAR: f32 = 24.0;
+    pub const SIDEBAR_WIDTH: f32 = 232.0;
+    pub const PANEL_WIDTH: f32 = 248.0;
+    pub const SETTINGS_SIDEBAR_WIDTH: f32 = 208.0;
+    pub const PANEL_HEADER: f32 = 28.0;
+    pub const LIST_ROW: f32 = 24.0;
+    pub const LIST_ROW_INSET: f32 = 6.0;
+    pub const LIST_INDENT: f32 = 14.0;
+    pub const OUTLINE_ROW: f32 = 22.0;
+    pub const OUTLINE_INDENT: f32 = 12.0;
+    pub const SMALL_ICON_BUTTON: f32 = 22.0;
+    pub const CONTROL: f32 = 24.0;
+    pub const FIELD: f32 = 26.0;
+    pub const INFOBAR: f32 = 30.0;
+    pub const MENU_ROW: f32 = 24.0;
+    pub const SWITCHER_ROW: f32 = 28.0;
+    pub const AUTOCOMPLETE_WIDTH: f32 = 300.0;
+    pub const HOVER_PREVIEW_WIDTH: f32 = 320.0;
+    pub const TAG_PILL: f32 = 18.0;
+    pub const PROFILE_CHIP: f32 = 18.0;
+    pub const CHECKBOX: f32 = 14.0;
+    pub const SCROLLBAR_THUMB: f32 = 6.0;
+    pub const THEME_CARD_PREVIEW: f32 = 84.0;
+
+    pub mod tab {
+        pub const HEIGHT: f32 = 28.0;
+        pub const PAD_LEFT: f32 = 10.0;
+        pub const PAD_RIGHT: f32 = 4.0;
+        pub const CLOSE_BUTTON: f32 = 18.0;
+    }
+
+    pub mod icon_button {
+        pub const WIDTH: f32 = 26.0;
+        pub const HEIGHT: f32 = 24.0;
+        /// Back, Forward, New tab and More actions are square.
+        pub const SQUARE: f32 = 24.0;
+        /// The application menu button on Windows and Linux.
+        pub const MENU_WIDTH: f32 = 28.0;
+    }
+
+    pub mod segment {
+        pub const FRAME: f32 = 24.0;
+        pub const INNER: f32 = 20.0;
+    }
+
+    pub mod switcher {
+        pub const WIDTH: f32 = 540.0;
+        pub const INPUT_ROW: f32 = 40.0;
+        pub const TOP: f32 = 84.0;
+    }
+
+    pub mod switch {
+        pub const WIDTH: f32 = 30.0;
+        pub const HEIGHT: f32 = 18.0;
+        pub const KNOB: f32 = 14.0;
+    }
+
+    pub mod document {
+        pub const COLUMN_MAX: f32 = 680.0;
+        pub const PAD_X: f32 = 40.0;
+        pub const PAD_TOP: f32 = 22.0;
+    }
+
+    pub mod editor {
+        pub const LINE_NUMBER_WIDTH: f32 = 26.0;
+        pub const GUTTER_GAP: f32 = 14.0;
+    }
+
+    pub mod settings_row {
+        pub const PLAIN: f32 = 36.0;
+        pub const WITH_DESCRIPTION: f32 = 40.0;
+    }
+}
+
+/// Spacing inside components, as the specification gives it per component.
+pub mod spacing {
+    /// The title row: padding `0 6`, gap 2.
+    pub mod title_row {
+        pub const PAD_X: f32 = 6.0;
+        pub const GAP: f32 = 2.0;
+        /// Space between the history buttons and the tab strip.
+        pub const TAB_STRIP_MARGIN: f32 = 4.0;
+        /// Space before the "more actions" button.
+        pub const MORE_MARGIN: f32 = 4.0;
+        /// Narrowest the flexible drag space may get.
+        pub const DRAG_MIN: f32 = 6.0;
+    }
+
+    /// Tabs: gap 2 between tabs and inside a tab.
+    pub mod tab {
+        pub const GAP: f32 = 2.0;
+    }
+
+    /// The mode switch: frame padding 1 and gap 1; labelled segments padding
+    /// `0 8` with a 5 px icon gap; the icon-only segment is 26 wide.
+    pub mod mode_switch {
+        pub const FRAME_PAD: f32 = 1.0;
+        pub const FRAME_GAP: f32 = 1.0;
+        pub const SEGMENT_PAD_X: f32 = 8.0;
+        pub const SEGMENT_GAP: f32 = 5.0;
+        pub const ICON_SEGMENT_WIDTH: f32 = 26.0;
+    }
+
+    /// The document column: 10 after the title heading, 12 between paragraphs.
+    pub mod document {
+        pub const HEADING_GAP: f32 = 10.0;
+        pub const PARAGRAPH_GAP: f32 = 12.0;
+    }
+
+    /// The status bar: padding `0 8`, gap 12.
+    pub mod status_bar {
+        pub const PAD_X: f32 = 8.0;
+        pub const GAP: f32 = 12.0;
+        /// Gap inside the breadcrumb and between an icon and its label.
+        pub const CRUMB_GAP: f32 = 3.0;
+        pub const ICON_GAP: f32 = 4.0;
+    }
+
+    /// The profile chip: padding `0 5 0 6`, gap 5.
+    pub mod profile_chip {
+        pub const PAD_LEFT: f32 = 6.0;
+        pub const PAD_RIGHT: f32 = 5.0;
+        pub const GAP: f32 = 5.0;
+    }
+
+    /// The sidebar head (Windows and Linux): padding `0 6`, gap 8; the panel
+    /// switcher's buttons are 2 apart.
+    pub mod sidebar_head {
+        pub const PAD_X: f32 = 6.0;
+        pub const GAP: f32 = 8.0;
+        pub const SWITCHER_GAP: f32 = 2.0;
+    }
+
+    /// A panel head: padding `0 6 0 12`, gap 2.
+    pub mod panel_head {
+        pub const PAD_LEFT: f32 = 12.0;
+        pub const PAD_RIGHT: f32 = 6.0;
+        pub const GAP: f32 = 2.0;
+    }
+
+    /// A right panel section head: padding `0 10`, gap 4.
+    pub mod section_head {
+        pub const PAD_X: f32 = 10.0;
+        pub const GAP: f32 = 4.0;
+    }
+
+    /// Window controls drawn by the application on Linux: 8 apart, 8 from the
+    /// right of the title row, 10 after the panel toggle.
+    pub mod linux_controls {
+        pub const DIAMETER: f32 = 22.0;
+        pub const GAP: f32 = 8.0;
+        pub const INSET_RIGHT: f32 = 8.0;
+        pub const MARGIN_LEFT: f32 = 10.0;
+        pub const GLYPH: f32 = 10.0;
+    }
+}
+
+/// Corner radii.
+pub mod radius {
+    pub const CONTROL: f32 = 5.0;
+    /// Buttons inside other controls: tab close, field toggles, code block
+    /// buttons.
+    pub const SMALL_CONTROL: f32 = 4.0;
+    pub const TAB: f32 = 6.0;
+    pub const SEGMENT_FRAME: f32 = 6.0;
+    pub const SEGMENT: f32 = 4.0;
+    pub const BLOCK: f32 = 6.0;
+    pub const POPOVER: f32 = 8.0;
+    pub const SWITCHER: f32 = 10.0;
+    pub const PILL: f32 = 9.0;
+    pub const CHIP: f32 = 4.0;
+    pub const KEYCAP: f32 = 4.0;
+
+    pub mod window {
+        pub const MACOS: f32 = 12.0;
+        pub const WINDOWS: f32 = 8.0;
+        pub const LINUX: f32 = 12.0;
+    }
+}
+
+/// Icon sizes.
+pub mod icon {
+    /// Title row buttons, panel switcher, menu button.
+    pub const TOOLBAR: f32 = 15.0;
+    /// List rows, panel head actions, mode switch, popover rows.
+    pub const ROW: f32 = 14.0;
+    /// Finding severity, code block buttons, inline status icons.
+    pub const INLINE: f32 = 13.0;
+    /// Status bar, profile chip, summary counts.
+    pub const SMALL: f32 = 12.0;
+    pub const CHEVRON: f32 = 12.0;
+    /// Tab close.
+    pub const TAB_CLOSE: f32 = 11.0;
+    /// Breadcrumb chevrons, fold markers, profile chip chevrons.
+    pub const TINY: f32 = 10.0;
+}
+
+/// Type scale: size and line height.
+pub mod text {
+    /// A size and its line height.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Scale {
+        pub size: f32,
+        pub line: f32,
+    }
+
+    /// Interface text.
+    pub const UI: Scale = Scale {
+        size: 12.0,
+        line: 16.0,
+    };
+    /// Status bar, counts, descriptions, paths.
+    pub const UI_SMALL: Scale = Scale {
+        size: 11.0,
+        line: 14.0,
+    };
+    /// Panel section headers, settings group headings (weight 600).
+    pub const UI_SECTION: Scale = Scale {
+        size: 11.5,
+        line: 16.0,
+    };
+    /// Settings page title, quick switcher results (weight 600).
+    pub const UI_TITLE: Scale = Scale {
+        size: 13.0,
+        line: 20.0,
+    };
+    pub const PREVIEW_BODY: Scale = Scale {
+        size: 15.0,
+        line: 24.0,
+    };
+    /// Weight 700, tracking [`H1_TRACKING`].
+    pub const PREVIEW_H1: Scale = Scale {
+        size: 26.0,
+        line: 32.0,
+    };
+    /// Weight 600, tracking [`H2_TRACKING`].
+    pub const PREVIEW_H2: Scale = Scale {
+        size: 18.0,
+        line: 24.0,
+    };
+    /// Callout body.
+    pub const PREVIEW_SMALL: Scale = Scale {
+        size: 14.0,
+        line: 22.0,
+    };
+    pub const PREVIEW_TABLE: Scale = Scale {
+        size: 13.5,
+        line: 20.0,
+    };
+    pub const PREVIEW_TABLE_HEADER_SIZE: f32 = 12.0;
+    pub const PREVIEW_PROPERTIES: Scale = Scale {
+        size: 12.5,
+        line: 22.0,
+    };
+    pub const CODE: Scale = Scale {
+        size: 12.5,
+        line: 20.0,
+    };
+    pub const EDITOR: Scale = Scale {
+        size: 12.5,
+        line: 20.0,
+    };
+    pub const EDITOR_LINE_NUMBER: Scale = Scale {
+        size: 11.0,
+        line: 20.0,
+    };
+    pub const KEYCAP_SIZE: f32 = 11.5;
+
+    /// Letter spacing of H1 and H2, in em.
+    pub const H1_TRACKING: f32 = -0.02;
+    pub const H2_TRACKING: f32 = -0.01;
+
+    /// Font weights.
+    pub mod weight {
+        pub const REGULAR: f32 = 400.0;
+        pub const ACTIVE: f32 = 500.0;
+        pub const STRONG: f32 = 600.0;
+        pub const BOLD: f32 = 700.0;
+    }
+}
+
+/// Font families. Inter and JetBrains Mono are not bundled yet; when they are
+/// not installed, text falls back to the system interface font.
+pub mod font {
+    pub const INTERFACE: &str = "Inter";
+    pub const EDITOR: &str = "JetBrains Mono";
+    /// GPUI's name for the platform's interface font.
+    pub const SYSTEM_FALLBACK: &str = ".SystemUIFont";
+}
+
+/// Width of every line: borders, rings, separators.
+pub const HAIRLINE: f32 = 1.0;
+
+/// Opacity of disabled controls.
+pub const DISABLED_OPACITY: f32 = 0.5;

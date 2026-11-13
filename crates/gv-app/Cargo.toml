@@ -1,0 +1,21 @@
+[package]
+name = "gv-app"
+description = "The glyphvane binary: CLI, single instance, platform glue, logging, settings bootstrap."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "glyphvane"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+gpui = { workspace = true }
+gv-ui = { workspace = true }
+
+[lints]
+workspace = true

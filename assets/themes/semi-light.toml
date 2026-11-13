@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Glyphvane theme: Semi-light
+# Generated from the design tokens, which are the source of truth. Do not edit by hand.
+# Colours are #RRGGBB, or #RRGGBBAA where transparency matters.
+
+id = "semi-light"
+name = "Semi-light"
+scheme = "light"   # which variant theme-aware content gets: light or dark
+
+[surface]
+window = "#E9DFCA"
+panel = "#F0E7D4"
+page = "#F8EFDE"
+raised = "#FDF7EC"
+sunken = "#F0E6D3"
+
+[state]
+hover = "#46321412"   # #463214 at 7%, drawn over any surface
+press = "#4632141F"   # #463214 at 12%, drawn over any surface
+
+[border]
+default = "#DCD1BB"
+strong = "#C0B59E"
+
+[text]
+primary = "#282017"
+secondary = "#544A3F"
+tertiary = "#665C50"
+
+[accent]
+default = "#006469"
+tint = "#B4E0DF"
+line = "#74B9BB"
+on = "#FFFFFF"
+
+[status]
+error = "#A71217"
+error_tint = "#F9D2CD"
+warning = "#7C4600"
+warning_tint = "#F2D694"
+success = "#10652F"
+success_tint = "#C4E7CA"
+info = "#1A5397"
+info_tint = "#C9DFF7"
+
+[selection]
+text = "#AAD9DF"
+
+[syntax]
+key = "#3E45A3"
+string = "#07602B"
+number = "#814300"
+tag = "#70318A"
+url = "#135298"
+code = "#9A2A23"
+
+[[shadow.popover]]
+x = 0
+y = 10
+blur = 30
+spread = 0
+color = "#46321433"
+
+[[shadow.popover]]
+x = 0
+y = 1
+blur = 3
+spread = 0
+color = "#46321424"
