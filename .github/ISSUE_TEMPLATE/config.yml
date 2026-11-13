@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/sorrelfox/glyphvane/security/advisories/new
+    about: Please report security issues privately through GitHub private vulnerability reporting, not as a public issue.
+  - name: Questions and ideas
+    url: https://github.com/sorrelfox/glyphvane/discussions
+    about: Ask questions and discuss ideas in GitHub Discussions.

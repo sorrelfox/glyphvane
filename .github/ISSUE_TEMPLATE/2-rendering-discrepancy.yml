@@ -1,0 +1,64 @@
+name: Rendering or syntax discrepancy
+description: Markdown renders or parses differently from the reference implementation of a flavor.
+labels: ["rendering", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Glyphvane renders Markdown according to the selected **flavor profile**.
+        A discrepancy is only actionable when it is compared against a
+        reference ("oracle") such as GitHub, Obsidian, pandoc or the
+        CommonMark dingus. Please keep the sample as small as possible.
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Flavor profile
+      description: The profile selected in Glyphvane when the problem occurs.
+      options:
+        - CommonMark (commonmark)
+        - GFM files (gfm-file)
+        - GFM comments (gfm-comment)
+        - Obsidian (obsidian)
+        - Extended (extended)
+        - Not sure / auto-detected
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Minimal Markdown sample
+      description: The smallest input that shows the problem.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What Glyphvane shows
+      description: Describe or screenshot the result. The output of `glyphvane render` (HTML or CST) is very welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      description: What the reference implementation produces (HTML, a screenshot, or a description).
+    validations:
+      required: true
+  - type: input
+    id: oracle
+    attributes:
+      label: Oracle reference
+      description: >-
+        Which implementation and version you compared against, ideally with a
+        link: e.g. "GitHub.com, 2026-11", "Obsidian 1.7.7", "pandoc 3.5 -f gfm",
+        "commonmark.js dingus 0.31".
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Glyphvane version
+      description: Output of `glyphvane --version`.
+    validations:
+      required: true

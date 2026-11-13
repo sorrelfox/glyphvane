@@ -1,0 +1,85 @@
+name: Link resolution bug
+description: A link, wikilink, embed or anchor resolves to the wrong target, or fails to resolve.
+labels: ["area:links", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Link resolution depends on the vault layout, the flavor profile and
+        sometimes the OS (case sensitivity, path separators). Please give all
+        of them, with file names reduced to a minimal tree if you can.
+  - type: textarea
+    id: tree
+    attributes:
+      label: Vault layout
+      description: The relevant part of the folder tree, e.g. the output of `tree` or a hand-written outline. Mark the file containing the link.
+      render: text
+      placeholder: |
+        vault/
+        ├── notes/
+        │   ├── index.md      <- contains the link
+        │   └── Topic.md
+        └── archive/
+            └── topic.md
+    validations:
+      required: true
+  - type: textarea
+    id: link
+    attributes:
+      label: The link
+      description: The exact link text as written in the source file.
+      render: markdown
+      placeholder: "[[Topic#Section]]"
+    validations:
+      required: true
+  - type: input
+    id: expected-target
+    attributes:
+      label: Expected target
+      description: The file (and heading or block, if any) the link should open.
+    validations:
+      required: true
+  - type: input
+    id: actual-target
+    attributes:
+      label: Actual result
+      description: What Glyphvane opened instead, or the error it reported.
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Flavor profile
+      options:
+        - CommonMark (commonmark)
+        - GFM files (gfm-file)
+        - GFM comments (gfm-comment)
+        - Obsidian (obsidian)
+        - Extended (extended)
+        - Not sure / auto-detected
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Glyphvane version
+      description: Output of `glyphvane --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: For example how another tool (Obsidian, GitHub) resolves the same link, or the output of `glyphvane check-links`.
+    validations:
+      required: false

@@ -1,0 +1,71 @@
+name: Bug report
+description: Something does not work as it should (crash, wrong behaviour, UI problem).
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For wrong rendering of Markdown, use the
+        **Rendering or syntax discrepancy** template; for links that open the
+        wrong target, use **Link resolution bug**. Security problems go to
+        private vulnerability reporting, never to a public issue.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from launching Glyphvane. Attach a small sample file or vault if one is needed.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: debug-info
+    attributes:
+      label: Debug info
+      description: >-
+        Paste the output of the *Copy debug info* command (app version, OS,
+        display server, GPU adapter and driver, active profile). If the app
+        cannot start, use the *Copy debug info* button in the startup error
+        dialog, or paste the output of `glyphvane --version`.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version and desktop
+      description: For example "Fedora 41, GNOME, Wayland", "macOS 15.1", "Windows 11 24H2".
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Relevant log output (run with `--verbose`) or screenshots.
+    validations:
+      required: false

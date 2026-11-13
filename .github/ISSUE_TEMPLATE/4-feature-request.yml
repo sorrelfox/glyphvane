@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose new behaviour, a syntax construct, or an improvement.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open-ended ideas are welcome in Discussions first. A feature request
+        must be anchored either in a **specific Markdown syntax construct**
+        (and the flavor it comes from) or in a **concrete use case**.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of request
+      options:
+        - Syntax construct (support or change rendering of a Markdown feature)
+        - Use case (workflow, editing, navigation, UI)
+    validations:
+      required: true
+  - type: textarea
+    id: construct-or-use-case
+    attributes:
+      label: Syntax construct or use case
+      description: >-
+        For syntax: name the construct, the flavor(s) that define it, and a
+        link to its specification or documentation, with a sample. For a use
+        case: describe what you are trying to achieve and why the current
+        behaviour does not support it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: How you would expect Glyphvane to behave.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and prior art
+      description: Workarounds you use today, or how other tools handle this.
+    validations:
+      required: false
