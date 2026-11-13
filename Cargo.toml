@@ -36,6 +36,7 @@ gv-editor = { path = "crates/gv-editor" }
 gv-spell = { path = "crates/gv-spell" }
 gv-ui = { path = "crates/gv-ui" }
 gv-helper = { path = "crates/gv-helper" }
+gv-settings = { path = "crates/gv-settings" }
 # Zed's rope, vendored unmodified (ADR-015; third_party/zed/PROVENANCE.md).
 rope = { path = "third_party/zed/rope" }
 
@@ -85,6 +86,32 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 # recorded divergences stay valid; bump deliberately) and spec fixtures.
 comrak = { version = "=0.59.0", default-features = false }
 serde_json = "1.0.145"
+# Vault: path index and link resolver (gv-vault). Unicode caseless matching
+# (full case folding, Unicode 16) and normalization for path keys, the
+# parallel directory walk, WHATWG URL parsing for the URL classifier, and
+# lock-free snapshot publication.
+arc-swap = "1.9.5"
+caseless = "0.2.2"
+ignore = "0.4.34"
+tempfile = "3.27.0"
+unicode-normalization = "0.1.26"
+url = "2.5.8"
+# Settings (gv-settings): format-preserving TOML edits, typed errors and the
+# per-OS config, data and cache directories.
+directories = "6.0.0"
+thiserror = "2.0.21"
+toml_edit = "0.25.19"
+# App: the settings file watcher (debounced; re-exports `notify`) and the
+# channel that hands reloaded settings to the UI thread.
+futures = "0.3.34"
+notify-debouncer-full = "0.7.0"
+# App: single instance. `rustix` gives the user id and the Unix socket's peer
+# credentials without `unsafe`; `interprocess` is the Windows named pipe.
+interprocess = { version = "2.4.6", default-features = false }
+rustix = { version = "1.1.6", features = ["net", "process"] }
+# Model (gv-model): Unicode general categories for the heading slug
+# algorithms (letters, marks, numbers, connector punctuation).
+unicode-properties = { version = "0.1.5", default-features = false, features = ["general-category"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

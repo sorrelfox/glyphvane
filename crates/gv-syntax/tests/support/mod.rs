@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod comrak_outline;
+pub mod edits;
 
 use std::path::PathBuf;
 

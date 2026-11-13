@@ -15,20 +15,17 @@
 //! | [`cst_text`] | `roundtrip_lossless` fuzz target |
 //! | [`cst_dump`], [`cst_dump_after_edits`] | `incremental_equals_full` fuzz target, `render --format cst` |
 //!
-//! # Placeholders
-//!
-//! **The parser does not exist yet.** Every function below has its final
-//! signature and a trivial body: the renderers return [`PLACEHOLDER_HTML`]
-//! (an HTML comment that matches no spec example, so the stub scores 0), the
-//! CST dump is empty, and [`cst_text`] echoes its input. [`IS_PLACEHOLDER`] is
-//! `true` while that is the case, so harnesses can report "not implemented"
-//! instead of failing. Replace the bodies (and set the constant to `false`)
-//! as the parser lands; the harnesses need no changes.
-//!
-//! [`normalize_html`] is not a placeholder: it is the spec-style HTML
-//! normalizer that conformance and differential comparisons use.
+//! [`normalize_html`] is the spec-style HTML normalizer that conformance
+//! and differential comparisons use.
 
 use std::ops::Range;
+use std::time::Instant;
+
+use crate::html::to_commonmark_html;
+use crate::incremental::{Budget, Change, Reparse};
+use crate::inline::api::{InlineInput, parse_inlines};
+use crate::tree::SyntaxTree;
+use crate::tree::walk;
 
 mod html4_entities;
 mod normalize;
@@ -37,11 +34,7 @@ pub use normalize::normalize_html;
 
 /// `true` while the functions in this module are placeholders rather than
 /// calls into the real parser.
-pub const IS_PLACEHOLDER: bool = true;
-
-/// What the placeholder renderers return. No spec example expects it, so
-/// examples whose expected output is empty do not pass by accident.
-pub const PLACEHOLDER_HTML: &str = "<!-- gv-syntax: HTML emitter not implemented -->\n";
+pub const IS_PLACEHOLDER: bool = false;
 
 /// The cmark-gfm extension names [`render_gfm_html`] accepts, as listed on
 /// the examples of the GFM spec.
@@ -56,19 +49,33 @@ pub const GFM_EXTENSIONS: &[&str] = &[
 
 /// Parses `src` completely (block structure and every inline) and drops the
 /// result. Used to time the parser and to check it does not panic.
-///
-/// Placeholder: does nothing.
 pub fn parse_full(src: &str) {
-    let _ = src;
+    let tree = SyntaxTree::parse(src);
+    let refs = tree.ref_map(src);
+    walk::walk(
+        &tree,
+        &mut walk::LeafFn(|leaf: &walk::Leaf<'_>| {
+            if matches!(
+                leaf.kind,
+                walk::LeafKind::Paragraph | walk::LeafKind::Heading { .. }
+            ) {
+                let segments = leaf.segments();
+                std::hint::black_box(parse_inlines(
+                    src,
+                    InlineInput {
+                        segments: &segments,
+                    },
+                    &*refs,
+                ));
+            }
+        }),
+    );
 }
 
 /// Renders `src` with the CommonMark profile through the CommonMark-exact
 /// HTML emitter: the output must equal cmark's after [`normalize_html`].
-///
-/// Placeholder: returns [`PLACEHOLDER_HTML`].
 pub fn render_commonmark_html(src: &str) -> String {
-    let _ = src;
-    PLACEHOLDER_HTML.to_owned()
+    to_commonmark_html(&SyntaxTree::parse(src), src)
 }
 
 /// Renders `src` with the GFM profile through the GFM-exact HTML emitter.
@@ -77,28 +84,25 @@ pub fn render_commonmark_html(src: &str) -> String {
 /// [`GFM_EXTENSIONS`]); the GFM spec lists them per example. Unknown names are
 /// ignored.
 ///
-/// Placeholder: returns [`PLACEHOLDER_HTML`].
+/// Until the GFM profile exists (M4), this renders with the CommonMark
+/// profile and ignores `extensions`.
 pub fn render_gfm_html(src: &str, extensions: &[&str]) -> String {
-    let _ = (src, extensions);
-    PLACEHOLDER_HTML.to_owned()
+    let _ = extensions;
+    render_commonmark_html(src)
 }
 
 /// The deterministic S-expression dump of the CST of `src` (the `cst` format
-/// of `glyphvane render`). Two parses are structurally equal iff their dumps
-/// are equal.
-///
-/// Placeholder: returns an empty string.
+/// of `glyphvane render`, documented in [`crate::cst_dump`]). Two parses are
+/// structurally equal iff their dumps are equal.
 pub fn cst_dump(src: &str) -> String {
-    let _ = src;
-    String::new()
+    crate::cst_dump::cst_dump(&SyntaxTree::parse(src), src)
 }
 
 /// The concatenated text of every CST token of `src`, in order. The CST is
 /// lossless iff this equals `src`.
-///
-/// Placeholder: returns `src` unchanged.
 pub fn cst_text(src: &str) -> String {
-    src.to_owned()
+    let bytes = crate::cst_dump::cst_text(&SyntaxTree::parse(src), src);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// One replacement in a text: `range` (byte offsets into the text as it is
@@ -129,13 +133,36 @@ pub fn apply_edits(src: &str, edits: &[TextEdit]) -> String {
 /// after each, and returns the [`cst_dump`] of the final tree. Incremental
 /// parsing is correct iff this equals `cst_dump(&apply_edits(src, edits))`.
 ///
-/// Placeholder: returns the full-parse dump of the edited text.
+/// Each reparse runs with an already expired budget, so it pauses after
+/// every slice and resumes (exercising the background continuation); every
+/// interim tree is checked with [`SyntaxTree::validate`].
 ///
 /// # Panics
 ///
-/// Panics on invalid edits, like [`apply_edits`].
+/// Panics on invalid edits, like [`apply_edits`], and if an interim tree is
+/// invalid.
 pub fn cst_dump_after_edits(src: &str, edits: &[TextEdit]) -> String {
-    cst_dump(&apply_edits(src, edits))
+    let mut text = src.to_owned();
+    let mut tree = SyntaxTree::parse(text.as_str());
+    for edit in edits {
+        let change = Change {
+            start: edit.range.start,
+            old_end: edit.range.end,
+            new_len: edit.insert.len(),
+        };
+        text.replace_range(edit.range.clone(), &edit.insert);
+        tree = match tree.reparse_change(text.as_str(), change, Budget::Until(Instant::now())) {
+            Reparse::Done { tree, .. } => tree,
+            Reparse::Partial { interim, mut task } => {
+                if let Err(e) = interim.validate(text.as_str()) {
+                    panic!("invalid interim tree: {e}");
+                }
+                while !task.run(text.as_str(), Budget::Until(Instant::now())) {}
+                task.finish().0
+            }
+        };
+    }
+    crate::cst_dump::cst_dump(&tree, text.as_str())
 }
 
 #[cfg(test)]
@@ -158,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_contract_holds() {
+    fn harness_contract_holds() {
         let src = "# Title\n\n- item\n";
         parse_full(src);
         assert_eq!(cst_text(src), src);

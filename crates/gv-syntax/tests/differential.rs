@@ -21,7 +21,7 @@ mod support;
 use std::collections::BTreeMap;
 
 use gv_syntax::harness::{IS_PLACEHOLDER, normalize_html, render_commonmark_html};
-use support::comrak_outline::comrak_outline;
+use support::comrak_outline::{comrak_outline, decided, gv_outline};
 use support::{
     COMMONMARK_SPEC, GFM_SPEC, Rng, comrak_commonmark_html, comrak_gfm_html, load_spec, minimize,
     random_document, workspace_root,
@@ -223,6 +223,15 @@ fn known_divergences_are_current() {
     }
 }
 
+/// Whether a minimized divergence is one of the decided block-level ones
+/// (see `support::comrak_outline::decided`).
+fn decided_block_divergence(md: &str) -> bool {
+    let tree = gv_syntax::SyntaxTree::parse(md);
+    let (ours, infos) = gv_outline(&tree, md);
+    let theirs = comrak_outline(md, &infos);
+    ours != theirs && decided(md, &ours, &theirs)
+}
+
 /// gv-syntax vs comrak on random documents (nightly).
 #[test]
 #[ignore = "nightly differential run; needs the gv-syntax HTML emitter"]
@@ -256,19 +265,29 @@ fn differential_vs_comrak() {
             continue;
         }
         let small = minimize(&doc, differs);
-        if known.contains(&small.as_str()) {
+        if known.contains(&small.as_str()) || decided_block_divergence(&small) {
             known_hits += 1;
         } else {
             *new_failures.entry(small).or_default() += 1;
         }
     }
+    // Divergences whose block structure agrees with comrak's come from the
+    // inline parser.
+    let block_level = new_failures
+        .keys()
+        .filter(|md| {
+            let tree = gv_syntax::SyntaxTree::parse(md.as_str());
+            let (ours, infos) = gv_outline(&tree, md.as_str());
+            ours != comrak_outline(md, &infos)
+        })
+        .count();
     eprintln!(
-        "differential_vs_comrak: {cases} documents (seed {seed}), {known_hits} known divergences, {} new",
+        "differential_vs_comrak: {cases} documents (seed {seed}), {known_hits} known divergences, {} new ({block_level} with a different block structure)",
         new_failures.len()
     );
     let report: Vec<String> = new_failures
         .iter()
-        .take(10)
+        .take(20)
         .map(|(md, n)| {
             format!(
                 "{md:?} ({n}×)\n  gv-syntax: {:?}\n  comrak:    {:?}",

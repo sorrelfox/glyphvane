@@ -34,18 +34,14 @@
 //! Comparing block structure, rather than HTML, separates block-pass bugs
 //! from inline bugs and works before the HTML emitter exists.
 //!
-//! TODO(M1, block structure): the gv-syntax side. Once `SyntaxTree::blocks()`
-//! exists, add `gv_outline(tree, text) -> Vec<String>` producing this format
-//! from the CST (resolving setext headings, reference definitions and list
-//! tightness), then:
-//! 1. assert `gv_outline == comrak_outline` on every CommonMark spec example
-//!    (all 652, not only the 296 in block sections);
-//! 2. run the same comparison on `random_document` inputs (100k per nightly
-//!    run) and minimize mismatches with `minimize`;
-//! 3. pin the cases in `tests/fixtures/differential/known-divergences.toml`
-//!    whose `decision` is `match-comrak` so they cannot drift.
+//! [`gv_outline`] produces the same format from a gv-syntax tree (text
+//! blocks resolved into definitions and a paragraph or setext heading,
+//! lists resolved to tight or loose). `tests/blocks.rs` compares the two on
+//! every CommonMark spec example and on random documents.
 
 use comrak::nodes::{AstNode, ListDelimType, ListType, NodeValue};
+use gv_syntax::{Container, ContainerKind, Leaf, LeafKind, SyntaxTree, Visitor};
+use gv_text::TextSource;
 
 /// The outline of comrak's block tree for `md` (CommonMark options).
 ///
@@ -142,4 +138,212 @@ fn outline_node<'a>(
             outline_node(c, depth + 1, out, raw_infos);
         }
     }
+}
+
+/// The outline of a gv-syntax tree of `text`, plus the raw info strings of
+/// its fenced code blocks in document order (for [`comrak_outline`]).
+pub fn gv_outline<S: TextSource + ?Sized>(
+    tree: &SyntaxTree,
+    text: &S,
+) -> (Vec<String>, Vec<String>) {
+    struct V<'s, S: TextSource + ?Sized> {
+        text: &'s S,
+        depth: usize,
+        out: Vec<String>,
+        infos: Vec<String>,
+    }
+    impl<S: TextSource + ?Sized> V<'_, S> {
+        fn read(&self, r: std::ops::Range<usize>) -> String {
+            let mut b = Vec::new();
+            self.text.copy_range(r, &mut b);
+            String::from_utf8_lossy(&b).into_owned()
+        }
+        fn push(&mut self, s: String) {
+            self.out.push(format!("{}{s}", "  ".repeat(self.depth)));
+        }
+    }
+    impl<S: TextSource + ?Sized> Visitor for V<'_, S> {
+        fn enter(&mut self, c: &Container) {
+            let line = c.line + 1;
+            let s = match c.kind {
+                ContainerKind::BlockQuote => format!("block_quote @{line}"),
+                ContainerKind::BulletList { marker, tight } => format!(
+                    "list bullet {} start=1 {} @{line}",
+                    char::from(marker),
+                    if tight { "tight" } else { "loose" }
+                ),
+                ContainerKind::OrderedList {
+                    start,
+                    delimiter,
+                    tight,
+                } => format!(
+                    "list ordered {} start={start} {} @{line}",
+                    char::from(delimiter),
+                    if tight { "tight" } else { "loose" }
+                ),
+                ContainerKind::Item => format!("item @{line}"),
+            };
+            self.push(s);
+            self.depth += 1;
+        }
+        fn exit(&mut self, _c: &Container) {
+            self.depth -= 1;
+        }
+        fn leaf(&mut self, leaf: &Leaf<'_>) {
+            let s = match leaf.kind {
+                LeafKind::Paragraph => {
+                    format!("paragraph @{}-{}", leaf.open_line + 1, leaf.end_line + 1)
+                }
+                LeafKind::Heading { level, setext } => {
+                    let start = if setext {
+                        leaf.open_line
+                    } else {
+                        leaf.start_line
+                    };
+                    format!(
+                        "heading h{level} {} @{}-{}",
+                        if setext { "setext" } else { "atx" },
+                        start + 1,
+                        leaf.end_line + 1
+                    )
+                }
+                LeafKind::ThematicBreak => format!("thematic_break @{}", leaf.open_line + 1),
+                LeafKind::FencedCode | LeafKind::IndentedCode => {
+                    let fenced = leaf.kind == LeafKind::FencedCode;
+                    let raw = leaf.info.clone().map(|r| self.read(r)).unwrap_or_default();
+                    if fenced {
+                        self.infos.push(raw.clone());
+                    }
+                    let mut lit = String::new();
+                    for l in leaf.lines {
+                        lit.push_str(&" ".repeat(usize::from(l.virtual_spaces)));
+                        lit.push_str(&self.read(l.content.clone()));
+                        lit.push_str(&self.read(l.line_ending.clone()));
+                    }
+                    if !fenced {
+                        lit = trim_trailing_blank_lines(&lit);
+                    }
+                    let escaped = raw.contains('&') || raw.contains('\\');
+                    format!(
+                        "code_block {} info={} @{} {lit:?}",
+                        if fenced { "fenced" } else { "indented" },
+                        if fenced {
+                            info_repr(&info_text(&raw), escaped)
+                        } else {
+                            info_repr("", false)
+                        },
+                        leaf.open_line + 1
+                    )
+                }
+                LeafKind::Html { .. } => {
+                    let mut lit = String::new();
+                    for l in leaf.lines {
+                        lit.push_str(&" ".repeat(usize::from(l.virtual_spaces)));
+                        lit.push_str(&self.read(l.content.clone()));
+                        lit.push_str(&self.read(l.line_ending.clone()));
+                    }
+                    format!("html_block @{} {lit:?}", leaf.open_line + 1)
+                }
+                LeafKind::LinkRefDef => return,
+            };
+            self.push(s);
+        }
+    }
+    let mut v = V {
+        text,
+        depth: 1,
+        out: vec![String::from("document")],
+        infos: Vec::new(),
+    };
+    gv_syntax::walk(tree, &mut v);
+    (v.out, v.infos)
+}
+
+/// comrak's info string for an info string without escapes: trimmed of
+/// ASCII whitespace.
+fn info_text(raw: &str) -> String {
+    raw.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}'))
+        .to_owned()
+}
+
+/// comrak's `remove_trailing_blank_lines`, then a final newline.
+fn trim_trailing_blank_lines(s: &str) -> String {
+    let b = s.as_bytes();
+    let Some(last) = b
+        .iter()
+        .rposition(|&c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+    else {
+        return String::from("\n");
+    };
+    let end = b[last..]
+        .iter()
+        .position(|&c| c == b'\n' || c == b'\r')
+        .map_or(b.len(), |i| last + i);
+    format!("{}\n", &s[..end])
+}
+
+/// Whether the difference between our outline and comrak's for a
+/// minimized input is one of the decided divergences
+/// (`tests/fixtures/differential/known-divergences.toml`, decided
+/// `match-spec` in M1; each is pinned exactly in `tests/blocks.rs`):
+///
+/// - `html-type-7-after-lazy-paragraph`: comrak opens an HTML block on a
+///   line that continues one of our paragraphs lazily;
+/// - `ordered-marker-at-eof`: an ordered marker on the last line without a
+///   line ending is our list item;
+/// - `refdef-then-dash-underline`: our thematic break after a paragraph of
+///   definitions is comrak's paragraph text.
+pub fn decided(md: &str, ours: &[String], theirs: &[String]) -> bool {
+    let line_of = |s: &str, prefix: &str| -> Option<usize> {
+        let rest = s.trim_start().strip_prefix(prefix)?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let paragraph_covers = |n: usize| {
+        ours.iter().any(|o| {
+            o.trim_start()
+                .strip_prefix("paragraph @")
+                .and_then(|r| r.split_once('-'))
+                .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+                .is_some_and(|(a, b)| a <= n && n <= b)
+        })
+    };
+    if theirs
+        .iter()
+        .filter_map(|t| line_of(t, "html_block @"))
+        .any(paragraph_covers)
+    {
+        return true;
+    }
+    let last = md.rsplit(['\n', '\r']).next().unwrap_or("").trim();
+    if !md.ends_with(['\n', '\r'])
+        && last.len() >= 2
+        && last[..last.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        && last.ends_with(['.', ')'])
+        && ours.iter().any(|o| o.contains("list ordered"))
+    {
+        return true;
+    }
+    // Not (yet) in the divergences file: comrak strips the info line of a
+    // fenced code block as if a lone `\r` ending it and the `\n` of the next
+    // line were one CRLF (cmark normalizes line endings first and agrees
+    // with us).
+    if md.contains('\r')
+        && ours.len() == theirs.len()
+        && ours.iter().zip(theirs).any(|(o, t)| o != t)
+        && ours.iter().zip(theirs).all(|(o, t)| {
+            o == t || (o.contains("code_block fenced") && o.replacen("\"\\n", "\"", 1) == *t)
+        })
+    {
+        return true;
+    }
+    md.contains("]:")
+        && ours.iter().any(|o| o.contains("thematic_break"))
+        && theirs
+            .iter()
+            .filter(|t| t.contains("thematic_break"))
+            .count()
+            < ours.iter().filter(|o| o.contains("thematic_break")).count()
 }

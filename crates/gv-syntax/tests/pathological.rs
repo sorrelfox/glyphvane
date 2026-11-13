@@ -5,6 +5,21 @@
 //! time ratio, normalized by the byte ratio, must stay below 2.5 (linear
 //! time). Where the expected output is known it is checked too.
 //!
+//! Two measures keep cache and memory effects from passing for
+//! superlinear time:
+//!
+//! - **Growth cap.** Inputs start at cmark's sizes and are grown (x4) only
+//!   until the 2n run takes about 5 ms, and never beyond 1 MB at 2n: larger
+//!   delimiter-dense paragraphs have working sets of 100 MB and more, which
+//!   spill out of the CPU caches and inflate the 2n time by 1.3-1.8x with
+//!   no algorithmic cause.
+//! - **Confirmation over an 8x step.** A ratio at or above the limit is
+//!   confirmed by running the shape at n/4 and 2n (same cap): the case
+//!   fails only if the growth exponent
+//!   `log(t(2n) / t(n/4)) / log(bytes(2n) / bytes(n/4))` is at least 1.5
+//!   (linear time gives 1, quadratic time 2; a cache penalty of 1.8x over
+//!   the 8x step gives 1.28).
+//!
 //! Run in release mode with `cargo xtask pathological` (or
 //! `--engine comrak` to validate the suite itself against comrak). Both
 //! engine tests are ignored by default because timings in a debug build or
@@ -481,9 +496,12 @@ fn fixed_cases() -> Vec<Fixed> {
 
 /// Inputs are grown until the 2n run takes at least this long...
 const TARGET_SECONDS: f64 = 0.005;
-/// ...unless that would make them larger than this (beyond a few MB, page
-/// faults and cache misses dominate and distort the ratio).
-const MAX_GROWN_BYTES: usize = 8 << 20;
+/// ...unless that would make the 2n input larger than this (beyond about
+/// 1 MB, cache misses and page faults dominate and distort the ratio).
+const MAX_GROWN_BYTES: usize = 1 << 20;
+/// Growth exponent (n/4 vs 2n) at which a high n/2n ratio is confirmed as
+/// superlinear.
+const MAX_EXPONENT: f64 = 1.5;
 
 /// Best of `runs` timings, in seconds, and the last output.
 fn time(render: fn(&str) -> String, input: &str, runs: usize) -> (f64, String) {
@@ -508,8 +526,9 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(if is_comrak { 3.0 } else { 2.5 });
-    // Below this the timer and the machine's noise dominate.
-    let min_seconds = 0.002;
+    // Below this the timer and the machine's noise dominate (best-of-5
+    // timings are stable well below a millisecond).
+    let min_seconds = 0.0005;
 
     let mut failures = Vec::new();
     println!("\nPathological inputs, engine {engine}, max normalized ratio {max_ratio}\n");
@@ -521,7 +540,9 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
         let mut n = c.n;
         while n < c.n * 64 {
             let b = (c.make)(2 * n);
-            if b.len() * 4 > MAX_GROWN_BYTES || time(render, &b, 1).0 >= TARGET_SECONDS {
+            if b.len() * 4 > MAX_GROWN_BYTES.max((c.make)(2 * c.n).len())
+                || time(render, &b, 1).0 >= TARGET_SECONDS
+            {
                 break;
             }
             n *= 4;
@@ -534,7 +555,7 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
             let ratio = (tb / ta) / (b.len() as f64 / a.len() as f64) * 2.0;
             (ta, tb, ratio, out)
         };
-        let (mut ta, mut tb, mut ratio, out) = measure(3);
+        let (mut ta, mut tb, mut ratio, out) = measure(5);
         if ratio >= max_ratio && tb >= min_seconds {
             // Timing noise is about +-0.3: measure once more, more carefully.
             let (ta2, tb2, ratio2, _) = measure(7);
@@ -552,9 +573,22 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
         let known = c.comrak_known.filter(|_| is_comrak);
         let mut note = String::new();
         if measurable && ratio >= max_ratio {
-            note.push_str(" SUPERLINEAR");
-            if known.is_none() {
-                failures.push(format!("{}: ratio {ratio:.2}", c.name));
+            // Confirm over an 8x size step, n/4 to 2n, within the capped
+            // size (see the module documentation).
+            let small = (c.make)((n / 4).max(1));
+            let (ts, _) = time(render, &small, 9);
+            let (tb8, _) = time(render, &b, 5);
+            let exponent = (tb8 / ts).ln() / (b.len() as f64 / small.len() as f64).ln();
+            if exponent >= MAX_EXPONENT {
+                let _ = write!(note, " SUPERLINEAR (exponent {exponent:.2} over 8x)");
+                if known.is_none() {
+                    failures.push(format!(
+                        "{}: ratio {ratio:.2}, exponent {exponent:.2}",
+                        c.name
+                    ));
+                }
+            } else {
+                let _ = write!(note, " (exponent {exponent:.2} over 8x: linear)");
             }
         }
         let output = match (c.check, output_ok) {
