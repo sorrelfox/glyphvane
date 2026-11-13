@@ -9,6 +9,20 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+chardetng.workspace = true
+encoding_rs.workspace = true
+memchr.workspace = true
+rope.workspace = true
+simdutf8.workspace = true
+sum_tree.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "text"
+harness = false
 
 [lints]
 workspace = true

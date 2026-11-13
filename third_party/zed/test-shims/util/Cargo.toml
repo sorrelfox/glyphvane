@@ -1,0 +1,19 @@
+# Test-only stand-in for Zed's `util` crate, used by the vendored rope tests.
+# See ../../PROVENANCE.md.
+
+[package]
+name = "zed-test-util"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "util"
+doctest = false
+
+[features]
+test-support = []
+
+[dependencies]
+rand.workspace = true

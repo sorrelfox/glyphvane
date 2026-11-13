@@ -33,15 +33,29 @@ const GUI_FREE: &[&str] = &[
     "gv-editor",
     "gv-spell",
     "gv-helper",
+    // Vendored Zed code (third_party/zed/): the rope and its test-only shims.
+    "rope",
+    "zed-test-util",
+    "zed-test-zlog",
 ];
 
 /// Workspace members that may depend on GPUI or are not shipped code.
 const GUI_ALLOWED: &[&str] = &["gv-ui", "gv-app", "xtask"];
 
+/// Zed's GUI-free utility crates, published under the GPUI snapshot's name
+/// prefix (ADR-014). Their own dependencies are still checked.
+const GUI_FREE_GPUI_SNAPSHOT_CRATES: &[&str] = &[
+    "gpui-pre-sum-tree",
+    "gpui-pre-util",
+    "gpui-pre-ztracing",
+    "gpui-pre-ztracing-macro",
+];
+
 /// GPUI and its companion crates: `gpui`, `gpui-pre`, `gpui-kit`,
-/// `gpui-component`, and anything else named `gpui*`.
+/// `gpui-component`, and anything else named `gpui*`, except the GUI-free
+/// utility crates above.
 fn is_gui_package(name: &str) -> bool {
-    name.starts_with("gpui")
+    name.starts_with("gpui") && !GUI_FREE_GPUI_SNAPSHOT_CRATES.contains(&name)
 }
 
 /// A resolved dependency graph, reduced to what the check needs.
@@ -237,7 +251,13 @@ mod tests {
         ] {
             assert!(is_gui_package(n), "{n}");
         }
-        for n in ["gv-ui", "ropey", "agpui"] {
+        for n in [
+            "gv-ui",
+            "ropey",
+            "agpui",
+            "gpui-pre-sum-tree",
+            "gpui-pre-util",
+        ] {
             assert!(!is_gui_package(n), "{n}");
         }
     }
