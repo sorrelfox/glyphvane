@@ -32,6 +32,7 @@ const GUI_FREE: &[&str] = &[
     "gv-export",
     "gv-editor",
     "gv-spell",
+    "gv-settings",
     "gv-helper",
     // Vendored Zed code (third_party/zed/): the rope and its test-only shims.
     "rope",

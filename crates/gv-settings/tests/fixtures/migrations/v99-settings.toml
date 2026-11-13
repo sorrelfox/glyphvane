@@ -1,0 +1,5 @@
+version = 99
+
+[appearance]
+theme = "dark"
+holographic = true

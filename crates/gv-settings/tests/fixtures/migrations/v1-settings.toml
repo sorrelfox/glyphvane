@@ -1,0 +1,13 @@
+# My Glyphvane settings
+version = 1 # do not edit by hand
+
+[general]
+open_files_in = "preview" # I like reading
+
+[appearance]
+# Bigger UI text
+ui_font_size = 14
+theme = "dark"   # night owl
+
+[someday]
+kept = "unknown keys survive migrations"

@@ -1,0 +1,4 @@
+version = 3
+# Written before files had versions
+[appearance]
+interface_font_size = 13
