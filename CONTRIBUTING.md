@@ -26,9 +26,13 @@ commands:
 
 | Command | What it does |
 |---|---|
-| `cargo xtask ci` | Formatting, SPDX headers, dependency rules, clippy and tests in one go |
+| `cargo xtask ci` | Formatting, SPDX headers, dependency rules, spec fixtures and ratchet, clippy and tests in one go |
 | `cargo xtask check-headers` | Checks that every source file starts with the SPDX header |
 | `cargo xtask check-deps` | Checks that core crates do not depend on GPUI or the UI crates |
+| `cargo xtask spec` | Runs the CommonMark (or `--suite gfm`) spec examples against the parser; see [Tests](#tests) |
+| `cargo xtask fetch-spec --verify` | Checks the vendored spec fixtures against their SHA-256 sums |
+| `cargo xtask pathological` | Linear-time checks on pathological inputs (release build) |
+| `cargo xtask fuzz-seed` | Writes the fuzz seed corpora from the spec examples |
 
 Run `cargo xtask ci` before opening a pull request.
 
@@ -58,6 +62,8 @@ workload).
 ```
 crates/   the gv-* library crates and the gv-app binary
 xtask/    project task runner (cargo xtask …)
+tests/    shared test fixtures (spec examples, known divergences)
+fuzz/     cargo-fuzz targets (a separate workspace)
 ```
 
 | Crate | Role |
@@ -131,6 +137,28 @@ with their own comment syntax where the format allows it.
 - Parser and rendering changes should come with fixtures that state the
   expected output and, where relevant, the reference implementation it was
   compared against (GitHub, Obsidian, pandoc, the CommonMark spec).
+
+Parser test layers:
+
+- **Spec conformance.** `cargo xtask spec` runs the CommonMark 0.31.2 examples
+  (`--suite gfm` for GFM 0.29) and prints pass counts per section and a diff
+  for each failure. Filter with `--section NAME` or `--example N`;
+  `--format json` gives a machine-readable report. HTML is compared after the
+  spec's normalization (whitespace, attribute order, character references).
+- **The ratchet.** `tests/fixtures/spec/passing.txt` (and `passing-gfm.txt`)
+  list the examples that pass. CI runs `cargo xtask spec --ratchet`, which
+  fails if any listed example stops passing; examples not listed yet may
+  fail. When your change makes more examples pass, record them with
+  `cargo xtask spec --update-ratchet` and commit the file.
+- **Differential.** `crates/gv-syntax/tests/differential.rs` compares the
+  parser with [comrak](https://crates.io/crates/comrak) on random documents
+  (ignored by default; run with `-- --ignored`). Deliberate or known
+  differences go in `tests/fixtures/differential/known-divergences.toml`
+  with a reason. Never change the parser towards a comrak or cmark bug.
+- **Pathological inputs.** `cargo xtask pathological` checks that time grows
+  linearly (n vs 2n) on cmark's pathological inputs and on deep-nesting
+  shapes; `--engine comrak` runs the same suite against comrak.
+- **Fuzzing.** See [fuzz/README.md](fuzz/README.md).
 
 ## Commits
 

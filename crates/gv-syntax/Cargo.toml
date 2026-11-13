@@ -10,5 +10,11 @@ publish = false
 
 [dependencies]
 
+[dev-dependencies]
+# Differential oracle and block-structure reference (tests only).
+comrak = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
 [lints]
 workspace = true

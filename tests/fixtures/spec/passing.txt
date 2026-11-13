@@ -1,0 +1,3 @@
+# CommonMark 0.31.2 spec examples that pass. `cargo xtask spec --suite commonmark --ratchet` fails
+# if one of them stops passing. Regenerate with
+# `cargo xtask spec --suite commonmark --update-ratchet`. One example number per line.

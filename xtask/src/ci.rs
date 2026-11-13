@@ -8,12 +8,14 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::{cargo, deps, headers};
+use crate::{cargo, deps, fixtures, headers, spec};
 
 enum Step {
     Cargo(&'static [&'static str]),
     Headers,
     Deps,
+    SpecFixtures,
+    SpecRatchet,
 }
 
 const STEPS: &[(&str, Step)] = &[
@@ -23,6 +25,8 @@ const STEPS: &[(&str, Step)] = &[
     ),
     ("check-headers", Step::Headers),
     ("check-deps", Step::Deps),
+    ("fetch-spec --verify --offline", Step::SpecFixtures),
+    ("spec --ratchet (commonmark, gfm)", Step::SpecRatchet),
     (
         "cargo clippy --workspace --all-targets -- -D warnings",
         Step::Cargo(&[
@@ -53,6 +57,8 @@ pub(crate) fn run(root: &Path) -> Result<bool> {
                 .success(),
             Step::Headers => headers::run(root, false)?,
             Step::Deps => deps::run(root)?,
+            Step::SpecFixtures => fixtures::verify_local(root)?,
+            Step::SpecRatchet => spec::ratchet_all(root)?,
         };
         if !ok {
             eprintln!("==> FAILED: {name}");

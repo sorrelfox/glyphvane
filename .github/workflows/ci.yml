@@ -55,6 +55,14 @@ jobs:
       - name: Check core crates stay GUI-free
         run: cargo xtask check-deps
 
+      # Spec fixtures match their recorded SHA-256 sums (offline), and no
+      # example listed in tests/fixtures/spec/passing*.txt has regressed.
+      - name: Spec conformance ratchet
+        run: |
+          cargo xtask fetch-spec --verify --offline
+          cargo xtask spec --suite commonmark --ratchet --diffs 0
+          cargo xtask spec --suite gfm --ratchet --diffs 0
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

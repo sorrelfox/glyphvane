@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+
+[package]
+name = "glyphvane-fuzz"
+description = "Fuzz targets for the Glyphvane parser (cargo-fuzz project)."
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: cargo-fuzz builds with nightly and sanitizer flags, which
+# must not leak into the main workspace (and its lockfile).
+[workspace]
+
+[dependencies]
+gv-syntax = { path = "../crates/gv-syntax" }
+
+# libFuzzer is linked only under cargo-fuzz, which passes `--cfg fuzzing`.
+# Without it the targets build on stable as standalone replay/smoke runners.
+[target.'cfg(fuzzing)'.dependencies]
+libfuzzer-sys = "=0.4.13"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+
+[[bin]]
+name = "parse_full"
+path = "fuzz_targets/parse_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "incremental_equals_full"
+path = "fuzz_targets/incremental_equals_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip_lossless"
+path = "fuzz_targets/roundtrip_lossless.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

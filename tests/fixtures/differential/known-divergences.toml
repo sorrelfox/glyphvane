@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+#
+# Known divergences between comrak (the differential oracle, pinned in the
+# root Cargo.toml) and the CommonMark/GFM specs or other reference
+# implementations (cmark, cmark-gfm, commonmark.js).
+#
+# Used by crates/gv-syntax/tests/differential.rs:
+# - `known_divergences_are_current` re-runs every `input` through comrak and
+#   checks the recorded `comrak_html`, so a comrak upgrade that changes one of
+#   these behaviours fails loudly;
+# - `differential_vs_comrak` minimizes each mismatch it finds on random
+#   documents and skips those whose minimized input equals an `input` here.
+#
+# Fields of [[divergence]]:
+#   id           stable name
+#   profile      "commonmark" or "gfm"
+#   input        minimal Markdown showing it (omit for entries the random
+#                generator cannot reach; then `reproduce` says how)
+#   comrak_html  comrak's output for `input`
+#   other        what other implementations or the spec text give
+#   reason       why they differ
+#   decision     what gv-syntax does: "undecided" (decide in M1, against the
+#                spec text, never towards a bug), "match-comrak" or
+#                "match-spec"
+#
+# [[comrak_spec_failure]] lists spec examples comrak itself fails, with the
+# reason; `comrak_passes_commonmark_spec` and
+# `comrak_gfm_spec_failures_are_recorded` keep the lists exact.
+
+[[divergence]]
+id = "refdef-then-dash-underline"
+profile = "commonmark"
+input = "[foo]: /url\n---\n"
+comrak_html = "<p>---</p>\n"
+other = "commonmark.js: <hr />"
+reason = """
+After the reference definition is removed, the paragraph is empty, so `---`
+cannot be a setext underline. cmark and comrak have already taken the setext
+branch for the line and keep it as paragraph text; commonmark.js reconsiders
+it and gives a thematic break. Spec example 216 shows the `===` variant
+becoming paragraph text, which both agree on because `===` cannot be a
+thematic break. The spec text supports the thematic break.
+"""
+decision = "undecided"
+
+[[divergence]]
+id = "ordered-marker-at-eof"
+profile = "commonmark"
+input = "1."
+comrak_html = "<p>1.</p>\n"
+other = "spec reading and commonmark.js: <ol><li></li></ol> (as for \"1.\\n\")"
+reason = """
+An ordered list marker must be followed by whitespace or the end of the line.
+cmark and comrak require an actual character after the marker, so a marker at
+the very end of input without a newline is not a list item. A bullet marker
+in the same position (`-`) is an empty list item in all implementations.
+"""
+decision = "undecided"
+
+[[divergence]]
+id = "html-type-7-after-lazy-paragraph"
+profile = "commonmark"
+input = "> foo\n<custom-tag>\n"
+comrak_html = "<blockquote>\n<p>foo</p>\n</blockquote>\n<custom-tag>\n"
+other = "spec reading and commonmark.js: <blockquote><p>foo\\n<custom-tag></p></blockquote>"
+reason = """
+An HTML block of type 7 cannot interrupt a paragraph, so the line should be a
+lazy continuation of the paragraph inside the block quote. cmark and comrak
+check for block starts before lazy continuation and start an HTML block
+there.
+"""
+decision = "undecided"
+
+[[divergence]]
+id = "list-starts-per-line-cap"
+profile = "commonmark"
+reproduce = "\"- \" repeated 101 times, then \"x\""
+other = "spec: 101 nested lists"
+reason = """
+cmark and comrak open at most 100 list items on one line (a guard against
+quadratic behaviour); further markers become paragraph text. The spec has no
+limit. gv-syntax needs a nesting cap of its own (deep nesting is a
+pathological input), which may differ.
+"""
+decision = "undecided"
+
+[[divergence]]
+id = "reference-expansion-cap"
+profile = "commonmark"
+reproduce = "more than 100 KB (or the document size, if smaller) of text produced by expanding reference links"
+other = "GitHub and cmark-gfm resolve all references"
+reason = """
+comrak stops resolving reference links once their expansions add up to
+min(document size, 100 KB), as a denial-of-service guard; the remaining
+references render as literal text. Large awesome-list READMEs exceed it.
+gv-syntax needs a guard that keeps GitHub-compatible results on real
+documents.
+"""
+decision = "undecided"
+
+[[divergence]]
+id = "no-tagfilter"
+profile = "gfm"
+reproduce = "GFM spec example 652 (tagfilter extension)"
+other = "cmark-gfm with the tagfilter extension escapes <title>, <textarea>, <style>, <xmp>, <iframe>, <noembed>, <noframes>, <script> and <plaintext>"
+reason = "comrak 0.59 has no tagfilter option; raw HTML passes through unchanged."
+decision = "match-spec"
+
+# comrak passes all 652 CommonMark 0.31.2 examples.
+#
+# GFM 0.29 (cmark-gfm 0.29.0.gfm.13 spec.txt) examples comrak fails:
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 398
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 389 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 426
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 417 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 434
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 425 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 435
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 426 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 436
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 427 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 473
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 464 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 474
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 465 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 475
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 466 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 477
+reason = "GFM spec expects directly nested strong emphasis collapsed into one <strong>; comrak nests them as CommonMark 0.31.2 example 468 does"
+
+[[comrak_spec_failure]]
+suite = "gfm"
+example = 652
+reason = "tagfilter extension: comrak 0.59 has no tagfilter (see divergence no-tagfilter)"

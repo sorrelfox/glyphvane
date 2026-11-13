@@ -5,7 +5,11 @@
 
 mod ci;
 mod deps;
+mod fixtures;
+mod fuzz_seed;
 mod headers;
+mod pathological;
+mod spec;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,7 +26,28 @@ Commands:
   check-deps            Check that GUI-free crates do not depend on GPUI
                         (NFR-MAINT-01).
   ci                    Run the local equivalent of CI: fmt, check-headers,
-                        check-deps, clippy, test.
+                        check-deps, spec fixtures and ratchet, clippy, test.
+  spec [options]        Run the CommonMark (or GFM) spec examples against
+                        gv-syntax's HTML emitter. Options:
+                          --suite commonmark|gfm   (default commonmark)
+                          --section NAME           sections containing NAME
+                          --example N              one example (repeatable)
+                          --format text|json       report format
+                          --diffs N                failures to show in full
+                          --min N                  fail below N passes
+                          --ratchet                fail if an example listed in
+                                                   tests/fixtures/spec/passing*.txt
+                                                   no longer passes
+                          --update-ratchet         record the passing examples
+  fetch-spec [--verify [--offline] | --update-sums]
+                        Download the spec fixtures and check their SHA-256
+                        sums; --verify checks the local files (and upstream,
+                        unless --offline or the network is unreachable).
+  pathological [--engine gv-syntax|comrak] [--filter TEXT] [--max-ratio R]
+                        Linear-time checks on pathological inputs (release
+                        build); --engine comrak validates the suite itself.
+  fuzz-seed             Write the fuzz seed corpora (fuzz/corpus/) from the
+                        spec examples.
 ";
 
 fn main() -> ExitCode {
@@ -65,6 +90,10 @@ fn run() -> Result<bool> {
             no_args(cmd, rest)?;
             ci::run(&root)
         }
+        "spec" => spec::run(&root, rest),
+        "fetch-spec" => fixtures::run(&root, rest),
+        "pathological" => pathological::run(&root, rest),
+        "fuzz-seed" => fuzz_seed::run(&root, rest),
         other => {
             eprint!("unknown command `{other}`\n\n{HELP}");
             Ok(false)
