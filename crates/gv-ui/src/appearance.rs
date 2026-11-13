@@ -58,7 +58,7 @@ impl Global for Appearance {}
 impl Appearance {
     /// Installs the theme state and applies it. Call once at startup, after
     /// GPUI Component is initialised.
-    pub fn init(cx: &mut App, choice: ThemeChoice) {
+    pub fn init(cx: &mut App, choice: ThemeChoice, preferred_light: PreferredLight) {
         let installed = cx.text_system().all_font_names();
         let interface_font = if installed.iter().any(|name| name == font::INTERFACE) {
             font::INTERFACE
@@ -67,7 +67,7 @@ impl Appearance {
         };
         cx.set_global(Self {
             choice,
-            preferred_light: PreferredLight::default(),
+            preferred_light,
             os: os_appearance(cx.window_appearance()),
             interface_font: interface_font.into(),
         });
@@ -84,30 +84,61 @@ impl Appearance {
         cx.global::<Self>().interface_font.clone()
     }
 
+    /// The theme choice in effect (from settings or the command line).
     pub fn choice(cx: &App) -> ThemeChoice {
         cx.global::<Self>().choice
+    }
+
+    /// The light theme that [`ThemeChoice::System`] uses in light appearance.
+    pub fn preferred_light(cx: &App) -> PreferredLight {
+        cx.global::<Self>().preferred_light
+    }
+
+    /// The theme in effect, as an id.
+    pub fn current_id(cx: &App) -> ThemeId {
+        cx.global::<Self>().theme_id()
     }
 
     pub fn theme_id(&self) -> ThemeId {
         self.choice.resolve(self.os, self.preferred_light)
     }
 
-    pub fn set_choice(cx: &mut App, choice: ThemeChoice) {
-        cx.global_mut::<Self>().choice = choice;
-        Self::apply(cx);
+    /// Sets the theme choice and the preferred light theme, and redraws every
+    /// window when the theme in effect changes.
+    pub fn set_preference(cx: &mut App, choice: ThemeChoice, preferred_light: PreferredLight) {
+        let this = cx.global::<Self>();
+        if (this.choice, this.preferred_light) == (choice, preferred_light) {
+            return;
+        }
+        let before = this.theme_id();
+        let this = cx.global_mut::<Self>();
+        this.choice = choice;
+        this.preferred_light = preferred_light;
+        if this.theme_id() != before {
+            Self::apply(cx);
+        }
     }
 
-    /// Records a change of the operating system's appearance.
+    /// Records a change of the operating system's appearance. With the
+    /// System choice this switches between Dark and the preferred light
+    /// theme.
     pub fn set_os_appearance(cx: &mut App, appearance: WindowAppearance) {
         let os = os_appearance(appearance);
-        if cx.global::<Self>().os != os {
-            cx.global_mut::<Self>().os = os;
+        let this = cx.global::<Self>();
+        if this.os == os {
+            return;
+        }
+        let before = this.theme_id();
+        cx.global_mut::<Self>().os = os;
+        if cx.global::<Self>().theme_id() != before {
             Self::apply(cx);
         }
     }
 
     /// Pushes the theme in effect into GPUI Component's theme, so that its
-    /// components and the window root draw with our tokens, then redraws.
+    /// components and the window root draw with our tokens. GPUI Component
+    /// refreshes every window after the update, so open windows redraw at
+    /// once.
     fn apply(cx: &mut App) {
         let theme = Self::theme(cx);
         let interface_font = Self::interface_font(cx);

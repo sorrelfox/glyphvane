@@ -14,7 +14,7 @@ use crate::theme::Theme;
 
 impl Workspace {
     pub(super) fn render_document(&self, theme: &Theme) -> Div {
-        let note = match self.mode {
+        let note = match self.mode() {
             ViewMode::Preview => "Reading view not implemented yet",
             ViewMode::Edit => "Editor not implemented yet",
             ViewMode::Split => "Split view not implemented yet",
@@ -45,7 +45,7 @@ impl Workspace {
                             .text_size(px(text::PREVIEW_H1.size))
                             .line_height(px(text::PREVIEW_H1.line))
                             .font_weight(FontWeight(text::weight::BOLD))
-                            .child(self.file.name.clone()),
+                            .child(self.active_tab().label.name.clone()),
                     )
                     .child(
                         div()

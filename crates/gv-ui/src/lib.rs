@@ -7,10 +7,9 @@ pub mod appearance;
 pub mod chrome;
 pub mod icons;
 pub mod metrics;
+pub mod settings;
 pub mod shell;
 pub mod theme;
-
-use std::path::PathBuf;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, KeyBinding, Result, WindowBounds, WindowOptions,
@@ -20,7 +19,9 @@ use gpui::{
 pub use appearance::Appearance;
 pub use chrome::WindowChrome;
 pub use icons::Assets;
-pub use theme::{ThemeChoice, ThemeId};
+pub use settings::AppSettings;
+pub use shell::{OpenTarget, TextPosition, WorkspaceWindow, most_recent_window};
+pub use theme::{PreferredLight, ThemeChoice, ThemeId};
 
 use crate::metrics::size as sz;
 use crate::shell::Workspace;
@@ -31,7 +32,8 @@ pub const APP_ID: &str = "io.github.sorrelfox.Glyphvane";
 gpui::actions!(
     glyphvane,
     [
-        /// Switch to the next theme: System, Light, Semi-light, Dark.
+        /// Switch to the next theme: System, Light, Semi-light, Dark. The
+        /// choice is saved to the settings file.
         CycleTheme,
         /// Switch the active tab between Preview and Edit.
         ToggleEditMode,
@@ -59,21 +61,20 @@ mod keys {
     pub const QUIT: &str = "ctrl-q";
 }
 
-/// Initialises GPUI Component, the theme and the key bindings. Call once,
-/// inside `Application::run`, before opening a window.
-pub fn init(cx: &mut App, theme: ThemeChoice) {
+/// Initialises GPUI Component, the settings, the theme and the key bindings.
+/// Call once, inside `Application::run`, before opening a window.
+pub fn init(cx: &mut App, settings: AppSettings) {
     gpui::component::init(cx);
-    Appearance::init(cx, theme);
+    let (choice, preferred_light) = settings.theme_preference();
+    settings.install(cx);
+    Appearance::init(cx, choice, preferred_light);
 
     cx.bind_keys([
         KeyBinding::new(keys::CYCLE_THEME, CycleTheme, None),
         KeyBinding::new(keys::TOGGLE_EDIT_MODE, ToggleEditMode, None),
         KeyBinding::new(keys::QUIT, Quit, None),
     ]);
-    cx.on_action(|_: &CycleTheme, cx| {
-        let next = Appearance::choice(cx).next();
-        Appearance::set_choice(cx, next);
-    });
+    cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
@@ -83,16 +84,63 @@ pub fn init(cx: &mut App, theme: ThemeChoice) {
     .detach();
 }
 
-/// Opens a main window for `path`, as when the file is passed on the command
-/// line: Preview mode, both side panels hidden.
-pub fn open_file_window(cx: &mut App, path: Option<PathBuf>) -> Result<AnyWindowHandle> {
-    let file_name = shell::FileLabel::new(path.as_deref());
-    let options = main_window_options(WindowChrome::current(), file_name.window_title().into(), cx);
-    let (window, _) = gpui::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Workspace::new(file_name, window, cx))
+/// Opens a main window for `target`, as for a file passed on the command
+/// line: Preview mode, both side panels hidden (FR-VIEW-16). `None` opens a
+/// window with an empty tab.
+pub fn open_file_window(cx: &mut App, target: Option<OpenTarget>) -> Result<AnyWindowHandle> {
+    open_workspace_window(cx, target).map(|w| w.window)
+}
+
+fn open_workspace_window(cx: &mut App, target: Option<OpenTarget>) -> Result<WorkspaceWindow> {
+    let title = shell::FileLabel::new(target.as_ref().map(|t| t.path.as_path())).window_title();
+    let options = main_window_options(WindowChrome::current(), title.into(), cx);
+    let (window, workspace) = gpui::open_window(options, cx, |window, cx| {
+        cx.new(|cx| Workspace::new(target, window, cx))
     })?;
     cx.activate(true);
-    Ok(window)
+    Ok(WorkspaceWindow {
+        window,
+        workspace: workspace.downgrade(),
+    })
+}
+
+/// Where [`open`] puts files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    /// As tabs in the most recently focused main window, leaving its panels
+    /// as they are; in a new window when none is open.
+    #[default]
+    RecentWindow,
+    /// In a new window, opened as for a file passed at launch.
+    NewWindow,
+}
+
+/// Opens files from the command line, another instance or the platform.
+///
+/// The files open as tabs of one window, the last one active. A new window
+/// (because of `placement` or because none is open) starts in Preview with
+/// its side panels hidden (FR-VIEW-16); an existing one keeps its panels.
+/// With no files, an existing window is brought forward, or an empty one is
+/// opened. Returns the window the files went to.
+pub fn open(
+    cx: &mut App,
+    targets: Vec<OpenTarget>,
+    placement: Placement,
+) -> Result<AnyWindowHandle> {
+    let existing = match placement {
+        Placement::RecentWindow => most_recent_window(cx),
+        Placement::NewWindow => None,
+    };
+    let mut targets = targets.into_iter();
+    let window = match existing {
+        Some(window) => window,
+        None => open_workspace_window(cx, targets.next())?,
+    };
+    for target in targets {
+        window.open_tab(target, cx)?;
+    }
+    window.activate(cx);
+    Ok(window.window)
 }
 
 /// A main window with the platform's chrome: no system title bar, so the

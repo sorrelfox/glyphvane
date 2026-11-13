@@ -13,7 +13,7 @@ use gpui::{
 use super::controls::{
     RowStart, disabled_icon_button, icon_button, linux_window_controls, windows_caption_buttons,
 };
-use super::{FileLabel, ViewMode, Workspace};
+use super::{ViewMode, Workspace};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::icons::Icon;
@@ -78,7 +78,7 @@ impl Workspace {
                 square,
                 theme,
             ))
-            .child(tab_strip(&self.file, theme))
+            .child(self.tab_strip(theme, cx))
             .child(icon_button(
                 "new-tab",
                 Icon::NewTab,
@@ -146,7 +146,7 @@ impl Workspace {
                     .into_iter()
                     .enumerate()
                     .map(|(index, (mode, icon, label))| {
-                        let active = self.mode == mode;
+                        let active = self.mode() == mode;
                         let hover = theme.state.hover;
                         div()
                             .id(("mode", index))
@@ -182,43 +182,59 @@ impl Workspace {
     }
 }
 
-/// The open tabs. Only one tab exists for now.
-fn tab_strip(file: &FileLabel, theme: &Theme) -> Div {
-    div()
-        .flex()
-        .min_w_0()
-        .overflow_hidden()
-        .items_center()
-        .gap(px(tab_spacing::GAP))
-        .ml(px(title_row::TAB_STRIP_MARGIN))
-        .child(active_tab(file, theme))
-}
-
-/// The active tab: page fill, hairline ring, title in weight 500.
-fn active_tab(file: &FileLabel, theme: &Theme) -> Div {
-    let close = (tab::CLOSE_BUTTON, tab::CLOSE_BUTTON);
-    div()
-        .h(px(tab::HEIGHT))
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(tab_spacing::GAP))
-        .pl(px(tab::PAD_LEFT - HAIRLINE))
-        .pr(px(tab::PAD_RIGHT - HAIRLINE))
-        .rounded(px(radius::TAB))
-        .bg(theme.surface.page)
-        .border_1()
-        .border_color(theme.border.default)
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_color(theme.text.primary)
-                .font_weight(FontWeight(text::weight::ACTIVE))
-                .child(file.name.clone()),
-        )
-        .child(
-            icon_button("close-tab", Icon::CloseTab, icon::TAB_CLOSE, close, theme)
-                .rounded(px(radius::SMALL_CONTROL)),
-        )
+impl Workspace {
+    /// The open tabs, in order. Clicking a tab activates it.
+    fn tab_strip(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+        div()
+            .flex()
+            .min_w_0()
+            .overflow_hidden()
+            .items_center()
+            .gap(px(tab_spacing::GAP))
+            .ml(px(title_row::TAB_STRIP_MARGIN))
+            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                let active = index == self.active;
+                let hover = theme.state.hover;
+                let close = (tab::CLOSE_BUTTON, tab::CLOSE_BUTTON);
+                div()
+                    .id(("tab", index))
+                    .h(px(tab::HEIGHT))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(tab_spacing::GAP))
+                    .pl(px(tab::PAD_LEFT - HAIRLINE))
+                    .pr(px(tab::PAD_RIGHT - HAIRLINE))
+                    .rounded(px(radius::TAB))
+                    .border_1()
+                    .map(|el| {
+                        if active {
+                            el.bg(theme.surface.page)
+                                .border_color(theme.border.default)
+                                .text_color(theme.text.primary)
+                                .font_weight(FontWeight(text::weight::ACTIVE))
+                        } else {
+                            el.border_color(transparent_black())
+                                .text_color(theme.text.secondary)
+                                .hover(move |style| style.bg(hover))
+                        }
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.activate_tab(index, window, cx)
+                        }),
+                    )
+                    .child(div().min_w_0().truncate().child(tab.label.name.clone()))
+                    .child(
+                        icon_button(
+                            ("close-tab", index),
+                            Icon::CloseTab,
+                            icon::TAB_CLOSE,
+                            close,
+                            theme,
+                        )
+                        .rounded(px(radius::SMALL_CONTROL)),
+                    )
+            }))
+    }
 }

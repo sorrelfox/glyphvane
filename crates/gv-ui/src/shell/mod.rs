@@ -12,13 +12,14 @@ mod tests;
 mod title_row;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, px,
+    AnyWindowHandle, App, AppContext as _, Context, FocusHandle, Global, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Result, SharedString, Styled as _, Subscription,
+    WeakEntity, Window, div, px,
 };
 
 use crate::appearance::Appearance;
@@ -33,6 +34,73 @@ pub enum ViewMode {
     Preview,
     Edit,
     Split,
+}
+
+/// A place in a document: a 1-based line and, optionally, a 1-based column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextPosition {
+    pub line: u32,
+    pub column: Option<u32>,
+}
+
+/// A file to open, and where to show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTarget {
+    pub path: PathBuf,
+    pub position: Option<TextPosition>,
+}
+
+impl OpenTarget {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            position: None,
+        }
+    }
+
+    pub fn at(mut self, position: TextPosition) -> Self {
+        self.position = Some(position);
+        self
+    }
+}
+
+/// One open document in a window.
+#[derive(Debug, Clone)]
+pub struct Tab {
+    label: FileLabel,
+    /// `None` for the empty tab of a window opened without a file.
+    path: Option<PathBuf>,
+    /// Where the Reading view is to be scrolled, from `PATH:LINE[:COL]`. The
+    /// Reading view does not exist yet, so it is only shown in the status bar.
+    position: Option<TextPosition>,
+    mode: ViewMode,
+}
+
+impl Tab {
+    fn new(target: Option<OpenTarget>) -> Self {
+        let (path, position) = match target {
+            Some(target) => (Some(target.path), target.position),
+            None => (None, None),
+        };
+        Self {
+            label: FileLabel::new(path.as_deref()),
+            path,
+            position,
+            mode: ViewMode::default(),
+        }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn position(&self) -> Option<TextPosition> {
+        self.position
+    }
+
+    pub fn mode(&self) -> ViewMode {
+        self.mode
+    }
 }
 
 /// How the opened file is named in the tab, the breadcrumb and the window
@@ -71,8 +139,9 @@ impl FileLabel {
 pub struct Workspace {
     focus: FocusHandle,
     chrome: WindowChrome,
-    file: FileLabel,
-    mode: ViewMode,
+    /// Never empty.
+    tabs: Vec<Tab>,
+    active: usize,
     /// Side panels start hidden: a window opened for a file shows only the
     /// document until the user calls a panel.
     sidebar_open: bool,
@@ -81,14 +150,15 @@ pub struct Workspace {
     /// and has not moved yet.
     drag_pending: bool,
     _appearance: Subscription,
+    _activation: Subscription,
 }
 
 impl fmt::Debug for Workspace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Workspace")
             .field("chrome", &self.chrome)
-            .field("file", &self.file)
-            .field("mode", &self.mode)
+            .field("tabs", &self.tabs)
+            .field("active", &self.active)
             .field("sidebar_open", &self.sidebar_open)
             .field("panel_open", &self.panel_open)
             .finish_non_exhaustive()
@@ -96,14 +166,19 @@ impl fmt::Debug for Workspace {
 }
 
 impl Workspace {
-    pub fn new(file: FileLabel, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
-        Self::with_chrome(file, WindowChrome::current(), window, cx)
+    /// A workspace with one tab: `target`, or an empty tab.
+    pub fn new(
+        target: Option<OpenTarget>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        Self::with_chrome(target, WindowChrome::current(), window, cx)
     }
 
     /// A workspace drawn with another platform's chrome. Only the window's
     /// own platform behaves natively; the others are for layout tests.
     pub fn with_chrome(
-        file: FileLabel,
+        target: Option<OpenTarget>,
         chrome: WindowChrome,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -114,25 +189,80 @@ impl Workspace {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Appearance::set_os_appearance(cx, window.appearance());
         });
+        let this = WorkspaceWindow {
+            window: window.window_handle(),
+            workspace: cx.weak_entity(),
+        };
+        RecentWindows::touch(this.clone(), cx);
+        let activation = cx.observe_window_activation(window, move |_, window, cx| {
+            if window.is_window_active() {
+                RecentWindows::touch(this.clone(), cx);
+            }
+        });
         Self {
             focus,
             chrome,
-            file,
-            mode: ViewMode::default(),
+            tabs: vec![Tab::new(target)],
+            active: 0,
             sidebar_open: false,
             panel_open: false,
             drag_pending: false,
             _appearance: appearance,
+            _activation: activation,
         }
     }
 
+    pub fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+
+    pub fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    /// Opens `target` as a new tab after the active one and activates it.
+    /// The window's panels stay as they are. A window holding only its empty
+    /// tab gets the file in that tab instead.
+    pub fn open_tab(
+        &mut self,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let tab = Tab::new(Some(target));
+        if self.tabs.len() == 1 && self.tabs[0].path.is_none() {
+            self.tabs[0] = tab;
+            self.active = 0;
+        } else {
+            self.active += 1;
+            self.tabs.insert(self.active, tab);
+        }
+        self.tabs_changed(window, cx);
+    }
+
+    fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if index < self.tabs.len() && index != self.active {
+            self.active = index;
+            self.tabs_changed(window, cx);
+        }
+    }
+
+    fn tabs_changed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        window.set_window_title(&self.active_tab().label.window_title());
+        cx.notify();
+    }
+
+    fn mode(&self) -> ViewMode {
+        self.active_tab().mode
+    }
+
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<'_, Self>) {
-        self.mode = mode;
+        self.tabs[self.active].mode = mode;
         cx.notify();
     }
 
     fn toggle_edit_mode(&mut self, cx: &mut Context<'_, Self>) {
-        let mode = match self.mode {
+        let mode = match self.mode() {
             ViewMode::Edit => ViewMode::Preview,
             ViewMode::Preview | ViewMode::Split => ViewMode::Edit,
         };
@@ -203,6 +333,51 @@ impl Render for Workspace {
                             ),
                     ),
             )
-            .child(status_bar::status_bar(&self.file, theme, radii))
+            .child(status_bar::status_bar(self.active_tab(), theme, radii))
     }
+}
+
+/// A main window and its workspace.
+#[derive(Debug, Clone)]
+pub struct WorkspaceWindow {
+    pub window: AnyWindowHandle,
+    pub workspace: WeakEntity<Workspace>,
+}
+
+impl WorkspaceWindow {
+    /// Opens `target` as a tab in this window (see [`Workspace::open_tab`]).
+    pub fn open_tab(&self, target: OpenTarget, cx: &mut App) -> Result<()> {
+        let workspace = self.workspace.clone();
+        cx.update_window(self.window, |_, window, cx| {
+            workspace.update(cx, |ws, cx| ws.open_tab(target, window, cx))
+        })?
+    }
+
+    /// Brings the window to the front.
+    pub fn activate(&self, cx: &mut App) {
+        // Fails only when the window has closed.
+        let _ = cx.update_window(self.window, |_, window, _| window.activate_window());
+    }
+}
+
+/// The main windows, most recently focused first.
+#[derive(Debug, Default)]
+struct RecentWindows(Vec<WorkspaceWindow>);
+
+impl Global for RecentWindows {}
+
+impl RecentWindows {
+    fn touch(entry: WorkspaceWindow, cx: &mut App) {
+        let order = &mut cx.default_global::<Self>().0;
+        order.retain(|w| w.window != entry.window);
+        order.insert(0, entry);
+    }
+}
+
+/// The main window that was focused last and is still open.
+pub fn most_recent_window(cx: &mut App) -> Option<WorkspaceWindow> {
+    let open = cx.windows();
+    let order = &mut cx.default_global::<RecentWindows>().0;
+    order.retain(|w| open.contains(&w.window) && w.workspace.upgrade().is_some());
+    order.first().cloned()
 }

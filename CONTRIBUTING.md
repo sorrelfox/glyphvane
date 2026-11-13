@@ -85,6 +85,7 @@ fuzz/     cargo-fuzz targets (a separate workspace)
 | `gv-editor` | Buffer model, selections, transactions, undo, Markdown commands, display map |
 | `gv-spell` | Spell-check backend trait, spellbook backend, prose tokenizer |
 | `gv-helper` | Helper-process entry points and IPC protocol for risky or non-cancellable engines |
+| `gv-settings` | Settings schema, layers with provenance, format-preserving TOML files, migrations and file locations |
 | `gv-ui` | GPUI views: workspace, panes, editor and reader elements, panels, theming |
 | `gv-app` | The `glyphvane` binary: CLI, single instance, platform glue, logging, settings bootstrap |
 

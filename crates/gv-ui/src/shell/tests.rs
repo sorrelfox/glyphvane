@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-use std::path::Path;
+use gpui::App;
 
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext,
     WindowOptions,
 };
 
-use super::{FileLabel, ViewMode, Workspace};
+use super::{OpenTarget, TextPosition, ViewMode, Workspace, most_recent_window};
 use crate::chrome::WindowChrome;
 use crate::metrics::size::{TITLE_ROW, icon_button};
 use crate::metrics::spacing::{macos_controls, title_row, windows_controls};
 use crate::metrics::{HAIRLINE, size};
-use crate::{Appearance, ThemeChoice, ToggleEditMode, TogglePanel, ToggleSidebar};
+use crate::{
+    AppSettings, Appearance, Placement, ThemeChoice, ToggleEditMode, TogglePanel, ToggleSidebar,
+};
 
 fn open_file_window(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
     open_window_with_chrome(cx, WindowChrome::current())
@@ -24,8 +26,8 @@ fn open_window_with_chrome(
     chrome: WindowChrome,
 ) -> (AnyWindowHandle, Entity<Workspace>) {
     cx.update(|cx| {
-        crate::init(cx, ThemeChoice::Light);
-        let file = FileLabel::new(Some(Path::new("notes/README.md")));
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        let file = Some(OpenTarget::new("notes/README.md"));
         gpui::open_window(WindowOptions::default(), cx, |window, cx| {
             cx.new(|cx| Workspace::with_chrome(file, chrome, window, cx))
         })
@@ -51,7 +53,7 @@ fn px_eq(value: Pixels, expected: f32) -> bool {
 
 /// (sidebar open, right panel open, mode)
 fn layout(workspace: &Entity<Workspace>, cx: &TestAppContext) -> (bool, bool, ViewMode) {
-    workspace.read_with(cx, |ws, _| (ws.sidebar_open, ws.panel_open, ws.mode))
+    workspace.read_with(cx, |ws, _| (ws.sidebar_open, ws.panel_open, ws.mode()))
 }
 
 #[gpui::test]
@@ -200,4 +202,108 @@ fn linux_draws_no_windows_or_macos_controls(cx: &mut TestAppContext) {
     for id in ["caption-close", "title-window-controls"] {
         assert!(bounds(&mut vcx, id).is_none(), "{id} is drawn on Linux");
     }
+}
+
+/// Opens `paths` as the command line would and returns the window and its
+/// workspace.
+fn route(
+    cx: &mut TestAppContext,
+    targets: Vec<OpenTarget>,
+    placement: Placement,
+) -> (AnyWindowHandle, Entity<Workspace>) {
+    cx.update(|cx: &mut App| {
+        let window = crate::open(cx, targets, placement).expect("files open");
+        let recent = most_recent_window(cx).expect("a main window is open");
+        assert_eq!(recent.window, window);
+        (
+            window,
+            recent.workspace.upgrade().expect("workspace is alive"),
+        )
+    })
+}
+
+fn tab_paths(workspace: &Entity<Workspace>, cx: &TestAppContext) -> (Vec<String>, usize) {
+    workspace.read_with(cx, |ws, _| {
+        let paths = ws
+            .tabs()
+            .iter()
+            .map(|t| {
+                t.path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        (paths, ws.active)
+    })
+}
+
+#[gpui::test]
+fn a_routed_file_opens_as_a_tab_and_leaves_the_panels_alone(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let (first, workspace) = route(cx, vec![OpenTarget::new("a.md")], Placement::RecentWindow);
+    assert_eq!(layout(&workspace, cx), (false, false, ViewMode::Preview));
+    cx.dispatch_action(first, ToggleSidebar);
+
+    let line = TextPosition {
+        line: 12,
+        column: Some(3),
+    };
+    let (second, _) = route(
+        cx,
+        vec![OpenTarget::new("b.md").at(line)],
+        Placement::RecentWindow,
+    );
+    assert_eq!(second, first);
+    assert_eq!(layout(&workspace, cx), (true, false, ViewMode::Preview));
+    assert_eq!(
+        tab_paths(&workspace, cx),
+        (vec!["a.md".into(), "b.md".into()], 1)
+    );
+    let position = workspace.read_with(cx, |ws, _| ws.active_tab().position());
+    assert_eq!(position, Some(line));
+}
+
+#[gpui::test]
+fn new_window_follows_the_launch_rule(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let (first, workspace) = route(cx, vec![OpenTarget::new("a.md")], Placement::RecentWindow);
+    cx.dispatch_action(first, ToggleSidebar);
+    cx.dispatch_action(first, TogglePanel);
+
+    let targets = vec![OpenTarget::new("b.md"), OpenTarget::new("c.md")];
+    let (second, opened) = route(cx, targets, Placement::NewWindow);
+    assert_ne!(second, first);
+    assert_eq!(layout(&opened, cx), (false, false, ViewMode::Preview));
+    assert_eq!(
+        tab_paths(&opened, cx),
+        (vec!["b.md".into(), "c.md".into()], 1)
+    );
+    // The first window is untouched.
+    assert_eq!(layout(&workspace, cx), (true, true, ViewMode::Preview));
+    assert_eq!(tab_paths(&workspace, cx), (vec!["a.md".into()], 0));
+}
+
+#[gpui::test]
+fn a_file_replaces_the_empty_tab(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let (first, workspace) = route(cx, Vec::new(), Placement::RecentWindow);
+    assert_eq!(tab_paths(&workspace, cx), (vec![String::new()], 0));
+
+    let (second, _) = route(cx, vec![OpenTarget::new("a.md")], Placement::RecentWindow);
+    assert_eq!(second, first);
+    assert_eq!(tab_paths(&workspace, cx), (vec!["a.md".into()], 0));
+}
+
+#[gpui::test]
+fn each_tab_keeps_its_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let (window, workspace) = route(cx, vec![OpenTarget::new("a.md")], Placement::RecentWindow);
+    cx.dispatch_action(window, ToggleEditMode);
+    route(cx, vec![OpenTarget::new("b.md")], Placement::RecentWindow);
+    assert_eq!(layout(&workspace, cx), (false, false, ViewMode::Preview));
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |ws, cx| ws.activate_tab(0, window, cx));
+    })
+    .expect("window is open");
+    assert_eq!(layout(&workspace, cx), (false, false, ViewMode::Edit));
 }

@@ -7,13 +7,14 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{Corners, Div, FontWeight, ParentElement as _, Pixels, Styled as _, div, px};
 
-use super::FileLabel;
+use super::{FileLabel, Tab};
 use crate::icons::Icon;
 use crate::metrics::spacing::{profile_chip, status_bar as spacing};
 use crate::metrics::{icon, radius, size, text};
 use crate::theme::Theme;
 
-pub(super) fn status_bar(file: &FileLabel, theme: &Theme, radii: Corners<Pixels>) -> Div {
+pub(super) fn status_bar(tab: &Tab, theme: &Theme, radii: Corners<Pixels>) -> Div {
+    let file = &tab.label;
     div()
         .h(px(size::STATUS_BAR))
         .flex_none()
@@ -47,6 +48,13 @@ pub(super) fn status_bar(file: &FileLabel, theme: &Theme, radii: Corners<Pixels>
                 .flex()
                 .items_center()
                 .gap(px(spacing::GAP))
+                // Where the Reading view will be scrolled to, until it exists.
+                .when_some(tab.position, |row, position| {
+                    row.child(match position.column {
+                        Some(column) => format!("Ln {}, Col {column}", position.line),
+                        None => format!("Ln {}", position.line),
+                    })
+                })
                 // Counted once the document model exists.
                 .child("— words")
                 .child(profile(theme)),
