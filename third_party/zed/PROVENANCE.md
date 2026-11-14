@@ -225,3 +225,185 @@ All 20 tests are kept, in the `tests` module of `tab_map.rs`.
 3. Update the commit and hashes here, and record the size of the upstream
    diff.
 4. Run `cargo test -p gv-editor`.
+
+## Display map: the wrap layer (ported 2026-11-14)
+
+The `wrap_map.rs` core is now ported, which supersedes "not ported yet" for
+it in the section above. With it comes the part of GPUI's line wrapper that
+finds the wrap boundaries. Same commit as above.
+
+| File in `crates/gv-editor/` | Upstream (commit above) | Licence upstream | Kind |
+|---|---|---|---|
+| `src/display_map/wrap_map.rs` | `crates/editor/src/display_map/wrap_map.rs` | GPL-3.0-or-later | ported, with 5 of its 6 upstream tests |
+| `src/display_map/line_wrapper.rs` | `crates/gpui/src/text_system/line_wrapper.rs` (`LineWrapper::wrap_line`, `LineFragment`, `Boundary`, `IndentAdjustment`, the width cache) | **Apache-2.0** | ported, with its 6 wrapping tests |
+
+Written for Glyphvane, not taken from Zed: `src/display_map/wrap_indent.rs`
+(the per-row indent callback and the Markdown hanging indent), the soft-wrap
+parts of `src/editor.rs` (the wrap layer in `DisplayLayers`, `DisplayRows`
+and the wrap-row motions), the `ColumnMeasure` test double in
+`src/display_map/test_support.rs`, `tests/wrap_map.rs`,
+`tests/editor_wrap.rs` and `benches/wrap.rs`.
+
+### Licence of `line_wrapper.rs`
+
+GPUI is licensed under the Apache License, Version 2.0
+(`crates/gpui/Cargo.toml`: `license = "Apache-2.0"`; `crates/gpui/LICENSE-APACHE`
+is a symlink to Zed's root `LICENSE-APACHE`). Apache-2.0 code may be included
+in a GPL-3.0 work. The ported file:
+
+- is distributed under GPL-3.0-or-later as part of Glyphvane (its SPDX
+  line), and its header names the upstream file, the commit, Zed's
+  copyright and the Apache-2.0 licence of the original;
+- states that it was modified, and this section lists the changes
+  (Apache-2.0 § 4(b));
+- keeps the upstream comments; Zed ships no `NOTICE` file, so there is no
+  notice text to carry (§ 4(d)).
+
+Apache-2.0 § 4(a) asks for a copy of the licence with the code: Zed's
+`LICENSE-APACHE` (hash below) belongs beside `LICENSE-GPL` in this
+directory.
+
+SHA-256 of the upstream files at the commit above:
+
+```
+f5d8ee0f98662d65c52dc3d6ce0e7d0d294760ab1edce62e6bac31b0b582baec  crates/editor/src/display_map/wrap_map.rs
+8912c5d16dc00bbcc1f19f56c2f2f4e3b826aa244b4f7c04c62a3934b22f7c4f  crates/gpui/src/text_system/line_wrapper.rs
+752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a  LICENSE-APACHE
+```
+
+### Modifications to `wrap_map.rs`
+
+1. **Input layer and coordinates.** The layer sits on gv-editor's
+   `TabSnapshot` (over the replace layer and gv-text) instead of Zed's tab
+   map over the fold map and multi-buffer. `make_wrap_point(Point, Bias)`
+   and `to_point` are renamed `buffer_point_to_wrap_point(BufferPoint,
+   Bias)` and `wrap_point_to_buffer_point`. The public API takes
+   `gv_text::Bias`; `sum_tree::Bias` is used only for tree seeks.
+   `Deref<Target = TabSnapshot>` is replaced by `tab_snapshot()` and
+   `buffer()`.
+2. **Measurement.** Wrapping goes through the ported `LineWrapper` over an
+   injected `TextMeasure`; `Font`, `FontId`, `Pixels` and `TextSystem` are
+   gone and widths are `f32`. `set_font_with_size` becomes
+   `set_measure(Box<dyn TextMeasure>)`; `WrapMap::new` takes the measure.
+3. **Scheduling.** `WrapMap` is a plain struct, not a GPUI entity: no
+   `background_spawn`, `block_with_timeout`, `cx.notify()` or `yield_now`,
+   and `update` is synchronous. A full re-wrap is a `RewrapJob` (new):
+   `begin_rewrap` / `defer_wrap_width` hand out a `Send` job that wraps rows
+   in steps with its own `LineWrapper`, so a view can run it on another
+   thread; `finish_rewrap` completes it, re-applies the tab edits synced
+   meanwhile with `update` (upstream's `pending_edits`), and reports **one
+   edit over the whole text** instead of composing
+   `interpolated_edits.invert()` with the job's edits, so `text::Patch` is
+   not needed. A job from before a newer re-wrap is rejected (generation
+   count). The setters (`set_wrap_width`, `set_measure`, `set_indent`) run a
+   job to completion at once.
+4. **`sync`.** While a job is out it interpolates, as upstream does while
+   its background task runs; otherwise it re-wraps the touched rows at
+   once, also when there is no width (upstream interpolates then), so the
+   unwrapped layer equals a rebuild exactly, longest row included.
+5. **Soft-wrap indent.** The `SoftWrapIndent` language setting and
+   `indent_adjustment_for` become a per-row `WrapIndent` callback that
+   returns an `IndentAdjustment` for the row's tab-expanded text
+   (`with_indent`, `set_indent`; `set_soft_wrap_indent` is gone).
+   `refresh_rows` (new) re-wraps rows whose answer changed.
+6. **Capped transforms.** Isomorphic transforms are merged only up to 32
+   rows (`MAX_ISOMORPHIC_ROWS`), so they split at row starts. Summarizing
+   a range of the tab layer scans its text here (the replace layer has no
+   summary tree yet), and upstream re-summarizes the rest of the
+   transform an edit falls in, which in unwrapped text can be the rest of
+   the document. For the same reason the fast path of `interpolate` for a
+   text without wraps (which summarizes the whole new text) is removed.
+   `check_invariants` allows adjacent isomorphic transforms (wraps still
+   never follow each other) and checks the row infos from six start rows
+   instead of every row (quadratic).
+7. **Lines that fit** skip the line wrapper (`fits`): same result, since
+   the wrapper breaks only once the running width exceeds the wrap width,
+   and widths are summed in the same order.
+8. **Chunks.** A wrap's display text (up to 257 bytes, upstream yielded
+   whole with empty bitmaps) comes in chunks of at most 128 bytes with
+   their bitmaps. The `\n` + 256 spaces text is a `const` (was a
+   `LazyLock`). `Transform::wrap` clamps the indent to `MAX_INDENT`.
+9. **Removed:** `LineFragmentBuilder` (invisible characters as elements of
+   their replacement glyph's width: the `TextMeasure` answers for the glyph
+   the view draws instead), chunk renderer widths, the
+   `LanguageAwareStyling` and `Highlights` parameters of `chunks`, every
+   `#[ztracing::instrument]`. `WrapRows` yields `WrapRowInfo { tab_row,
+   buffer_line, soft_wrapped }` instead of multi-buffer `RowInfo`.
+10. **Row arithmetic.** `RowDelta` and `impl_for_row_types!` are replaced
+    by `u32` arithmetic on `WrapRow.0` and `Add for WrapRow`. `WrapEdit` is
+    `primitives::Edit<WrapRow>` and patches are `Vec<WrapEdit>`.
+    `consolidate_wrap_edits` is a plain loop (upstream scans in place and
+    asserts the allocation is reused).
+11. **Visibility and small changes.** `text` and `text_chunks` are public
+    (were test-only); `is_interpolated`, `wrap_width`, `into_measure` are
+    new accessors; `clip_point` saturates the column it steps back;
+    `Transform::isomorphic` uses `debug_assert!` (was a test-only
+    `assert!`); `unwrap()`s on the first edit become matches; `Debug` on
+    every type and doc comments on the public API.
+
+### Modifications to `line_wrapper.rs`
+
+1. **Widths** come from `TextMeasure::char_width` through the same cache
+   (ASCII array and hash map) instead of
+   `TextSystem::layout_width(font_id, font_size, c)`. `LineWrapper::new`
+   takes the measure; `into_measure` gives it back; `width_for_char` is
+   public; `Pixels` is `f32`.
+2. **Break opportunities** come from `unicode-linebreak` 0.1.5 (UAX #14,
+   Unicode 15.0, already a workspace dependency) instead of ICU4X's
+   `LineSegmenter::new_for_non_complex_scripts` (`icu_segmenter` 2.x). It
+   does not report the opportunity at index 0, which could never become a
+   candidate, and opportunities that no candidate starts at are skipped
+   instead of blocking later ones. All six upstream wrapping tests pass
+   unchanged with it, including the UAX #14 cases (`required!`,
+   `foo/bar`, `(hello)`, `a\u{a0}b`, `你好！`) and the grapheme tests.
+   Differences between the two segmenters in Unicode 15.1+ rules are not
+   checked.
+3. **`IndentAdjustment::Columns(u32)`** (new): an absolute continuation
+   indent, with the same overflow guard as `ExtraColumns`.
+4. **`SameIndent` overflow guard** (new): no indent when the text carried
+   to the continuation row would not fit after it. Upstream keeps the
+   indent, and the row then overflows with more than one grapheme (found by
+   the property test; `same_indent_overflow_guard` has the example). No
+   upstream test changes.
+5. **Not ported:** truncation (`TruncateFrom`, `should_truncate_line*`,
+   `truncate_line*`, `update_runs_after_*`), `into_char_widths`, and the
+   crate-private constructor. `break_indices` is a free function.
+6. `if base_indent.is_none() { if let … }` becomes a let chain; `Debug`.
+
+### Modifications to the upstream tests
+
+`wrap_map.rs` (5 of 6 kept, in its `tests` module):
+
+1. `#[gpui::test]` becomes `#[test]`; `#[gpui::test(iterations = 100)]`
+   becomes `for_each_seed(100, …)`.
+2. Upstream measures its test font at 14 px (8.4 px per character). Here
+   `MonospaceMeasure::new(1.0)` with widths in columns: `px(14.0) * 15.0`
+   is 25 columns, `px(14.0) * 8.0` is 13, `font_size * n * 0.6` is `n`.
+3. The `SoftWrapIndent` setting becomes a test-only `WrapIndent` that reads
+   the tab size from the snapshot (`indent_adjustment_for` is kept).
+4. `test_invisibles_wrap_at_replacement_glyph_width` gives control
+   characters a replacement-glyph width through the measure.
+   `test_invisibles_become_width_measured_elements` is not ported: it tests
+   `LineFragmentBuilder`.
+5. `test_random_wraps`: the text is random (up to 300 characters) instead
+   of `MultiBuffer::build_random`; fold and inlay mutations become
+   `refresh_rows` and tab-size changes; the background re-wrap becomes a
+   job run in random steps on its own wrapper and finished at random, or
+   left stale by a newer one; the measure is `ColumnMeasure` (wide
+   characters two columns); widths are 0 to 120 columns. `verify_chunks`
+   also checks chunk sizes and bitmaps. `Rope` becomes `String` and
+   `TestText`.
+
+`line_wrapper.rs` (the 6 wrapping tests of 21 kept; the 14 truncation tests
+and the macOS-only `test_wrap_shaped_line` are not ported): `.ZedMono` at
+16 px through GPUI becomes `MonospaceMeasure::new(9.6)` (its ASCII
+advance); the 1 px width-cache fill becomes `MonospaceMeasure::new(1.0)`;
+the two-column crab of `test_extra_columns_overflow_guard` comes from
+`ColumnMeasure`; the grapheme and break-opportunity tests also run with
+`ColumnMeasure`.
+
+### Updating the wrap layer
+
+As for the other display-map ports, and also: diff `line_wrapper.rs` and
+`LICENSE-APACHE`, and if upstream changes its segmenter or its break rules,
+check them against `unicode-linebreak` with the break-opportunity tests.

@@ -3034,10 +3034,12 @@ name = "gv-editor"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "gpui-pre-sum-tree",
  "gv-syntax",
  "gv-text",
  "proptest",
  "rand 0.9.5",
+ "unicode-linebreak",
  "unicode-segmentation",
  "zed-test-util",
 ]

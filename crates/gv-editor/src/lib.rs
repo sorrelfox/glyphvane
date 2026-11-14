@@ -18,8 +18,9 @@
 //! - the undo [`History`]: transactions grouped into steps (see
 //!   [`EditKind`] for the grouping rules), with selections restored, a
 //!   memory bound and save points;
-//! - the [`display_map`] layers (replace and tab), synced on every edit;
-//!   vertical motion runs on display rows;
+//! - the [`display_map`] layers (replace and tab, and the wrap layer while
+//!   soft wrap is on: [`Editor::set_wrap_width`]), synced on every edit;
+//!   vertical motion runs on display rows (wrap rows when wrapping);
 //! - input-method state: marked text and the UTF-16 queries and
 //!   replacements a platform text-input handler needs;
 //! - observers, told about every change with its
@@ -51,8 +52,8 @@
 //! - [`movement`]: caret motions;
 //! - [`commands`]: the Markdown-aware editing commands (list continuation,
 //!   indentation, renumbering, formatting, headings, quotes, links);
-//! - [`display_map`]: the replace layer (an identity layer for now) and the
-//!   tab layer, ported from Zed.
+//! - [`display_map`]: the replace layer (an identity layer for now), and
+//!   the tab and wrap layers, ported from Zed.
 
 pub mod boundaries;
 mod clock;

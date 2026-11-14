@@ -12,6 +12,40 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use util::RandomCharIter;
 
 use super::primitives::{Edit, Point};
+use super::text_measure::TextMeasure;
+
+/// A variable-width [`TextMeasure`] in columns: East Asian wide characters
+/// and emoji are two columns, combining marks, emoji modifiers and
+/// joiners none, everything else one.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ColumnMeasure;
+
+impl ColumnMeasure {
+    pub(crate) fn width(c: char) -> f32 {
+        match c as u32 {
+            0x0300..=0x036F | 0x200B..=0x200D | 0x3099..=0x309A | 0xFE00..=0xFE0F => 0.0,
+            0x1F3FB..=0x1F3FF => 0.0,
+            0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3040..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD => 2.0,
+            _ => 1.0,
+        }
+    }
+}
+
+impl TextMeasure for ColumnMeasure {
+    fn char_width(&mut self, c: char) -> f32 {
+        Self::width(c)
+    }
+}
 
 /// Runs `test` with a seeded RNG for seeds `0..iterations`, or only for the
 /// seed in the `SEED` environment variable. Reports the failing seed.

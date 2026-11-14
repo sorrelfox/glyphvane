@@ -14,7 +14,7 @@
 //! | Buffer | `gv_text` | [`BufferPoint`] (line, byte column, `usize`) | The exact text, with LF, CRLF and lone CR line endings |
 //! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds and inline replacements (not yet: an identity layer); every line ending becomes one `\n` |
 //! | Tab | [`tab_map`] | [`TabPoint`] | Expands hard tabs to tab stops |
-//! | Wrap | not yet | | Soft wrap, measured through [`TextMeasure`] |
+//! | Wrap | [`wrap_map`] | [`WrapPoint`] | Soft wrap, measured through [`TextMeasure`], with continuation indents from a [`WrapIndent`] |
 //! | Block | not yet | | Block widgets with pixel heights |
 //!
 //! Display-layer points are a `u32` row and a byte column in that layer's
@@ -25,8 +25,9 @@
 //!
 //! A buffer transaction returns an [`EditSummary`](gv_text::EditSummary) of
 //! byte ranges. [`ReplaceMap::sync`] turns it into [`ReplaceEdit`]s and
-//! [`TabMap::sync`] those into [`TabEdit`]s: in each, the old range is in the
-//! previous snapshot of the layer and the new range in the next one.
+//! [`TabMap::sync`] those into [`TabEdit`]s, and [`WrapMap::sync`] those into
+//! [`WrapEdit`]s (whole wrap rows): in each, the old range is in the previous
+//! snapshot of the layer and the new range in the next one.
 //!
 //! ```
 //! use std::num::NonZeroU32;
@@ -46,14 +47,18 @@
 //! assert_eq!(tab_edits[0].new, TabPoint::new(0, 0)..TabPoint::new(0, 4));
 //! ```
 
+pub mod line_wrapper;
 pub mod primitives;
 pub mod replace_map;
 pub mod tab_map;
 pub mod text_measure;
+pub mod wrap_indent;
+pub mod wrap_map;
 
 #[cfg(test)]
 mod test_support;
 
+pub use line_wrapper::{Boundary, IndentAdjustment, LineFragment, LineWrapper};
 pub use primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
 pub use replace_map::{ReplaceChunks, ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot};
 pub use tab_map::{
@@ -61,6 +66,11 @@ pub use tab_map::{
     TabSnapshot,
 };
 pub use text_measure::{MonospaceMeasure, TextMeasure};
+pub use wrap_indent::{MarkdownHangingIndent, WrapIndent};
+pub use wrap_map::{
+    RewrapJob, WrapChunks, WrapEdit, WrapMap, WrapPoint, WrapPointCursor, WrapRow, WrapRowInfo,
+    WrapRows, WrapSnapshot,
+};
 
 /// A buffer position: a line and a byte column (see [`gv_text::Point`]).
 pub type BufferPoint = gv_text::Point;

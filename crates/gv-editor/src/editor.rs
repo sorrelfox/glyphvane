@@ -6,6 +6,7 @@
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
+use std::sync::Arc;
 
 use gv_text::{
     Anchor, Bias, Buffer, EditError, EditSummary, OffsetUtf16, Revision, TextSnapshot, Transaction,
@@ -16,13 +17,17 @@ use crate::boundaries::{
     prev_grapheme_boundary, prev_word_start, snap_to_grapheme,
 };
 use crate::clock::{Clock, SystemClock};
-use crate::display_map::{ReplaceMap, TabEdit, TabMap, TabPoint, TabSnapshot};
+use crate::display_map::{
+    IndentAdjustment, MonospaceMeasure, ReplaceMap, TabEdit, TabMap, TabPoint, TabSnapshot,
+    TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
+};
 use crate::history::{
     EditKind, History, HistoryConfig, Record, SelectionState, StateId, UndoOutcome, UndoPlan,
     patch_of,
 };
 use crate::movement::{
     Motion, display_column, display_to_offset, move_caret, offset_to_display, point_at_column,
+    smart_line_start,
 };
 use crate::selection::{Selection, SelectionGoal, SelectionId, SelectionSpec, Selections};
 
@@ -87,6 +92,11 @@ pub struct EditEvent<'a> {
     pub display: &'a TabSnapshot,
     /// What changed in the display map.
     pub display_edits: &'a [TabEdit],
+    /// The wrap layer after the change, if soft wrap is on.
+    pub wrap: Option<&'a WrapSnapshot>,
+    /// What changed in the wrap layer, in wrap rows (empty when soft wrap
+    /// is off).
+    pub wrap_edits: &'a [WrapEdit],
     /// The selections after the change.
     pub selections: &'a Selections,
 }
@@ -108,6 +118,18 @@ pub enum EditorEvent<'a> {
         display: &'a TabSnapshot,
         /// What changed in it.
         edits: &'a [TabEdit],
+    },
+    /// The wrap layer changed without a text change: soft wrap was turned
+    /// on or off, or its width, measure or indent changed, or the tab size
+    /// did (after [`EditorEvent::DisplayChanged`]).
+    WrapChanged {
+        /// The wrap layer after the change; `None` when soft wrap was
+        /// turned off, so the view shows the rows of
+        /// [`Editor::display`] again.
+        wrap: Option<&'a WrapSnapshot>,
+        /// What changed, in display rows: wrap rows, or tab rows on the
+        /// side where soft wrap is off.
+        edits: &'a [WrapEdit],
     },
 }
 
@@ -135,13 +157,34 @@ pub struct SavePoint {
     pub state: StateId,
 }
 
-/// The replace and tab layers, kept in step with the buffer.
-#[derive(Debug)]
+/// The replace and tab layers, and the wrap layer while soft wrap is on,
+/// kept in step with the buffer.
 struct DisplayLayers {
     replace_map: ReplaceMap,
     tab_map: TabMap,
     snapshot: TabSnapshot,
     tab_size: NonZeroU32,
+    wrap: Option<WrapLayer>,
+    /// The measure while soft wrap is off (the wrap map owns it while on).
+    measure: Option<Box<dyn TextMeasure>>,
+    indent: Arc<dyn WrapIndent>,
+}
+
+#[derive(Debug)]
+struct WrapLayer {
+    map: WrapMap,
+    snapshot: WrapSnapshot,
+}
+
+impl fmt::Debug for DisplayLayers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DisplayLayers")
+            .field("replace_map", &self.replace_map)
+            .field("tab_map", &self.tab_map)
+            .field("tab_size", &self.tab_size)
+            .field("wrap", &self.wrap)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DisplayLayers {
@@ -153,22 +196,116 @@ impl DisplayLayers {
             tab_map,
             snapshot,
             tab_size,
+            wrap: None,
+            measure: None,
+            indent: Arc::new(IndentAdjustment::SameIndent),
         }
     }
 
-    fn sync(&mut self, text: TextSnapshot, summary: &EditSummary) -> Vec<TabEdit> {
+    /// The rows vertical motion runs on.
+    fn rows(&self) -> DisplayRows<'_> {
+        match &self.wrap {
+            Some(wrap) => DisplayRows::Wrap(&wrap.snapshot),
+            None => DisplayRows::Tab(&self.snapshot),
+        }
+    }
+
+    fn wrap_snapshot(&self) -> Option<&WrapSnapshot> {
+        self.wrap.as_ref().map(|wrap| &wrap.snapshot)
+    }
+
+    fn sync(&mut self, text: TextSnapshot, summary: &EditSummary) -> (Vec<TabEdit>, Vec<WrapEdit>) {
         let (replace, replace_edits) = self.replace_map.sync(text, summary);
         let (snapshot, edits) = self.tab_map.sync(replace, replace_edits, self.tab_size);
         self.snapshot = snapshot;
-        edits
+        let wrap_edits = self.sync_wrap(&edits);
+        (edits, wrap_edits)
     }
 
-    fn set_tab_size(&mut self, tab_size: NonZeroU32) -> Vec<TabEdit> {
+    fn sync_wrap(&mut self, edits: &[TabEdit]) -> Vec<WrapEdit> {
+        match &mut self.wrap {
+            Some(wrap) => {
+                let (snapshot, wrap_edits) = wrap.map.sync(self.snapshot.clone(), edits.to_vec());
+                wrap.snapshot = snapshot;
+                wrap_edits
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn set_tab_size(&mut self, tab_size: NonZeroU32) -> (Vec<TabEdit>, Vec<WrapEdit>) {
         self.tab_size = tab_size;
         let replace = self.replace_map.snapshot();
         let (snapshot, edits) = self.tab_map.sync(replace, Vec::new(), tab_size);
         self.snapshot = snapshot;
-        edits
+        let wrap_edits = self.sync_wrap(&edits);
+        (edits, wrap_edits)
+    }
+
+    /// Turns soft wrap on or off or changes its width. Returns the edits
+    /// in display rows, or `None` if nothing changed.
+    fn set_wrap_width(&mut self, width: Option<f32>) -> Option<Vec<WrapEdit>> {
+        let width = width.filter(|width| !width.is_nan());
+        let tab_rows = self.snapshot.max_point().row() + 1;
+        match (self.wrap.as_mut(), width) {
+            (None, None) => None,
+            (Some(wrap), Some(width)) => {
+                let (snapshot, edits) = wrap.map.set_wrap_width(Some(width));
+                wrap.snapshot = snapshot;
+                (!edits.is_empty()).then_some(edits)
+            }
+            (Some(_), None) => {
+                let wrap = self.wrap.take()?;
+                let wrap_rows = wrap.snapshot.max_point().row().0 + 1;
+                self.measure = Some(wrap.map.into_measure());
+                Some(vec![WrapEdit {
+                    old: WrapRow(0)..WrapRow(wrap_rows),
+                    new: WrapRow(0)..WrapRow(tab_rows),
+                }])
+            }
+            (None, Some(width)) => {
+                let measure = self
+                    .measure
+                    .take()
+                    .unwrap_or_else(|| Box::new(MonospaceMeasure::new(1.0)));
+                let (map, snapshot) = WrapMap::with_indent(
+                    self.snapshot.clone(),
+                    measure,
+                    Arc::clone(&self.indent),
+                    Some(width),
+                );
+                let wrap_rows = snapshot.max_point().row().0 + 1;
+                self.wrap = Some(WrapLayer { map, snapshot });
+                Some(vec![WrapEdit {
+                    old: WrapRow(0)..WrapRow(tab_rows),
+                    new: WrapRow(0)..WrapRow(wrap_rows),
+                }])
+            }
+        }
+    }
+
+    /// Returns the wrap edits if soft wrap is on.
+    fn set_measure(&mut self, measure: Box<dyn TextMeasure>) -> Option<Vec<WrapEdit>> {
+        match &mut self.wrap {
+            Some(wrap) => {
+                let (snapshot, edits) = wrap.map.set_measure(measure);
+                wrap.snapshot = snapshot;
+                Some(edits)
+            }
+            None => {
+                self.measure = Some(measure);
+                None
+            }
+        }
+    }
+
+    /// Returns the wrap edits if soft wrap is on.
+    fn set_wrap_indent(&mut self, indent: Arc<dyn WrapIndent>) -> Option<Vec<WrapEdit>> {
+        self.indent = Arc::clone(&indent);
+        let wrap = self.wrap.as_mut()?;
+        let (snapshot, edits) = wrap.map.set_indent(indent);
+        wrap.snapshot = snapshot;
+        Some(edits)
     }
 }
 
@@ -297,7 +434,7 @@ impl Editor {
 
     /// Changes the tab size of the display map.
     pub fn set_tab_size(&mut self, tab_size: NonZeroU32) {
-        let edits = self.display.set_tab_size(tab_size);
+        let (edits, wrap_edits) = self.display.set_tab_size(tab_size);
         if !edits.is_empty() {
             let event = EditorEvent::DisplayChanged {
                 display: &self.display.snapshot,
@@ -305,6 +442,66 @@ impl Editor {
             };
             emit(&mut self.observers, &event);
         }
+        if !wrap_edits.is_empty() {
+            self.wrap_changed(&wrap_edits);
+        }
+    }
+
+    // ----- soft wrap ----------------------------------------------------------
+
+    /// The wrap layer over [`display`](Self::display), if soft wrap is on.
+    pub fn wrap(&self) -> Option<&WrapSnapshot> {
+        self.display.wrap_snapshot()
+    }
+
+    /// The soft-wrap width, or `None` when soft wrap is off.
+    pub fn wrap_width(&self) -> Option<f32> {
+        self.display
+            .wrap
+            .as_ref()
+            .and_then(|wrap| wrap.map.wrap_width())
+    }
+
+    /// Turns soft wrap on at `width`, changes the width, or turns soft wrap
+    /// off (`None`). The width is in the units of the measure
+    /// ([`set_measure`](Self::set_measure)): text-column pixels in the view,
+    /// columns with the default measure (every character one unit wide).
+    ///
+    /// The whole text is re-wrapped at once. While soft wrap is on,
+    /// vertical motion moves by wrap rows, and Home and End stop at the
+    /// display row first (see [`Editor::move_selections`]). Observers get
+    /// [`EditorEvent::WrapChanged`].
+    pub fn set_wrap_width(&mut self, width: Option<f32>) {
+        if let Some(edits) = self.display.set_wrap_width(width) {
+            self.wrap_changed(&edits);
+        }
+    }
+
+    /// Measures text for soft wrap with `measure` from now on (a new font
+    /// or size), re-wrapping at once if soft wrap is on.
+    pub fn set_measure(&mut self, measure: Box<dyn TextMeasure>) {
+        if let Some(edits) = self.display.set_measure(measure) {
+            self.wrap_changed(&edits);
+        }
+    }
+
+    /// Chooses the indent of soft-wrapped continuation rows with `indent`
+    /// (by default, their row's leading whitespace; see
+    /// [`MarkdownHangingIndent`](crate::display_map::MarkdownHangingIndent)
+    /// for a list and quote hanging indent), re-wrapping at once if soft
+    /// wrap is on.
+    pub fn set_wrap_indent(&mut self, indent: Arc<dyn WrapIndent>) {
+        if let Some(edits) = self.display.set_wrap_indent(indent) {
+            self.wrap_changed(&edits);
+        }
+    }
+
+    fn wrap_changed(&mut self, edits: &[WrapEdit]) {
+        let event = EditorEvent::WrapChanged {
+            wrap: self.display.wrap_snapshot(),
+            edits,
+        };
+        emit(&mut self.observers, &event);
     }
 
     // ----- observers ----------------------------------------------------------
@@ -373,7 +570,7 @@ impl Editor {
                 });
             }
         }
-        let display_edits = self.display.sync(self.buffer.snapshot(), &summary);
+        let (display_edits, wrap_edits) = self.display.sync(self.buffer.snapshot(), &summary);
         if let Some(composition) = &mut self.composition {
             for (start, end) in &mut composition.ranges {
                 *start = start.transform(&summary);
@@ -387,6 +584,8 @@ impl Editor {
             summary: &summary,
             display: &self.display.snapshot,
             display_edits: &display_edits,
+            wrap: self.display.wrap_snapshot(),
+            wrap_edits: &wrap_edits,
             selections: &self.selections,
         });
         emit(&mut self.observers, &event);
@@ -752,50 +951,46 @@ impl Editor {
     /// tails stay (shift-motion); without, a non-empty selection collapses:
     /// left and up from its start, right and down from its end (a plain
     /// left or right only collapses it).
+    ///
+    /// While soft wrap is on, vertical motions move by wrap rows, with the
+    /// goal column counted in characters of the wrap row (its indent
+    /// included). [`Motion::LineStart`] and [`Motion::SmartLineStart`] on a
+    /// continuation row go to the start of that row's text, and
+    /// [`Motion::LineEnd`] on a row that continues goes before its last
+    /// character (the end of a soft-wrapped row is the same text position
+    /// as the start of the next one); pressed again there, they do what
+    /// they do without soft wrap, on the buffer line.
     pub fn move_selections(&mut self, motion: Motion, extend: bool) {
         self.end_composition();
-        let display = &self.display.snapshot;
+        let rows = self.display.rows();
         self.selections.update(self.buffer.text(), |selection| {
-            move_selection(display, selection, motion, extend)
+            move_selection(rows, selection, motion, extend)
         });
         self.user_selection_change();
     }
 
     /// Column (box) selection, as with Alt-drag: one selection per display
-    /// row from `tail`'s row to `head`'s, each from `tail`'s display column
-    /// to `head`'s (clamped to the row). Rows that end before the left
-    /// column get none. The selection on `head`'s row is primary.
+    /// row (wrap row while soft wrap is on) from `tail`'s row to `head`'s,
+    /// each from `tail`'s display column to `head`'s (clamped to the row).
+    /// Rows that end before the left column get none. The selection on
+    /// `head`'s row is primary.
     pub fn select_columns(&mut self, tail: usize, head: usize) {
-        let display = &self.display.snapshot;
-        let text = self.buffer.text();
-        let tail_point = offset_to_display(display, tail);
-        let head_point = offset_to_display(display, head);
-        let tail_column = display_column(display, tail_point);
-        let head_column = display_column(display, head_point);
+        let display = self.display.rows();
+        let (tail_row, tail_column) = display.row_and_column(tail);
+        let (head_row, head_column) = display.row_and_column(head);
         let left = tail_column.min(head_column);
-        let rows: Vec<u32> = if tail_point.row() <= head_point.row() {
-            (tail_point.row()..=head_point.row()).collect()
+        let rows: Vec<u32> = if tail_row <= head_row {
+            (tail_row..=head_row).collect()
         } else {
-            (head_point.row()..=tail_point.row()).rev().collect()
+            (head_row..=tail_row).rev().collect()
         };
         let specs: Vec<SelectionSpec> = rows
             .into_iter()
-            .filter(|&row| {
-                let end = TabPoint::new(row, display.line_len(row));
-                left <= display_column(display, end)
-            })
-            .map(|row| {
-                let at = |column| {
-                    snap_to_grapheme(
-                        text,
-                        display_to_offset(display, point_at_column(display, row, column)),
-                    )
-                };
-                SelectionSpec {
-                    tail: at(tail_column),
-                    head: at(head_column),
-                    goal: SelectionGoal::Column(head_column),
-                }
+            .filter(|&row| left <= display.row_end_column(row))
+            .map(|row| SelectionSpec {
+                tail: display.offset_at(row, tail_column, false),
+                head: display.offset_at(row, head_column, false),
+                goal: SelectionGoal::Column(head_column),
             })
             .collect();
         if specs.is_empty() {
@@ -819,14 +1014,14 @@ impl Editor {
     }
 
     fn add_cursor_vertically(&mut self, motion: Motion) -> bool {
-        let display = &self.display.snapshot;
+        let display = self.display.rows();
         let from = match motion {
             Motion::Up => self.selections.first(),
             _ => self.selections.last(),
         };
-        let row = offset_to_display(display, from.head()).row();
-        let (to, goal) = move_caret(display, from.head(), from.goal(), motion);
-        if offset_to_display(display, to).row() == row {
+        let row = display.row_of(from.head());
+        let (to, goal) = display.move_caret(from.head(), from.goal(), motion);
+        if display.row_of(to) == row {
             return false;
         }
         self.add_selection(SelectionSpec {
@@ -1106,7 +1301,7 @@ impl Editor {
 
 /// Where a selection goes under a motion (see [`Editor::move_selections`]).
 fn move_selection(
-    display: &TabSnapshot,
+    display: DisplayRows<'_>,
     selection: &Selection,
     motion: Motion,
     extend: bool,
@@ -1132,13 +1327,257 @@ fn move_selection(
     } else {
         SelectionGoal::None
     };
-    let (to, goal) = move_caret(display, from, goal, motion);
+    let (to, goal) = display.move_caret(from, goal, motion);
     let tail = if extend { selection.tail() } else { to };
     SelectionSpec {
         tail,
         head: to,
         goal,
     }
+}
+
+/// The rows vertical motion and column selection run on: wrap rows while
+/// soft wrap is on, tab rows otherwise. Columns are counted in characters
+/// of the display row.
+#[derive(Clone, Copy, Debug)]
+enum DisplayRows<'a> {
+    Tab(&'a TabSnapshot),
+    Wrap(&'a WrapSnapshot),
+}
+
+impl<'a> DisplayRows<'a> {
+    fn text(self) -> &'a TextSnapshot {
+        match self {
+            Self::Tab(tabs) => tabs.buffer(),
+            Self::Wrap(wrap) => wrap.buffer(),
+        }
+    }
+
+    /// The display row of a caret offset.
+    fn row_of(self, offset: usize) -> u32 {
+        match self {
+            Self::Tab(tabs) => offset_to_display(tabs, offset).row(),
+            Self::Wrap(wrap) => offset_to_wrap_point(wrap, offset).row().0,
+        }
+    }
+
+    /// The display row of a caret offset and its column.
+    fn row_and_column(self, offset: usize) -> (u32, u32) {
+        match self {
+            Self::Tab(tabs) => {
+                let point = offset_to_display(tabs, offset);
+                (point.row(), display_column(tabs, point))
+            }
+            Self::Wrap(wrap) => {
+                let point = offset_to_wrap_point(wrap, offset);
+                (point.row().0, wrap_column(wrap, point))
+            }
+        }
+    }
+
+    /// The columns of display row `row`.
+    fn row_end_column(self, row: u32) -> u32 {
+        match self {
+            Self::Tab(tabs) => display_column(tabs, TabPoint::new(row, tabs.line_len(row))),
+            Self::Wrap(wrap) => {
+                let row = WrapRow(row);
+                wrap_column(wrap, WrapPoint::new(row, wrap.line_len(row)))
+            }
+        }
+    }
+
+    /// The caret offset at `column` of display row `row`, or at the end of
+    /// the row if it is shorter. A wrap row with no caret position (all
+    /// inside an expanded tab) gives the nearest one before it with
+    /// `earlier`, after it otherwise.
+    fn offset_at(self, row: u32, column: u32, earlier: bool) -> usize {
+        match self {
+            Self::Tab(tabs) => snap_to_grapheme(
+                tabs.buffer(),
+                display_to_offset(tabs, point_at_column(tabs, row, column)),
+            ),
+            Self::Wrap(wrap) => wrap_offset_at(wrap, WrapRow(row), column, earlier),
+        }
+    }
+
+    fn move_caret(
+        self,
+        offset: usize,
+        goal: SelectionGoal,
+        motion: Motion,
+    ) -> (usize, SelectionGoal) {
+        let wrap = match self {
+            Self::Tab(tabs) => return move_caret(tabs, offset, goal, motion),
+            Self::Wrap(wrap) => wrap,
+        };
+        let text = wrap.buffer();
+        let offset = clip_caret(text, offset, Bias::Left);
+        let target = match motion {
+            Motion::Up => return self.move_rows(offset, goal, -1),
+            Motion::Down => return self.move_rows(offset, goal, 1),
+            Motion::UpRows(rows) => return self.move_rows(offset, goal, -i64::from(rows)),
+            Motion::DownRows(rows) => return self.move_rows(offset, goal, i64::from(rows)),
+            Motion::LineStart => wrap_line_start(wrap, offset, false),
+            Motion::SmartLineStart => wrap_line_start(wrap, offset, true),
+            Motion::LineEnd => wrap_line_end(wrap, offset),
+            _ => return move_caret(wrap.tab_snapshot(), offset, goal, motion),
+        };
+        (clip_caret(text, target, Bias::Left), SelectionGoal::None)
+    }
+
+    /// Moves `rows` display rows (negative: up), as
+    /// [`movement::move_caret`](crate::movement::move_caret) does on tab
+    /// rows: past the first row the caret goes to the start of the text,
+    /// past the last to its end; the goal is kept either way.
+    fn move_rows(self, offset: usize, goal: SelectionGoal, rows: i64) -> (usize, SelectionGoal) {
+        let (row, column) = self.row_and_column(offset);
+        let column = match goal {
+            SelectionGoal::Column(column) => column,
+            SelectionGoal::None => column,
+        };
+        let goal = SelectionGoal::Column(column);
+        let max_row = match self {
+            Self::Tab(tabs) => tabs.max_point().row(),
+            Self::Wrap(wrap) => wrap.max_point().row().0,
+        };
+        let target = i64::from(row) + rows;
+        if target < 0 {
+            return (0, goal);
+        }
+        if target > i64::from(max_row) {
+            return (self.text().len(), goal);
+        }
+        let row = u32::try_from(target).unwrap_or(0);
+        (self.offset_at(row, column, rows < 0), goal)
+    }
+}
+
+/// The wrap point of a caret offset (clipped first). The offset of a soft
+/// wrap is shown at the start of the continuation row.
+fn offset_to_wrap_point(wrap: &WrapSnapshot, offset: usize) -> WrapPoint {
+    let text = wrap.buffer();
+    let offset = clip_caret(text, offset, Bias::Left);
+    let point = text
+        .offset_to_point(offset)
+        .unwrap_or_else(|_| text.max_point());
+    wrap.buffer_point_to_wrap_point(point, Bias::Left)
+}
+
+/// The caret offset of a wrap point; inside an expanded tab it goes to the
+/// tab ([`Bias::Left`]) or after it ([`Bias::Right`]).
+fn wrap_point_to_offset(wrap: &WrapSnapshot, point: WrapPoint, bias: Bias) -> usize {
+    let text = wrap.buffer();
+    let point = wrap.wrap_point_to_buffer_point(point, bias);
+    let offset = text.point_to_offset(point).unwrap_or_else(|_| {
+        text.point_to_offset(text.clip_point(point, Bias::Left))
+            .unwrap_or(0)
+    });
+    clip_caret(text, offset, bias)
+}
+
+/// The column of `point` in characters of its wrap row, the indent
+/// included.
+fn wrap_column(wrap: &WrapSnapshot, point: WrapPoint) -> u32 {
+    let row = point.row();
+    let mut bytes = 0;
+    let mut chars = 0u32;
+    for chunk in wrap.chunks(row..row + WrapRow(1)) {
+        for c in chunk.text.chars() {
+            if bytes >= point.column() || c == '\n' {
+                return chars;
+            }
+            bytes += c.len_utf8() as u32;
+            chars += 1;
+        }
+    }
+    chars
+}
+
+/// The caret position at character `column` of wrap row `row`: not inside
+/// the continuation indent, and not at the end of a row that continues
+/// (that position belongs to the next row).
+fn wrap_point_at_column(wrap: &WrapSnapshot, row: WrapRow, column: u32) -> WrapPoint {
+    let mut bytes = 0;
+    let mut chars = 0u32;
+    'row: for chunk in wrap.chunks(row..row + WrapRow(1)) {
+        for c in chunk.text.chars() {
+            if c == '\n' || chars == column {
+                break 'row;
+            }
+            bytes += c.len_utf8() as u32;
+            chars += 1;
+        }
+    }
+    let indent = match row.0.checked_sub(1) {
+        Some(previous) => wrap.soft_wrap_indent(WrapRow(previous)).unwrap_or(0),
+        None => 0,
+    };
+    let point = WrapPoint::new(row, bytes.max(indent));
+    if wrap.soft_wrap_indent(row).is_some() && point.column() >= wrap.line_len(row) {
+        wrap.clip_point(point, Bias::Left)
+    } else {
+        point
+    }
+}
+
+/// The caret offset at character `column` of wrap row `row`, on that row.
+///
+/// A tab expanded across a soft wrap has its caret positions on the rows
+/// where it starts and ends, so a column inside it on another row goes
+/// after it, or before it if that is on the row. A row all inside a tab
+/// has no caret position: then the position before the tab (`earlier`) or
+/// after it, so that moving up or down never stops on the row it started
+/// from.
+fn wrap_offset_at(wrap: &WrapSnapshot, row: WrapRow, column: u32, earlier: bool) -> usize {
+    let text = wrap.buffer();
+    let point = wrap_point_at_column(wrap, row, column);
+    let before = snap_to_grapheme(text, wrap_point_to_offset(wrap, point, Bias::Left));
+    if offset_to_wrap_point(wrap, before).row() == row {
+        return before;
+    }
+    let after = snap_to_grapheme(text, wrap_point_to_offset(wrap, point, Bias::Right));
+    if earlier && offset_to_wrap_point(wrap, after).row() != row {
+        before
+    } else {
+        after
+    }
+}
+
+/// Home on wrap rows: the start of a continuation row's text, then (pressed
+/// there, or on the first row of a line) the line start, or the smart line
+/// start with `smart`.
+fn wrap_line_start(wrap: &WrapSnapshot, offset: usize, smart: bool) -> usize {
+    let text = wrap.buffer();
+    let row = offset_to_wrap_point(wrap, offset).row();
+    let continuation = row
+        .0
+        .checked_sub(1)
+        .is_some_and(|previous| wrap.soft_wrap_indent(WrapRow(previous)).is_some());
+    if continuation {
+        let row_start = wrap_point_to_offset(wrap, WrapPoint::new(row, 0), Bias::Right);
+        if offset > row_start && offset_to_wrap_point(wrap, row_start).row() == row {
+            return row_start;
+        }
+    }
+    if smart {
+        smart_line_start(text, offset)
+    } else {
+        line_start(text, offset)
+    }
+}
+
+/// End on wrap rows: before the last character of a row that continues,
+/// then (pressed there, or on the last row of a line) the line end.
+fn wrap_line_end(wrap: &WrapSnapshot, offset: usize) -> usize {
+    let text = wrap.buffer();
+    let row = offset_to_wrap_point(wrap, offset).row();
+    if wrap.soft_wrap_indent(row).is_some() {
+        let row_end = wrap_offset_at(wrap, row, u32::MAX, true);
+        if offset < row_end {
+            return row_end;
+        }
+    }
+    line_end(text, offset)
 }
 
 /// The byte offset in `text` of a UTF-16 offset, clamped to the text and

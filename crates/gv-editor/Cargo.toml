@@ -12,6 +12,10 @@ publish = false
 # The Markdown commands read the block and inline structure at the carets.
 gv-syntax.workspace = true
 gv-text.workspace = true
+# The wrap layer's transform tree (the crate GPUI uses; GUI-free).
+sum_tree.workspace = true
+# UAX #14 break opportunities for soft wrap.
+unicode-linebreak.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
@@ -23,6 +27,10 @@ zed-test-util = { workspace = true, features = ["test-support"] }
 
 [[bench]]
 name = "typing"
+harness = false
+
+[[bench]]
+name = "wrap"
 harness = false
 
 [lints]
