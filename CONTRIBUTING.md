@@ -76,6 +76,7 @@ packaging/  desktop and platform files for the release artifacts
 | `gv-vault` | Vault roots, path and content index, file watcher, link resolver, journaled refactors |
 | `gv-search` | Query language, parallel scan, quick-switcher matching |
 | `gv-render-tree` | Render tree from CST and model, flattened virtual items, plain-text projection |
+| `gv-inline` | Pure inline layout: line breaking, line boxes, hit testing, carets and selection behind a `Measure` trait |
 | `gv-html` | Raw HTML regions, sanitizer, HTML to render nodes, HTML to Markdown for paste |
 | `gv-highlight` | Code highlighting with caches and the Linguist alias map |
 | `gv-math` | LaTeX to display list or SVG, with caches and the macro pass |
