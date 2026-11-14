@@ -724,9 +724,6 @@ impl Worker {
             },
             Ok(ExternalChange::Unchanged) | Err(_) => return,
             Ok(ExternalChange::Deleted) if doc.deleted || !report_deleted => return,
-            // The write-access check runs after the read; a file moved
-            // away in between looks read-only. The move is reported next.
-            Ok(ExternalChange::Touched(_)) if fs::metadata(&doc.path).is_err() => return,
             Ok(change) => change,
         };
         match &change {

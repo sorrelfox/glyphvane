@@ -73,7 +73,20 @@ impl DiskState {
 
     /// Reads the file at `path` (following symlinks) and returns its bytes
     /// and state.
+    ///
+    /// Fails with [`io::ErrorKind::NotFound`] when the file vanishes at any
+    /// step, including between the read and the write-access check, so a
+    /// file moved away is never reported as read-only.
     pub fn read(path: &Path) -> io::Result<(Vec<u8>, Self)> {
+        Self::read_with(path, write_access)
+    }
+
+    /// [`DiskState::read`] with the write-access check supplied, so tests can
+    /// change the file between the steps.
+    fn read_with(
+        path: &Path,
+        access: impl FnOnce(&Path, &fs::Metadata) -> io::Result<bool>,
+    ) -> io::Result<(Vec<u8>, Self)> {
         let mut file = fs::File::open(path)?;
         let meta = file.metadata()?;
         let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
@@ -83,7 +96,7 @@ impl DiskState {
         // file was replaced meanwhile; only the length can be trusted from
         // the read itself.
         state.len = bytes.len() as u64;
-        state.read_only = !is_writable(path, &meta);
+        state.read_only = !access(path, &meta)?;
         Ok((bytes, state))
     }
 
@@ -102,15 +115,26 @@ impl DiskState {
 /// group, ACL and read-only mounts count), the read-only attribute
 /// elsewhere.
 pub(crate) fn is_writable(path: &Path, meta: &fs::Metadata) -> bool {
+    write_access(path, meta).unwrap_or(false)
+}
+
+/// Like [`is_writable`], but a file that no longer exists is an
+/// [`io::ErrorKind::NotFound`] error rather than "not writable". Any other
+/// failure of the check counts as not writable.
+fn write_access(path: &Path, meta: &fs::Metadata) -> io::Result<bool> {
     #[cfg(unix)]
     {
         let _ = meta;
-        rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
+        match rustix::fs::access(path, rustix::fs::Access::WRITE_OK) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::NOENT) => Err(io::ErrorKind::NotFound.into()),
+            Err(_) => Ok(false),
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        !meta.permissions().readonly()
+        Ok(!meta.permissions().readonly())
     }
 }
 
@@ -168,8 +192,15 @@ pub fn check_external_change(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ExternalChange::Deleted),
         Err(e) => return Err(e),
     };
-    if mode == CheckMode::Quick && baseline.stat_matches(&meta, is_writable(path, &meta)) {
-        return Ok(ExternalChange::Unchanged);
+    if mode == CheckMode::Quick {
+        let writable = match write_access(path, &meta) {
+            Ok(writable) => writable,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ExternalChange::Deleted),
+            Err(e) => return Err(e),
+        };
+        if baseline.stat_matches(&meta, writable) {
+            return Ok(ExternalChange::Unchanged);
+        }
     }
     let (bytes, state) = match DiskState::read(path) {
         Ok(read) => read,
@@ -232,5 +263,26 @@ mod tests {
             check_external_change(&path, &baseline, CheckMode::Quick).expect("check"),
             ExternalChange::Deleted
         );
+    }
+
+    // Only Unix asks the file system for write access by path.
+    #[cfg(unix)]
+    #[test]
+    fn file_vanishing_before_access_check_is_not_found() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("note.md");
+        let moved = dir.path().join("moved.md");
+        fs::write(&path, "one\n").expect("write");
+        let err = DiskState::read_with(&path, |p, meta| {
+            fs::rename(p, &moved).expect("move away");
+            write_access(p, meta)
+        })
+        .expect_err("a vanished file must not read as read-only");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        // The file still at its path keeps its real write access.
+        let (bytes, state) = DiskState::read(&moved).expect("read");
+        assert_eq!(bytes, b"one\n");
+        assert!(!state.read_only);
     }
 }
