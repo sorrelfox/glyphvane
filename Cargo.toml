@@ -123,6 +123,10 @@ regex = "1.13.1"
 # Inline layout (gv-inline): UAX #14 line breaking. Grapheme clusters come
 # from `unicode-segmentation` above.
 unicode-linebreak = "0.1.5"
+# Editor (gv-editor): the test-only stand-in for Zed's `util` crate
+# (`RandomCharIter`), used by the tests ported with the tab map
+# (third_party/zed/PROVENANCE.md). Its library is named `util`.
+zed-test-util = { path = "third_party/zed/test-shims/util" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -9,6 +9,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gv-text.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+# `RandomCharIter` for the ported Zed tests (third_party/zed/PROVENANCE.md).
+zed-test-util = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

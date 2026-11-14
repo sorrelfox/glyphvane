@@ -3031,6 +3031,12 @@ version = "0.0.0"
 [[package]]
 name = "gv-editor"
 version = "0.0.0"
+dependencies = [
+ "gv-text",
+ "proptest",
+ "rand 0.9.5",
+ "zed-test-util",
+]
 
 [[package]]
 name = "gv-export"
