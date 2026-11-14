@@ -18,15 +18,19 @@
 //!   (network paths, script schemes, dangerous OS handlers, LAN hosts).
 //! - [`platform`]: naming rules of Linux, macOS and Windows as data.
 //! - [`expect`]: results in the `glyphvane-expect/1` oracle format.
+//! - [`model`]: the bridge from the document model (`gv-model`): its links
+//!   as [`LinkRef`]s, and [`ModelFragments`], the [`FragmentResolver`] that
+//!   matches headings and block ids in target documents.
 //!
-//! Fragments are only classified here; matching headings and block ids is
-//! the document model's job, through [`FragmentResolver`].
+//! The resolver itself only classifies fragments; matching headings and
+//! block ids is the document model's job, through [`FragmentResolver`].
 
 pub mod expect;
 pub mod fragment;
 pub mod index;
 pub mod keys;
 pub mod link;
+pub mod model;
 pub mod path;
 pub mod platform;
 pub mod probe;
@@ -41,10 +45,11 @@ pub use index::{
     SharedPathIndex, SymlinkTarget, WalkStats,
 };
 pub use link::{LinkKind, LinkRef};
+pub use model::{ModelFragments, fragment_in_model, links_from_model};
 pub use path::VaultPath;
 pub use platform::PlatformRules;
 pub use probe::{FsProbe, NoProbe, PathProbe, ProbeResult};
-pub use profile::{ProfileId, ProfileParams, ResolveSettings};
+pub use profile::{Anchoring, ProfileId, ProfileParams, ResolveSettings};
 pub use resolve::{
     Candidate, Note, Resolution, Stage, Status, TargetKind, TraceStep, resolve, resolve_with_probe,
 };

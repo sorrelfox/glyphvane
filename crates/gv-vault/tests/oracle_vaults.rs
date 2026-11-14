@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Obsidian oracle fixture vaults through the path index and the resolver,
-//! emitted as `glyphvane-expect/1`.
+//! Obsidian oracle fixture vaults through the parser, the document model,
+//! the path index and the resolver, emitted as `glyphvane-expect/1`.
 //!
 //! - `mini_vault_round_trip` always runs: a small vault in a temp dir.
 //! - `oracle_fixture_vaults` runs when `GLYPHVANE_ORACLE_VAULTS` names the
@@ -13,362 +13,266 @@
 //!   emitted files are then also checked with it (`python3 -I`), against a
 //!   synthetic oracle built from them and through its `--skeleton` output.
 //!
-//! The link extractor and the heading matcher here are deliberately small
-//! stand-ins for the parser and the document model; they cover the syntax
-//! the fixtures use, not all of Markdown.
+//! Markdown links, images and autolinks come from the document model
+//! ([`links_from_model`]); heading fragments are matched by
+//! [`ModelFragments`]. The parser has no Obsidian syntax yet, so three
+//! small stand-ins remain here, each covering only what the fixtures use:
+//!
+//! - front matter is cut off before parsing, and its values are parsed as
+//!   Markdown on their own (`frontmatter` links);
+//! - wikilinks, embeds, `%%` comments and bare URLs are found by a text scan
+//!   of the paragraph and heading lines the parser reports, outside code
+//!   spans, raw HTML and Markdown links;
+//! - block ids (`^id`) are found by a line scan.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gv_model::DocModel;
+use gv_syntax::inline::InlineKind;
+use gv_syntax::{Leaf, LeafKind, SyntaxTree, Visitor};
 use gv_vault::expect::{
     EXPECT_SCHEMA, ExpectFile, ExpectKind, ExpectLink, ExpectProbe, is_valid_status,
 };
 use gv_vault::{
     Fragment, FragmentKind, FragmentResolver, FragmentTarget, IndexConfig, LinkKind, LinkRef,
-    PathIndex, ProfileId, ProfileParams, Status, VaultPath, resolve,
+    ModelFragments, PathIndex, ProfileId, ProfileParams, Status, VaultPath, links_from_model,
+    resolve,
 };
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
-// A small link extractor (stand-in for the parser).
+// Parsing.
+// ---------------------------------------------------------------------------
+
+/// A leading YAML front matter block: the range of its content (between
+/// the fences) and of the whole block (closing fence line included).
+fn front_matter(text: &str) -> Option<(Range<usize>, Range<usize>)> {
+    let body = text.strip_prefix("---\n")?;
+    let end = body.find("\n---")? + 4;
+    let close = end + 1 + 3;
+    let after = text[close..].find('\n').map_or(text.len(), |n| close + n);
+    Some((4..end, 0..after))
+}
+
+/// `text` with the bytes in `ranges` (line endings excepted) replaced by
+/// spaces: byte offsets and line numbers stay the same.
+fn blank(text: &str, ranges: &[Range<usize>]) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    for r in ranges {
+        for b in &mut bytes[r.clone()] {
+            if !matches!(*b, b'\n' | b'\r') {
+                *b = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).expect("ASCII replacements of whole ranges")
+}
+
+/// The text the parser sees: front matter blanked.
+// TODO(gv-syntax front matter): parse the front matter block instead, once
+// the parser has one. Until then a leading `---…---` block would read as a
+// thematic break and a setext heading.
+fn parsed_text(text: &str) -> String {
+    match front_matter(text) {
+        Some((_, block)) => blank(text, &[block]),
+        None => text.to_owned(),
+    }
+}
+
+fn parse(text: &str) -> (SyntaxTree, DocModel) {
+    let tree = gv_syntax::parse(text);
+    let model = DocModel::build(&tree, text);
+    (tree, model)
+}
+
+// ---------------------------------------------------------------------------
+// Links: the model's, plus a scan for Obsidian syntax.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Extracted {
     kind: ExpectKind,
-    link_kind: LinkKind,
+    start: usize,
     original: String,
-    raw: String,
+    link: LinkRef,
 }
 
-/// What the parser would hand the resolver for a Markdown destination:
-/// angle brackets removed, backslash escapes of ASCII punctuation resolved.
-fn parser_destination(dest: &str) -> String {
-    let d = dest
-        .strip_prefix('<')
-        .and_then(|d| d.strip_suffix('>'))
-        .unwrap_or(dest);
-    let mut out = String::new();
-    let mut chars = d.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' && chars.peek().is_some_and(char::is_ascii_punctuation) {
-            out.push(chars.next().unwrap_or('\\'));
-        } else {
-            out.push(c);
+/// The content lines of paragraphs and headings, and the ranges inside
+/// them the scan must skip (code spans, raw HTML).
+struct TextLines<'a> {
+    tree: &'a SyntaxTree,
+    text: &'a str,
+    lines: Vec<Range<usize>>,
+    masked: Vec<Range<usize>>,
+}
+
+impl Visitor for TextLines<'_> {
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
+            return;
         }
+        self.lines
+            .extend(leaf.lines.iter().map(|l| l.content.clone()));
+        let inlines = self.tree.inlines(leaf, self.text);
+        self.masked.extend(
+            inlines
+                .tokens()
+                .filter(|(k, _)| matches!(k, InlineKind::CodeText | InlineKind::HtmlText))
+                .map(|(_, r)| r),
+        );
     }
-    out
 }
 
-/// Parses `(dest "title")` at `s`; returns `(dest, end)` with `end` after `)`.
-fn inline_destination(s: &str) -> Option<(String, usize)> {
-    let b = s.as_bytes();
-    if b.first() != Some(&b'(') {
-        return None;
-    }
-    let mut i = 1;
-    while i < b.len() && b[i] == b' ' {
-        i += 1;
-    }
-    let start = i;
-    if b.get(i) == Some(&b'<') {
-        let close = s[i..].find('>')? + i;
-        i = close + 1;
-    } else {
-        let mut depth = 0;
-        while i < b.len() {
-            match b[i] {
-                b'\\' => i += 1,
-                b'(' => depth += 1,
-                b')' if depth == 0 => break,
-                b')' => depth -= 1,
-                b' ' | b'\t' => break,
-                _ => {}
+fn inside(ranges: &[Range<usize>], at: usize) -> bool {
+    ranges.iter().any(|r| r.contains(&at))
+}
+
+/// Obsidian comments (`%%…%%`, possibly over several lines and blocks):
+/// `%%` pairs in document order, outside masked ranges.
+// TODO(gv-syntax profile hooks): Obsidian comments in the parser.
+fn comments(text: &str, lines: &[Range<usize>], masked: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut marks = Vec::new();
+    for line in lines {
+        let mut i = line.start;
+        while let Some(n) = text[i..line.end].find("%%") {
+            let at = i + n;
+            if !inside(masked, at) {
+                marks.push(at);
             }
-            i += 1;
+            i = at + 2;
         }
     }
-    let dest = s[start..i.min(s.len())].to_owned();
-    while i < b.len() && b[i] == b' ' {
-        i += 1;
-    }
-    if b.get(i) == Some(&b'"') {
-        i = s[i + 1..].find('"')? + i + 2;
-        while i < b.len() && b[i] == b' ' {
-            i += 1;
-        }
-    }
-    (b.get(i) == Some(&b')')).then_some((dest, i + 1))
+    marks
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[open, close]| *open..*close + 2)
+        .collect()
 }
 
-/// Byte ranges of `line` hidden from link scanning: code spans, `%%…%%`
-/// and `<!-- … -->` on the line.
-fn masked(line: &str) -> Vec<bool> {
-    let b = line.as_bytes();
-    let mut mask = vec![false; b.len()];
-    let mut i = 0;
-    while i < b.len() {
-        if !line.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        let hide = |from: usize, to: usize, mask: &mut Vec<bool>| {
-            mask[from..to].iter_mut().for_each(|m| *m = true)
-        };
-        if b[i] == b'`' {
-            let run = b[i..].iter().take_while(|&&c| c == b'`').count();
-            let fence = &line[i..i + run];
-            if let Some(close) = line[i + run..].find(fence) {
-                let end = i + run + close + run;
-                hide(i, end, &mut mask);
-                i = end;
-                continue;
-            }
-        } else if line[i..].starts_with("%%") {
-            if let Some(close) = line[i + 2..].find("%%") {
-                let end = i + 2 + close + 2;
-                hide(i, end, &mut mask);
-                i = end;
-                continue;
-            }
-        } else if line[i..].starts_with("<!--")
-            && let Some(close) = line[i..].find("-->")
-        {
-            hide(i, i + close + 3, &mut mask);
-            i += close + 3;
-            continue;
-        }
-        i += 1;
-    }
-    mask
-}
-
+/// Wikilinks, embeds and bare URLs in one content line.
+// TODO(gv-syntax profile hooks): wikilinks, embeds and extended autolinks
+// from the parser and the model.
 fn scan_line(
-    line: &str,
+    text: &str,
+    line: Range<usize>,
+    skip: &[Range<usize>],
     kind: ExpectKind,
-    refs: &HashMap<String, String>,
+    source: &VaultPath,
     out: &mut Vec<Extracted>,
 ) {
-    let mask = masked(line);
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if mask[i] || !line.is_char_boundary(i) {
+    let mut push = |kind, start: usize, end: usize, link_kind, raw: String| {
+        out.push(Extracted {
+            kind,
+            start,
+            original: text[start..end].to_owned(),
+            link: LinkRef::new(link_kind, raw, source.clone(), ProfileId::Obsidian),
+        });
+    };
+    let mut i = line.start;
+    while i < line.end {
+        if inside(skip, i) || !text.is_char_boundary(i) {
             i += 1;
             continue;
         }
-        let rest = &line[i..];
-        let embed = rest.starts_with('!');
-        let at = if embed { i + 1 } else { i };
-        let r = &line[at..];
-        if let Some(after_open) = r.strip_prefix("[[") {
-            if let Some(close) = after_open.find("]]") {
-                let inner = &after_open[..close];
-                let end = at + 2 + close + 2;
-                out.push(Extracted {
-                    kind: if embed { ExpectKind::Embed } else { kind },
-                    link_kind: if embed {
-                        LinkKind::Embed
-                    } else {
-                        LinkKind::Wikilink
-                    },
-                    original: line[i..end].to_owned(),
-                    raw: inner.replace("\\|", "|"),
-                });
-                i = end;
-                continue;
-            }
-        } else if r.starts_with('[') {
-            if let Some(close) = r.find(']') {
-                let after = &r[close + 1..];
-                let text = &r[1..close];
-                if let Some((dest, len)) = inline_destination(after) {
-                    let end = at + close + 1 + len;
-                    out.push(Extracted {
-                        kind: if embed { ExpectKind::Embed } else { kind },
-                        link_kind: if embed {
-                            LinkKind::Image
-                        } else {
-                            LinkKind::Inline
-                        },
-                        original: line[i..end].to_owned(),
-                        raw: parser_destination(&dest),
-                    });
-                    i = end;
-                    continue;
-                }
-                let (label, len) = match after
-                    .strip_prefix('[')
-                    .and_then(|a| a.find(']').map(|c| (&a[..c], c + 2)))
-                {
-                    Some(("", len)) => (text, len),
-                    Some((l, len)) => (l, len),
-                    None => (text, 0),
-                };
-                if let Some(dest) = refs.get(&label.to_lowercase()) {
-                    let end = at + close + 1 + len;
-                    out.push(Extracted {
-                        kind: if embed { ExpectKind::Embed } else { kind },
-                        link_kind: if embed {
-                            LinkKind::Image
-                        } else {
-                            LinkKind::Reference
-                        },
-                        original: line[i..end].to_owned(),
-                        raw: parser_destination(dest),
-                    });
-                    i = end;
-                    continue;
-                }
-            }
-        } else if !embed && rest.starts_with('<') {
-            if let Some(close) = rest.find('>') {
-                let inner = &rest[1..close];
-                if gv_vault::url::has_scheme(inner) && !inner.contains(' ') {
-                    out.push(Extracted {
-                        kind,
-                        link_kind: LinkKind::Autolink,
-                        original: rest[..=close].to_owned(),
-                        raw: inner.to_owned(),
-                    });
-                    i += close + 1;
-                    continue;
-                }
-            }
-        } else if !embed && (rest.starts_with("https://") || rest.starts_with("http://")) {
-            let end = rest.find([' ', ')', '>']).unwrap_or(rest.len());
-            out.push(Extracted {
-                kind,
-                link_kind: LinkKind::Autolink,
-                original: rest[..end].to_owned(),
-                raw: rest[..end].to_owned(),
-            });
-            i += end;
+        let rest = &text[i..line.end];
+        let embed = rest.starts_with("![[");
+        let r = if embed { &rest[1..] } else { rest };
+        if let Some(after_open) = r.strip_prefix("[[")
+            && let Some(close) = after_open.find("]]")
+        {
+            let end = i + usize::from(embed) + 2 + close + 2;
+            let (k, lk) = if embed {
+                (ExpectKind::Embed, LinkKind::Embed)
+            } else {
+                (kind, LinkKind::Wikilink)
+            };
+            push(k, i, end, lk, after_open[..close].replace("\\|", "|"));
+            i = end;
+            continue;
+        }
+        if rest.starts_with("https://") || rest.starts_with("http://") {
+            let end = i + rest.find([' ', ')', '>']).unwrap_or(rest.len());
+            push(kind, i, end, LinkKind::Autolink, text[i..end].to_owned());
+            i = end;
             continue;
         }
         i += 1;
     }
 }
 
-fn extract(text: &str) -> Vec<Extracted> {
+/// Every link of a parsed `text`, in document order.
+fn extract_parsed(text: &str, kind: ExpectKind, source: &VaultPath) -> Vec<Extracted> {
+    let (tree, model) = parse(text);
+    let mut v = TextLines {
+        tree: &tree,
+        text,
+        lines: Vec::new(),
+        masked: Vec::new(),
+    };
+    gv_syntax::walk(&tree, &mut v);
+    let hidden = comments(text, &v.lines, &v.masked);
     let mut out = Vec::new();
-    let mut body = text;
-    if let Some(fm) = text.strip_prefix("---\n")
-        && let Some(end) = fm.find("\n---")
-    {
-        for line in fm[..end].lines() {
-            scan_line(line, ExpectKind::Frontmatter, &HashMap::new(), &mut out);
+    let refs = links_from_model(&model, source, ProfileId::Obsidian);
+    for (l, link) in model.links().iter().zip(refs) {
+        if inside(&hidden, l.range.start) {
+            continue;
         }
-        body = &fm[end + 4..];
+        out.push(Extracted {
+            kind: if l.image { ExpectKind::Embed } else { kind },
+            start: l.range.start,
+            original: text[l.range.clone()].to_owned(),
+            link,
+        });
     }
-    let mut refs = HashMap::new();
-    for line in body.lines() {
-        let t = line.trim_start();
-        if let Some(r) = t.strip_prefix('[')
-            && let Some((label, dest)) = r.split_once("]:")
-        {
-            refs.insert(label.to_lowercase(), dest.trim().to_owned());
-        }
+    let mut skip = v.masked;
+    skip.extend(hidden);
+    skip.extend(model.links().iter().map(|l| l.range.clone()));
+    for line in v.lines {
+        scan_line(text, line, &skip, kind, source, &mut out);
     }
-    let mut fence: Option<String> = None;
-    let mut in_comment = false;
-    let mut in_html_comment = false;
-    let mut prev_blank = true;
-    let mut prev_indented_code = false;
-    for line in body.lines() {
-        let t = line.trim_start();
-        if let Some(f) = &fence {
-            if t.starts_with(f.as_str()) {
-                fence = None;
-            }
-            continue;
-        }
-        if t.starts_with("```") || t.starts_with("~~~") {
-            fence = Some(t[..3].to_owned());
-            continue;
-        }
-        if t == "%%" {
-            in_comment = !in_comment;
-            continue;
-        }
-        if in_comment {
-            continue;
-        }
-        if in_html_comment {
-            in_html_comment = !line.contains("-->");
-            continue;
-        }
-        if t.starts_with("<!--") && !t.contains("-->") {
-            in_html_comment = true;
-            continue;
-        }
-        let indented = line.starts_with("    ") || line.starts_with('\t');
-        if indented && (prev_blank || prev_indented_code) {
-            prev_indented_code = true;
-            prev_blank = false;
-            continue;
-        }
-        prev_indented_code = false;
-        prev_blank = t.is_empty();
-        if t.starts_with('[') && t.contains("]:") && !t.starts_with("[[") {
-            continue; // a reference definition
-        }
-        scan_line(line, ExpectKind::Link, &refs, &mut out);
-    }
+    out.sort_by_key(|x| x.start);
+    out
+}
+
+/// Every link of a note: front matter values first, then the body.
+// TODO(gv-model properties): front matter links from the model.
+fn extract(text: &str, source: &VaultPath) -> Vec<Extracted> {
+    let Some((content, block)) = front_matter(text) else {
+        return extract_parsed(text, ExpectKind::Link, source);
+    };
+    let values = blank(text, &[0..content.start, content.end..text.len()]);
+    let mut out = extract_parsed(&values, ExpectKind::Frontmatter, source);
+    out.extend(extract_parsed(
+        &blank(text, &[block]),
+        ExpectKind::Link,
+        source,
+    ));
     out
 }
 
 // ---------------------------------------------------------------------------
-// An approximate Obsidian heading matcher (stand-in for the document model).
-// ORACLE-PENDING: Obsidian's `stripHeading` rules and block-id case.
+// Fragments: the model's, plus a block-id scan.
 // ---------------------------------------------------------------------------
 
-struct Heading {
-    level: usize,
-    text: String,
-    line: u32,
-}
-
-struct DocInfo {
-    headings: Vec<Heading>,
-    blocks: Vec<(String, u32)>,
-}
-
-fn doc_info(text: &str) -> DocInfo {
-    let mut headings = Vec::new();
-    let mut blocks = Vec::new();
+/// Block ids (`^id` at the end of a line, after a space or alone) with
+/// their 0-based lines, outside fenced code.
+// TODO(gv-model block ids): the Obsidian profile's `DocModel::block_anchors`.
+fn block_ids(text: &str) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
     let mut fence = false;
-    let mut in_fm = text.starts_with("---\n");
     for (n, line) in text.lines().enumerate() {
-        let n = u32::try_from(n).unwrap_or(u32::MAX);
-        if in_fm {
-            if n > 0 && line == "---" {
-                in_fm = false;
-            }
-            continue;
-        }
-        let t = line.trim_start();
-        if t.starts_with("```") {
+        if line.trim_start().starts_with("```") {
             fence = !fence;
             continue;
         }
         if fence {
             continue;
-        }
-        let hashes = t.bytes().take_while(|&c| c == b'#').count();
-        if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
-            let text = t[hashes..]
-                .trim()
-                .trim_end_matches('#')
-                .trim_end()
-                .to_owned();
-            headings.push(Heading {
-                level: hashes,
-                text,
-                line: n,
-            });
         }
         if let Some(pos) = line.rfind('^') {
             let id = &line[pos + 1..];
@@ -377,104 +281,76 @@ fn doc_info(text: &str) -> DocInfo {
                 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
                 && (before.is_empty() || before.ends_with(' '))
             {
-                blocks.push((id.to_owned(), n));
+                out.push((id.to_owned(), u32::try_from(n).unwrap_or(u32::MAX)));
             }
         }
     }
-    DocInfo { headings, blocks }
+    out
 }
 
-fn strip_heading(s: &str) -> String {
-    let kept: String = s
-        .chars()
-        .map(|c| if "#|^:%[]*`".contains(c) { ' ' } else { c })
-        .collect();
-    kept.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-struct ObsidianHeadings {
+/// Notes of a vault, parsed once each.
+struct Notes {
     root: PathBuf,
+    cache: RefCell<HashMap<VaultPath, Option<(String, DocModel)>>>,
 }
 
-impl FragmentResolver for ObsidianHeadings {
+impl Notes {
+    fn get(&self, path: &VaultPath) -> Option<(String, DocModel)> {
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            return None;
+        }
+        self.cache
+            .borrow_mut()
+            .entry(path.clone())
+            .or_insert_with(|| {
+                let text = parsed_text(&fs::read_to_string(path.to_fs_path(&self.root)).ok()?);
+                let (_, model) = parse(&text);
+                Some((text, model))
+            })
+            .clone()
+    }
+}
+
+/// [`ModelFragments`] over the vault's notes, with block ids from
+/// [`block_ids`] while the model has none.
+struct VaultFragments<'a, F> {
+    notes: &'a Notes,
+    model: ModelFragments<F>,
+}
+
+impl<F: Fn(&VaultPath) -> Option<DocModel>> FragmentResolver for VaultFragments<'_, F> {
     fn resolve_fragment(
         &self,
         target: &VaultPath,
         fragment: &Fragment,
-        _: &ProfileParams,
+        params: &ProfileParams,
     ) -> FragmentTarget {
-        match &fragment.kind {
-            FragmentKind::Top => return FragmentTarget::Top,
-            FragmentKind::Viewer(_) => return FragmentTarget::Passthrough,
-            FragmentKind::Lines { start, end } => {
-                return FragmentTarget::Lines {
-                    start: *start,
-                    end: end.unwrap_or(*start),
-                };
-            }
-            _ => {}
-        }
-        if target
-            .extension()
-            .is_none_or(|e| !e.eq_ignore_ascii_case("md"))
-        {
-            return FragmentTarget::Passthrough;
-        }
-        let Ok(text) = fs::read_to_string(target.to_fs_path(&self.root)) else {
-            return FragmentTarget::Missing;
+        let FragmentKind::Block(id) = &fragment.kind else {
+            return self.model.resolve_fragment(target, fragment, params);
         };
-        let info = doc_info(&text);
-        match &fragment.kind {
-            FragmentKind::Block(id) => {
-                if let Some((bid, line)) = info.blocks.iter().find(|(b, _)| b == id) {
-                    return FragmentTarget::Block {
-                        id: bid.clone(),
-                        line: *line,
-                        loose: false,
-                    };
-                }
-                if let Some((bid, line)) =
-                    info.blocks.iter().find(|(b, _)| b.eq_ignore_ascii_case(id))
-                {
-                    return FragmentTarget::Block {
-                        id: bid.clone(),
-                        line: *line,
-                        loose: true,
-                    };
-                }
-                FragmentTarget::Missing
-            }
-            FragmentKind::Heading(chain) => {
-                let mut range = 0..info.headings.len();
-                let mut found = None;
-                for part in chain {
-                    let want = strip_heading(part);
-                    let Some(i) = range
-                        .clone()
-                        .find(|&i| strip_heading(&info.headings[i].text) == want)
-                    else {
-                        return FragmentTarget::Missing;
-                    };
-                    let level = info.headings[i].level;
-                    let end = (i + 1..info.headings.len())
-                        .find(|&j| info.headings[j].level <= level)
-                        .unwrap_or(info.headings.len());
-                    range = i + 1..end;
-                    found = Some(i);
-                }
-                match found {
-                    Some(i) => FragmentTarget::Heading {
-                        text: info.headings[i].text.clone(),
-                        line: info.headings[i].line,
-                        loose: false,
-                    },
-                    None => FragmentTarget::Missing,
-                }
-            }
-            _ => FragmentTarget::Unchecked,
+        let Some((text, model)) = self.notes.get(target) else {
+            return FragmentTarget::Unchecked;
+        };
+        if !model.block_anchors().is_empty() {
+            return self.model.resolve_fragment(target, fragment, params);
+        }
+        let ids = block_ids(&text);
+        let lower = id.to_lowercase();
+        let exact = ids.iter().find(|(b, _)| b == id).map(|x| (x, false));
+        match exact.or_else(|| {
+            ids.iter()
+                .find(|(b, _)| b.to_lowercase() == lower)
+                .map(|x| (x, true))
+        }) {
+            Some(((bid, line), loose)) => FragmentTarget::Block {
+                id: bid.clone(),
+                line: *line,
+                loose,
+            },
+            None => FragmentTarget::Missing,
         }
     }
 }
@@ -504,8 +380,13 @@ fn expect_for_vault(vault: &Path, name: &str) -> (ExpectFile, BTreeMap<String, u
     let (idx, _) = PathIndex::build(vault, IndexConfig::obsidian(user_ignore_filters(vault)))
         .expect("test setup");
     let params = ProfileParams::for_profile(ProfileId::Obsidian);
-    let fragments = ObsidianHeadings {
+    let notes = Notes {
         root: vault.to_path_buf(),
+        cache: RefCell::new(HashMap::new()),
+    };
+    let fragments = VaultFragments {
+        notes: &notes,
+        model: ModelFragments::new(|p: &VaultPath| notes.get(p).map(|(_, m)| m)),
     };
     let mut links = Vec::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -517,16 +398,10 @@ fn expect_for_vault(vault: &Path, name: &str) -> (ExpectFile, BTreeMap<String, u
     for src in sources {
         let text = fs::read_to_string(src.path.to_fs_path(vault)).expect("test setup");
         let mut ordinals: HashMap<(String, String), u32> = HashMap::new();
-        for x in extract(&text) {
+        for x in extract(&text, &src.path) {
             let kind_name = format!("{:?}", x.kind);
             let ord = ordinals.entry((kind_name, x.original.clone())).or_insert(0);
-            let link = LinkRef::new(
-                x.link_kind,
-                x.raw.clone(),
-                src.path.clone(),
-                ProfileId::Obsidian,
-            );
-            let r = resolve(&idx, &link, &params);
+            let r = resolve(&idx, &x.link, &params);
             let frag = r.resolve_fragment(&fragments, &params);
             let base = match r.status {
                 Status::Ambiguous(_) => "Ambiguous".to_owned(),
@@ -763,20 +638,38 @@ fn find<'a>(file: &'a ExpectFile, source: &str, original: &str) -> &'a ExpectLin
 
 #[test]
 fn extractor_skips_code_and_comments() {
-    let text = "---\nrel: \"[[A]]\"\n---\n# T\n%% [[B]] %%\n`[[C]]`\n\n    [[D]] indented\n\n```\n[[E]]\n```\n<!-- [[F]] -->\n[[G\\|x]] ![[H|300]] [t](<a b.md>) [r][ref] ![i](p.png)\n\n[ref]: R.md\n";
-    let got: Vec<(ExpectKind, String)> =
-        extract(text).into_iter().map(|x| (x.kind, x.raw)).collect();
-    assert_eq!(
-        got,
-        [
-            (ExpectKind::Frontmatter, "A".to_owned()),
-            (ExpectKind::Link, "G|x".to_owned()),
-            (ExpectKind::Embed, "H|300".to_owned()),
-            (ExpectKind::Link, "a b.md".to_owned()),
-            (ExpectKind::Link, "R.md".to_owned()),
-            (ExpectKind::Embed, "p.png".to_owned()),
-        ]
-    );
+    let text = "---\nrel: \"[[A]]\"\n---\n# T\n%% [[B]] [b](B.md) %%\n`[[C]]`\n\n    [[D]] indented\n\n```\n[[E]]\n```\n<!-- [[F]] -->\n[[G\\|x]] ![[H|300]] [t](<a b.md>) [r][ref] ![i](p.png) <https://x.org> https://y.org <i>[[I]]</i>\n\n[ref]: R.md\n";
+    let source = VaultPath::new("S.md").unwrap();
+    let got: Vec<(ExpectKind, LinkKind, String)> = extract(text, &source)
+        .into_iter()
+        .map(|x| (x.kind, x.link.kind, x.link.raw_destination))
+        .collect();
+    let want = [
+        (ExpectKind::Frontmatter, LinkKind::Wikilink, "A"),
+        (ExpectKind::Link, LinkKind::Wikilink, "G|x"),
+        (ExpectKind::Embed, LinkKind::Embed, "H|300"),
+        (ExpectKind::Link, LinkKind::Inline, "a b.md"),
+        (ExpectKind::Link, LinkKind::Reference, "R.md"),
+        (ExpectKind::Embed, LinkKind::Image, "p.png"),
+        (ExpectKind::Link, LinkKind::Autolink, "https://x.org"),
+        (ExpectKind::Link, LinkKind::Autolink, "https://y.org"),
+        (ExpectKind::Link, LinkKind::Wikilink, "I"),
+    ];
+    assert_eq!(got, want.map(|(k, l, r)| (k, l, r.to_owned())));
+}
+
+#[test]
+fn front_matter_is_blanked_for_the_parser() {
+    let text = "---\ntitle: x\n---\n# Heading\n";
+    let parsed = parsed_text(text);
+    assert_eq!(parsed.len(), text.len());
+    let (_, model) = parse(&parsed);
+    let h = &model.headings()[0];
+    assert_eq!((&*h.source, h.line, h.level), ("Heading", 3, 1));
+    assert_eq!(model.headings().len(), 1);
+    // Without blanking it is a thematic break and a setext heading.
+    let (_, raw) = parse(text);
+    assert_eq!(&*raw.headings()[0].source, "title: x");
 }
 
 #[test]

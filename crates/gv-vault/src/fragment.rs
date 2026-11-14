@@ -7,7 +7,8 @@
 //! The resolver only **classifies** a fragment, following a fixed
 //! cascade: empty, block id, line range, viewer parameters, otherwise
 //! heading text. Matching headings against slugs or heading text needs the
-//! document model, which implements [`FragmentResolver`].
+//! document model: [`ModelFragments`](crate::model::ModelFragments)
+//! implements [`FragmentResolver`] over it.
 
 use crate::keys::nfc_key;
 use crate::link::percent_decode_lossy;
@@ -201,7 +202,7 @@ pub enum FragmentTarget {
 /// resolver stays free of document contents.
 pub trait FragmentResolver {
     /// Resolves `fragment` inside `target` under `params` (whose
-    /// [`slug`](ProfileParams::slug) is the primary algorithm).
+    /// [`anchoring`](ProfileParams::anchoring) is the primary one).
     fn resolve_fragment(
         &self,
         target: &VaultPath,

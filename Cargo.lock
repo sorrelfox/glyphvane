@@ -3141,6 +3141,8 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "caseless",
+ "gv-model",
+ "gv-syntax",
  "ignore",
  "proptest",
  "serde",

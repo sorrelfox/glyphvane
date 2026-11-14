@@ -11,12 +11,14 @@ publish = false
 [dependencies]
 arc-swap.workspace = true
 caseless.workspace = true
+gv-model.workspace = true
 ignore.workspace = true
 serde.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+gv-syntax.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

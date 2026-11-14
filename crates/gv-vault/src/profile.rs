@@ -10,6 +10,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+/// How a profile names headings in fragments (the document model's enum).
+pub use gv_model::Anchoring;
+use gv_model::SlugAlgorithm;
+
 use crate::path::VaultPath;
 use crate::repo::RepoContext;
 use crate::resolve::tiebreak::TieBreak;
@@ -116,18 +120,6 @@ pub enum PageNameMapping {
     SpacesToHyphen,
 }
 
-/// The primary heading-anchor algorithm (matching itself is done by a
-/// [`FragmentResolver`](crate::FragmentResolver)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlugAlgorithm {
-    /// GitHub (github-slugger).
-    GitHub,
-    /// No slugs: heading text, normalized (Obsidian).
-    HeadingText,
-    /// No heading anchors (GFM comments).
-    None,
-}
-
 /// Per-vault settings the resolver needs besides the profile.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveSettings {
@@ -170,8 +162,11 @@ pub struct ProfileParams {
     pub page_names: PageNameMapping,
     /// Wikilink subpaths and Markdown fragments are `#A#B` chains.
     pub fragment_chains: bool,
-    /// Primary slug algorithm.
-    pub slug: SlugAlgorithm,
+    /// How headings are named in fragments: the primary slug algorithm, or
+    /// heading text. Matching itself is done by a
+    /// [`FragmentResolver`](crate::FragmentResolver) (the document model's
+    /// [`ModelFragments`](crate::model::ModelFragments)).
+    pub anchoring: Anchoring,
     /// Vault settings.
     pub settings: ResolveSettings,
 }
@@ -197,16 +192,16 @@ impl ProfileParams {
                 pipe_order: PipeOrder::TargetFirst,
                 page_names: PageNameMapping::Literal,
                 fragment_chains: false,
-                slug: SlugAlgorithm::GitHub,
+                anchoring: Anchoring::Slug(SlugAlgorithm::GitHub),
                 settings: ResolveSettings::default(),
             },
             ProfileId::GfmFile | ProfileId::GfmComment => Self {
                 profile,
                 index_files: vec![IndexFile::Name("README.md"), IndexFile::Stem("README")],
-                slug: if profile == ProfileId::GfmFile {
-                    SlugAlgorithm::GitHub
+                anchoring: if profile == ProfileId::GfmFile {
+                    Anchoring::Slug(SlugAlgorithm::GitHub)
                 } else {
-                    SlugAlgorithm::None
+                    Anchoring::None
                 },
                 settings: ResolveSettings {
                     map_repo_urls: true,
@@ -232,7 +227,7 @@ impl ProfileParams {
                     // ORACLE-PENDING: Markdown-link fragments chain like
                     // wikilink subpaths (`Note.md#A#B`).
                     fragment_chains: true,
-                    slug: SlugAlgorithm::HeadingText,
+                    anchoring: Anchoring::HeadingText,
                     settings: ResolveSettings::default(),
                 }
             }
@@ -250,7 +245,7 @@ impl ProfileParams {
                 pipe_order: PipeOrder::TargetFirst,
                 page_names: PageNameMapping::Literal,
                 fragment_chains: false,
-                slug: SlugAlgorithm::GitHub,
+                anchoring: Anchoring::Slug(SlugAlgorithm::GitHub),
                 settings: ResolveSettings {
                     map_repo_urls: true,
                     ..ResolveSettings::default()
