@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The file tree's model, without GPUI: where a window's vault root is, the
-//! order of a folder's entries, and the visible rows with their selection.
+//! The file tree's model, without GPUI: the order of a folder's entries,
+//! and the visible rows with their selection.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -12,83 +12,6 @@ use std::sync::Arc;
 
 use gpui::SharedString;
 use gv_vault::{EntryKind, FileId, PathIndex, VaultPath};
-
-/// What made a folder the root of a vault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RootMarker {
-    /// `.obsidian/`: an Obsidian vault.
-    Obsidian,
-    /// `.glyphvane/`, or `.glyphvane.toml` with `root = true`.
-    Glyphvane,
-    /// `.git` (a folder, or a file in a worktree): the repository root.
-    Git,
-}
-
-/// The root a file belongs to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DetectedRoot {
-    /// Absolute folder.
-    pub path: PathBuf,
-    /// `None` when no ancestor has a marker: the file's own folder.
-    pub marker: Option<RootMarker>,
-}
-
-/// The vault root of `file`: the nearest ancestor folder holding a root
-/// marker, or the file's own folder.
-///
-/// The markers of other site generators (MkDocs, Docusaurus, Quarto, ...)
-/// come with their profiles.
-pub(crate) fn detect_root(file: &Path) -> DetectedRoot {
-    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
-    let folder = file.parent().unwrap_or(&file).to_path_buf();
-    for dir in folder.ancestors() {
-        if let Some(marker) = marker_in(dir) {
-            return DetectedRoot {
-                path: dir.to_path_buf(),
-                marker: Some(marker),
-            };
-        }
-    }
-    DetectedRoot {
-        path: folder,
-        marker: None,
-    }
-}
-
-fn marker_in(dir: &Path) -> Option<RootMarker> {
-    if dir.join(".obsidian").is_dir() {
-        Some(RootMarker::Obsidian)
-    } else if dir.join(".glyphvane").is_dir() || glyphvane_toml_is_root(dir) {
-        Some(RootMarker::Glyphvane)
-    } else if dir.join(".git").exists() {
-        Some(RootMarker::Git)
-    } else {
-        None
-    }
-}
-
-fn glyphvane_toml_is_root(dir: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(dir.join(".glyphvane.toml")) else {
-        return false;
-    };
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|table| table.get("root").and_then(toml::Value::as_bool))
-        .unwrap_or(false)
-}
-
-/// Why a root is not indexed without asking: the home folder and a
-/// filesystem root are never indexed automatically.
-pub(crate) fn refuses_auto_index(root: &Path) -> Option<&'static str> {
-    if root.parent().is_none() {
-        return Some("filesystem root");
-    }
-    let home = std::env::home_dir().and_then(|h| std::path::absolute(h).ok());
-    if home.as_deref() == Some(root) {
-        return Some("home folder");
-    }
-    None
-}
 
 /// Compares names the way people sort them: case-insensitively, with runs
 /// of digits by their value (`a2` before `a10`). Names equal by that measure
@@ -526,37 +449,5 @@ mod tests {
         m.set_index(next);
         assert_eq!(names(&m), ["a", "  a.md", "  b.md", "c.md"]);
         assert_eq!(m.selected_row(), Some(2));
-    }
-
-    #[test]
-    fn root_detection_picks_the_nearest_marker() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".git")).expect("git");
-        std::fs::create_dir_all(root.join("vault/.obsidian")).expect("obsidian");
-        std::fs::create_dir_all(root.join("vault/notes")).expect("notes");
-        std::fs::create_dir_all(root.join("docs")).expect("docs");
-        std::fs::create_dir_all(root.join("site")).expect("site");
-        std::fs::write(root.join("site/.glyphvane.toml"), "root = true\n").expect("toml");
-
-        let found = detect_root(&root.join("vault/notes/a.md"));
-        assert_eq!(found.path, root.join("vault"));
-        assert_eq!(found.marker, Some(RootMarker::Obsidian));
-        let found = detect_root(&root.join("docs/a.md"));
-        assert_eq!(
-            (found.path, found.marker),
-            (root.to_path_buf(), Some(RootMarker::Git))
-        );
-        let found = detect_root(&root.join("site/a.md"));
-        assert_eq!(found.marker, Some(RootMarker::Glyphvane));
-    }
-
-    #[test]
-    fn the_home_folder_and_filesystem_root_are_not_indexed_without_asking() {
-        assert!(refuses_auto_index(Path::new("/")).is_some());
-        if let Some(home) = std::env::home_dir() {
-            assert!(refuses_auto_index(&home).is_some());
-            assert!(refuses_auto_index(&home.join("notes")).is_none());
-        }
     }
 }

@@ -14,6 +14,8 @@
 //! - [`resolve()`]: a pure function from a snapshot, a [`LinkRef`] and the
 //!   profile's [`ProfileParams`] to a [`Resolution`] with a [`Status`], a
 //!   target, a classified fragment, candidates and a trace.
+//! - [`root`]: vault root detection (the nearest marker folder) and the
+//!   roots never indexed without asking.
 //! - [`url`]: the URL classifier and policy shared with the HTML pipeline
 //!   (network paths, script schemes, dangerous OS handlers, LAN hosts).
 //! - [`platform`]: naming rules of Linux, macOS and Windows as data.
@@ -37,6 +39,7 @@ pub mod probe;
 pub mod profile;
 pub mod repo;
 pub mod resolve;
+pub mod root;
 pub mod url;
 
 pub use fragment::{Fragment, FragmentKind, FragmentResolver, FragmentTarget, StructuralFragments};
@@ -53,3 +56,4 @@ pub use profile::{Anchoring, ProfileId, ProfileParams, ResolveSettings};
 pub use resolve::{
     Candidate, Note, Resolution, Stage, Status, TargetKind, TraceStep, resolve, resolve_with_probe,
 };
+pub use root::{RefusedRoot, RootDetection, RootMarker, RootReason, detect_root, is_refused_root};

@@ -13,9 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Context, SharedString, Task};
+use gv_vault::root::{self, RootDetection, RootReason};
 use gv_vault::{IndexConfig, IndexError, PathIndex, SharedPathIndex};
-
-use super::tree::{DetectedRoot, RootMarker, detect_root, refuses_auto_index};
 
 /// Where the path index is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +35,7 @@ pub(crate) enum VaultStatus {
 pub(crate) struct WindowVault {
     root: PathBuf,
     name: SharedString,
-    marker: Option<RootMarker>,
+    reason: RootReason,
     index: Arc<SharedPathIndex>,
     status: VaultStatus,
     build_time: Option<Duration>,
@@ -47,7 +46,7 @@ impl fmt::Debug for WindowVault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WindowVault")
             .field("root", &self.root)
-            .field("marker", &self.marker)
+            .field("reason", &self.reason)
             .field("status", &self.status)
             .field("build_time", &self.build_time)
             .finish_non_exhaustive()
@@ -58,33 +57,33 @@ impl WindowVault {
     /// The vault of the file at `path`: root detection, then the path index
     /// built on a background thread.
     pub fn for_file(path: &Path, cx: &mut Context<'_, Self>) -> Self {
-        Self::open(detect_root(path), cx)
+        Self::open(root::detect_root(path), cx)
     }
 
-    fn open(root: DetectedRoot, cx: &mut Context<'_, Self>) -> Self {
+    fn open(detected: RootDetection, cx: &mut Context<'_, Self>) -> Self {
         // Per-profile settings (gitignore for repositories, the vault's
         // userIgnoreFilters) come with profile detection.
         let config = IndexConfig::default();
-        let name = root.path.file_name().map_or_else(
-            || root.path.display().to_string(),
+        let name = detected.root.file_name().map_or_else(
+            || detected.root.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        let index = Arc::new(SharedPathIndex::building(&root.path, config.clone()));
+        let index = Arc::new(SharedPathIndex::building(&detected.root, config.clone()));
         let mut this = Self {
-            root: root.path.clone(),
+            root: detected.root.clone(),
             name: name.into(),
-            marker: root.marker,
+            reason: detected.reason,
             index: index.clone(),
             status: VaultStatus::Building,
             build_time: None,
             _build: None,
         };
         // TODO(vault): ask before indexing these ("Index ~/ (≈ N files)?").
-        if let Some(reason) = refuses_auto_index(&root.path) {
+        if let Some(reason) = root::is_refused_root(&detected.root, root::home_dir().as_deref()) {
             this.status = VaultStatus::NotIndexed(format!("Not indexed: {reason}").into());
             return this;
         }
-        let path = root.path;
+        let path = detected.root;
         this._build = Some(cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let result = cx
