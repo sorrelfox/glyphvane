@@ -17,17 +17,26 @@
 //! default) in every case: it decides what `system` shows in light
 //! appearance. Picking a theme with the theme chord writes it to the
 //! settings file and ends the command-line override.
+//!
+//! **Safe mode** (`--safe-mode`, [`AppSettings::with_safe_mode`]) ignores the
+//! theme settings for the built-in default (a `--theme` given on the same
+//! command line still applies), blocks remote content, and writes nothing:
+//! the theme chord changes the theme for that run only.
 
 use std::fmt;
 
 use gpui::{App, Global};
-use gv_settings::{Change, Effective, LayerKind, SettingsFile, SettingsStack, Severity};
+use gv_settings::{Change, Effective, Layer, LayerKind, SettingsFile, SettingsStack, Severity};
 
 use crate::appearance::Appearance;
 use crate::theme::{PreferredLight, ThemeChoice};
 
 /// The settings key of the theme choice.
 const THEME_KEY: &str = "appearance.theme";
+
+/// The values safe mode puts over every settings file, as a layer of their
+/// own.
+const SAFE_MODE_VALUES: &str = "[privacy_and_security]\nremote_content = \"block\"\n";
 
 impl From<gv_settings::ThemeChoice> for ThemeChoice {
     fn from(choice: gv_settings::ThemeChoice) -> Self {
@@ -89,6 +98,7 @@ pub struct AppSettings {
     /// home directory) or could not be read; then settings are not saved.
     global_file: Option<SettingsFile>,
     theme_override: Option<ThemeChoice>,
+    safe_mode: bool,
 }
 
 impl Global for AppSettings {}
@@ -101,6 +111,7 @@ impl fmt::Debug for AppSettings {
                 &self.global_file.as_ref().map(SettingsFile::path),
             )
             .field("theme_override", &self.theme_override)
+            .field("safe_mode", &self.safe_mode)
             .finish_non_exhaustive()
     }
 }
@@ -114,7 +125,25 @@ impl AppSettings {
             stack: SettingsStack::new(layers),
             global_file,
             theme_override,
+            safe_mode: false,
         }
+    }
+
+    /// Safe mode for this run: the theme settings give way to the built-in
+    /// default, remote content is blocked whatever the settings say, and
+    /// nothing is written to the settings file. The blocking values sit in
+    /// the highest layer (per-file state, unused so far), so a reloaded
+    /// settings file cannot lift them.
+    pub fn with_safe_mode(mut self) -> Self {
+        self.safe_mode = true;
+        self.stack
+            .set_layer(Layer::parse(LayerKind::File, None, SAFE_MODE_VALUES));
+        self
+    }
+
+    /// Whether safe mode is on.
+    pub fn safe_mode(&self) -> bool {
+        self.safe_mode
     }
 
     /// The effective settings, with provenance and diagnostics.
@@ -134,6 +163,9 @@ impl AppSettings {
 
     /// The theme choice and preferred light theme in effect.
     pub fn theme_preference(&self) -> (ThemeChoice, PreferredLight) {
+        if self.safe_mode {
+            return theme_preference(self.theme_override, &gv_settings::Settings::default());
+        }
         theme_preference(self.theme_override, self.stack.settings())
     }
 
@@ -171,12 +203,13 @@ impl AppSettings {
     /// The theme chord: switches to the next theme choice and saves it as
     /// `appearance.theme` in the global file (keeping the file's comments and
     /// layout). A command-line override ends, so the saved choice shows.
-    /// When the file cannot be written the choice applies for this session
-    /// only.
+    /// In safe mode, or when the file cannot be written, the choice applies
+    /// for this session only.
     pub fn cycle_theme(cx: &mut App) {
         let next = Appearance::choice(cx).next();
         let this = cx.global_mut::<Self>();
         let saved = match this.global_file.as_mut() {
+            Some(_) if this.safe_mode => false,
             Some(file) => match file.set(THEME_KEY, &gv_settings::ThemeChoice::from(next)) {
                 Ok(()) => {
                     this.stack.set_layer(file.layer().clone());

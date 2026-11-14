@@ -131,3 +131,89 @@ pub fn watch(path: PathBuf, cx: &mut App) {
     })
     .detach();
 }
+
+#[cfg(test)]
+mod tests {
+    use gv_settings::{PreferredLightTheme, RemoteContent};
+    use gv_ui::ThemeChoice;
+    use gv_ui::theme::PreferredLight;
+
+    use super::*;
+
+    const USER_SETTINGS: &str = "\
+[appearance]
+theme = \"dark\"
+preferred_light_theme = \"semi-light\"
+
+[privacy_and_security]
+remote_content = \"allow\"
+";
+
+    fn user_file(dir: &Path) -> SettingsFile {
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, USER_SETTINGS).expect("written");
+        SettingsFile::load(&path, LayerKind::Global).expect("loaded")
+    }
+
+    #[test]
+    fn safe_mode_uses_the_default_theme_and_blocks_remote_content() {
+        let dir = tempfile::tempdir().expect("temporary folder");
+        let normal = AppSettings::new(Some(user_file(dir.path())), None);
+        assert_eq!(
+            normal.theme_preference(),
+            (ThemeChoice::Dark, PreferredLight::SemiLight)
+        );
+        assert_eq!(
+            normal
+                .effective()
+                .settings()
+                .privacy_and_security
+                .remote_content,
+            RemoteContent::Allow
+        );
+
+        let safe = AppSettings::new(Some(user_file(dir.path())), None).with_safe_mode();
+        assert!(safe.safe_mode());
+        let defaults = gv_settings::Settings::default();
+        assert_eq!(
+            safe.theme_preference(),
+            (
+                defaults.appearance.theme.into(),
+                defaults.appearance.preferred_light_theme.into()
+            )
+        );
+        assert_eq!(
+            defaults.appearance.preferred_light_theme,
+            PreferredLightTheme::Light
+        );
+        assert_eq!(
+            safe.effective()
+                .settings()
+                .privacy_and_security
+                .remote_content,
+            RemoteContent::Block
+        );
+        // The other settings still come from the file, which is unchanged.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.toml")).expect("readable"),
+            USER_SETTINGS
+        );
+        assert_eq!(
+            safe.global_file().map(SettingsFile::text),
+            Some(USER_SETTINGS)
+        );
+    }
+
+    #[test]
+    fn a_theme_on_the_command_line_still_applies_in_safe_mode() {
+        let safe = AppSettings::new(None, Some(ThemeChoice::Light)).with_safe_mode();
+        assert_eq!(safe.theme_preference().0, ThemeChoice::Light);
+        assert_eq!(
+            safe.effective()
+                .settings()
+                .privacy_and_security
+                .remote_content,
+            RemoteContent::Block
+        );
+    }
+}

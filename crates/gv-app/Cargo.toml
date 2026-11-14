@@ -34,6 +34,9 @@ rustix = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 interprocess = { workspace = true }
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+rfd = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

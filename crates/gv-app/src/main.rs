@@ -6,11 +6,15 @@
 mod cli;
 mod gpu;
 mod instance;
+mod no_gpu_dialog;
 mod render;
+mod safe_mode;
 mod settings;
 
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::io::IsTerminal as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -24,6 +28,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command, OpenRequest};
 use crate::instance::Claim;
+use crate::no_gpu_dialog::Choice;
+use crate::safe_mode::{Platform, Start};
 
 /// Logs go to standard error, warnings and errors by default. `RUST_LOG`
 /// picks other levels, for example `RUST_LOG=info` to see which GPU adapter
@@ -47,19 +53,47 @@ fn main() -> ExitCode {
         };
     }
     init_logging();
+    let platform = Platform::current();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let marker = std::env::var_os(safe_mode::CHILD_MARKER);
+    let safe_mode = match safe_mode::start(platform, cli.safe_mode, marker.as_deref(), &args) {
+        Start::Normal => false,
+        Start::Safe => true,
+        Start::Relaunch(relaunch) => match safe_mode::run(&relaunch) {
+            Ok(code) => return code,
+            Err(err) => {
+                tracing::warn!(
+                    "safe mode: cannot start again with conservative graphics settings, \
+                     so the renderer is unchanged: {err}"
+                );
+                true
+            }
+        },
+    };
+    if safe_mode {
+        safe_mode::report(platform);
+    }
+
     let cwd = std::env::current_dir().unwrap_or_default();
     let request = OpenRequest::from_cli(&cli, &cwd);
     let locations = settings::locations(cli.config_dir.as_deref());
+    let log_dir = locations
+        .as_ref()
+        .map_or_else(std::env::temp_dir, |locations| {
+            locations.log_dir().to_path_buf()
+        });
 
     // Hand the paths to a running instance before anything else is loaded.
-    // A separate `--config-dir` is a separate instance.
+    // A separate `--config-dir` is a separate instance. Safe mode runs on
+    // its own: a running instance would open the files with its normal
+    // renderer and settings.
     let claim = match &locations {
-        Some(locations) => instance::claim(
+        Some(locations) if !safe_mode => instance::claim(
             instance::endpoint(locations, instance::runtime_dir_from_env()),
             &request,
             instance::TIMEOUT,
         ),
-        None => Claim::Standalone,
+        _ => Claim::Standalone,
     };
     let primary = match claim {
         Claim::Delivered => return ExitCode::SUCCESS,
@@ -67,21 +101,21 @@ fn main() -> ExitCode {
         Claim::Standalone => None,
     };
 
-    if cli.safe_mode {
-        let notice = gpu::safe_mode_notice();
-        tracing::info!("{notice}");
-        eprintln!("{notice}");
-    }
     let settings_file = settings::load(locations.as_ref());
     let watched = settings_file.as_ref().map(|file| file.path().to_path_buf());
-    let app_settings = AppSettings::new(settings_file, cli.theme.map(ThemeChoice::from));
+    let mut app_settings = AppSettings::new(settings_file, cli.theme.map(ThemeChoice::from));
+    if safe_mode {
+        app_settings = app_settings.with_safe_mode();
+    }
     settings::report(&app_settings);
     let failed = Rc::new(Cell::new(false));
+    // Set when the user chooses safe mode in the no-GPU message.
+    let restart_safe = Rc::new(Cell::new(false));
 
     // Requests from later invocations and from the platform reach the UI
     // thread through this channel.
     let (sender, mut requests) = mpsc::unbounded::<OpenRequest>();
-    let _instance = primary.map(|primary| {
+    let instance = primary.map(|primary| {
         let sender = sender.clone();
         primary.serve(Arc::new(move |request| {
             sender
@@ -99,6 +133,7 @@ fn main() -> ExitCode {
     });
     application.run({
         let failed = Rc::clone(&failed);
+        let restart_safe = Rc::clone(&restart_safe);
         move |cx| {
             gv_ui::init(cx, app_settings);
             if let Some(path) = watched {
@@ -109,7 +144,11 @@ fn main() -> ExitCode {
                 Err(err) => {
                     if gpu::is_gpu_error(&err) {
                         tracing::error!("no usable GPU: {err:#}");
-                        eprintln!("{}", gpu::failure_message(&err));
+                        if report_gpu_failure(&err, platform, safe_mode, &log_dir, cx)
+                            == Some(Choice::SafeMode)
+                        {
+                            restart_safe.set(true);
+                        }
                     } else {
                         tracing::error!("cannot open a window: {err:#}");
                         eprintln!("glyphvane: cannot open a window: {err:#}");
@@ -135,11 +174,60 @@ fn main() -> ExitCode {
         }
     });
 
+    if restart_safe.get() {
+        // Give up the single-instance endpoint first: the new process does
+        // not take it, and a later normal start should.
+        drop(instance);
+        if let Some(relaunch) = safe_mode::relaunch(platform, &args) {
+            match safe_mode::run(&relaunch) {
+                Ok(code) => return code,
+                Err(err) => tracing::error!("safe mode: cannot start again: {err}"),
+            }
+        }
+    }
     if failed.get() {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Tells the user that the GPU could not be used: on standard error, in the
+/// failure file in the log folder, and in a native message box, which offers
+/// a restart in safe mode where that can help. Returns the user's choice, or
+/// `None` when no message box could be shown.
+fn report_gpu_failure(
+    err: &anyhow::Error,
+    platform: Platform,
+    safe_mode: bool,
+    log_dir: &std::path::Path,
+    cx: &mut App,
+) -> Option<Choice> {
+    let failure = gpu::Failure::new(err, platform, safe_mode);
+    let saved: Option<PathBuf> = match failure.save(log_dir) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            tracing::warn!("cannot save the debug info in {}: {err}", log_dir.display());
+            None
+        }
+    };
+    eprintln!("{}", failure.terminal_message(saved.as_deref()));
+    let text = failure.dialog_text(saved.as_deref());
+    let debug_info = failure.debug_info();
+    let choice = no_gpu_dialog::show(
+        &no_gpu_dialog::Message {
+            text: &text,
+            debug_info: &debug_info,
+            debug_file: saved.as_deref(),
+            offer_safe_mode: failure.offers_safe_mode(),
+        },
+        cx,
+    );
+    match choice {
+        Some(choice) => tracing::info!("no-GPU message answered: {choice:?}"),
+        None => tracing::info!("no native message box could be shown"),
+    }
+    choice
 }
 
 /// Opens what `request` names, by the rules of [`gv_ui::open`]: files as

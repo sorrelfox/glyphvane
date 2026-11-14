@@ -28,8 +28,10 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub config_dir: Option<PathBuf>,
 
-    /// Start with conservative graphics settings, for a graphics driver that
-    /// draws the window wrongly.
+    /// Start in safe mode: conservative graphics settings (Mesa's software
+    /// renderers on Linux, no DirectComposition on Windows), the default theme
+    /// and no remote content, without changing the settings. Safe mode runs on
+    /// its own: it does not hand its files to a running Glyphvane.
     #[arg(long)]
     pub safe_mode: bool,
 

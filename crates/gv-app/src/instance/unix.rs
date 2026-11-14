@@ -208,6 +208,9 @@ impl Endpoint {
 #[derive(Debug)]
 pub struct Listener {
     listener: UnixListener,
+    /// Checked against the client's credentials where the system reports
+    /// them (Linux).
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
     uid: u32,
 }
 
