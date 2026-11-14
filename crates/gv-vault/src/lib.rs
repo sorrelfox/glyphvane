@@ -23,11 +23,15 @@
 //! - [`model`]: the bridge from the document model (`gv-model`): its links
 //!   as [`LinkRef`]s, and [`ModelFragments`], the [`FragmentResolver`] that
 //!   matches headings and block ids in target documents.
+//! - [`files`]: the save pipeline. Loading and byte-preserving saving
+//!   (atomic replace, symlinks, hardlinks), the crash journal and recovery,
+//!   the autosave policy, external-change checks and the 3-way merge.
 //!
 //! The resolver itself only classifies fragments; matching headings and
 //! block ids is the document model's job, through [`FragmentResolver`].
 
 pub mod expect;
+pub mod files;
 pub mod fragment;
 pub mod index;
 pub mod keys;

@@ -283,6 +283,30 @@ pub fn backup_path(path: &Path, version: u32) -> PathBuf {
 /// target replaced; the link itself stays. The original's permissions are
 /// kept. Missing parent directories are created.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_with(path, contents, &mut |_, _| Ok(()))
+}
+
+/// [`atomic_write`] with a hook for the metadata it does not copy itself.
+///
+/// The temporary file is named `.<name>.gv-tmp-<random>` and lives next to
+/// the target. The steps are: write the contents; copy the original's
+/// permissions, and its file attributes and creation time where the platform
+/// has them (Windows: hidden, system, archive and not-indexed attributes and
+/// the creation time; macOS: the creation time); call `before_rename` with
+/// the temporary file and the original's metadata (`None` for a new file);
+/// `fsync`; rename over the target (on Windows, retried with backoff for up
+/// to about 2 s while another process holds the file open, as antivirus
+/// scanners, indexers and sync clients do); `fsync` the directory.
+///
+/// `before_rename` copies what only the caller knows how to copy (owner,
+/// extended attributes) or checks a last condition. If it or any step before
+/// the rename fails, the temporary file is removed and the original is left
+/// untouched.
+pub fn atomic_write_with(
+    path: &Path,
+    contents: &[u8],
+    before_rename: &mut dyn FnMut(&fs::File, Option<&fs::Metadata>) -> io::Result<()>,
+) -> io::Result<()> {
     let target = resolve_symlink(path)?;
     let dir = match target.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
@@ -293,18 +317,75 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut temp = tempfile::Builder::new()
-        .prefix(&format!(".{name}.gv-tmp-"))
-        .tempfile_in(&dir)?;
+    let original = fs::metadata(&target).ok();
+    let mut temp = create_temp(&dir, &name, original.as_ref())?;
     temp.write_all(contents)?;
-    temp.as_file().sync_all()?;
-    if let Ok(meta) = fs::metadata(&target) {
-        fs::set_permissions(temp.path(), meta.permissions())?;
+    if let Some(meta) = &original {
+        temp.as_file().set_permissions(meta.permissions())?;
+        copy_creation_time(temp.as_file(), meta);
     }
+    before_rename(temp.as_file(), original.as_ref())?;
+    temp.as_file().sync_all()?;
     persist(temp, &target)?;
     sync_dir(&dir);
     Ok(())
 }
+
+#[cfg(not(windows))]
+fn create_temp(
+    dir: &Path,
+    name: &str,
+    _original: Option<&fs::Metadata>,
+) -> io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(&format!(".{name}.gv-tmp-"))
+        .tempfile_in(dir)
+}
+
+/// Windows: the temporary file is created with the original's hidden,
+/// system, archive and not-content-indexed attributes, which can only be set
+/// when a file is created. The read-only attribute is not copied: the
+/// temporary file must stay writable and removable.
+#[cfg(windows)]
+fn create_temp(
+    dir: &Path,
+    name: &str,
+    original: Option<&fs::Metadata>,
+) -> io::Result<tempfile::NamedTempFile> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    const ARCHIVE: u32 = 0x20;
+    const NOT_CONTENT_INDEXED: u32 = 0x2000;
+    let attributes = original.map_or(0, |m| {
+        m.file_attributes() & (HIDDEN | SYSTEM | ARCHIVE | NOT_CONTENT_INDEXED)
+    });
+    tempfile::Builder::new()
+        .prefix(&format!(".{name}.gv-tmp-"))
+        .make_in(dir, |path| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .attributes(attributes)
+                .open(path)
+        })
+}
+
+/// Best effort: a file system without creation times keeps the new file's.
+#[cfg(any(windows, target_os = "macos"))]
+fn copy_creation_time(temp: &fs::File, original: &fs::Metadata) {
+    #[cfg(target_os = "macos")]
+    use std::os::macos::fs::FileTimesExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileTimesExt;
+    if let Ok(created) = original.created() {
+        let _ = temp.set_times(fs::FileTimes::new().set_created(created));
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn copy_creation_time(_temp: &fs::File, _original: &fs::Metadata) {}
 
 fn resolve_symlink(path: &Path) -> io::Result<PathBuf> {
     match fs::symlink_metadata(path) {
@@ -328,8 +409,7 @@ fn persist(mut temp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
         match temp.persist(target) {
             Ok(_) => return Ok(()),
             Err(e)
-                if e.error.kind() == io::ErrorKind::PermissionDenied
-                    && waited < std::time::Duration::from_secs(2) =>
+                if is_sharing_violation(&e.error) && waited < std::time::Duration::from_secs(2) =>
             {
                 temp = e.file;
                 std::thread::sleep(delay);
@@ -339,6 +419,14 @@ fn persist(mut temp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
             Err(e) => return Err(e.error),
         }
     }
+}
+
+/// Access denied (a file open without delete sharing), sharing violation
+/// (`ERROR_SHARING_VIOLATION`, 32) or lock violation (`ERROR_LOCK_VIOLATION`,
+/// 33).
+#[cfg(windows)]
+fn is_sharing_violation(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied || matches!(error.raw_os_error(), Some(32 | 33))
 }
 
 #[cfg(unix)]

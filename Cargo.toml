@@ -127,6 +127,13 @@ unicode-linebreak = "0.1.5"
 # (`RandomCharIter`), used by the tests ported with the tab map
 # (third_party/zed/PROVENANCE.md). Its library is named `util`.
 zed-test-util = { path = "third_party/zed/test-shims/util" }
+# Save pipeline (gv-vault `files`): SHA-256 content hashes for change
+# detection and journal bases, CRC-32 checksums on journal records, and the
+# line diff behind reloads and 3-way merges (the `similar` version GPUI
+# already pulls in; Apache-2.0).
+crc32fast = "1.5.5"
+sha2 = "0.10.9"
+similar = "2.7.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

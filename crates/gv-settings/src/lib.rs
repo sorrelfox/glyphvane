@@ -53,7 +53,7 @@ pub use toml_edit;
 
 pub use diagnostic::{Diagnostic, DiagnosticKind, Position, Severity};
 pub use edit::{EditError, remove_value, set_value};
-pub use file::{SettingsError, SettingsFile, atomic_write, backup_path};
+pub use file::{SettingsError, SettingsFile, atomic_write, atomic_write_with, backup_path};
 pub use json_schema::{SCHEMA_ID, json_schema, json_schema_string};
 pub use keymap::{
     CommandId, CommandRegistry, ContextSet, KeySequence, Keymap, KeymapDiagnostic, KeymapIssue,

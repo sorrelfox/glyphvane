@@ -1,6 +1,6 @@
 [package]
 name = "gv-vault"
-description = "Vault roots, path and content index, watcher, link resolver, journaled refactors."
+description = "Vault roots, path and content index, watcher, link resolver, journaled refactors, save pipeline and crash journal."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,12 +11,22 @@ publish = false
 [dependencies]
 arc-swap.workspace = true
 caseless.workspace = true
+crc32fast.workspace = true
 gv-model.workspace = true
+gv-settings.workspace = true
+gv-text.workspace = true
 ignore.workspace = true
 serde.workspace = true
+sha2.workspace = true
+similar.workspace = true
+thiserror.workspace = true
 toml.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Write access checks, extended attributes and the file-system type for saves.
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 gv-syntax.workspace = true
