@@ -22,6 +22,7 @@ const GUI_FREE: &[&str] = &[
     "gv-vault",
     "gv-search",
     "gv-render-tree",
+    "gv-inline",
     "gv-html",
     "gv-highlight",
     "gv-math",

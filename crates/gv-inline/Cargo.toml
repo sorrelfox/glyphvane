@@ -1,0 +1,24 @@
+[package]
+name = "gv-inline"
+description = "Inline formatting context: line breaking, line boxes, hit testing, carets and selection geometry behind a measurer trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+unicode-linebreak.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "paragraph"
+harness = false
+
+[lints]
+workspace = true

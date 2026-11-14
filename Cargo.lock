@@ -3055,6 +3055,16 @@ name = "gv-media"
 version = "0.0.0"
 
 [[package]]
+name = "gv-inline"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "proptest",
+ "unicode-linebreak",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "gv-model"
 version = "0.0.0"
 dependencies = [
