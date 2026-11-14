@@ -26,6 +26,8 @@ use crate::metrics::size::{document, editor as editor_size};
 use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
 
+mod find;
+
 const WIDTH: f32 = 1280.0;
 const HEIGHT: f32 = 800.0;
 /// A character's advance in the test text system.

@@ -122,6 +122,8 @@ pub(crate) struct Probe {
     pub numbers: Vec<(usize, Token)>,
     pub carets: Vec<Bounds<Pixels>>,
     pub selections: Vec<Bounds<Pixels>>,
+    /// Find highlights, each with whether it is the current match's.
+    pub matches: Vec<(Bounds<Pixels>, bool)>,
     /// Composition underlines: start, width.
     pub marked: Vec<(Point<Pixels>, Pixels)>,
     pub columns: Option<Columns>,
@@ -132,8 +134,12 @@ pub(crate) struct Frame {
     focus: FocusHandle,
     /// Code fill and current line, under everything.
     under: Vec<PaintQuad>,
+    /// Find matches, under the selections.
+    matches: Vec<PaintQuad>,
     /// Inside the text column.
     selections: Vec<PaintQuad>,
+    /// The current find match, over the selections.
+    current_match: Vec<PaintQuad>,
     rows: Vec<(ShapedLine, Point<Pixels>)>,
     lines: Vec<Line>,
     carets: Vec<PaintQuad>,
@@ -150,7 +156,9 @@ impl Frame {
         Self {
             focus,
             under: Vec::new(),
+            matches: Vec::new(),
             selections: Vec::new(),
+            current_match: Vec::new(),
             rows: Vec::new(),
             lines: Vec::new(),
             carets: Vec::new(),
@@ -252,7 +260,9 @@ impl EditorView {
         let origin_x = self.text_origin_x(&columns);
         let whitespace = self.show_whitespace;
         let fonts = self.fonts.clone();
-        let Self { doc, links, .. } = self;
+        let Self {
+            doc, links, find, ..
+        } = self;
         let Some(doc) = doc.as_mut() else {
             return frame;
         };
@@ -280,6 +290,7 @@ impl EditorView {
                 .map(|s| (s.range(), s.head()))
                 .collect()
         };
+        let found = find.marks.touching(text.revision(), visible.clone());
         let marked = doc.editor.marked_ranges();
         let env = RowEnv {
             text: &text,
@@ -362,6 +373,33 @@ impl EditorView {
                     .row_lines
                     .push((display_row, line, (k > 0).then_some(segment.indent)));
 
+                // Find matches, as selections are drawn.
+                for (r, current) in &found {
+                    if r.end < range.start || r.start > range.end {
+                        continue;
+                    }
+                    let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
+                    if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
+                        continue;
+                    }
+                    let (a, b) = (a.max(cols.start), b.min(cols.end));
+                    let past_end = is_last && r.end > range.end && has_terminator;
+                    if a == b && !past_end {
+                        continue;
+                    }
+                    let x0 = row.x_in(k, a);
+                    let x1 = row.x_in(k, b) + if past_end { space } else { 0.0 };
+                    let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                    #[cfg(test)]
+                    probe.matches.push((rect, *current));
+                    if *current {
+                        frame
+                            .current_match
+                            .push(fill(rect, color(super::find::CURRENT_MATCH)));
+                    } else {
+                        frame.matches.push(fill(rect, color(super::find::MATCH)));
+                    }
+                }
                 // Selections, past the row's end when they go on, and past
                 // the line's end when they hold its terminator.
                 let mut selected: Vec<Range<usize>> = Vec::new();
@@ -960,7 +998,13 @@ impl Element for EditorElement {
             }
             let clip = frame.text_clip.unwrap_or(bounds);
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                for quad in frame.matches.drain(..) {
+                    window.paint_quad(quad);
+                }
                 for quad in frame.selections.drain(..) {
+                    window.paint_quad(quad);
+                }
+                for quad in frame.current_match.drain(..) {
                     window.paint_quad(quad);
                 }
                 for (line, origin) in &frame.rows {

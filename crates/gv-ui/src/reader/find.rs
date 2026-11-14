@@ -221,6 +221,8 @@ impl Reader {
                 FindBarEvent::Next => this.step(true, cx),
                 FindBarEvent::Previous => this.step(false, cx),
                 FindBarEvent::Close => this.close_find(window, cx),
+                // Replacing is the Source view's.
+                FindBarEvent::Replace | FindBarEvent::ReplaceAll | FindBarEvent::SelectAll => {}
             },
         ));
         self.find.bar = Some(bar.clone());

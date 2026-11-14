@@ -58,6 +58,12 @@
 //!   Alt-drag selects a column (07 § Buffer, selections and undo); the
 //!   wheel scrolls, sideways with Shift.
 //!
+//! # Find and replace
+//!
+//! [`find`]: Mod+F and Ctrl+H (Cmd+Alt+F) open the find popover with the
+//! replace row over the text; matches are highlighted on the rows on
+//! screen, the current one is selected, Replace all is one undo step.
+//!
 //! # The file
 //!
 //! [`file`] holds the document's file side: the crash journal every
@@ -68,6 +74,7 @@
 
 mod element;
 mod file;
+mod find;
 mod highlight;
 mod input;
 mod layout;
@@ -106,6 +113,7 @@ use crate::metrics::text;
 use element::{EditorElement, Press, Scrollbar};
 pub use file::DocEvent;
 use file::{DocState, Loaded};
+pub use find::DEBUG_REPLACE_ENV;
 use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
 use rows::{Fonts, RowCache};
@@ -373,6 +381,8 @@ pub struct EditorView {
     scrollbar: Option<Scrollbar>,
     /// The text revision the Reading view was last given.
     handed_off: Option<Revision>,
+    /// Find and replace.
+    find: find::FindState,
     #[cfg(test)]
     probe: element::Probe,
     _load: Option<Task<()>>,
@@ -422,6 +432,7 @@ impl EditorView {
             press: Press::None,
             scrollbar: None,
             handed_off: None,
+            find: find::FindState::default(),
             #[cfg(test)]
             probe: element::Probe::default(),
             _load: None,
@@ -615,6 +626,7 @@ impl EditorView {
             large_file,
         });
         self.availabilities.reset();
+        self.reset_find();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
@@ -890,7 +902,11 @@ impl EditorView {
         });
     }
 
+    /// Esc: closes the find popover first.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.close_find(window, cx) {
+            return;
+        }
         self.with_editor(window, cx, |editor, _| {
             if editor.is_composing() {
                 // The input method did not take Escape: drop the marked text.
@@ -1112,11 +1128,26 @@ fn notice(title: SharedString, message: SharedString, cx: &App) -> impl IntoElem
 }
 
 impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
+        if self.status == EditorStatus::Ready {
+            self.debug_replace(window, cx);
+        }
+        // The key context is on the element around the editor and the find
+        // popover, so the commands bound to it also work from the
+        // popover's fields; the editor's own handlers are on the element
+        // with its focus, which the fields are not inside.
+        let host = div()
+            .id("editor-host")
+            .key_context(KEY_CONTEXT)
+            .relative()
+            .size_full();
+        let host = self.find_handlers(host, cx);
+        let popover = self
+            .find_popover()
+            .filter(|_| self.status == EditorStatus::Ready);
         let root = div()
             .id("editor")
-            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(
                 cx.listener(|this, _: &MoveLeft, w, cx| this.motion(Motion::Left, false, w, cx)),
@@ -1247,7 +1278,7 @@ impl Render for EditorView {
             .relative()
             .size_full()
             .bg(theme.surface.page);
-        match &self.status {
+        let root = match &self.status {
             EditorStatus::Ready => root.child(EditorElement::new(cx.entity())),
             EditorStatus::Failed(err) => {
                 let name: SharedString = self
@@ -1264,6 +1295,7 @@ impl Render for EditorView {
                 ))
             }
             EditorStatus::Loading => root,
-        }
+        };
+        host.child(root).children(popover)
     }
 }

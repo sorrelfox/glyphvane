@@ -3173,6 +3173,7 @@ dependencies = [
  "gv-vault",
  "notify-debouncer-full",
  "nucleo-matcher",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

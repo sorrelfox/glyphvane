@@ -76,7 +76,8 @@ fn the_menus_follow_each_platform() {
                 "editor.copy_as_markdown",
                 "editor.paste",
                 "editor.select_all",
-                "search.find"
+                "search.find",
+                "search.replace"
             ]
         );
         assert_eq!(
@@ -178,6 +179,7 @@ fn shortcut_labels_follow_the_platform() {
             "Paste ⌘V",
             "Select all ⌘A",
             "Find ⌘F",
+            "Replace ⌥⌘F",
             "Bold ⌘B",
             "Italic ⌘I",
             "Strikethrough ⇧⌘X",
@@ -216,6 +218,7 @@ fn shortcut_labels_follow_the_platform() {
         "Paste Ctrl+V",
         "Select all Ctrl+A",
         "Find Ctrl+F",
+        "Replace Ctrl+H",
         "Bold Ctrl+B",
         "Italic Ctrl+I",
         "Strikethrough Ctrl+Shift+X",
@@ -294,6 +297,7 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
             ("Paste".to_owned(), "editor::Paste", true),
             ("Select all".to_owned(), "editor::SelectAll", true),
             ("Find".to_owned(), "search::Find", false),
+            ("Replace".to_owned(), "search::Replace", false),
         ]
     );
     let roles: Vec<Option<Role>> = app_menus(Platform::MacOs)[2]
@@ -310,6 +314,7 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
             None,
             Some(Role::Paste),
             Some(Role::SelectAll),
+            None,
             None
         ]
     );

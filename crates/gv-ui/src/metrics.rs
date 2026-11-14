@@ -297,16 +297,21 @@ pub mod spacing {
     }
 
     /// The find popover: padding 4, rows 4 apart, 2 between the controls
-    /// of a row; the field has padding `0 2 0 7` and 4 between its text
-    /// and its toggles. The popover sits 8 below the top of the document
-    /// area and 16 from its right edge, clear of the scrollbar (not
-    /// designed).
+    /// of the find row and 4 between those of the replace row; the find
+    /// field has padding `0 2 0 7` and 4 between its text and its toggles,
+    /// the replace field padding `0 7`; the Replace and Replace all
+    /// buttons padding `0 9`. The popover sits 8 below the top of the
+    /// document area and 16 from its right edge, clear of the scrollbar
+    /// (not designed).
     pub mod find {
         pub const PAD: f32 = 4.0;
         pub const ROW_GAP: f32 = 4.0;
         pub const GAP: f32 = 2.0;
+        pub const REPLACE_GAP: f32 = 4.0;
         pub const FIELD_PAD_LEFT: f32 = 7.0;
         pub const FIELD_PAD_RIGHT: f32 = 2.0;
+        pub const REPLACE_FIELD_PAD_X: f32 = 7.0;
+        pub const BUTTON_PAD_X: f32 = 9.0;
         pub const FIELD_GAP: f32 = 4.0;
         pub const INSET_TOP: f32 = 8.0;
         pub const INSET_RIGHT: f32 = 16.0;

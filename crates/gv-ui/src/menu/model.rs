@@ -223,6 +223,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             with_role("editor.select_all", "Select all", Role::SelectAll),
             SEPARATOR,
             item("search.find", "Find"),
+            item("search.replace", "Replace"),
         ],
     ));
     menus.push(Menu::new(

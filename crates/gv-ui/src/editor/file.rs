@@ -481,6 +481,7 @@ impl EditorView {
         }
         self.schedule_autosave(cx);
         self.report_modified(cx);
+        self.find_after_edit(cx);
     }
 
     /// Tells the window when the text went from saved to modified or back.

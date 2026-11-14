@@ -3,20 +3,26 @@
 
 //! The find popover of find in page (SPEC § Popovers, "Find and replace").
 //!
-//! In Preview only the find row is shown (replace is the editor's): a
-//! field with the match case (`Aa`), whole word (`ab`) and regular
-//! expression (`.*`) toggles, the match count, and the previous, next and
-//! close buttons. The popover is a view of its own, [`FindBar`]; the
-//! Reading view hosts it at the top right of the document area, runs the
-//! searches and tells it what to show ([`FindStatus`]).
+//! The find row: a field with the match case (`Aa`), whole word (`ab`) and
+//! regular expression (`.*`) toggles, the match count, and the previous,
+//! next and close buttons. The replace row, in the Source view only: the
+//! replacement field, then Replace and Replace all. The popover is a view
+//! of its own, [`FindBar`]; the Reading view and the Source view host it at
+//! the top right of the document area, run the searches and tell it what
+//! to show ([`FindStatus`]). In the Split view each pane has its own.
 //!
 //! # Keys
 //!
 //! Mod+F opens find (filled with the selection when there is one),
-//! Enter and Shift+Enter in the field go to the next and previous match, as
+//! Ctrl+H (Cmd+Alt+F on macOS) find and replace in the Source view. Enter
+//! and Shift+Enter in the find field go to the next and previous match, as
 //! do F3 and Shift+F3 (Cmd+G and Cmd+Shift+G on macOS) anywhere in the
-//! Reading view; Esc closes the popover and gives the keyboard back to the
+//! view; Enter in the replace field replaces the current match. Alt+Enter
+//! in either field of the Source view's popover selects every match, one
+//! caret each. Esc closes the popover and gives the keyboard back to the
 //! document.
+
+pub(crate) mod source;
 
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
@@ -32,32 +38,37 @@ use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::{CONTROL, SMALL_ICON_BUTTON, find as size};
 use crate::metrics::spacing::find as spacing;
-use crate::metrics::{FOCUS_HALO, HAIRLINE, font, icon, radius, text};
+use crate::metrics::{DISABLED_OPACITY, FOCUS_HALO, HAIRLINE, font, icon, radius, text};
 use crate::theme::Theme;
 
 /// Open find in page, filled with the selection if there is one
-/// (`search.find`); go to the next and the previous match
-/// (`search.find_next`, `search.find_previous`): commands of the keymap.
-pub use crate::keymap::actions::search::{Find, FindNext, FindPrevious};
+/// (`search.find`); open find and replace (`search.replace`, the Source
+/// view's); go to the next and the previous match (`search.find_next`,
+/// `search.find_previous`): commands of the keymap.
+pub use crate::keymap::actions::search::{Find, FindNext, FindPrevious, Replace};
 
 gpui::actions!(
     find,
     [
         /// Close find in page.
         CloseFind,
+        /// Select every match in the Source view, one caret each.
+        SelectAllMatches,
     ]
 );
 
 /// The key context of the popover.
 pub(crate) const KEY_CONTEXT: &str = "FindBar";
 
-/// The popover's own key: Esc closes it, in the popover and in the Reading
-/// view that hosts it. Find, next and previous are commands, bound by the
-/// keymap ([`crate::keymap`]).
+/// The popover's own keys: Esc closes it, in the popover and in the
+/// Reading view that hosts it (the Source view's Esc closes it first);
+/// Alt+Enter selects every match. Find, replace, next and previous are
+/// commands, bound by the keymap ([`crate::keymap`]).
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("escape", CloseFind, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CloseFind, Some(crate::reader::KEY_CONTEXT)),
+        KeyBinding::new("alt-enter", SelectAllMatches, Some(KEY_CONTEXT)),
     ]
 }
 
@@ -114,7 +125,7 @@ fn grouped(n: usize) -> String {
     out
 }
 
-/// What the popover asks of the Reading view.
+/// What the popover asks of the view that hosts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindBarEvent {
     /// The query or an option changed.
@@ -122,14 +133,25 @@ pub enum FindBarEvent {
     Next,
     Previous,
     Close,
+    /// Replace the current match, then go to the next one.
+    Replace,
+    ReplaceAll,
+    /// Select every match, one caret each.
+    SelectAll,
 }
 
 /// The find popover.
 pub struct FindBar {
     input: Entity<InputState>,
+    replace: Entity<InputState>,
     options: FindOptions,
     status: FindStatus,
-    _input_events: Subscription,
+    /// The host edits text: the replace row can show and Alt+Enter selects
+    /// every match.
+    editing: bool,
+    /// The replace row shows.
+    replacing: bool,
+    _input_events: [Subscription; 2],
 }
 
 impl std::fmt::Debug for FindBar {
@@ -137,6 +159,8 @@ impl std::fmt::Debug for FindBar {
         f.debug_struct("FindBar")
             .field("options", &self.options)
             .field("status", &self.status)
+            .field("editing", &self.editing)
+            .field("replacing", &self.replacing)
             .finish_non_exhaustive()
     }
 }
@@ -144,24 +168,97 @@ impl std::fmt::Debug for FindBar {
 impl EventEmitter<FindBarEvent> for FindBar {}
 
 impl FindBar {
+    /// The popover of a view that only reads (find, no replace).
     pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
-        let events = cx.subscribe_in(
-            &input,
+        let replace = cx.new(|cx| InputState::new(window, cx));
+        let find_events =
+            cx.subscribe_in(
+                &input,
+                window,
+                |_, _, event: &InputEvent, _, cx| match event {
+                    InputEvent::Change => cx.emit(FindBarEvent::Changed),
+                    InputEvent::PressEnter { shift: false, .. } => cx.emit(FindBarEvent::Next),
+                    InputEvent::PressEnter { shift: true, .. } => cx.emit(FindBarEvent::Previous),
+                    InputEvent::Focus | InputEvent::Blur => cx.notify(),
+                },
+            );
+        let replace_events = cx.subscribe_in(
+            &replace,
             window,
             |_, _, event: &InputEvent, _, cx| match event {
-                InputEvent::Change => cx.emit(FindBarEvent::Changed),
-                InputEvent::PressEnter { shift: false, .. } => cx.emit(FindBarEvent::Next),
-                InputEvent::PressEnter { shift: true, .. } => cx.emit(FindBarEvent::Previous),
+                InputEvent::Change => {}
+                InputEvent::PressEnter { .. } => cx.emit(FindBarEvent::Replace),
                 InputEvent::Focus | InputEvent::Blur => cx.notify(),
             },
         );
         Self {
             input,
+            replace,
             options: FindOptions::default(),
             status: FindStatus::Empty,
-            _input_events: events,
+            editing: false,
+            replacing: false,
+            _input_events: [find_events, replace_events],
         }
+    }
+
+    /// The popover of the Source view, which can replace.
+    pub fn for_editor(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        Self {
+            editing: true,
+            ..Self::new(window, cx)
+        }
+    }
+
+    /// Whether the replace row shows.
+    pub fn is_replacing(&self) -> bool {
+        self.replacing
+    }
+
+    /// Shows or hides the replace row (never shown in a view that only
+    /// reads).
+    pub fn set_replacing(&mut self, replacing: bool, cx: &mut Context<'_, Self>) {
+        let replacing = replacing && self.editing;
+        if self.replacing != replacing {
+            self.replacing = replacing;
+            cx.notify();
+        }
+    }
+
+    /// The replacement text.
+    pub fn replacement(&self, cx: &App) -> String {
+        self.replace.read(cx).value().to_string()
+    }
+
+    /// Replaces the text of the replace field.
+    pub fn set_replacement(&mut self, text: &str, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.replace
+            .update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
+        cx.notify();
+    }
+
+    /// Gives the keyboard to the replace field, with its text selected.
+    pub fn focus_replace(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.replace.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+    }
+
+    /// Whether the replace field has the keyboard.
+    pub fn replace_focused(&self, window: &Window, cx: &App) -> bool {
+        self.replace.read(cx).focus_handle(cx).is_focused(window)
+    }
+
+    /// Whether either field has the keyboard.
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.field_focused(window, cx) || self.replace_focused(window, cx)
+    }
+
+    /// Whether there are matches to replace or select.
+    fn has_matches(&self) -> bool {
+        matches!(self.status, FindStatus::Matches { total, .. } if total > 0)
     }
 
     /// The text being searched for.
@@ -346,45 +443,96 @@ impl FindBar {
     }
 }
 
+/// A field: `surface.page`, a 1 px `border.strong` border, `accent.default`
+/// with the focus halo while it has the keyboard.
+fn field(
+    input: &Entity<InputState>,
+    label: &'static str,
+    focused: bool,
+    (pad_left, pad_right): (f32, f32),
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(CONTROL))
+        .flex()
+        .items_center()
+        .gap(px(spacing::FIELD_GAP))
+        .pl(px(pad_left))
+        .pr(px(pad_right))
+        .rounded(px(radius::CONTROL))
+        .bg(theme.surface.page)
+        .border(px(HAIRLINE))
+        .border_color(if focused {
+            theme.accent.default
+        } else {
+            theme.border.strong
+        })
+        .when(focused, |d| d.shadow(focus_halo(theme)))
+        .child(
+            div().flex_1().min_w_0().h_full().child(
+                Input::new(input)
+                    .aria_label(label)
+                    .appearance(false)
+                    .h_full()
+                    .px_0()
+                    .py_0()
+                    .text_size(px(text::UI.size))
+                    .text_color(theme.text.primary),
+            ),
+        )
+}
+
+/// A secondary button 24 high: 1 px `border.strong`, `surface.raised`,
+/// 12/500; half opacity and inert while `enabled` is false.
+fn text_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let (hover, press) = (theme.state.hover, theme.state.press);
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(CONTROL))
+        .px(px(spacing::BUTTON_PAD_X))
+        .flex()
+        .items_center()
+        .rounded(px(radius::CONTROL))
+        .border(px(HAIRLINE))
+        .border_color(theme.border.strong)
+        .bg(theme.surface.raised)
+        .text_color(theme.text.primary)
+        .font_weight(FontWeight(text::weight::ACTIVE))
+        .map(|d| {
+            if enabled {
+                d.hover(move |s| s.bg(hover)).active(move |s| s.bg(press))
+            } else {
+                d.opacity(DISABLED_OPACITY)
+            }
+        })
+        .child(label)
+}
+
 impl Render for FindBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
         let focused = self.field_focused(window, cx);
-        let field = div()
-            .flex_1()
-            .min_w_0()
-            .h(px(CONTROL))
-            .flex()
-            .items_center()
-            .gap(px(spacing::FIELD_GAP))
-            .pl(px(spacing::FIELD_PAD_LEFT))
-            .pr(px(spacing::FIELD_PAD_RIGHT))
-            .rounded(px(radius::CONTROL))
-            .bg(theme.surface.page)
-            .border(px(HAIRLINE))
-            .border_color(if focused {
-                theme.accent.default
-            } else {
-                theme.border.strong
-            })
-            .when(focused, |d| d.shadow(focus_halo(theme)))
-            .child(
-                div().flex_1().min_w_0().h_full().child(
-                    Input::new(&self.input)
-                        .aria_label("Find")
-                        .appearance(false)
-                        .h_full()
-                        .px_0()
-                        .py_0()
-                        .text_size(px(text::UI.size))
-                        .text_color(theme.text.primary),
-                ),
-            )
-            .children(
-                FindToggle::ALL
-                    .into_iter()
-                    .map(|t| self.toggle_button(t, theme, cx).into_any_element()),
-            );
+        let find_field = field(
+            &self.input,
+            "Find",
+            focused,
+            (spacing::FIELD_PAD_LEFT, spacing::FIELD_PAD_RIGHT),
+            theme,
+        )
+        .children(
+            FindToggle::ALL
+                .into_iter()
+                .map(|t| self.toggle_button(t, theme, cx).into_any_element()),
+        );
         let count = div()
             .debug_selector(|| "find-count".into())
             .flex_none()
@@ -405,7 +553,7 @@ impl Render for FindBar {
             .flex()
             .items_center()
             .gap(px(spacing::GAP))
-            .child(field)
+            .child(find_field)
             .child(count)
             .child(
                 icon_button("find-previous", Icon::FindPrevious, icon::INLINE, theme)
@@ -419,10 +567,49 @@ impl Render for FindBar {
                 icon_button("find-close", Icon::CloseFind, icon::SMALL, theme)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(FindBarEvent::Close))),
             );
+        let replace_row = self.replacing.then(|| {
+            let enabled = self.has_matches();
+            let focused = self.replace_focused(window, cx);
+            let pad = spacing::REPLACE_FIELD_PAD_X;
+            div()
+                .debug_selector(|| "find-replace-row".into())
+                .h(px(CONTROL))
+                .flex()
+                .items_center()
+                .gap(px(spacing::REPLACE_GAP))
+                .child(field(
+                    &self.replace,
+                    "Replace with",
+                    focused,
+                    (pad, pad),
+                    theme,
+                ))
+                .child(
+                    text_button("find-replace", "Replace", enabled, theme).when(enabled, |b| {
+                        b.on_click(cx.listener(|_, _, _, cx| cx.emit(FindBarEvent::Replace)))
+                    }),
+                )
+                .child(
+                    text_button("find-replace-all", "Replace all", enabled, theme).when(
+                        enabled,
+                        |b| {
+                            b.on_click(cx.listener(|_, _, _, cx| cx.emit(FindBarEvent::ReplaceAll)))
+                        },
+                    ),
+                )
+        });
         div()
             .id("find-bar")
             .debug_selector(|| "find-bar".into())
             .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &SelectAllMatches, _, cx| {
+                if this.editing {
+                    cx.emit(FindBarEvent::SelectAll);
+                } else {
+                    // Alt+Enter keeps its meaning in a view that only reads.
+                    cx.propagate();
+                }
+            }))
             .occlude()
             .w(px(size::WIDTH))
             .p(px(spacing::PAD))
@@ -438,6 +625,7 @@ impl Render for FindBar {
             .text_size(px(text::UI.size))
             .line_height(px(text::UI.line))
             .child(row)
+            .children(replace_row)
     }
 }
 
