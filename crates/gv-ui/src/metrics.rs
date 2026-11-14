@@ -35,6 +35,11 @@ pub mod size {
     pub const PROFILE_CHIP: f32 = 18.0;
     pub const CHECKBOX: f32 = 14.0;
     pub const SCROLLBAR_THUMB: f32 = 6.0;
+    /// The shortest the scrollbar thumb gets in a long document (not
+    /// designed).
+    pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+    /// Copy and wrap buttons in a code block's head.
+    pub const CODE_BUTTON: f32 = 20.0;
     pub const THEME_CARD_PREVIEW: f32 = 84.0;
     /// The caret: 2 px wide, `accent.default` (SPEC § Editor).
     pub const CARET_WIDTH: f32 = 2.0;
@@ -122,6 +127,23 @@ pub mod spacing {
     pub mod document {
         pub const HEADING_GAP: f32 = 10.0;
         pub const PARAGRAPH_GAP: f32 = 12.0;
+        /// Space between a list marker and its item's content (not
+        /// designed).
+        pub const LIST_MARKER_GAP: f32 = 6.0;
+    }
+
+    /// A code block's head in the preview: the buttons 4 apart and 4 from
+    /// the right edge; the label starts at the code's own padding.
+    pub mod code_head {
+        pub const PAD_RIGHT: f32 = 4.0;
+        pub const GAP: f32 = 4.0;
+    }
+
+    /// The preview's scrollbar: 3 from the right edge, 4 from the top and
+    /// the bottom. No track.
+    pub mod scrollbar {
+        pub const INSET_X: f32 = 3.0;
+        pub const INSET_Y: f32 = 4.0;
     }
 
     /// Inline content of the preview (SPEC § Preview, § Link status).
@@ -247,6 +269,7 @@ pub mod radius {
     pub const PILL: f32 = 9.0;
     pub const CHIP: f32 = 4.0;
     pub const KEYCAP: f32 = 4.0;
+    pub const SCROLLBAR: f32 = 3.0;
 
     pub mod window {
         pub const MACOS: f32 = 12.0;

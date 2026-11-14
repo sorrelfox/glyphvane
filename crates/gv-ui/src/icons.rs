@@ -80,6 +80,10 @@ pub enum Icon {
     WindowMaximize,
     WindowRestore,
     WindowClose,
+    /// A code block's copy button.
+    CopyCode,
+    /// A code block's soft wrap toggle.
+    WrapCode,
 }
 
 impl Icon {
@@ -127,6 +131,8 @@ impl Icon {
             Self::WindowMaximize => IconName::WindowMaximize,
             Self::WindowRestore => IconName::WindowRestore,
             Self::WindowClose => IconName::WindowClose,
+            Self::CopyCode => IconName::Copy,
+            Self::WrapCode => IconName::TextWrap,
         }
     }
 }
@@ -262,7 +268,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 34] = [
+    const ALL: [Icon; 36] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -297,6 +303,8 @@ mod tests {
         Icon::WindowMaximize,
         Icon::WindowRestore,
         Icon::WindowClose,
+        Icon::CopyCode,
+        Icon::WrapCode,
     ];
 
     #[test]

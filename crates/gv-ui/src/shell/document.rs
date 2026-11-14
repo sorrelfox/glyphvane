@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The document area. It holds a placeholder until the reader and the editor
-//! exist.
+//! The document area: the active tab's Reading view in Preview mode. Edit
+//! and Split hold a placeholder until the editor exists.
 
-use gpui::{Div, FontWeight, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, div, px,
+};
 
 use super::{ViewMode, Workspace};
 use crate::metrics::size::document;
@@ -13,9 +15,19 @@ use crate::metrics::text;
 use crate::theme::Theme;
 
 impl Workspace {
-    pub(super) fn render_document(&self, theme: &Theme) -> Div {
+    pub(super) fn render_document(&self, theme: &Theme, _cx: &mut Context<'_, Self>) -> AnyElement {
+        let area = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .bg(theme.surface.page);
+        let tab = self.active_tab();
+        if let (ViewMode::Preview, Some(reader)) = (self.mode(), &tab.reader) {
+            return area.child(reader.clone()).into_any_element();
+        }
         let note = match self.mode() {
-            ViewMode::Preview => "Reading view not implemented yet",
+            ViewMode::Preview => "Nothing to show",
             ViewMode::Edit => "Editor not implemented yet",
             ViewMode::Split => "Split view not implemented yet",
         };
@@ -23,13 +35,7 @@ impl Workspace {
         // in every mode, so text does not move sideways when the mode changes.
         let column_width = document::COLUMN_MAX + 2.0 * document::PAD_X;
 
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_hidden()
-            .bg(theme.surface.page)
-            .flex()
+        area.flex()
             .justify_center()
             .child(
                 div()
@@ -45,7 +51,7 @@ impl Workspace {
                             .text_size(px(text::PREVIEW_H1.size))
                             .line_height(px(text::PREVIEW_H1.line))
                             .font_weight(FontWeight(text::weight::BOLD))
-                            .child(self.active_tab().label.name.clone()),
+                            .child(tab.label.name.clone()),
                     )
                     .child(
                         div()
@@ -56,5 +62,6 @@ impl Workspace {
                             .child(note),
                     ),
             )
+            .into_any_element()
     }
 }

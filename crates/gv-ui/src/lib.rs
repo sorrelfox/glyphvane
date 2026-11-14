@@ -8,6 +8,7 @@ pub mod chrome;
 pub mod icons;
 pub mod inline;
 pub mod metrics;
+pub mod reader;
 pub mod settings;
 pub mod shell;
 pub mod theme;
@@ -76,6 +77,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
         KeyBinding::new(keys::QUIT, Quit, None),
     ]);
     cx.bind_keys(shell::file_tree_key_bindings());
+    cx.bind_keys(reader::key_bindings());
     cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_window_closed(|cx, _| {

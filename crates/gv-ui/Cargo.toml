@@ -11,14 +11,20 @@ publish = false
 [dependencies]
 gpui = { workspace = true }
 gv-inline = { workspace = true }
+gv-model = { workspace = true }
+gv-render-tree = { workspace = true }
 gv-settings = { workspace = true }
+gv-syntax = { workspace = true }
+gv-text = { workspace = true }
 gv-vault = { workspace = true }
 serde = { workspace = true }
+sum_tree = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 gpui-pre = { workspace = true, features = ["test-support"] }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 unicode-segmentation = { workspace = true }
 
