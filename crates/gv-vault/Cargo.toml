@@ -16,6 +16,8 @@ gv-model.workspace = true
 gv-settings.workspace = true
 gv-text.workspace = true
 ignore.workspace = true
+# The vault watcher: debounced OS notifications (re-exports `notify`).
+notify-debouncer-full.workspace = true
 serde.workspace = true
 sha2.workspace = true
 similar.workspace = true

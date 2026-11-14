@@ -26,6 +26,10 @@
 //! - [`files`]: the save pipeline. Loading and byte-preserving saving
 //!   (atomic replace, symlinks, hardlinks), the crash journal and recovery,
 //!   the autosave policy, external-change checks and the 3-way merge.
+//! - [`watch`]: the vault watcher. Keeps a [`SharedPathIndex`] in step with
+//!   the disk (OS notifications, polling on network file systems, rescans
+//!   when events were lost) and reports external changes to open documents
+//!   and new sync-conflict copies.
 //!
 //! The resolver itself only classifies fragments; matching headings and
 //! block ids is the document model's job, through [`FragmentResolver`].
@@ -45,6 +49,7 @@ pub mod repo;
 pub mod resolve;
 pub mod root;
 pub mod url;
+pub mod watch;
 
 pub use fragment::{Fragment, FragmentKind, FragmentResolver, FragmentTarget, StructuralFragments};
 pub use index::{
@@ -61,3 +66,4 @@ pub use resolve::{
     Candidate, Note, Resolution, Stage, Status, TargetKind, TraceStep, resolve, resolve_with_probe,
 };
 pub use root::{RefusedRoot, RootDetection, RootMarker, RootReason, detect_root, is_refused_root};
+pub use watch::{VaultWatcher, WatchEvent, WatchMode, WatchOptions};

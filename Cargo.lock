@@ -3188,6 +3188,7 @@ dependencies = [
  "gv-syntax",
  "gv-text",
  "ignore",
+ "notify-debouncer-full",
  "proptest",
  "rustix",
  "serde",

@@ -48,6 +48,7 @@ use cow::{CowMap, CowMultiMap, CowTable};
 
 pub use shared::SharedPathIndex;
 pub use walk::WalkStats;
+pub(crate) use walk::entry_of;
 
 /// A session-stable handle for one indexed entry. It survives renames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]

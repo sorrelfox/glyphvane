@@ -71,6 +71,15 @@ impl SharedPathIndex {
         result.map(|next| next.unwrap_or_else(|| self.load()))
     }
 
+    /// Publishes `next` only if the current snapshot is still `expected`
+    /// (the one `next` was derived from). Returns whether it was published.
+    pub(crate) fn compare_and_store(&self, expected: &PathIndex, next: &PathIndex) -> bool {
+        let prev = self
+            .current
+            .compare_and_swap(expected.inner_arc(), next.inner_arc().clone());
+        std::sync::Arc::ptr_eq(&*prev, expected.inner_arc())
+    }
+
     /// Runs the initial walk of `root` and publishes the complete index.
     /// Until it returns, readers see the building snapshot this was created
     /// with. Blocking: run it on a background thread.

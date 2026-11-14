@@ -76,19 +76,6 @@ impl Collector<'_> {
         }
     }
 
-    fn symlink_target(&self, path: &Path) -> SymlinkTarget {
-        let (Ok(target), Some(croot)) = (fs::canonicalize(path), self.canonical_root) else {
-            return SymlinkTarget::Broken;
-        };
-        match target.strip_prefix(croot) {
-            Ok(rel) => match VaultPath::from_relative_fs_path(rel) {
-                Ok(vp) => SymlinkTarget::Inside(vp),
-                Err(_) => SymlinkTarget::Broken,
-            },
-            Err(_) => SymlinkTarget::Outside(target),
-        }
-    }
-
     fn take(&mut self, entry: &DirEntry) -> Option<RawEntry> {
         let rel = entry.path().strip_prefix(self.root).ok()?;
         let path = match VaultPath::from_relative_fs_path(rel) {
@@ -105,7 +92,7 @@ impl Collector<'_> {
         };
         let ft = entry.file_type()?;
         let kind = if ft.is_symlink() {
-            EntryKind::Symlink(self.symlink_target(entry.path()))
+            EntryKind::Symlink(symlink_target(entry.path(), self.canonical_root))
         } else if ft.is_dir() {
             EntryKind::Dir
         } else {
@@ -183,6 +170,44 @@ impl<'s> ParallelVisitorBuilder<'s> for Builder<'s> {
             out: Vec::new(),
         })
     }
+}
+
+/// Where the symbolic link at `path` points, relative to the vault whose
+/// canonical root is `canonical_root`.
+pub(crate) fn symlink_target(path: &Path, canonical_root: Option<&Path>) -> SymlinkTarget {
+    let (Ok(target), Some(croot)) = (fs::canonicalize(path), canonical_root) else {
+        return SymlinkTarget::Broken;
+    };
+    match target.strip_prefix(croot) {
+        Ok(rel) => match VaultPath::from_relative_fs_path(rel) {
+            Ok(vp) => SymlinkTarget::Inside(vp),
+            Err(_) => SymlinkTarget::Broken,
+        },
+        Err(_) => SymlinkTarget::Outside(target),
+    }
+}
+
+/// The kind and metadata of the entry at `path`, without following a final
+/// symbolic link: the same values the walk records.
+pub(crate) fn entry_of(
+    path: &Path,
+    canonical_root: Option<&Path>,
+) -> std::io::Result<(EntryKind, FileMeta)> {
+    let m = fs::symlink_metadata(path)?;
+    let ft = m.file_type();
+    let kind = if ft.is_symlink() {
+        EntryKind::Symlink(symlink_target(path, canonical_root))
+    } else if ft.is_dir() {
+        EntryKind::Dir
+    } else {
+        EntryKind::File
+    };
+    let meta = FileMeta {
+        size: if ft.is_file() { m.len() } else { 0 },
+        mtime: m.modified().ok(),
+        identity: identity(&m),
+    };
+    Ok((kind, meta))
 }
 
 #[cfg(unix)]
