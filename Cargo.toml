@@ -137,6 +137,9 @@ similar = "2.7.0"
 # UI (gv-ui): fuzzy matching for the command palette, from the nucleo
 # project (MPL-2.0).
 nucleo-matcher = "0.3.1"
+# HTML (gv-html): the HTML5 parser, building into gv-html's own tree sink
+# (MIT OR Apache-2.0). The WHATWG URL parser above resolves pasted links.
+html5ever = "0.40.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

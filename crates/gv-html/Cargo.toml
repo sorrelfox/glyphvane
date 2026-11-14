@@ -9,6 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+html5ever.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+# Round-trip tests: converted Markdown is parsed and rendered back.
+gv-syntax.workspace = true
 
 [lints]
 workspace = true
