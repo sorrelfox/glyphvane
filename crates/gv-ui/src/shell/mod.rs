@@ -5,11 +5,18 @@
 
 mod controls;
 mod document;
+mod files_panel;
+#[cfg(test)]
+mod files_panel_tests;
 mod panels;
 mod status_bar;
 #[cfg(test)]
 mod tests;
 mod title_row;
+mod tree;
+mod vault;
+
+pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -17,15 +24,22 @@ use std::path::{Path, PathBuf};
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Context, FocusHandle, Global, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Result, SharedString, Styled as _, Subscription,
-    WeakEntity, Window, div, px,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Result, SharedString,
+    Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::metrics::text;
 use crate::{ToggleEditMode, TogglePanel, ToggleSidebar};
+use files_panel::{FilesPanel, FilesPanelEvent};
+use vault::WindowVault;
+
+/// Set to `1` to open main windows with the sidebar shown, for screenshots
+/// and manual checks. Windows opened for a file otherwise start with both
+/// side panels hidden.
+pub const DEBUG_SHOW_SIDEBAR_ENV: &str = "GLYPHVANE_DEBUG_SHOW_SIDEBAR";
 
 /// What the document area shows. Each tab has its own mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -146,6 +160,12 @@ pub struct Workspace {
     /// document until the user calls a panel.
     sidebar_open: bool,
     panel_open: bool,
+    /// The window's vault, created when something first needs it: the
+    /// sidebar being shown. Until then nothing is indexed.
+    vault: Option<Entity<WindowVault>>,
+    /// The Files panel, created with the sidebar.
+    files: Option<Entity<FilesPanel>>,
+    _files_events: Option<Subscription>,
     /// The pointer went down on a drag region of a client-decorated window
     /// and has not moved yet.
     drag_pending: bool,
@@ -161,6 +181,7 @@ impl fmt::Debug for Workspace {
             .field("active", &self.active)
             .field("sidebar_open", &self.sidebar_open)
             .field("panel_open", &self.panel_open)
+            .field("vault", &self.vault)
             .finish_non_exhaustive()
     }
 }
@@ -172,7 +193,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        Self::with_chrome(target, WindowChrome::current(), window, cx)
+        let mut this = Self::with_chrome(target, WindowChrome::current(), window, cx);
+        if std::env::var_os(DEBUG_SHOW_SIDEBAR_ENV).is_some_and(|v| v == "1") {
+            this.set_sidebar_open(true, window, cx);
+        }
+        this
     }
 
     /// A workspace drawn with another platform's chrome. Only the window's
@@ -206,6 +231,9 @@ impl Workspace {
             active: 0,
             sidebar_open: false,
             panel_open: false,
+            vault: None,
+            files: None,
+            _files_events: None,
             drag_pending: false,
             _appearance: appearance,
             _activation: activation,
@@ -249,7 +277,58 @@ impl Workspace {
 
     fn tabs_changed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         window.set_window_title(&self.active_tab().label.window_title());
+        if let Some(files) = self.files.clone() {
+            self.ensure_vault(cx);
+            let active = self.active_tab().path.clone();
+            files.update(cx, |files, cx| files.set_active(active, cx));
+        }
         cx.notify();
+    }
+
+    /// Opens a file from a panel: activates its tab, or opens a new one.
+    fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let open = self
+            .tabs
+            .iter()
+            .position(|t| t.path.as_deref() == Some(&path));
+        match open {
+            Some(index) => self.activate_tab(index, window, cx),
+            None => self.open_tab(OpenTarget::new(path), window, cx),
+        }
+    }
+
+    /// Creates the window's vault from the active tab's file, once.
+    fn ensure_vault(&mut self, cx: &mut Context<'_, Self>) {
+        if self.vault.is_some() {
+            return;
+        }
+        let Some(path) = self.active_tab().path.clone() else {
+            return;
+        };
+        let vault = cx.new(|cx| WindowVault::for_file(&path, cx));
+        self.vault = Some(vault.clone());
+        if let Some(files) = &self.files {
+            files.update(cx, |files, cx| files.set_vault(vault, cx));
+        }
+    }
+
+    /// Creates the Files panel, and with it the vault, the first time the
+    /// sidebar is shown.
+    fn ensure_files_panel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.files.is_some() {
+            return;
+        }
+        self.ensure_vault(cx);
+        let (vault, active) = (self.vault.clone(), self.active_tab().path.clone());
+        let files = cx.new(|cx| FilesPanel::new(vault, active, cx));
+        self._files_events = Some(cx.subscribe_in(
+            &files,
+            window,
+            |this, _, event: &FilesPanelEvent, window, cx| match event {
+                FilesPanelEvent::Open(path) => this.open_path(path.clone(), window, cx),
+            },
+        ));
+        self.files = Some(files);
     }
 
     fn mode(&self) -> ViewMode {
@@ -269,8 +348,15 @@ impl Workspace {
         self.set_mode(mode, cx);
     }
 
-    fn toggle_sidebar(&mut self, cx: &mut Context<'_, Self>) {
-        self.sidebar_open = !self.sidebar_open;
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.set_sidebar_open(!self.sidebar_open, window, cx);
+    }
+
+    fn set_sidebar_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.sidebar_open = open;
+        if open {
+            self.ensure_files_panel(window, cx);
+        }
         cx.notify();
     }
 
@@ -293,7 +379,9 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleEditMode, _, cx| this.toggle_edit_mode(cx)))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.toggle_sidebar(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
             .size_full()
             .flex()

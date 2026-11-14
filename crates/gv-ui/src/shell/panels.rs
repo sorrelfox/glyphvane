@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The side panels. Only their frames and head rows exist so far.
+//! The side panels. The sidebar holds the Files panel; the right panel has
+//! only its frame and section heads so far.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -14,7 +15,7 @@ use super::controls::{RowStart, icon_button};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::icon_button as button;
-use crate::metrics::spacing::{panel_head, section_head, sidebar_head};
+use crate::metrics::spacing::{section_head, sidebar_head};
 use crate::metrics::{HAIRLINE, icon, size, text};
 use crate::theme::Theme;
 
@@ -52,7 +53,7 @@ impl Workspace {
                     .child(self.drag_region("sidebar-drag", window, cx).flex_1())
                     .child(panel_switcher(theme)),
             )
-            .child(panel_head("Files", theme))
+            .when_some(self.files.clone(), |sidebar, files| sidebar.child(files))
     }
 }
 
@@ -71,31 +72,6 @@ fn panel_switcher(theme: &Theme) -> Div {
             } else {
                 button
             }
-        }))
-}
-
-/// A panel head: title at the left, actions at the right.
-fn panel_head(title: &'static str, theme: &Theme) -> Div {
-    let actions = [Icon::NewNote, Icon::NewFolder, Icon::Sort];
-    let size = (size::SMALL_ICON_BUTTON, size::SMALL_ICON_BUTTON);
-    div()
-        .h(px(size::PANEL_HEADER))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(panel_head::GAP))
-        .pl(px(panel_head::PAD_LEFT))
-        .pr(px(panel_head::PAD_RIGHT))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .font_weight(FontWeight(text::weight::STRONG))
-                .child(title),
-        )
-        .children(actions.into_iter().enumerate().map(|(index, action)| {
-            icon_button(("panel-action", index), action, icon::ROW, size, theme)
         }))
 }
 

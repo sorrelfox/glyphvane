@@ -12,6 +12,7 @@ publish = false
 gpui = { workspace = true }
 gv-inline = { workspace = true }
 gv-settings = { workspace = true }
+gv-vault = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

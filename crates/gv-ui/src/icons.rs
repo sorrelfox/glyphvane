@@ -64,6 +64,13 @@ pub enum Icon {
     NewNote,
     NewFolder,
     Sort,
+    CollapseAll,
+    Folder,
+    Note,
+    Canvas,
+    Base,
+    ImageFile,
+    OtherFile,
     ChevronRight,
     ChevronDown,
     Select,
@@ -103,6 +110,14 @@ impl Icon {
             Self::NewNote => IconName::FilePlus,
             Self::NewFolder => IconName::FolderPlus,
             Self::Sort => IconName::ArrowUpDown,
+            Self::CollapseAll => IconName::ChevronsDownUp,
+            Self::Folder => IconName::Folder,
+            Self::Note => IconName::FileText,
+            Self::Canvas => IconName::LayoutDashboard,
+            Self::Base => IconName::Table2,
+            Self::ImageFile => IconName::Image,
+            // Not in the design's inventory: Lucide's plain `file`.
+            Self::OtherFile => IconName::File,
             Self::ChevronRight => IconName::ChevronRight,
             Self::ChevronDown => IconName::ChevronDown,
             Self::Select => IconName::ChevronsUpDown,
@@ -247,7 +262,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 27] = [
+    const ALL: [Icon; 34] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -266,6 +281,13 @@ mod tests {
         Icon::NewNote,
         Icon::NewFolder,
         Icon::Sort,
+        Icon::CollapseAll,
+        Icon::Folder,
+        Icon::Note,
+        Icon::Canvas,
+        Icon::Base,
+        Icon::ImageFile,
+        Icon::OtherFile,
         Icon::ChevronRight,
         Icon::ChevronDown,
         Icon::Select,

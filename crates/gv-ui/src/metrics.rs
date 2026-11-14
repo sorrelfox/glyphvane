@@ -171,6 +171,21 @@ pub mod spacing {
         pub const PAD_LEFT: f32 = 12.0;
         pub const PAD_RIGHT: f32 = 6.0;
         pub const GAP: f32 = 2.0;
+        /// Between the Files panel's vault name and its chevron.
+        pub const TITLE_GAP: f32 = 4.0;
+    }
+
+    /// List rows (Files, Tags): margin `0 6` (`size::LIST_ROW_INSET`), gap 5,
+    /// padding right 8, padding left 6 plus `size::LIST_INDENT` per level.
+    pub mod list_row {
+        pub const PAD_LEFT: f32 = 6.0;
+        pub const PAD_RIGHT: f32 = 8.0;
+        pub const GAP: f32 = 5.0;
+    }
+
+    /// A panel's list: 2 above the first row and below the last.
+    pub mod list {
+        pub const PAD_Y: f32 = 2.0;
     }
 
     /// A right panel section head: padding `0 10`, gap 4.

@@ -75,6 +75,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
         KeyBinding::new(keys::TOGGLE_EDIT_MODE, ToggleEditMode, None),
         KeyBinding::new(keys::QUIT, Quit, None),
     ]);
+    cx.bind_keys(shell::file_tree_key_bindings());
     cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_window_closed(|cx, _| {

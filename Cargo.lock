@@ -3140,6 +3140,7 @@ dependencies = [
  "gpui-pre",
  "gv-inline",
  "gv-settings",
+ "gv-vault",
  "serde",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",

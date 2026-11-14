@@ -64,7 +64,7 @@ impl Workspace {
                     theme,
                 )
                 .debug_selector(|| "toggle-sidebar".into())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(disabled_icon_button(
                 Icon::Back,
