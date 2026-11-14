@@ -23,24 +23,27 @@ use gpui::{
     ElementInputHandler, Entity, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ScrollEvent, ShapedLine, SharedString, Style,
-    TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
+    TextAlign, TextRun, TransformationMatrix, UnderlineStyle, Window, fill, point, px, relative,
+    size,
 };
 use gv_editor::SelectionSpec;
-use gv_text::TextSnapshot;
+use gv_text::{Bias, TextSnapshot};
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use super::fold::{self, VisualLine};
 use super::highlight::Underline;
 use super::input::Columns;
 use super::rows::RowEnv;
 use super::wrap::RowMap;
-use super::{EditorView, LINE, Top};
+use super::{EditorLayout, EditorView, LINE, Top};
 use crate::appearance::Appearance;
+use crate::icons::Icon;
 use crate::inline::{Palette, Token};
 use crate::metrics::size::{
-    CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, editor as editor_size,
+    CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, editor as editor_size, split,
 };
 use crate::metrics::spacing::{inline, scrollbar};
-use crate::metrics::{HAIRLINE, radius, text};
+use crate::metrics::{HAIRLINE, icon, radius, text};
 
 /// Pointer travel (px) after which an Alt-press selects a column instead of
 /// adding a caret.
@@ -126,6 +129,12 @@ pub(crate) struct Probe {
     pub matches: Vec<(Bounds<Pixels>, bool)>,
     /// Composition underlines: start, width.
     pub marked: Vec<(Point<Pixels>, Pixels)>,
+    /// Fold chevrons: line, folded, bounds.
+    pub chevrons: Vec<(usize, bool, Bounds<Pixels>)>,
+    /// Fold placeholder chips and the text they hide.
+    pub chips: Vec<(Bounds<Pixels>, Range<usize>)>,
+    /// Their fills.
+    pub chip_tokens: Vec<Token>,
     pub columns: Option<Columns>,
 }
 
@@ -136,6 +145,8 @@ pub(crate) struct Frame {
     under: Vec<PaintQuad>,
     /// Find matches, under the selections.
     matches: Vec<PaintQuad>,
+    /// Fold placeholder chips, under the matches.
+    chips: Vec<PaintQuad>,
     /// Inside the text column.
     selections: Vec<PaintQuad>,
     /// The current find match, over the selections.
@@ -146,9 +157,13 @@ pub(crate) struct Frame {
     /// The text column, where rows are clipped.
     text_clip: Option<Bounds<Pixels>>,
     numbers: Vec<(ShapedLine, Point<Pixels>)>,
+    /// Fold chevrons: bounds, SVG path and colour.
+    icons: Vec<(Bounds<Pixels>, SharedString, Hsla)>,
     thumb: Option<PaintQuad>,
     /// Where the pointer is an I-beam.
     text_area: Option<Bounds<Pixels>>,
+    /// Where the pointer is a hand: chevrons and chips.
+    pointers: Vec<Bounds<Pixels>>,
 }
 
 impl Frame {
@@ -157,6 +172,7 @@ impl Frame {
             focus,
             under: Vec::new(),
             matches: Vec::new(),
+            chips: Vec::new(),
             selections: Vec::new(),
             current_match: Vec::new(),
             rows: Vec::new(),
@@ -164,8 +180,10 @@ impl Frame {
             carets: Vec::new(),
             text_clip: None,
             numbers: Vec::new(),
+            icons: Vec::new(),
             thumb: None,
             text_area: None,
+            pointers: Vec::new(),
         }
     }
 }
@@ -229,7 +247,7 @@ impl EditorView {
                 Top::Offset(offset) => text.line_of_offset(offset.min(text.len())).unwrap_or(0),
                 Top::Line(line) => line.min(text.line_count().saturating_sub(1)),
             };
-            let row = RowMap::new(text, doc.editor.wrap()).first_row(line);
+            let row = RowMap::of(&doc.editor).first_row(line);
             // The row's top at the top edge (the column's top padding
             // scrolls away).
             self.scroll_y = if row == 0 {
@@ -259,6 +277,7 @@ impl EditorView {
             .min(rows_total);
         let origin_x = self.text_origin_x(&columns);
         let whitespace = self.show_whitespace;
+        let layout = self.layout;
         let fonts = self.fonts.clone();
         let Self {
             doc, links, find, ..
@@ -268,19 +287,40 @@ impl EditorView {
         };
         let wrap = doc.editor.wrap().cloned();
         let text = doc.editor.text().clone();
-        let map = RowMap::new(&text, wrap.as_ref());
-        let first = map.line_of_row(first_row);
-        let last = if last_row > first_row {
-            (map.line_of_row(last_row - 1) + 1).min(lines)
-        } else {
-            first
-        };
-        doc.highlights.ensure(&doc.syntax, links, first..last);
+        let tabs = doc.editor.display().clone();
+        let map = RowMap::new(&text, &tabs, wrap.as_ref());
+        let pane = layout == EditorLayout::Pane;
 
-        let visible = text.line_start(first).unwrap_or(0)
-            ..text
-                .line_range(last.saturating_sub(1).max(first))
-                .map_or(text.len(), |r| r.end);
+        // The visual lines on screen, with their first rows.
+        let mut visuals: Vec<(usize, VisualLine)> = Vec::new();
+        let mut next = map.line_of_row(first_row);
+        while next < lines {
+            let row = map.first_row(next);
+            if row >= last_row {
+                break;
+            }
+            let Some(visual) = VisualLine::new(&text, tabs.replace_snapshot(), next) else {
+                break;
+            };
+            next = visual.last + 1;
+            visuals.push((row, visual));
+        }
+        #[cfg(test)]
+        let (first, last) = (
+            visuals.first().map_or(0, |(_, v)| v.first),
+            visuals.last().map_or(0, |(_, v)| v.last + 1),
+        );
+        // Highlight the lines shown, not the ones folds hide.
+        let mut styled: Vec<usize> = visuals.iter().flat_map(|(_, v)| v.styled_lines()).collect();
+        styled.dedup();
+        for run in styled.chunk_by(|a, b| b == &(a + 1)) {
+            if let (Some(&a), Some(&b)) = (run.first(), run.last()) {
+                doc.highlights.ensure(&doc.syntax, links, a..b + 1);
+            }
+        }
+
+        let visible = visuals.first().map_or(0, |(_, v)| v.range.start)
+            ..visuals.last().map_or(text.len(), |(_, v)| v.range.end);
         let selections: Vec<(Range<usize>, usize)> = {
             let all = doc.editor.selections().as_slice();
             let from = all.partition_point(|s| s.end() < visible.start);
@@ -293,7 +333,6 @@ impl EditorView {
         let found = find.marks.touching(text.revision(), visible.clone());
         let marked = doc.editor.marked_ranges();
         let env = RowEnv {
-            text: &text,
             fonts: &fonts,
             palette: &palette,
             theme,
@@ -313,22 +352,19 @@ impl EditorView {
         };
         let row_top = |row: usize| columns.top + (row as f64 * f64::from(LINE) - scroll_y) as f32;
 
-        for line in first..last {
-            let Ok(range) = text.line_range(line) else {
-                continue;
-            };
-            let has_terminator = text.line_terminator(line).ok().flatten().is_some();
-            let line_row = map.first_row(line);
-            let breaks = map.breaks(line);
-            let Some(row) = doc
-                .rows
-                .row(line, doc.highlights.get(line), breaks, env, window)
-            else {
+        for (line_row, visual) in &visuals {
+            let (line_row, line) = (*line_row, visual.first);
+            let range = visual.range.clone();
+            let has_terminator = text.line_terminator(visual.last).ok().flatten().is_some();
+            let breaks = map.breaks(visual);
+            let style = visual.style(&doc.highlights);
+            let Some(row) = doc.rows.row(visual, style.as_ref(), breaks, env, window) else {
                 continue;
             };
             widest = widest.max(row.content_width());
-            let local = |offset: usize| offset.saturating_sub(range.start).min(range.len());
-            let on_line = |offset: usize| range.start <= offset && offset <= range.end;
+            let local = |offset: usize| visual.local(offset, Bias::Left);
+            let local_end = |offset: usize| visual.local(offset, Bias::Right);
+            let on_line = |offset: usize| visual.holds(offset);
             let line_top = row_top(line_row);
             let line_h = row.segments.len() as f32 * LINE;
 
@@ -378,7 +414,10 @@ impl EditorView {
                     if r.end < range.start || r.start > range.end {
                         continue;
                     }
-                    let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
+                    let (a, b) = (
+                        local(r.start.max(range.start)),
+                        local_end(r.end.min(range.end)),
+                    );
                     if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
                         continue;
                     }
@@ -407,7 +446,10 @@ impl EditorView {
                     if r.end < range.start || r.start > range.end {
                         continue;
                     }
-                    let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
+                    let (a, b) = (
+                        local(r.start.max(range.start)),
+                        local_end(r.end.min(range.end)),
+                    );
                     if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
                         continue;
                     }
@@ -507,6 +549,29 @@ impl EditorView {
                     probe.carets.push(rect);
                     frame.carets.push(fill(rect, color(Token::AccentDefault)));
                 }
+                // Fold placeholders: a chip under the `⋯`.
+                for mark in &visual.marks {
+                    let Some((x0, x1)) = fold::chip_span(row, k, mark) else {
+                        continue;
+                    };
+                    let h = editor_size::FOLD_CHIP_HEIGHT;
+                    let rect = bounds_of(origin_x + x0, top + (LINE - h) / 2.0, x1 - x0, h);
+                    #[cfg(test)]
+                    probe.chips.push((rect, mark.buffer.clone()));
+                    // On the code fill or the current line `surface.sunken`
+                    // would not show.
+                    let chip = if row.code || current {
+                        Token::StatePress
+                    } else {
+                        Token::SurfaceSunken
+                    };
+                    #[cfg(test)]
+                    probe.chip_tokens.push(chip);
+                    frame
+                        .chips
+                        .push(fill(rect, color(chip)).corner_radii(px(radius::CHIP)));
+                    frame.pointers.push(rect);
+                }
                 frame.rows.push((shaped, point(px(seg_x), px(top))));
 
                 // The line number, on the line's first row only.
@@ -541,6 +606,38 @@ impl EditorView {
                 );
                 let x = columns.numbers_right - f32::from(number.width);
                 frame.numbers.push((number, point(px(x), px(top))));
+
+                // The fold chevron, in the Split view.
+                if !pane {
+                    continue;
+                }
+                let folded = !visual.marks.is_empty();
+                if !folded && !doc.editor.is_foldable(line) {
+                    continue;
+                }
+                let icon = if folded {
+                    Icon::Folded
+                } else {
+                    Icon::FoldMarker
+                };
+                let size = icon::TINY;
+                let rect = bounds_of(
+                    columns.numbers_right + split::CHEVRON_GAP,
+                    top + (LINE - size) / 2.0,
+                    size,
+                    size,
+                );
+                #[cfg(test)]
+                probe.chevrons.push((line, folded, rect));
+                frame
+                    .icons
+                    .push((rect, icon.name().path(), color(Token::TextTertiary)));
+                frame.pointers.push(bounds_of(
+                    columns.numbers_right,
+                    top,
+                    fold::chevron_slot(),
+                    LINE,
+                ));
             }
         }
         doc.rows.end_frame();
@@ -607,23 +704,19 @@ impl EditorView {
         window: &Window,
         cx: &App,
     ) {
-        let Some((line, column, rows, wrapping)) = self.doc.as_ref().and_then(|doc| {
+        let Some((line, head, rows, wrapping)) = self.doc.as_ref().and_then(|doc| {
             let text = doc.editor.text();
             let head = doc.editor.selections().primary().head();
             let line = text.line_of_offset(head).ok()?;
-            let map = RowMap::new(text, doc.editor.wrap());
-            Some((
-                line,
-                head - text.line_start(line).ok()?,
-                map.row_count(),
-                map.is_wrapping(),
-            ))
+            let map = RowMap::of(&doc.editor);
+            Some((line, head, map.row_count(), map.is_wrapping()))
         }) else {
             return;
         };
-        let Some((first, row)) = self.line_row(line, window, cx) else {
+        let Some((first, visual, row)) = self.line_row(line, window, cx) else {
             return;
         };
+        let column = visual.local(head, Bias::Left);
         let (segment, x) = row.x(column);
         let display_row = first + segment;
         let pad_top = self.layout.pad_top();
@@ -671,12 +764,19 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if !e.modifiers.modified()
+            && let Some(hit) = self.fold_hit(e.position, window, cx)
+        {
+            self.press_fold(hit, window, cx);
+            return;
+        }
         let Some(offset) = self.offset_at(e.position, window, cx) else {
             return;
         };
         let in_gutter = self
             .columns(None, window)
             .is_some_and(|c| f32::from(e.position.x) < c.text_x - editor_size::GUTTER_GAP / 2.0);
+        let line_range = self.visual_line_at(offset);
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
@@ -718,7 +818,7 @@ impl EditorView {
                 }
             }
             _ => {
-                let line = line_at(&text, offset);
+                let line = line_range.unwrap_or_else(|| line_at(&text, offset));
                 editor.select_ranges([line.clone()]);
                 Press::Select {
                     tail: line,
@@ -743,6 +843,7 @@ impl EditorView {
                 let Some(offset) = self.offset_at(e.position, window, cx) else {
                     return;
                 };
+                let line_range = self.visual_line_at(offset);
                 let Some(doc) = self.doc.as_mut() else {
                     return;
                 };
@@ -758,7 +859,7 @@ impl EditorView {
                         }
                     }
                     Unit::Line => {
-                        let line = line_at(&text, offset);
+                        let line = line_range.unwrap_or_else(|| line_at(&text, offset));
                         if offset < tail.start {
                             (tail.end, line.start)
                         } else {
@@ -925,6 +1026,8 @@ impl IntoElement for EditorElement {
 pub(crate) struct Prepaint {
     hitbox: Hitbox,
     text_hitbox: Option<Hitbox>,
+    /// Over the fold chevrons and chips.
+    pointer_hitboxes: Vec<Hitbox>,
     frame: Frame,
 }
 
@@ -969,9 +1072,16 @@ impl Element for EditorElement {
         let text_hitbox = frame
             .text_area
             .map(|area| window.insert_hitbox(area, HitboxBehavior::Normal));
+        let pointer_hitboxes = frame
+            .pointers
+            .iter()
+            .filter(|b| b.intersects(&bounds))
+            .map(|b| window.insert_hitbox(b.intersect(&bounds), HitboxBehavior::Normal))
+            .collect();
         Prepaint {
             hitbox,
             text_hitbox,
+            pointer_hitboxes,
             frame,
         }
     }
@@ -998,6 +1108,9 @@ impl Element for EditorElement {
             }
             let clip = frame.text_clip.unwrap_or(bounds);
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                for quad in frame.chips.drain(..) {
+                    window.paint_quad(quad);
+                }
                 for quad in frame.matches.drain(..) {
                     window.paint_quad(quad);
                 }
@@ -1042,12 +1155,20 @@ impl Element for EditorElement {
             for (number, origin) in &frame.numbers {
                 let _ = number.paint(*origin, px(LINE), TextAlign::Left, None, window, cx);
             }
+            for (bounds, path, color) in frame.icons.drain(..) {
+                // An icon missing from the assets draws nothing.
+                let _ =
+                    window.paint_svg(bounds, path, None, TransformationMatrix::unit(), color, cx);
+            }
             if let Some(thumb) = frame.thumb.take() {
                 window.paint_quad(thumb);
             }
         });
         if let Some(text_hitbox) = &pre.text_hitbox {
             window.set_cursor_style(CursorStyle::IBeam, text_hitbox);
+        }
+        for hitbox in &pre.pointer_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
         self.register_handlers(&pre.hitbox, window);
     }

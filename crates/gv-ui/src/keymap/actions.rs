@@ -76,6 +76,9 @@ command_actions! {
         Unfold = "view.unfold",
         FoldAll = "view.fold_all",
         UnfoldAll = "view.unfold_all",
+        FoldLevel1 = "view.fold_level_1",
+        FoldLevel2 = "view.fold_level_2",
+        FoldLevel3 = "view.fold_level_3",
         ToggleSoftWrap = "view.toggle_soft_wrap",
     }
     navigation {

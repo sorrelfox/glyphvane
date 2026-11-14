@@ -68,6 +68,15 @@
 //! replace row over the text; matches are highlighted on the rows on
 //! screen, the current one is selected, Replace all is one undo step.
 //!
+//! # Folding
+//!
+//! [`fold`]: headings, list items, code, quotes, front matter and HTML
+//! blocks fold to their first line and a `⋯` chip. In the Split view the
+//! gutter has a chevron on each line that folds; the View menu and the
+//! palette have Fold, Unfold, Fold all, Unfold all and Fold to heading
+//! level 1 to 3. Rows are visual lines: a folded line and the rest of the
+//! line its fold ends on.
+//!
 //! # The status bar
 //!
 //! [`stats`]: the primary caret's line and column, the characters
@@ -85,6 +94,7 @@
 mod element;
 mod file;
 mod find;
+mod fold;
 mod highlight;
 mod input;
 mod layout;
@@ -126,6 +136,7 @@ use element::{EditorElement, Press, Scrollbar};
 pub use file::DocEvent;
 use file::{DocState, Loaded};
 pub use find::DEBUG_REPLACE_ENV;
+pub use fold::DEBUG_FOLD_ENV;
 use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
 pub use paste::{ClipboardHtml, HtmlClipboard, set_html_clipboard};
@@ -308,6 +319,8 @@ pub(crate) struct Doc {
     state: DocState,
     /// Large-file mode: soft wrap stays off.
     large_file: bool,
+    /// The text revision the foldable regions were found in.
+    foldable_at: Option<Revision>,
 }
 
 impl std::fmt::Debug for Doc {
@@ -411,6 +424,8 @@ pub struct EditorView {
     _rewrap: Option<wrap::Rewrap>,
     /// The wait for a large document's new width to settle.
     _rewrap_wait: Option<Task<()>>,
+    /// The wait before the foldable regions are found again.
+    _foldable: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -462,6 +477,7 @@ impl EditorView {
             _reparse: None,
             _rewrap: None,
             _rewrap_wait: None,
+            _foldable: None,
         }
     }
 
@@ -664,7 +680,10 @@ impl EditorView {
             rows: RowCache::default(),
             state,
             large_file,
+            foldable_at: None,
         });
+        self._foldable = None;
+        self.refresh_foldable();
         self.availabilities.reset();
         self.stats.reset();
         self.reset_find();
@@ -786,7 +805,6 @@ impl EditorView {
             };
             return Some(line as f64);
         }
-        let lines = self.doc.as_ref()?.editor.text().line_count();
         let map = self.row_map()?;
         let pad = f64::from(self.layout.pad_top());
         if self.scroll_y < pad {
@@ -794,7 +812,7 @@ impl EditorView {
         }
         let row = (self.scroll_y - pad) / f64::from(LINE);
         let line = map.line_of_row(row.floor() as usize);
-        let (first, rows) = line_rows(map, lines, line);
+        let (first, rows) = line_rows(map, line);
         Some(line as f64 + ((row - first as f64) / rows as f64).clamp(0.0, 1.0))
     }
 
@@ -812,7 +830,7 @@ impl EditorView {
             (position + 1.0).max(0.0) * pad
         } else {
             let line = (position.floor() as usize).min(lines.saturating_sub(1));
-            let (first, rows) = line_rows(map, lines, line);
+            let (first, rows) = line_rows(map, line);
             let frac = (position - line as f64).clamp(0.0, 1.0);
             pad + (first as f64 + frac * rows as f64) * f64::from(LINE)
         };
@@ -893,6 +911,7 @@ impl EditorView {
                 .ok();
             }));
         }
+        self.schedule_foldable(cx);
     }
 
     fn with_editor(
@@ -1105,6 +1124,35 @@ impl EditorView {
     }
 }
 
+/// Registers the fold commands on `root`.
+fn fold_handlers(
+    root: gpui::Stateful<gpui::Div>,
+    cx: &mut Context<'_, EditorView>,
+) -> gpui::Stateful<gpui::Div> {
+    use fold::FoldCommand;
+    root.on_action(cx.listener(|this, _: &view_commands::Fold, w, cx| {
+        this.fold_command(FoldCommand::Fold, w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::Unfold, w, cx| {
+        this.fold_command(FoldCommand::Unfold, w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldAll, w, cx| {
+        this.fold_command(FoldCommand::FoldAll, w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::UnfoldAll, w, cx| {
+        this.fold_command(FoldCommand::UnfoldAll, w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel1, w, cx| {
+        this.fold_command(FoldCommand::Level(1), w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel2, w, cx| {
+        this.fold_command(FoldCommand::Level(2), w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel3, w, cx| {
+        this.fold_command(FoldCommand::Level(3), w, cx);
+    }))
+}
+
 /// What an editing closure may ask of the view.
 pub(crate) struct Extra {
     /// Rows in a page.
@@ -1147,15 +1195,11 @@ fn split_for_carets(text: &str, lengths: Option<&[usize]>, count: usize) -> Opti
 /// The row height.
 const LINE: f32 = text::EDITOR.line;
 
-/// The first display row of `line` (of `lines`) and its number of rows.
-fn line_rows(map: RowMap<'_>, lines: usize, line: usize) -> (usize, usize) {
+/// The first display row of the visual line of `line` and its number of
+/// rows.
+fn line_rows(map: RowMap<'_>, line: usize) -> (usize, usize) {
     let first = map.first_row(line);
-    let next = if line + 1 < lines {
-        map.first_row(line + 1)
-    } else {
-        map.row_count()
-    };
-    (first, next.saturating_sub(first).max(1))
+    (first, map.row_end(line).saturating_sub(first).max(1))
 }
 
 impl EventEmitter<DocEvent> for EditorView {}
@@ -1202,6 +1246,7 @@ impl Render for EditorView {
         let theme = Appearance::theme(cx);
         if self.status == EditorStatus::Ready {
             self.debug_replace(window, cx);
+            self.debug_fold(window, cx);
         }
         // The key context is on the element around the editor and the find
         // popover, so the commands bound to it also work from the
@@ -1309,6 +1354,7 @@ impl Render for EditorView {
                     this.toggle_soft_wrap(cx);
                 }),
             );
+        let root = fold_handlers(root, cx);
         // Viewer mode: nothing that changes the text has a handler, so its
         // menu items are disabled and its keys do nothing.
         let root = if self.read_only {

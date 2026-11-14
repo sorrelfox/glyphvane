@@ -73,6 +73,9 @@ pub enum Icon {
     OtherFile,
     ChevronRight,
     ChevronDown,
+    /// A fold marker in the editor's gutter, and a folded one.
+    FoldMarker,
+    Folded,
     Select,
     GitBranch,
     Profile,
@@ -140,6 +143,8 @@ impl Icon {
             Self::OtherFile => IconName::File,
             Self::ChevronRight => IconName::ChevronRight,
             Self::ChevronDown => IconName::ChevronDown,
+            Self::FoldMarker => IconName::ChevronDown,
+            Self::Folded => IconName::ChevronRight,
             Self::Select => IconName::ChevronsUpDown,
             Self::GitBranch => IconName::GitBranch,
             Self::Profile => IconName::Layers2,
@@ -295,7 +300,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 45] = [
+    const ALL: [Icon; 47] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -323,6 +328,8 @@ mod tests {
         Icon::OtherFile,
         Icon::ChevronRight,
         Icon::ChevronDown,
+        Icon::FoldMarker,
+        Icon::Folded,
         Icon::Select,
         Icon::GitBranch,
         Icon::Profile,

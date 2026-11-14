@@ -86,6 +86,9 @@ const BUILTIN: &[Row] = &[
     ("view.unfold", "Unfold", Category::View, Some(EDITOR), &[]),
     ("view.fold_all", "Fold all", Category::View, Some(EDITOR), &[]),
     ("view.unfold_all", "Unfold all", Category::View, Some(EDITOR), &[]),
+    ("view.fold_level_1", "Fold to heading level 1", Category::View, Some(EDITOR), &[]),
+    ("view.fold_level_2", "Fold to heading level 2", Category::View, Some(EDITOR), &[]),
+    ("view.fold_level_3", "Fold to heading level 3", Category::View, Some(EDITOR), &[]),
     ("view.toggle_soft_wrap", "Toggle soft wrap", Category::View, Some(EDITOR), &[]),
 
     // Navigation

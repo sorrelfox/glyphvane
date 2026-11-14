@@ -11,6 +11,10 @@
 //! tabs as `→`, no-break spaces as `⍽` and a `↵` after a line that ends in
 //! a hard break of two or more spaces. Display text never changes a line's
 //! number of rows.
+//!
+//! A fold placeholder (`⋯`, [`super::fold`]) is drawn with a space on each
+//! side, room for its chip; it counts as one column for tab stops, as in
+//! the display map.
 
 use std::ops::Range;
 
@@ -40,8 +44,22 @@ impl RowText {
     /// The display text of `content` (a line without its terminator).
     /// `hard_break` says whether the line ends in a hard break of spaces
     /// (only drawn with `show_whitespace`).
+    #[cfg(test)]
     pub fn new(content: &str, tab_size: u32, show_whitespace: bool, hard_break: bool) -> Self {
-        let needs_map = content.bytes().any(|b| b == b'\t' || b < 0x20 || b == 0x7f)
+        Self::with_placeholders(content, tab_size, show_whitespace, hard_break, &[])
+    }
+
+    /// [`Self::new`] for content that holds fold placeholders at
+    /// `placeholders` (byte ranges of `content`, in order).
+    pub fn with_placeholders(
+        content: &str,
+        tab_size: u32,
+        show_whitespace: bool,
+        hard_break: bool,
+        placeholders: &[Range<usize>],
+    ) -> Self {
+        let needs_map = !placeholders.is_empty()
+            || content.bytes().any(|b| b == b'\t' || b < 0x20 || b == 0x7f)
             || (show_whitespace && (content.ends_with(' ') || content.contains('\u{a0}')));
         if !needs_map && !(show_whitespace && hard_break) {
             return Self {
@@ -57,10 +75,19 @@ impl RowText {
         let mut map = vec![0u32; content.len() + 1];
         let mut marks = Vec::new();
         let mut column = 0usize;
+        let mut placeholders = placeholders.iter().peekable();
         for (at, c) in content.char_indices() {
             let start = display.len();
             for slot in &mut map[at..at + c.len_utf8()] {
                 *slot = u32::try_from(start).unwrap_or(u32::MAX);
+            }
+            while placeholders.next_if(|p| p.start < at).is_some() {}
+            if placeholders.next_if(|p| p.start == at).is_some() {
+                display.push(' ');
+                display.push(c);
+                display.push(' ');
+                column += 1;
+                continue;
             }
             match c {
                 '\t' => {
@@ -198,6 +225,19 @@ mod tests {
         assert_eq!(row.to_display(4), "a→  b·".len());
         assert_eq!(row.to_buffer("a→  b·".len()), 4);
         assert_eq!(row.to_buffer("a→  b".len() + 1), 3);
+    }
+
+    #[test]
+    fn placeholders_get_room() {
+        let row =
+            RowText::with_placeholders("a⋯\tb", 4, false, false, std::slice::from_ref(&(1..4)));
+        assert_eq!(row.display, "a ⋯   b");
+        // The placeholder's ends: before its room, after it.
+        assert_eq!(row.to_display(1), 1);
+        assert_eq!(row.to_display(4), " ⋯ ".len() + 1);
+        assert_eq!(row.to_buffer(" ⋯".len() + 1), 1);
+        // A literal ellipsis is plain text.
+        assert_eq!(RowText::new("a⋯", 4, false, false).display, "a⋯");
     }
 
     #[test]

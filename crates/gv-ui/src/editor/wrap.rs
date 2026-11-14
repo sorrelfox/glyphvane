@@ -35,10 +35,11 @@ use std::time::Duration;
 use gpui::{App, Context, Font, FontId, Pixels, Task, TextSystem, px};
 use gv_editor::Editor;
 use gv_editor::display_map::{
-    LineWrapper, RewrapJob, TextMeasure, WrapPoint, WrapRow, WrapSnapshot,
+    LineWrapper, RewrapJob, TabPoint, TabSnapshot, TextMeasure, WrapPoint, WrapRow, WrapSnapshot,
 };
-use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
+use gv_text::{Bias, TextSnapshot};
 
+use super::fold::{PLACEHOLDER_CHAR, VisualLine};
 use super::{EditorView, LINE};
 use crate::metrics::text;
 
@@ -134,6 +135,11 @@ impl EditorMeasure {
     /// control picture, a character no font has as a box at least an `m`
     /// wide.
     fn visible_width(&mut self, c: char) -> f32 {
+        if c == PLACEHOLDER_CHAR {
+            // A fold placeholder is drawn with a space on each side
+            // (`super::layout`).
+            return self.shaped_width(c) + 2.0 * self.shaped_width(' ');
+        }
         let drawn = match c as u32 {
             n @ 0..0x20 => char::from_u32(0x2400 + n).unwrap_or(c),
             0x7f => '\u{2421}',
@@ -174,20 +180,36 @@ pub(crate) struct Break {
     pub indent: u32,
 }
 
-/// The rows the view shows: wrap rows while soft wrap is on, buffer lines
-/// otherwise.
+/// The rows the view shows: wrap rows while soft wrap is on, else the rows
+/// of the tab layer (buffer lines, less the lines folds hide).
+///
+/// Lines are named by buffer line; a line hidden in a fold belongs to the
+/// visual line ([`VisualLine`]) its fold is on.
 #[derive(Clone, Copy)]
 pub(crate) enum RowMap<'a> {
+    /// No folds, no wrap: a row per buffer line.
     Lines(&'a TextSnapshot),
+    /// Folds, no wrap: a row per tab row.
+    Tabs(&'a TabSnapshot),
     Wrap(&'a WrapSnapshot),
 }
 
 impl<'a> RowMap<'a> {
-    pub fn new(text: &'a TextSnapshot, wrap: Option<&'a WrapSnapshot>) -> Self {
+    pub fn new(
+        text: &'a TextSnapshot,
+        tabs: &'a TabSnapshot,
+        wrap: Option<&'a WrapSnapshot>,
+    ) -> Self {
         match wrap {
             Some(wrap) => Self::Wrap(wrap),
+            None if tabs.replace_snapshot().has_folds() => Self::Tabs(tabs),
             None => Self::Lines(text),
         }
+    }
+
+    /// The rows of `editor`.
+    pub fn of(editor: &'a Editor) -> Self {
+        Self::new(editor.text(), editor.display(), editor.wrap())
     }
 
     pub fn is_wrapping(self) -> bool {
@@ -198,38 +220,84 @@ impl<'a> RowMap<'a> {
     pub fn row_count(self) -> usize {
         match self {
             Self::Lines(text) => text.line_count(),
+            Self::Tabs(tabs) => tabs.max_point().row() as usize + 1,
             Self::Wrap(wrap) => wrap.max_point().row().0 as usize + 1,
         }
     }
 
-    /// The line row `row` belongs to (the last line past the end).
+    /// The first buffer line of the visual line row `row` belongs to (the
+    /// last one past the end).
     pub fn line_of_row(self, row: usize) -> usize {
         match self {
             Self::Lines(text) => row.min(text.line_count().saturating_sub(1)),
+            Self::Tabs(tabs) => {
+                let max = tabs.max_point().row();
+                let row = u32::try_from(row).unwrap_or(u32::MAX).min(max);
+                tabs.replace_snapshot().buffer_line(row)
+            }
             Self::Wrap(wrap) => {
                 let max = wrap.max_point().row().0;
                 let row = u32::try_from(row).unwrap_or(u32::MAX).min(max);
-                wrap.wrap_point_to_buffer_point(WrapPoint::new(WrapRow(row), 0), Bias::Left)
-                    .line
+                let tab_row = wrap.to_tab_point(WrapPoint::new(WrapRow(row), 0)).row();
+                wrap.tab_snapshot().replace_snapshot().buffer_line(tab_row)
             }
         }
     }
 
-    /// The first row of `line`.
+    /// The tab row of buffer line `line`'s visual line.
+    fn tab_row(tabs: &TabSnapshot, line: usize) -> u32 {
+        tabs.buffer_line_to_tab_row(line)
+    }
+
+    /// The first row of the visual line that shows `line`.
     pub fn first_row(self, line: usize) -> usize {
         match self {
             Self::Lines(_) => line,
+            Self::Tabs(tabs) => Self::tab_row(tabs, line) as usize,
             Self::Wrap(wrap) => {
-                wrap.buffer_point_to_wrap_point(BufferPoint::new(line, 0), Bias::Left)
+                let tab_row = Self::tab_row(wrap.tab_snapshot(), line);
+                wrap.tab_point_to_wrap_point(TabPoint::new(tab_row, 0))
                     .row()
                     .0 as usize
             }
         }
     }
 
-    /// Where the rows of `line` start: one break at column 0 for an
-    /// unwrapped line.
-    pub fn breaks(self, line: usize) -> Vec<Break> {
+    /// One past the last row of the visual line that shows `line`.
+    pub fn row_end(self, line: usize) -> usize {
+        match self {
+            Self::Lines(_) | Self::Tabs(_) => self.first_row(line) + 1,
+            Self::Wrap(wrap) => {
+                let tabs = wrap.tab_snapshot();
+                let tab_row = Self::tab_row(tabs, line);
+                if tab_row >= tabs.max_point().row() {
+                    return self.row_count();
+                }
+                wrap.tab_point_to_wrap_point(TabPoint::new(tab_row + 1, 0))
+                    .row()
+                    .0 as usize
+            }
+        }
+    }
+
+    /// The first buffer line of the visual line that shows `line`.
+    pub fn visual_start(self, line: usize) -> usize {
+        match self {
+            Self::Lines(_) => line,
+            Self::Tabs(tabs) => tabs
+                .replace_snapshot()
+                .buffer_line(Self::tab_row(tabs, line)),
+            Self::Wrap(wrap) => {
+                let tabs = wrap.tab_snapshot();
+                tabs.replace_snapshot()
+                    .buffer_line(Self::tab_row(tabs, line))
+            }
+        }
+    }
+
+    /// Where the rows of visual line `line` start, in its columns: one break
+    /// at column 0 for a line that does not wrap.
+    pub fn breaks(self, line: &VisualLine) -> Vec<Break> {
         let first = Break {
             column: 0,
             indent: 0,
@@ -237,20 +305,23 @@ impl<'a> RowMap<'a> {
         let Self::Wrap(wrap) = self else {
             return vec![first];
         };
+        let text = wrap.buffer();
         let mut breaks = vec![first];
-        let mut row = WrapRow(self.first_row(line) as u32);
+        let mut row = WrapRow(self.first_row(line.first) as u32);
         while let Some(indent) = wrap.soft_wrap_indent(row) {
             row = row + WrapRow(1);
             let point = wrap.wrap_point_to_buffer_point(WrapPoint::new(row, indent), Bias::Left);
-            if point.line != line {
+            let Ok(start) = text.line_start(point.line) else {
+                break;
+            };
+            let offset = start + point.column;
+            if !line.holds(offset) {
                 break;
             }
+            let column = line.local(offset, Bias::Left);
             // A row inside one expanded tab starts nowhere new.
-            if breaks.last().is_some_and(|b| point.column > b.column) {
-                breaks.push(Break {
-                    column: point.column,
-                    indent,
-                });
+            if breaks.last().is_some_and(|b| column > b.column) {
+                breaks.push(Break { column, indent });
             }
         }
         breaks
@@ -332,8 +403,7 @@ impl EditorView {
 
     /// The rows the view shows now.
     pub(crate) fn row_map(&self) -> Option<RowMap<'_>> {
-        let editor = &self.doc.as_ref()?.editor;
-        Some(RowMap::new(editor.text(), editor.wrap()))
+        Some(RowMap::of(&self.doc.as_ref()?.editor))
     }
 
     /// The wrap width wanted for a text column `text_w` wide.
@@ -450,7 +520,7 @@ impl EditorView {
         let row_px = f64::from(LINE);
         let doc = self.doc.as_mut()?;
         let (line, delta) = {
-            let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
+            let map = RowMap::of(&doc.editor);
             let row = ((self.scroll_y - pad) / row_px).floor().max(0.0) as usize;
             let line = map.line_of_row(row);
             let line_top = pad + map.first_row(line) as f64 * row_px;
@@ -458,9 +528,10 @@ impl EditorView {
         };
         let result = change(&mut doc.editor);
         if self.scroll_y > 0.0 {
-            let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
-            let rows = map.breaks(line).len() as f64;
-            let line_top = pad + map.first_row(line) as f64 * row_px;
+            let map = RowMap::of(&doc.editor);
+            let first = map.first_row(line);
+            let rows = map.row_end(line).saturating_sub(first).max(1) as f64;
+            let line_top = pad + first as f64 * row_px;
             self.scroll_y = (line_top + delta.min(rows * row_px - 1.0)).max(0.0);
         }
         Some(result)

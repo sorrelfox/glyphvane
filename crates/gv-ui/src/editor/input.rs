@@ -22,6 +22,7 @@ use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, W
 use gv_editor::boundaries::{clip_caret, snap_to_grapheme};
 use gv_text::{Bias, OffsetUtf16};
 
+use super::fold::VisualLine;
 use super::rows::{Row, RowEnv};
 use super::wrap::RowMap;
 use super::{EditorLayout, EditorView, LINE};
@@ -56,8 +57,8 @@ impl Columns {
     ///   left when the numbers do not fit.
     /// - [`EditorLayout::Pane`]: from the pane's left edge; the line
     ///   numbers are 28 wide and grow to the right, then the fold
-    ///   chevron's place (no folding yet, so nothing is drawn there) and
-    ///   the text, which ends clear of the scrollbar.
+    ///   chevron's slot ([`super::fold`]) and the text, which ends clear
+    ///   of the scrollbar.
     pub fn new(bounds: Bounds<Pixels>, lines: usize, digit: f32, layout: EditorLayout) -> Self {
         let left = f32::from(bounds.left());
         let width = f32::from(bounds.size.width);
@@ -138,25 +139,30 @@ impl EditorView {
         columns.text_x - self.scroll_x
     }
 
-    /// The shaped row of `line` in the current text, and its first
-    /// display row.
+    /// The shaped row of the visual line that shows buffer line `line` in
+    /// the current text, its first display row and the visual line.
     pub(crate) fn line_row(
         &mut self,
         line: usize,
         window: &Window,
         cx: &gpui::App,
-    ) -> Option<(usize, Row)> {
+    ) -> Option<(usize, VisualLine, Row)> {
         let theme = Appearance::current_id(cx);
         let palette = Palette::of(theme);
         let whitespace = self.show_whitespace;
         let fonts = self.fonts.clone();
         let (_, space) = self.advances(window);
         let doc = self.doc.as_mut()?;
-        let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
-        let first = map.first_row(line);
-        let breaks = map.breaks(line);
+        let map = RowMap::of(&doc.editor);
+        let start = map.visual_start(line);
+        let first = map.first_row(start);
+        let visual = VisualLine::new(
+            doc.editor.text(),
+            doc.editor.display().replace_snapshot(),
+            start,
+        )?;
+        let breaks = map.breaks(&visual);
         let env = RowEnv {
-            text: doc.editor.text(),
             fonts: &fonts,
             palette: &palette,
             theme,
@@ -164,17 +170,18 @@ impl EditorView {
             tab_size: doc.editor.display().tab_size().get(),
             space,
         };
+        let style = visual.style(&doc.highlights);
         let row = doc
             .rows
-            .row(line, doc.highlights.get(line), breaks, env, window)
+            .row(&visual, style.as_ref(), breaks, env, window)
             .cloned()?;
-        Some((first, row))
+        Some((first, visual, row))
     }
 
     /// The shaped row of `line` in the current text.
     #[cfg(test)]
     pub(crate) fn row(&mut self, line: usize, window: &Window, cx: &gpui::App) -> Option<Row> {
-        self.line_row(line, window, cx).map(|(_, row)| row)
+        self.line_row(line, window, cx).map(|(_, _, row)| row)
     }
 
     /// The caret offset nearest to window point `position`.
@@ -198,13 +205,12 @@ impl EditorView {
         if display_row >= row_count {
             return Some(len);
         }
-        let (first, row) = self.line_row(line, window, cx)?;
+        let (first, visual, row) = self.line_row(line, window, cx)?;
         let segment = display_row.saturating_sub(first);
         let x = f32::from(position.x) - self.text_origin_x(&columns);
         let column = row.column_at(segment, x).min(row.content_len());
         let text = self.doc.as_ref()?.editor.text();
-        let start = text.line_start(line).ok()?;
-        let offset = snap_to_grapheme(text, start + column);
+        let offset = snap_to_grapheme(text, visual.to_buffer(column));
         Some(clip_caret(text, offset, Bias::Left))
     }
 
@@ -219,15 +225,15 @@ impl EditorView {
     ) -> Option<Bounds<Pixels>> {
         let bounds = self.bounds.or(element_bounds);
         let columns = self.columns(bounds, window)?;
-        let (line, start, end) = {
+        let line = {
             let text = self.doc.as_ref()?.editor.text();
-            let line = text.line_of_offset(range.start).ok()?;
-            let line_range = text.line_range(line).ok()?;
-            let start = range.start.saturating_sub(line_range.start);
-            let end = (range.end.min(line_range.end)).saturating_sub(line_range.start);
-            (line, start, end.max(start))
+            text.line_of_offset(range.start).ok()?
         };
-        let (first, row) = self.line_row(line, window, cx)?;
+        let (first, visual, row) = self.line_row(line, window, cx)?;
+        let start = visual.local(range.start, Bias::Left);
+        let end = visual
+            .local(range.end.min(visual.range.end), Bias::Right)
+            .max(start);
         let (segment, x0) = row.x(start);
         let x1 = row.x_in(segment, end);
         let x = self.text_origin_x(&columns);

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Shaped rows: a buffer line with its styled runs, shaped as one GPUI
+//! Shaped rows: a visual line ([`VisualLine`]: a buffer line, or one
+//! joined to others by folds) with its styled runs, shaped as one GPUI
 //! [`ShapedLine`] per wrap row ([`Segment`]), kept across frames while the
-//! line's text, highlighting and wraps stay the same.
+//! line's text, folds, highlighting and wraps stay the same. Columns are
+//! the visual line's (line-relative bytes when nothing is folded).
 //!
 //! GPUI also caches glyph layouts for the lines of the last two frames, by
 //! text and fonts; this cache adds the display text, the run list and the
@@ -15,8 +17,8 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{Font, Hsla, ShapedLine, SharedString, StrikethroughStyle, TextRun, Window, px};
-use gv_text::TextSnapshot;
 
+use super::fold::VisualLine;
 use super::highlight::{LineStyle, Style, Underline};
 use super::layout::{RowText, ends_in_hard_break};
 use super::wrap::Break;
@@ -85,6 +87,8 @@ pub(crate) struct Segment {
 pub(crate) struct Row {
     /// What it was made from.
     content: String,
+    /// The fold placeholders in `content`.
+    placeholders: Vec<Range<usize>>,
     style: Option<Rc<LineStyle>>,
     whitespace: bool,
     theme: ThemeId,
@@ -369,7 +373,6 @@ fn decorations(text: &RowText, runs: &[(Range<usize>, Style)]) -> Vec<Decoration
 /// What a row is made with, besides its line.
 #[derive(Clone, Copy)]
 pub(crate) struct RowEnv<'a> {
-    pub text: &'a TextSnapshot,
     pub fonts: &'a Fonts,
     pub palette: &'a Palette,
     pub theme: ThemeId,
@@ -391,22 +394,25 @@ pub(crate) struct RowCache {
 const SPARE_ROWS: usize = 256;
 
 impl RowCache {
-    /// The row of `line`, shaped now unless the cached one still fits.
-    /// The line wraps at `breaks` (one at column 0 when it does not wrap).
+    /// The row of visual line `line`, shaped now unless the cached one
+    /// still fits. The line wraps at `breaks` (one at column 0 when it does
+    /// not wrap).
     pub fn row(
         &mut self,
-        line: usize,
+        line: &VisualLine,
         style: Option<&Rc<LineStyle>>,
         breaks: Vec<Break>,
         env: RowEnv<'_>,
         window: &Window,
     ) -> Option<&Row> {
-        let range = env.text.line_range(line).ok()?;
-        let content = env.text.text_for_range(range).ok()?;
-        self.used.push(line);
-        let fresh = match self.rows.get(&line) {
+        let content = &line.content;
+        let placeholders = line.mark_columns();
+        let key = line.first;
+        self.used.push(key);
+        let fresh = match self.rows.get(&key) {
             Some(row) => {
-                row.content != content
+                row.content != *content
+                    || row.placeholders != placeholders
                     || row.whitespace != env.whitespace
                     || row.theme != env.theme
                     || row.tab_size != env.tab_size
@@ -421,10 +427,17 @@ impl RowCache {
             None => true,
         };
         if fresh {
-            let row = make_row(content, style.cloned(), breaks, env, window);
-            self.rows.insert(line, row);
+            let row = make_row(
+                content.clone(),
+                placeholders,
+                style.cloned(),
+                breaks,
+                env,
+                window,
+            );
+            self.rows.insert(key, row);
         }
-        self.rows.get(&line)
+        self.rows.get(&key)
     }
 
     /// Forgets rows that were not used in the frame that ends.
@@ -439,13 +452,20 @@ impl RowCache {
 
 fn make_row(
     content: String,
+    placeholders: Vec<Range<usize>>,
     style: Option<Rc<LineStyle>>,
     mut breaks: Vec<Break>,
     env: RowEnv<'_>,
     window: &Window,
 ) -> Row {
     let hard_break = env.whitespace && ends_in_hard_break(&content);
-    let text = RowText::new(&content, env.tab_size, env.whitespace, hard_break);
+    let text = RowText::with_placeholders(
+        &content,
+        env.tab_size,
+        env.whitespace,
+        hard_break,
+        &placeholders,
+    );
     let runs = match &style {
         Some(style) => style.clamped(content.len()),
         None if content.is_empty() => Vec::new(),
@@ -503,6 +523,7 @@ fn make_row(
     let code = style.as_ref().is_some_and(|s| s.code);
     Row {
         content,
+        placeholders,
         style,
         whitespace: env.whitespace,
         theme: env.theme,

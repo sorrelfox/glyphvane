@@ -108,6 +108,11 @@ pub mod size {
         pub const GUTTER_GAP: f32 = 14.0;
         /// The caret: 16 tall, centred in its 20 px row (SPEC § Editor).
         pub const CARET_HEIGHT: f32 = 16.0;
+        /// A fold placeholder's chip (not designed: built from the inline
+        /// code chip): 16 tall, centred in its row, 2 in from the ends of
+        /// the `⋯` and the space each side of it.
+        pub const FOLD_CHIP_HEIGHT: f32 = 16.0;
+        pub const FOLD_CHIP_INSET_X: f32 = 2.0;
     }
 
     /// Split view (SPEC § Split, screens `split.*`): two panes of equal
@@ -127,6 +132,8 @@ pub mod size {
         pub const GUTTER: f32 = 46.0;
         pub const LINE_NUMBER_WIDTH: f32 = 28.0;
         pub const TEXT_PAD_LEFT: f32 = 4.0;
+        /// Between the line numbers and the fold chevron.
+        pub const CHEVRON_GAP: f32 = 4.0;
         pub const EDITOR_PAD_TOP: f32 = 8.0;
         pub const PREVIEW_PAD_X: f32 = 28.0;
         pub const PREVIEW_PAD_TOP: f32 = 20.0;

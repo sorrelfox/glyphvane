@@ -9,7 +9,7 @@
 //! run and shows their keys. Items whose command nothing handles where the
 //! focus is are shown disabled: Open file, Save as (no file dialog yet),
 //! About and zoom always; Undo, Redo, Cut, Paste, Show whitespace, Soft
-//! wrap and the Format menu outside the editor (in Preview); in the editor, the Format items that
+//! wrap, the fold items and the Format menu outside the editor (in Preview); in the editor, the Format items that
 //! cannot run in the tab's profile (strikethrough, highlight and task boxes
 //! in CommonMark) or at the carets (bold in a code block). In viewer mode
 //! Edit and Split are disabled, and so is everything that edits.
@@ -276,6 +276,11 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             SEPARATOR,
             item("editor.toggle_whitespace", "Show whitespace"),
             item("view.toggle_soft_wrap", "Soft wrap"),
+            SEPARATOR,
+            item("view.fold", "Fold"),
+            item("view.unfold", "Unfold"),
+            item("view.fold_all", "Fold all"),
+            item("view.unfold_all", "Unfold all"),
             SEPARATOR,
             item("view.cycle_theme", "Cycle theme"),
             SEPARATOR,

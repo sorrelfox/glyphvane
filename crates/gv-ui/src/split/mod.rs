@@ -33,10 +33,13 @@
 //! block gets a `state.hover` band. Both wait until the preview shows the
 //! editor's current revision, so the band does not flicker while typing.
 //!
+//! # Folding
+//!
+//! The editor's gutter shows the fold chevrons (`crate::editor`'s folding).
+//! The preview shows the whole text; folds are the editor's.
+//!
 //! # Not built
 //!
-//! - Folding: the editor's gutter keeps the fold chevrons' place, but none
-//!   are drawn.
 //! - The divider cannot be dragged; the panes stay equal.
 
 mod sync;
