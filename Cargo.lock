@@ -3147,6 +3147,7 @@ dependencies = [
 name = "gv-ui"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-sum-tree",
@@ -3157,6 +3158,7 @@ dependencies = [
  "gv-syntax",
  "gv-text",
  "gv-vault",
+ "notify-debouncer-full",
  "serde",
  "serde_json",
  "tempfile",

@@ -88,6 +88,10 @@ pub enum Icon {
     FindPrevious,
     FindNext,
     CloseFind,
+    /// The check mark of a menu item that is on (not designed).
+    MenuCheck,
+    /// A menu row that opens a submenu.
+    Submenu,
 }
 
 impl Icon {
@@ -140,6 +144,9 @@ impl Icon {
             Self::FindPrevious => IconName::ArrowUp,
             Self::FindNext => IconName::ArrowDown,
             Self::CloseFind => IconName::X,
+            // Not in the design's inventory: Lucide's `check`.
+            Self::MenuCheck => IconName::Check,
+            Self::Submenu => IconName::ChevronRight,
         }
     }
 }
@@ -275,7 +282,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 39] = [
+    const ALL: [Icon; 41] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -315,6 +322,8 @@ mod tests {
         Icon::FindPrevious,
         Icon::FindNext,
         Icon::CloseFind,
+        Icon::MenuCheck,
+        Icon::Submenu,
     ];
 
     #[test]

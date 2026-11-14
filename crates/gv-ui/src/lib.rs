@@ -8,6 +8,8 @@ pub mod chrome;
 pub mod find;
 pub mod icons;
 pub mod inline;
+pub mod keymap;
+pub mod menu;
 pub mod metrics;
 pub mod reader;
 pub mod settings;
@@ -15,8 +17,7 @@ pub mod shell;
 pub mod theme;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, KeyBinding, Result, WindowBounds, WindowOptions,
-    px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Result, WindowBounds, WindowOptions, px, size,
 };
 
 pub use appearance::Appearance;
@@ -32,88 +33,30 @@ use crate::shell::Workspace;
 /// The application id the desktop uses to group windows and find the icon.
 pub const APP_ID: &str = "io.github.sorrelfox.Glyphvane";
 
-gpui::actions!(
-    glyphvane,
-    [
-        /// Switch to the next theme: System, Light, Semi-light, Dark. The
-        /// choice is saved to the settings file.
-        CycleTheme,
-        /// Switch the active tab between Preview and Edit.
-        ToggleEditMode,
-        /// Show or hide the sidebar.
-        ToggleSidebar,
-        /// Show or hide the right panel.
-        TogglePanel,
-        /// Go back to where the active tab was.
-        GoBack,
-        /// Go forward again after going back.
-        GoForward,
-        /// Close the active tab.
-        CloseTab,
-        /// Reopen the tab closed last, with its history.
-        ReopenClosedTab,
-        /// Quit the application.
-        Quit,
-    ]
-);
-
-/// Default key bindings. Mod is Cmd on macOS and Ctrl elsewhere. Themes cycle
-/// on the chord Mod+K Mod+T: Ctrl+Alt+T opens a terminal on most Linux desktops.
-/// History is Alt+Left and Alt+Right outside macOS, where Alt+Left moves by
-/// word; there it is Cmd+[ and Cmd+] or Cmd+Alt+Left and Cmd+Alt+Right.
-// TODO: bind through the keymap model (`gv_settings::keymap`) once it is
-// wired into the window; these are its defaults.
-#[cfg(target_os = "macos")]
-mod keys {
-    pub const CYCLE_THEME: &str = "cmd-k cmd-t";
-    pub const TOGGLE_EDIT_MODE: &str = "cmd-e";
-    pub const QUIT: &str = "cmd-q";
-    pub const GO_BACK: &[&str] = &["cmd-[", "cmd-alt-left"];
-    pub const GO_FORWARD: &[&str] = &["cmd-]", "cmd-alt-right"];
-    pub const CLOSE_TAB: &str = "cmd-w";
-    pub const REOPEN_CLOSED_TAB: &str = "cmd-shift-t";
-}
-#[cfg(not(target_os = "macos"))]
-mod keys {
-    pub const CYCLE_THEME: &str = "ctrl-k ctrl-t";
-    pub const TOGGLE_EDIT_MODE: &str = "ctrl-e";
-    pub const QUIT: &str = "ctrl-q";
-    pub const GO_BACK: &[&str] = &["alt-left"];
-    pub const GO_FORWARD: &[&str] = &["alt-right"];
-    pub const CLOSE_TAB: &str = "ctrl-w";
-    pub const REOPEN_CLOSED_TAB: &str = "ctrl-shift-t";
-}
+// The commands the window handles, under the names the views use. Every
+// command's action is in [`keymap::actions`].
+pub use keymap::actions::app::Quit;
+pub use keymap::actions::navigation::{Back as GoBack, Forward as GoForward};
+pub use keymap::actions::tabs::{Close as CloseTab, ReopenClosed as ReopenClosedTab};
+pub use keymap::actions::view::{CycleTheme, ToggleMode as ToggleEditMode};
+pub use keymap::actions::workspace::{TogglePanel, ToggleSidebar};
 
 /// Initialises GPUI Component, the settings, the theme and the key bindings.
-/// Call once, inside `Application::run`, before opening a window.
+/// Call once, inside `Application::run`, before opening a window. The
+/// bindings are the keymap's built-in ones until [`keymap::install`] adds
+/// the user's `keymap.toml`.
 pub fn init(cx: &mut App, settings: AppSettings) {
     gpui::component::init(cx);
     let (choice, preferred_light) = settings.theme_preference();
     settings.install(cx);
     Appearance::init(cx, choice, preferred_light);
 
-    cx.bind_keys([
-        KeyBinding::new(keys::CYCLE_THEME, CycleTheme, None),
-        KeyBinding::new(keys::TOGGLE_EDIT_MODE, ToggleEditMode, None),
-        KeyBinding::new(keys::QUIT, Quit, None),
-        KeyBinding::new(keys::CLOSE_TAB, CloseTab, None),
-        KeyBinding::new(keys::REOPEN_CLOSED_TAB, ReopenClosedTab, None),
-    ]);
-    cx.bind_keys(
-        keys::GO_BACK
-            .iter()
-            .map(|k| KeyBinding::new(k, GoBack, None)),
-    );
-    cx.bind_keys(
-        keys::GO_FORWARD
-            .iter()
-            .map(|k| KeyBinding::new(k, GoForward, None)),
-    );
+    // The widgets' own keys, then the commands' keys from the keymap.
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
     cx.bind_keys(find::key_bindings());
-    cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    menu::init(cx);
+    keymap::init(cx);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
             cx.quit();

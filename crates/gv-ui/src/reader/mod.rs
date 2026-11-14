@@ -80,13 +80,13 @@ pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
 pub(crate) use links::{Navigation, PROFILE, navigation};
 
+/// Copy the selection as plain text (`editor.copy`), and select the whole
+/// document (`editor.select_all`): commands of the keymap.
+pub use crate::keymap::actions::editor::{Copy, SelectAll};
+
 gpui::actions!(
     reader,
     [
-        /// Copy the selection as plain text.
-        Copy,
-        /// Select the whole document.
-        SelectAll,
         /// Scroll up by a line.
         LineUp,
         /// Scroll down by a line.
@@ -105,7 +105,9 @@ gpui::actions!(
 /// The key context of the Reading view.
 pub(crate) const KEY_CONTEXT: &str = "Reader";
 
-/// The Reading view's keys. They apply while it has the focus.
+/// The Reading view's own scrolling keys. They apply while it has the
+/// focus. Copy, select all and find are commands, bound by the keymap
+/// ([`crate::keymap`]).
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let context = Some(KEY_CONTEXT);
     let mut keys = vec![
@@ -120,15 +122,11 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     ];
     if cfg!(target_os = "macos") {
         keys.extend([
-            KeyBinding::new("cmd-c", Copy, context),
-            KeyBinding::new("cmd-a", SelectAll, context),
             KeyBinding::new("cmd-up", ScrollToTop, context),
             KeyBinding::new("cmd-down", ScrollToBottom, context),
         ]);
     } else {
         keys.extend([
-            KeyBinding::new("ctrl-c", Copy, context),
-            KeyBinding::new("ctrl-a", SelectAll, context),
             KeyBinding::new("ctrl-home", ScrollToTop, context),
             KeyBinding::new("ctrl-end", ScrollToBottom, context),
         ]);

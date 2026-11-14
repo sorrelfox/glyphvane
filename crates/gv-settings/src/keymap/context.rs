@@ -45,7 +45,10 @@ pub const CONTEXTS: &[ContextInfo] = &[
     focus("search", "The vault search panel has focus"),
     focus("palette", "The command palette is open"),
     focus("switcher", "The quick switcher is open"),
-    focus("menu", "A context menu or link menu is open"),
+    focus(
+        "menu",
+        "A menu is open: the application menu, a context menu or the link menu",
+    ),
     focus("infobar", "An infobar has focus"),
     focus("settings", "The settings window has focus"),
     state("autocomplete", "The editor's autocomplete popup is open"),

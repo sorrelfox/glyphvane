@@ -28,6 +28,8 @@ pub mod size {
     pub const FIELD: f32 = 26.0;
     pub const INFOBAR: f32 = 30.0;
     pub const MENU_ROW: f32 = 24.0;
+    /// The link menu, and the application menu drawn like it.
+    pub const MENU_WIDTH: f32 = 228.0;
     pub const SWITCHER_ROW: f32 = 28.0;
     pub const AUTOCOMPLETE_WIDTH: f32 = 300.0;
     pub const HOVER_PREVIEW_WIDTH: f32 = 320.0;
@@ -251,6 +253,23 @@ pub mod spacing {
         pub const INSET_RIGHT: f32 = 16.0;
     }
 
+    /// Menus: the link menu (SPEC § Popovers) and the application menu drawn
+    /// like it. Padding 4; rows with padding `0 8`; separators with margin
+    /// `4 8`. Not designed: the check mark slot of a row (7 before the
+    /// label, as in autocomplete rows), the least space between a label and
+    /// its shortcut, the 4 between the menu button and the menu, and the 2
+    /// between a menu and its submenu.
+    pub mod menu {
+        pub const PAD: f32 = 4.0;
+        pub const ROW_PAD_X: f32 = 8.0;
+        pub const SEPARATOR_MARGIN_Y: f32 = 4.0;
+        pub const SEPARATOR_MARGIN_X: f32 = 8.0;
+        pub const ICON_GAP: f32 = 7.0;
+        pub const SHORTCUT_GAP: f32 = 16.0;
+        pub const OFFSET_Y: f32 = 4.0;
+        pub const SUBMENU_GAP: f32 = 2.0;
+    }
+
     /// Window controls drawn by the application on Linux: 8 apart, 8 from the
     /// right of the title row, 10 after the panel toggle.
     pub mod linux_controls {
@@ -402,6 +421,8 @@ pub mod text {
     pub const KEYCAP_SIZE: f32 = 11.5;
     /// The find field's toggles (`Aa`, `ab`, `.*`), mono.
     pub const FIELD_TOGGLE_SIZE: f32 = 10.5;
+    /// Shortcuts at the right of menu rows, mono.
+    pub const MENU_SHORTCUT_SIZE: f32 = 10.5;
     /// Inline code in the preview (mono).
     pub const INLINE_CODE_SIZE: f32 = 13.0;
 

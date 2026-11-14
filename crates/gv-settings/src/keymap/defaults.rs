@@ -13,6 +13,8 @@
 //!   where Cmd+H hides the app; find next is F3 elsewhere and Cmd+G on macOS.
 //! - Insert table (Mod+Alt+T) has no default on Linux, where Ctrl+Alt+T opens
 //!   a terminal on most desktops.
+//! - F10 opens the application menu on Linux and Windows, as in GNOME and
+//!   Windows applications; macOS has the system menu bar instead.
 //!
 //! The theme chord Mod+K Mod+T does not apply in the editor, where Mod+K
 //! inserts a link at once.
@@ -43,12 +45,16 @@ const BUILTIN: &[Row] = &[
     // Application
     ("app.quit", "Quit", Category::Application, None, &[("secondary-q", ALL)]),
     ("app.settings", "Open settings", Category::Application, None, &[("secondary-,", ALL)]),
+    ("app.about", "About Glyphvane", Category::Application, None, &[]),
+    ("app.open_menu", "Open application menu", Category::Application, None, &[("f10", NOT_MAC)]),
 
     // File
     ("file.new_note", "New note", Category::File, None, &[("secondary-n", ALL)]),
     ("file.save", "Save", Category::File, None, &[("secondary-s", ALL)]),
+    ("file.open", "Open file", Category::File, None, &[]),
 
     // Tabs
+    ("tabs.new", "New tab", Category::Tabs, None, &[]),
     ("tabs.close", "Close tab", Category::Tabs, None, &[("secondary-w", ALL)]),
     ("tabs.reopen_closed", "Reopen closed tab", Category::Tabs, None, &[("secondary-shift-t", ALL)]),
 
@@ -67,6 +73,9 @@ const BUILTIN: &[Row] = &[
     // View
     ("view.toggle_mode", "Toggle Preview and Edit", Category::View, None, &[("secondary-e", ALL)]),
     ("view.toggle_split", "Toggle split view", Category::View, None, &[("secondary-alt-e", ALL)]),
+    ("view.preview", "Show Preview", Category::View, None, &[]),
+    ("view.edit", "Show Edit", Category::View, None, &[]),
+    ("view.split", "Show Edit and Preview side by side", Category::View, None, &[]),
     ("view.cycle_theme", "Cycle theme", Category::View, Some("!editor"),
         &[("secondary-k secondary-t", ALL)]),
     ("view.zoom_in", "Zoom in", Category::View, None, &[("secondary-=", ALL)]),

@@ -35,15 +35,14 @@ use crate::metrics::spacing::find as spacing;
 use crate::metrics::{FOCUS_HALO, HAIRLINE, font, icon, radius, text};
 use crate::theme::Theme;
 
+/// Open find in page, filled with the selection if there is one
+/// (`search.find`); go to the next and the previous match
+/// (`search.find_next`, `search.find_previous`): commands of the keymap.
+pub use crate::keymap::actions::search::{Find, FindNext, FindPrevious};
+
 gpui::actions!(
     find,
     [
-        /// Open find in page, filled with the selection if there is one.
-        Find,
-        /// Go to the next match.
-        FindNext,
-        /// Go to the previous match.
-        FindPrevious,
         /// Close find in page.
         CloseFind,
     ]
@@ -52,31 +51,14 @@ gpui::actions!(
 /// The key context of the popover.
 pub(crate) const KEY_CONTEXT: &str = "FindBar";
 
-/// The keys of find in page. Find, next and previous apply in the Reading
-/// view (the popover is inside it); Esc in the popover.
-// TODO: bind through the keymap model (`gv_settings::keymap`: `search.find`,
-// `search.find_next`, `search.find_previous`) once it is wired into the
-// window; these are its defaults.
+/// The popover's own key: Esc closes it, in the popover and in the Reading
+/// view that hosts it. Find, next and previous are commands, bound by the
+/// keymap ([`crate::keymap`]).
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-    let reader = Some(crate::reader::KEY_CONTEXT);
-    let mut keys = vec![
+    vec![
         KeyBinding::new("escape", CloseFind, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", CloseFind, reader),
-    ];
-    if cfg!(target_os = "macos") {
-        keys.extend([
-            KeyBinding::new("cmd-f", Find, reader),
-            KeyBinding::new("cmd-g", FindNext, reader),
-            KeyBinding::new("cmd-shift-g", FindPrevious, reader),
-        ]);
-    } else {
-        keys.extend([
-            KeyBinding::new("ctrl-f", Find, reader),
-            KeyBinding::new("f3", FindNext, reader),
-            KeyBinding::new("shift-f3", FindPrevious, reader),
-        ]);
-    }
-    keys
+        KeyBinding::new("escape", CloseFind, Some(crate::reader::KEY_CONTEXT)),
+    ]
 }
 
 /// What the match count shows.

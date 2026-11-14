@@ -138,6 +138,12 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Shows the active tab in `mode`, as the mode switch does (the View
+    /// menu's Preview, Edit and Split commands).
+    pub(crate) fn show_mode(&mut self, mode: ViewMode, cx: &mut Context<'_, Self>) {
+        self.set_mode(mode, cx);
+    }
+
     /// Preview, Edit and Split as a segmented control.
     fn mode_switch(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
         let segments = [

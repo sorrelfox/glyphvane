@@ -5,13 +5,15 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Decorations, Div, ElementId, InteractiveElement as _, MouseButton, ParentElement as _,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, px,
+    AnyElement, Context, Decorations, Div, ElementId, InteractiveElement as _, IntoElement as _,
+    MouseButton, ParentElement as _, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Window, WindowControlArea, div, px,
 };
 
 use super::Workspace;
 use crate::chrome::WindowChrome;
 use crate::icons::{CaptionGlyph, Icon};
+use crate::menu::{MenuButton, MenuState};
 use crate::metrics::size::icon_button as button;
 use crate::metrics::spacing::{
     linux_controls, macos_controls, sidebar_head, title_row, windows_controls,
@@ -63,8 +65,8 @@ pub(super) fn disabled_icon_button(
         .child(icon.sized(icon_size))
 }
 
-/// The application menu button (Windows and Linux). The menu itself is not
-/// designed yet.
+/// The application menu button (Windows and Linux). It opens the
+/// application menu ([`crate::menu`]).
 pub(super) fn menu_button(theme: &Theme) -> Stateful<Div> {
     icon_button(
         "app-menu",
@@ -95,9 +97,14 @@ impl Workspace {
         theme: &Theme,
         window: &Window,
         cx: &mut Context<'_, Self>,
-    ) -> Option<Stateful<Div>> {
+    ) -> Option<AnyElement> {
         if self.chrome.has_menu_button() {
-            return Some(menu_button(theme));
+            let state = MenuState {
+                mode: self.mode(),
+                can_go_back: self.can_go_back(),
+                can_go_forward: self.can_go_forward(),
+            };
+            return Some(MenuButton::new(menu_button(theme), state).into_any_element());
         }
         if !self.chrome.has_system_window_controls() || window.is_fullscreen() {
             return None;
@@ -120,7 +127,8 @@ impl Workspace {
             self.drag_region(id, window, cx)
                 .debug_selector(move || id.into())
                 .flex_none()
-                .w(px(width)),
+                .w(px(width))
+                .into_any_element(),
         )
     }
 

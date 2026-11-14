@@ -140,6 +140,7 @@ fn main() -> ExitCode {
         let restart_safe = Rc::clone(&restart_safe);
         move |cx| {
             gv_ui::init(cx, app_settings);
+            gv_ui::keymap::install(cx, locations.as_ref());
             ui_session::install(cx, session_store);
             if let Some(path) = watched {
                 settings::watch(path, cx);
