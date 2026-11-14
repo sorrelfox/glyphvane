@@ -721,6 +721,46 @@ fn closing_the_window_without_autosave_keeps_the_journal(cx: &mut TestAppContext
     assert_eq!(f.journals().len(), 1, "recovered on the next start");
 }
 
+/// Clicks the close button the application draws on a client-decorated
+/// Linux window.
+fn click_linux_close(f: &mut Fixture) {
+    f.vcx
+        .update(|_, cx| cx.set_global(crate::shell::ClientDecorationsForTests));
+    f.draw();
+    let close = f
+        .vcx
+        .debug_bounds("window-close")
+        .expect("the Linux close button is drawn")
+        .center();
+    f.vcx.simulate_click(close, Modifiers::none());
+}
+
+#[gpui::test]
+fn the_linux_close_button_saves_first(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    f.edit();
+    f.type_at_end("A");
+    click_linux_close(&mut f);
+    f.vcx.run_until_parked();
+    assert_eq!(f.read("note.md"), format!("{NOTE}A").as_bytes());
+    assert!(f.journals().is_empty());
+    assert!(f.vcx.windows().is_empty(), "then it closes");
+}
+
+#[gpui::test]
+fn the_linux_close_button_without_autosave_keeps_the_journal(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    f.vcx
+        .update(|_, cx| super::override_autosave(cx, Some(false)));
+    f.edit();
+    f.type_at_end("A");
+    click_linux_close(&mut f);
+    f.vcx.run_until_parked();
+    assert!(f.vcx.windows().is_empty(), "it closes at once");
+    assert_eq!(f.read("note.md"), NOTE.as_bytes());
+    assert_eq!(f.journals().len(), 1, "recovered on the next start");
+}
+
 #[gpui::test]
 fn quitting_saves_and_syncs_first(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);

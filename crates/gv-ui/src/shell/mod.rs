@@ -26,6 +26,8 @@ mod vault;
 #[cfg(test)]
 pub(crate) use vault::VaultStatus;
 
+#[cfg(test)]
+pub(crate) use controls::ClientDecorationsForTests;
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
 pub(crate) use saving::prepare_quit;
 use saving::same_file;
@@ -1913,7 +1915,8 @@ mod close_hook_tests {
 
     #[gpui::test]
     fn a_window_removed_without_asking_still_saves_first(cx: &mut TestAppContext) {
-        // The client-drawn close button removes the window directly.
+        // A window removed without a close request (the client-drawn close
+        // button asks first) still calls the hooks on release.
         let mut f = fixture(cx, &["msg.md"], true);
         f.type_at_end("Done.");
         f.vcx.update(|window, _| window.remove_window());

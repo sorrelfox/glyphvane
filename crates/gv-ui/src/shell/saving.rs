@@ -215,10 +215,20 @@ impl Workspace {
         let handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             files::wait_for(waits, cx).await;
+            // Forced on purpose: the saves the close waited for are done.
             let _ = cx.update_window(handle, |_, window, _| window.remove_window());
         })
         .detach();
         false
+    }
+
+    /// The window's own close button: closes the window the way a close
+    /// request from the platform does, through [`Self::should_close`], so
+    /// documents are saved or journaled and the close hooks run first.
+    pub(super) fn request_close(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.should_close(window, cx) {
+            window.remove_window();
+        }
     }
 
     // ----- watching ------------------------------------------------------------------

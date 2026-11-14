@@ -5,13 +5,14 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Corners, Decorations, Div, FontWeight, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px, transparent_black,
+    AnyElement, App, Context, Corners, Div, FontWeight, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px, transparent_black,
 };
 
 use super::controls::{
-    RowStart, disabled_icon_button, icon_button, linux_window_controls, windows_caption_buttons,
+    RowStart, client_decorated, disabled_icon_button, icon_button, linux_window_controls,
+    windows_caption_buttons,
 };
 use super::{ViewMode, Workspace};
 use crate::appearance::Appearance;
@@ -33,8 +34,8 @@ impl Workspace {
         let wide = (button::WIDTH, button::HEIGHT);
         let square = (button::SQUARE, button::SQUARE);
         let caption_buttons = self.chrome.has_caption_buttons();
-        let draws_linux_controls = self.chrome == WindowChrome::Linux
-            && matches!(window.window_decorations(), Decorations::Client { .. });
+        let draws_linux_controls =
+            self.chrome == WindowChrome::Linux && client_decorated(window, cx);
 
         div()
             .id("title-row")
@@ -105,8 +106,12 @@ impl Workspace {
                 row.child(windows_caption_buttons(window, theme))
             })
             .when(draws_linux_controls, |row| {
+                let workspace = cx.weak_entity();
+                let close = move |window: &mut Window, cx: &mut App| {
+                    let _ = workspace.update(cx, |ws, cx| ws.request_close(window, cx));
+                };
                 row.child(
-                    linux_window_controls(window, theme)
+                    linux_window_controls(window, theme, close)
                         .mr(px(linux_controls::INSET_RIGHT - title_row::PAD_X)),
                 )
             })

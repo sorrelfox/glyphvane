@@ -5,9 +5,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Decorations, Div, ElementId, InteractiveElement as _, IntoElement as _,
-    MouseButton, ParentElement as _, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Window, WindowControlArea, div, px,
+    AnyElement, App, Context, Decorations, Div, ElementId, InteractiveElement as _,
+    IntoElement as _, MouseButton, ParentElement as _, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, WindowControlArea, div, px,
 };
 
 use super::Workspace;
@@ -253,9 +253,32 @@ fn caption_button(
         .child(glyph.sized(windows_controls::GLYPH))
 }
 
+/// Draws the Linux window controls in a test window, whose platform
+/// decorates it itself.
+#[cfg(test)]
+pub(crate) struct ClientDecorationsForTests;
+
+#[cfg(test)]
+impl gpui::Global for ClientDecorationsForTests {}
+
+/// Whether `window` is decorated by the application.
+pub(super) fn client_decorated(window: &Window, cx: &App) -> bool {
+    #[cfg(test)]
+    if cx.has_global::<ClientDecorationsForTests>() {
+        return true;
+    }
+    let _ = cx;
+    matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
 /// Minimise, maximise and close, drawn by the application for a
 /// client-decorated window on Linux: round buttons on the press overlay.
-pub(super) fn linux_window_controls(window: &Window, theme: &Theme) -> Div {
+/// `on_close` asks the window to close, as the platform would.
+pub(super) fn linux_window_controls(
+    window: &Window,
+    theme: &Theme,
+    on_close: impl Fn(&mut Window, &mut App) + 'static,
+) -> Div {
     let supported = window.window_controls();
     let maximize_icon = if window.is_maximized() {
         Icon::WindowRestore
@@ -273,24 +296,22 @@ pub(super) fn linux_window_controls(window: &Window, theme: &Theme) -> Div {
                 "minimize",
                 Icon::WindowMinimize,
                 theme,
-                |w| w.minimize_window(),
+                |w, _| w.minimize_window(),
             ))
         })
         .when(supported.maximize, |row| {
-            row.child(window_control("maximize", maximize_icon, theme, |w| {
+            row.child(window_control("maximize", maximize_icon, theme, |w, _| {
                 w.zoom_window()
             }))
         })
-        .child(window_control("close", Icon::WindowClose, theme, |w| {
-            w.remove_window()
-        }))
+        .child(window_control("close", Icon::WindowClose, theme, on_close))
 }
 
 fn window_control(
     id: &'static str,
     icon: Icon,
     theme: &Theme,
-    action: fn(&mut Window),
+    action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let hover = theme.state.hover;
     // The hover overlay is drawn on top of the press fill.
@@ -304,11 +325,12 @@ fn window_control(
         .child(icon.sized(linux_controls::GLYPH));
     div()
         .id(id)
+        .debug_selector(move || format!("window-{id}"))
         .flex_none()
         .size(px(linux_controls::DIAMETER))
         .rounded_full()
         .bg(theme.state.press)
         .text_color(theme.text.primary)
         .child(face)
-        .on_click(move |_, window, _| action(window))
+        .on_click(move |_, window, cx| action(window, cx))
 }
