@@ -168,6 +168,31 @@ impl Resolver {
     }
 }
 
+impl Resolver {
+    /// Whether the status of `link` can change when the index does. URLs
+    /// are classified by their text alone, except web URLs this vault maps
+    /// to its own files; local paths, fragments, `file:` and `obsidian:`
+    /// links are looked up.
+    pub fn depends_on_index(&self, link: &LinkTarget<'_>) -> bool {
+        match gv_vault::url::classify(link.destination) {
+            UrlClass::Web { .. } => {
+                let settings = &self.params.settings;
+                settings.map_repo_urls && settings.repo.is_some()
+            }
+            UrlClass::Mailto(_)
+            | UrlClass::DataImage { .. }
+            | UrlClass::Data
+            | UrlClass::Network { .. }
+            | UrlClass::Script(_)
+            | UrlClass::DangerousHandler(_)
+            | UrlClass::External { .. }
+            | UrlClass::Unknown { .. }
+            | UrlClass::Invalid(_) => false,
+            _ => true,
+        }
+    }
+}
+
 impl LinkStatusSource for Resolver {
     fn status(&self, link: &LinkTarget<'_>) -> LinkStatus {
         let res = self.resolve(resolver_kind(link.kind, link.image), link.destination);

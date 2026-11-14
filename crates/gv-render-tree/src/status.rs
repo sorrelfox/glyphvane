@@ -7,7 +7,9 @@
 //! Both are traits so this crate depends on neither the vault nor the
 //! media engines. The UI implements them over its resolver and image cache
 //! and calls [`RenderTree::refresh`](crate::RenderTree::refresh) when their
-//! answers change (the index finished building, an image header was read).
+//! answers change (the index finished building, an image header was read),
+//! or [`RenderTree::refresh_where`](crate::RenderTree::refresh_where) to
+//! re-ask only the links and images whose answers can have changed.
 
 use std::fmt;
 use std::ops::Range;

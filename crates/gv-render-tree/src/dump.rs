@@ -10,7 +10,9 @@ use std::sync::Arc;
 use gv_inline::{ItemKind as RunKind, Paragraph, ParagraphBuilder, UnderlineStyle};
 
 use crate::item::{Item, ItemKind};
-use crate::node::{BlockNode, Frame, FrameKind, InlineContent, InlineRole, ListMarker, NodeKind};
+use crate::node::{
+    BlockNode, BoxRef, Frame, FrameKind, InlineContent, InlineRole, ListMarker, NodeKind,
+};
 use crate::style::{ColorToken, TextRole, Variant, decode_style_id};
 use crate::tree::RenderTree;
 
@@ -263,9 +265,9 @@ fn dump_inline(c: &InlineContent, out: &mut String) {
                 format!("{:?} {style} {color}{deco}", p.item_text(ix))
             }
             RunKind::Box(b) => format!(
-                "box {:?} id={} {}x{}",
+                "box {:?} id={:?} {}x{}",
                 b.kind,
-                b.id,
+                BoxRef::from_id(b.id),
                 num(b.width),
                 num(b.height())
             ),

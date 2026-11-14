@@ -247,14 +247,49 @@ pub enum InlineRole {
     /// Raw inline HTML, shown as text.
     RawHtml,
     /// An image box (index into [`InlineContent::images`]); the box's id is
-    /// the same index.
+    /// [`BoxRef::Image`] of the same index.
     Image(u32),
     /// The alt text of an image that is not shown (size unknown or
     /// failed).
     ImageAlt(u32),
     /// The status decoration after a link: `≈` text or an icon box (the
-    /// box's id is the link index). Not content: copy and find skip it.
+    /// box's id is [`BoxRef::LinkSuffix`] of the link index). Not content:
+    /// copy and find skip it.
     LinkSuffix,
+}
+
+/// What an inline box of a paragraph stands for, as encoded in its
+/// `gv-inline` box id ([`gv_inline::InlineBox::id`]). Images and link
+/// suffixes are numbered separately, so the id carries a tag: one
+/// paragraph's boxes never share an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoxRef {
+    /// Image `i` of [`InlineContent::images`].
+    Image(u32),
+    /// The status icon after link `i` of [`InlineContent::links`].
+    LinkSuffix(u32),
+}
+
+impl BoxRef {
+    /// The tag bit of link suffixes (indices stay below it).
+    const LINK_SUFFIX: u32 = 1 << 31;
+
+    /// The box id.
+    pub const fn id(self) -> u32 {
+        match self {
+            Self::Image(i) => i & !Self::LINK_SUFFIX,
+            Self::LinkSuffix(i) => i | Self::LINK_SUFFIX,
+        }
+    }
+
+    /// What box id `id` stands for.
+    pub const fn from_id(id: u32) -> Self {
+        if id & Self::LINK_SUFFIX == 0 {
+            Self::Image(id)
+        } else {
+            Self::LinkSuffix(id & !Self::LINK_SUFFIX)
+        }
+    }
 }
 
 impl InlineRole {

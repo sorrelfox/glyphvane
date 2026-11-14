@@ -29,6 +29,12 @@ impl Spacing {
 ///
 /// Values the design does not give (marked "not designed" below) are
 /// derived from the nearest designed component.
+///
+/// # The text column
+///
+/// The design's 680 px column is the width of the **text** (a CSS
+/// content box): the column's side padding (40 px) lies outside it. Block
+/// content is laid out in that width less its containers' indents.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     /// Average advance of the text family, in em (Inter: about 0.53).
@@ -66,10 +72,12 @@ pub struct Metrics {
     pub code_padding_x: f32,
     /// Code block border: 1.
     pub code_border: f32,
-    /// Widest an image is laid out (the text column: 680 - 2 × 40).
+    /// Widest an image is laid out: the text column, 680. Wider images
+    /// are scaled down to it, keeping their aspect ratio.
     pub image_max_width: f32,
-    /// Estimate code blocks soft-wrapped (the wrap toggle) rather than
-    /// scrolled horizontally.
+    /// Whether code blocks soft-wrap rather than scroll horizontally, for
+    /// blocks without their own setting
+    /// ([`RenderTree::set_code_wrap`](crate::RenderTree::set_code_wrap)).
     pub wrap_code: bool,
 }
 
@@ -101,7 +109,7 @@ impl Default for Metrics {
             code_padding_y: 8.0,
             code_padding_x: 12.0,
             code_border: 1.0,
-            image_max_width: 600.0,
+            image_max_width: 680.0,
             wrap_code: false,
         }
     }

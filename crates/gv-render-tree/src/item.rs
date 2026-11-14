@@ -26,6 +26,7 @@
 //! opens here, to the bottom of the box. An item frame that opens here
 //! draws its marker on the first line, in the indent.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -234,6 +235,8 @@ pub(crate) struct Flatten<'a> {
     pub styles: &'a StyleTable,
     pub metrics: &'a Metrics,
     pub chunk_lines: usize,
+    /// Per-block soft wrap of code blocks (else [`Metrics::wrap_code`]).
+    pub code_wrap: &'a HashMap<BlockId, bool>,
 }
 
 impl Flatten<'_> {
@@ -289,6 +292,7 @@ impl Flatten<'_> {
                 // Code and HTML blocks have the code block's frame and head;
                 // front matter is a list of properties.
                 let chrome = !matches!(node.kind, NodeKind::Properties { .. });
+                let wrap = self.code_wrap.get(&node.id).copied().unwrap_or(m.wrap_code);
                 let n = code.lines.len();
                 let per = self.chunk_lines.max(1);
                 let chunks = n.div_ceil(per).max(1);
@@ -325,7 +329,7 @@ impl Flatten<'_> {
                         },
                     };
                     let ends = (k == 0, k + 1 == chunks);
-                    let e = self.lines_estimate(code, lines, inset, chrome, ends);
+                    let e = self.lines_estimate(code, lines, inset, (chrome, wrap), ends);
                     out.push(mk(k32, kind, start..end.max(start), e));
                 }
             }
@@ -344,13 +348,14 @@ impl Flatten<'_> {
     }
 
     /// The estimate of `lines` of a code block (`chrome`: with the code
-    /// block's frame; `ends`: whether the chunk is the first and the last).
+    /// block's frame; `wrap`: a framed block soft-wraps; `ends`: whether
+    /// the chunk is the first and the last).
     fn lines_estimate(
         &self,
         code: &CodeBlock,
         lines: Range<usize>,
         inset: f32,
-        chrome: bool,
+        (chrome, wrap): (bool, bool),
         (first, last): (bool, bool),
     ) -> Estimate {
         let m = self.metrics;
@@ -380,7 +385,7 @@ impl Flatten<'_> {
             fixed,
             line_height: spec.line_height,
             inset,
-            wrap: !chrome || m.wrap_code,
+            wrap: !chrome || wrap,
             widths: code.lines[lines]
                 .iter()
                 .map(|l| l.units as f32 * advance)

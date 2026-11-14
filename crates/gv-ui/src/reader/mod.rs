@@ -67,12 +67,12 @@ use crate::metrics::text;
 use crate::theme::Theme;
 use bench::Bench;
 use element::ReaderElement;
-use links::{PROFILE, Resolver};
+use links::Resolver;
 use load::Loaded;
 use state::{Selection, State};
 
 pub use bench::DEBUG_READER_BENCH_ENV;
-pub(crate) use links::{Navigation, navigation};
+pub(crate) use links::{Navigation, PROFILE, navigation};
 
 gpui::actions!(
     reader,
@@ -359,7 +359,12 @@ impl Reader {
                     return;
                 }
                 if let Some(current) = &mut st.doc {
-                    current.tree = doc.tree;
+                    let mut tree = doc.tree;
+                    // Code blocks whose wrap was toggled meanwhile.
+                    for (block, wrap) in current.tree.code_wrap_settings() {
+                        tree.set_code_wrap(block, wrap);
+                    }
+                    current.tree = tree;
                 }
                 st.stale.extend(changed);
                 drop(st);
@@ -387,6 +392,25 @@ impl Reader {
         let anchor = st.engine.anchor()?;
         let ix = doc.tree.index_of(anchor.id)?;
         Some(ScrollTarget::Offset(doc.tree.items()[ix].source.start))
+    }
+
+    /// The loaded document's model (headings, outline), for the window's
+    /// outline and status bar. Cloning it is O(1).
+    pub fn model(&self) -> Option<gv_model::DocModel> {
+        let st = self.state.borrow();
+        st.doc.as_ref().map(|doc| doc.model.clone())
+    }
+
+    /// The plain text of the whole loaded document, without list markers
+    /// or blank lines (for the status bar's word count).
+    pub fn plain_text(&self) -> Option<String> {
+        let st = self.state.borrow();
+        let tree = &st.doc.as_ref()?.tree;
+        let opts = CopyOptions {
+            list_markers: false,
+            blank_lines: false,
+        };
+        Some(tree.plain_text(0..tree.len(), opts))
     }
 
     /// The selection as plain text.

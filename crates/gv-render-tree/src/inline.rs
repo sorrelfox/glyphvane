@@ -30,7 +30,9 @@ use gv_syntax::inline::{
 };
 
 use crate::metrics::Metrics;
-use crate::node::{ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, Measure, Units};
+use crate::node::{
+    BoxRef, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, Measure, Units,
+};
 use crate::status::{ImageSize, LinkTarget, Sources};
 use crate::style::{ColorToken, Family, LinkSuffix, StyleTable, TextRole, Variant, link_decor};
 
@@ -426,7 +428,7 @@ impl Builder<'_, '_> {
                     margin = 5.0 * zoom;
                 }
                 let b = InlineBox::new(BoxKind::Other, width, size, 0.0)
-                    .with_id(link)
+                    .with_id(BoxRef::LinkSuffix(link).id())
                     .with_margins(margin, 0.0)
                     .with_align(BoxAlign::Middle);
                 self.push_box(b, at..at, InlineRole::LinkSuffix, Some(link));
@@ -471,7 +473,8 @@ impl Builder<'_, '_> {
                     h *= max / w;
                     w = max;
                 }
-                let b = InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(index);
+                let b =
+                    InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(BoxRef::Image(index).id());
                 self.push_box(b, l.range, InlineRole::Image(index), state.link);
                 None
             }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gv_model::DocModel;
-use gv_render_tree::{NoImageSizes, RenderOptions, RenderTree, Sources};
+use gv_render_tree::{LinkTarget, NoImageSizes, RenderOptions, RenderTree, Sources};
 use gv_syntax::{ParseOptions, SyntaxTree};
 use gv_text::DecodeStatus;
 
@@ -103,12 +103,16 @@ pub(crate) fn load(
     })
 }
 
-/// Re-asks every link's status (the index changed). Returns the indices of
-/// the items that changed.
+/// Re-asks the status of every link the index can change (the index
+/// changed); image sizes are not known yet and URLs keep their status.
+/// Returns the ids of the items that changed.
 pub(crate) fn refresh(doc: &mut Loaded, links: &Resolver) -> Vec<gv_render_tree::ItemId> {
     let sources = Sources {
         links,
         images: &NoImageSizes,
     };
-    doc.tree.refresh(&doc.syntax, &*doc.text, sources).changed
+    let which = |t: &LinkTarget<'_>| !t.image && links.depends_on_index(t);
+    doc.tree
+        .refresh_where(&doc.syntax, &*doc.text, sources, &which)
+        .changed
 }

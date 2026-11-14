@@ -7,7 +7,7 @@
 //! for hit testing.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -153,8 +153,6 @@ pub(crate) struct State {
     pub cache: ItemCache,
     pub text: Rc<RefCell<InlineText>>,
     pub selection: Option<Selection>,
-    /// Code blocks with soft wrap on.
-    pub wrapped: HashSet<BlockId>,
     /// Sideways scroll of code blocks without soft wrap.
     pub hscroll: HashMap<BlockId, f32>,
     pub hover: Hover,
@@ -186,7 +184,6 @@ impl State {
             cache: ItemCache::default(),
             text: Rc::new(RefCell::new(text)),
             selection: None,
-            wrapped: HashSet::new(),
             hscroll: HashMap::new(),
             hover: Hover::None,
             press: Press::None,
@@ -203,7 +200,6 @@ impl State {
         self.engine = Engine::new(document::PAD_TOP, OVERDRAW);
         self.cache.clear();
         self.selection = None;
-        self.wrapped.clear();
         self.hscroll.clear();
         self.hover = Hover::None;
         self.press = Press::None;
@@ -314,45 +310,24 @@ impl State {
         Some(doc.tree.nodes().get(node)?.lines()?.text.clone())
     }
 
-    /// The items of `block` (the chunks of a code block).
-    fn block_items(&self, block: BlockId) -> Range<usize> {
-        let Some(doc) = &self.doc else {
-            return 0..0;
-        };
-        let items = doc.tree.items();
-        let Some(start) = doc.tree.index_of(ItemId { block, chunk: 0 }) else {
-            return 0..0;
-        };
-        let end = start
-            + items[start..]
-                .iter()
-                .take_while(|it| it.id.block == block)
-                .count();
-        start..end
-    }
-
     /// Turns soft wrap of a code block on or off.
     pub fn toggle_wrap(&mut self, block: BlockId, ts: &WindowTextSystem) {
-        if !self.wrapped.insert(block) {
-            self.wrapped.remove(&block);
-        }
         self.hscroll.remove(&block);
-        let range = self.block_items(block);
         let State {
             doc,
             engine,
             cache,
             text,
-            wrapped,
             ..
         } = self;
         if let Some(doc) = doc {
+            let wrap = !doc.tree.code_wrap(block);
+            let range = doc.tree.set_code_wrap(block, wrap);
             let items = DocItems {
                 tree: &doc.tree,
                 cache,
                 text,
                 ts,
-                wrapped,
             };
             engine.invalidate(&items, range);
         }
@@ -373,7 +348,6 @@ impl State {
             engine,
             cache,
             text,
-            wrapped,
             ..
         } = self;
         if let Some(doc) = doc {
@@ -383,7 +357,6 @@ impl State {
                 cache,
                 text,
                 ts,
-                wrapped,
             };
             engine.invalidate(&items, ixs);
         }

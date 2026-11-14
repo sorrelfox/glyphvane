@@ -331,7 +331,6 @@ impl Element for ReaderElement {
             cache,
             text,
             selection,
-            wrapped,
             hscroll,
             geometry,
             hover,
@@ -365,7 +364,6 @@ impl Element for ReaderElement {
                 cache,
                 text,
                 ts: &ts,
-                wrapped,
             };
             engine.frame(&mut items, column, f32::from(bounds.size.height));
         }
@@ -520,8 +518,7 @@ impl Element for ReaderElement {
                                 node: item.node,
                                 kind,
                             };
-                            let active =
-                                kind == ButtonKind::Wrap && wrapped.contains(&item.id.block);
+                            let active = kind == ButtonKind::Wrap && tree.code_wrap(item.id.block);
                             let hovered = *hover == Hover::Button(button);
                             if active || hovered {
                                 out.over.push(Op::Rect {
@@ -551,7 +548,7 @@ impl Element for ReaderElement {
                         }
                     }
                     if let Some(block) = &block {
-                        let is_wrapped = wrapped.contains(&item.id.block);
+                        let is_wrapped = tree.code_wrap(item.id.block);
                         let tw = text_width(item, column, &m, is_wrapped);
                         let layout_width = text
                             .borrow_mut()

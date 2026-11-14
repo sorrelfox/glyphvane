@@ -56,7 +56,7 @@ pub use build::MAX_FRAMES;
 pub use item::{Estimate, Item, ItemId, ItemKind, indent};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
-    BlockNode, CodeBlock, CodeLine, Context, Frame, FrameKind, ImageInfo, InlineContent,
+    BlockNode, BoxRef, CodeBlock, CodeLine, Context, Frame, FrameKind, ImageInfo, InlineContent,
     InlineRole, InlineSpan, LinkInfo, ListMarker, NodeKind, Units,
 };
 pub use status::{

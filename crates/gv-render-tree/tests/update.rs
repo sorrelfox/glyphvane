@@ -6,11 +6,14 @@
 mod common;
 
 use gv_inline::Bias;
+use std::cell::Cell;
+
+use gv_inline::ItemKind as RunKind;
 use gv_render_tree::{
-    CopyOptions, FindOptions, FrameKind, ItemKind, LinkStatus, LinkTarget, ListMarker, NodeKind,
-    RenderOptions, Sources,
+    BoxRef, CopyOptions, FindOptions, FrameKind, ImageSize, InlineRole, ItemKind, LinkStatus,
+    LinkTarget, ListMarker, NodeKind, RenderOptions, Sources,
 };
-use gv_syntax::ParseOptions;
+use gv_syntax::{Change, ParseOptions};
 
 fn markers(d: &common::Doc) -> Vec<String> {
     d.render
@@ -275,4 +278,208 @@ fn deep_nesting_is_capped() {
             marker: ListMarker::Bullet { depth: 0 }
         }
     ));
+}
+
+#[test]
+fn image_and_link_suffix_boxes_have_distinct_ids() {
+    // Image 0 and link 0 in one paragraph: both used to get box id 0.
+    let md = "![pic](pic.png) and [web](https://example.org)\n";
+    let links = |_: &LinkTarget<'_>| LinkStatus::External;
+    let images = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 40.0,
+        height: 20.0,
+    };
+    let d = common::build_with(
+        md,
+        ParseOptions::default(),
+        RenderOptions::default(),
+        Sources {
+            links: &links,
+            images: &images,
+        },
+    );
+    common::check(&d);
+    let c = d.render.nodes()[0].inline().expect("inline");
+    let boxes: Vec<_> = c
+        .paragraph
+        .items()
+        .iter()
+        .zip(c.spans.iter())
+        .filter_map(|(it, span)| match it.kind() {
+            RunKind::Box(b) => Some((b.id, *span)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boxes.len(), 2, "an image box and a suffix box");
+    assert_ne!(boxes[0].0, boxes[1].0);
+    // Each id names what its span says the box is.
+    for (id, span) in boxes {
+        match (BoxRef::from_id(id), span.role) {
+            (BoxRef::Image(i), InlineRole::Image(j)) => assert_eq!(i, j),
+            (BoxRef::LinkSuffix(l), InlineRole::LinkSuffix) => assert_eq!(Some(l), span.link),
+            other => panic!("box id {id} for {other:?}"),
+        }
+    }
+    for r in [
+        BoxRef::Image(0),
+        BoxRef::LinkSuffix(0),
+        BoxRef::LinkSuffix(7),
+    ] {
+        assert_eq!(BoxRef::from_id(r.id()), r);
+    }
+}
+
+#[test]
+fn wide_images_fit_the_text_column() {
+    let images = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 1360.0,
+        height: 400.0,
+    };
+    let d = common::build_with(
+        "![wide](w.png)\n",
+        ParseOptions::default(),
+        RenderOptions::default(),
+        Sources {
+            images: &images,
+            ..Sources::default()
+        },
+    );
+    let c = d.render.nodes()[0].inline().expect("inline");
+    let RunKind::Box(b) = c.paragraph.items()[0].kind() else {
+        panic!("an image box");
+    };
+    // The column is 680 wide (its padding is outside it).
+    assert_eq!((b.width, b.height()), (680.0, 200.0));
+}
+
+fn code_doc(lines: usize) -> String {
+    let mut md = String::from("intro\n\n```\n");
+    for i in 0..lines {
+        md.push_str(&format!(
+            "line {i} of a code block that is long enough to wrap\n"
+        ));
+    }
+    md.push_str("```\n\nafter\n");
+    md
+}
+
+#[test]
+fn items_of_a_block_are_its_chunks() {
+    let d = common::build(&code_doc(120));
+    let code = d.render.items()[1].id.block;
+    assert_eq!(d.render.items_of(code), 1..4);
+    let intro = d.render.items()[0].id.block;
+    assert_eq!(d.render.items_of(intro), 0..1);
+    let after = d.render.items()[4].id.block;
+    assert_eq!(d.render.items_of(after), 4..5);
+    assert_eq!(d.render.items_of(gv_syntax::BlockId(u64::MAX)), 0..0);
+}
+
+#[test]
+fn code_wrap_is_per_block_and_survives_updates() {
+    let md = format!("{}\n```\nshort\n```\n", code_doc(60));
+    let mut d = common::build(&md);
+    let block = d.render.items()[1].id.block;
+    let other = d.render.items().last().expect("items").id.block;
+    let width = 300.0;
+    let heights = |d: &common::Doc| -> Vec<f32> {
+        d.render
+            .items()
+            .iter()
+            .map(|it| it.height_estimate(width))
+            .collect()
+    };
+    let before = heights(&d);
+    assert!(!d.render.code_wrap(block));
+    let range = d.render.set_code_wrap(block, true);
+    assert_eq!(range, d.render.items_of(block));
+    assert_eq!(range.len(), 2);
+    assert!(d.render.code_wrap(block));
+    assert!(!d.render.code_wrap(other));
+    let after = heights(&d);
+    for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+        if range.contains(&i) {
+            assert!(b > a, "item {i} wraps: {b} > {a}");
+        } else {
+            assert_eq!(a, b, "item {i} is not this block's");
+        }
+    }
+    common::check(&d);
+    // An edit elsewhere keeps the setting.
+    let end = d.text.find("after").expect("found");
+    d.edit(end..end, "x", Sources::default());
+    assert_eq!(heights(&d), after);
+    // So does a rebuild of the whole tree.
+    let text = format!("{}!", d.text);
+    let at = d.text.len();
+    let (tree, mut changes) = d.tree.reparse_full(
+        text.as_str(),
+        Change {
+            start: at,
+            old_end: at,
+            new_len: 1,
+        },
+    );
+    let model = d.model.update(&tree, text.as_str(), &changes);
+    // A report that does not fit the tree forces a full rebuild.
+    changes.new_range = text.len() + 1..text.len() + 1;
+    let report = d
+        .render
+        .update(&tree, &model, text.as_str(), &changes, Sources::default());
+    assert!(report.full);
+    assert!(d.render.code_wrap(block));
+    assert_eq!(heights(&d)[range.clone()], after[range.clone()]);
+    // Turning it off restores the estimates.
+    d.render.set_code_wrap(block, false);
+    assert_eq!(heights(&d)[range.clone()], before[range]);
+}
+
+#[test]
+fn refresh_where_asks_only_what_it_selects() {
+    let mut d = common::build("[a](a.md) ![i](i.png)\n\n[b](https://e.org)\n");
+    let asked = Cell::new(0);
+    let links = |t: &LinkTarget<'_>| {
+        asked.set(asked.get() + 1);
+        if t.destination.starts_with("https:") {
+            LinkStatus::External
+        } else {
+            LinkStatus::Exact
+        }
+    };
+    let images = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 10.0,
+        height: 10.0,
+    };
+    let sources = Sources {
+        links: &links,
+        images: &images,
+    };
+    // Only images: the first block's image changed; links are not asked
+    // except while that block is rebuilt (its one link).
+    let report = d
+        .render
+        .refresh_where(&d.tree, d.text.as_str(), sources, &|t| t.image);
+    assert_eq!(report.nodes_built, 1);
+    assert_eq!(asked.get(), 1);
+    let first = d.render.nodes()[0].inline().expect("inline");
+    assert!(matches!(first.images[0].size, ImageSize::Known { .. }));
+    assert_eq!(first.links[0].status, LinkStatus::Exact);
+    let last = d.render.nodes()[1].inline().expect("inline");
+    assert_eq!(last.links[0].status, LinkStatus::Pending);
+    // Only local links: the URL keeps its (stale) status.
+    asked.set(0);
+    let local = |t: &LinkTarget<'_>| !t.image && !t.destination.contains(':');
+    let report = d
+        .render
+        .refresh_where(&d.tree, d.text.as_str(), sources, &local);
+    assert_eq!(report.nodes_built, 0);
+    assert_eq!(asked.get(), 1);
+    // The full refresh asks everything.
+    asked.set(0);
+    let report = d.render.refresh(&d.tree, d.text.as_str(), sources);
+    assert_eq!(report.nodes_built, 1);
+    assert_eq!(asked.get(), 3, "two links checked, one rebuilt");
+    let last = d.render.nodes()[1].inline().expect("inline");
+    assert_eq!(last.links[0].status, LinkStatus::External);
+    common::check(&d);
 }

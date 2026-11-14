@@ -9,24 +9,24 @@ item 0 #1.0 paragraph 0..251 gap=0 opens=0 closes=0 h600=48 h200=120
     suffix link[2] 51..51 "\u{a0}≈" body text.secondary
     text 51..52 " " body text.primary
     text link[3] 53..62 "Ambiguous" body accent.default underline=solid/accent.line
-    suffix link[3] 77..77 box Other id=3 21.09x13
+    suffix link[3] 77..77 box Other id=LinkSuffix(3) 21.09x13
     text 77..78 " " body text.primary
     text link[4] 79..86 "Pending" body accent.default underline=solid/accent.line
     text 97..98 " " body text.primary
     text link[5] 99..106 "Missing" body accent.default underline=dashed/accent.default
-    suffix link[5] 119..119 box Other id=5 13x13
+    suffix link[5] 119..119 box Other id=LinkSuffix(5) 13x13
     text 119..120 " " body text.primary
     text link[6] 121..124 "Out" body accent.default underline=solid/accent.line
-    suffix link[6] 135..135 box Other id=6 13x13
+    suffix link[6] 135..135 box Other id=LinkSuffix(6) 13x13
     text 135..136 " " body text.primary
     text link[7] 137..140 "Web" body accent.default underline=solid/accent.line
-    suffix link[7] 162..162 box Other id=7 12x12
+    suffix link[7] 162..162 box Other id=LinkSuffix(7) 12x12
     text 162..163 " " body text.primary
     text link[8] 164..167 "Bad" body text.secondary strike
-    suffix link[8] 182..182 box Other id=8 13x13
+    suffix link[8] 182..182 box Other id=LinkSuffix(8) 13x13
     text 182..183 " " body text.primary
     text link[9] 184..208 "https://example.org/auto" body accent.default underline=solid/accent.line
-    suffix link[9] 209..209 box Other id=9 12x12
+    suffix link[9] 209..209 box Other id=LinkSuffix(9) 12x12
     text 209..210 " " body text.primary
     text link[10] 211..225 "me@example.org" body accent.default underline=solid/accent.line
     text 226..227 " " body text.primary
@@ -47,17 +47,17 @@ item 0 #1.0 paragraph 0..251 gap=0 opens=0 closes=0 h600=48 h200=120
   link[11] Inline "exact.md" exact 227..250
 copy: "Exact Case Loose Ambiguous Pending Missing Out Web Bad https://example.org/auto me@example.org em code"
 === images: "![Small](small.png) ![Wide](wide.png \"title\") ![Broken *alt*](broken.png) ![Loading](later.png) [![Linked](small.png)](exact.md)\n"
-item 0 #1.0 paragraph 0..129 gap=0 opens=0 closes=0 h600=324 h200=396
-    image[0] 0..19 box Image id=0 32x16
+item 0 #1.0 paragraph 0..129 gap=0 opens=0 closes=0 h600=364 h200=436
+    image[0] 0..19 box Image id=Image(0) 32x16
     text 19..20 " " body text.primary
-    image[1] 20..45 box Image id=1 600x300
+    image[1] 20..45 box Image id=Image(1) 680x340
     text 45..46 " " body text.primary
     alt[2] 48..55 "Broken " body text.secondary
     alt[2] 56..59 "alt" body+i text.secondary
     text 73..74 " " body text.primary
     alt[3] 76..83 "Loading" body text.secondary
     text 95..96 " " body text.primary
-    image[4] link[0] 97..117 box Image id=4 32x16
+    image[4] link[0] 97..117 box Image id=Image(4) 32x16
   link[0] Inline "exact.md" exact 96..128
   image[0] "small.png" alt="Small" Known { width: 32.0, height: 16.0 } 0..19
   image[1] "wide.png" alt="Wide" Known { width: 1200.0, height: 600.0 } 20..45

@@ -18,7 +18,7 @@
 //! document.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,10 +27,9 @@ use gpui::WindowTextSystem;
 use gpui::assets::IconName;
 use gv_inline::{Affinity, Bias, Paragraph, ParagraphBuilder};
 use gv_render_tree::{
-    BlockNode, CodeBlock, ColorToken, InlineContent, Item, ItemId, ItemKind, LinkSuffix, Metrics,
-    NodeKind, RenderTree, StatusIcon, StyleTable, TextRole, Variant, link_decor,
+    BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, Item, ItemId, ItemKind, LinkSuffix,
+    Metrics, NodeKind, RenderTree, StatusIcon, StyleTable, TextRole, Variant, link_decor,
 };
-use gv_syntax::BlockId;
 
 use super::engine::{Items, TextAnchor};
 use crate::icons::FILE_PLUS_DASHED;
@@ -133,9 +132,10 @@ pub(crate) fn status_icon_path(icon: StatusIcon) -> gpui::SharedString {
 fn inline_block(content: &InlineContent) -> InlineBlock {
     let mut block = InlineBlock::new(content.paragraph.clone());
     for (i, link) in content.links.iter().enumerate() {
-        let Ok(id) = u32::try_from(i) else {
+        let Ok(i) = u32::try_from(i) else {
             break;
         };
+        let id = BoxRef::LinkSuffix(i).id();
         match link_decor(link.status).suffix {
             Some(LinkSuffix::Icon { count: Some(_), .. }) => {
                 block.set_box_content(id, BoxContent::Blank)
@@ -371,7 +371,6 @@ pub(crate) struct DocItems<'a> {
     pub cache: &'a mut ItemCache,
     pub text: &'a RefCell<InlineText>,
     pub ts: &'a WindowTextSystem,
-    pub wrapped: &'a HashSet<BlockId>,
 }
 
 impl DocItems<'_> {
@@ -380,7 +379,7 @@ impl DocItems<'_> {
     }
 
     fn is_wrapped(&self, item: &Item) -> bool {
-        self.wrapped.contains(&item.id.block)
+        self.tree.code_wrap(item.id.block)
     }
 }
 
@@ -398,14 +397,7 @@ impl Items for DocItems<'_> {
     }
 
     fn estimate(&self, ix: usize, width: f32) -> f32 {
-        let item = &self.tree.items()[ix];
-        if is_code(&item.kind) && self.is_wrapped(item) {
-            // The tree estimates code unwrapped; wrapped code fills lines.
-            let mut e = item.estimate.clone();
-            e.wrap = true;
-            return item.gap_before + e.height(width);
-        }
-        item.height_estimate(width)
+        self.tree.items()[ix].height_estimate(width)
     }
 
     fn measure(&mut self, ix: usize, width: f32) -> f32 {
@@ -507,6 +499,36 @@ mod tests {
         assert_eq!(&md[src(7)..src(7) + 2], "cd");
         // Inside the expanded tab: the tab itself.
         assert_eq!(&md[src(2)..src(2) + 1], "\t");
+    }
+
+    #[test]
+    fn link_icons_do_not_land_on_images() {
+        // Image 0 and link 0 of one paragraph: distinct boxes.
+        let md = "![pic](pic.png) [web](https://example.org)\n";
+        let syntax = gv_syntax::parse(md);
+        let model = gv_model::DocModel::build(&syntax, md);
+        let links = |_: &gv_render_tree::LinkTarget<'_>| gv_render_tree::LinkStatus::External;
+        let images = |_: &gv_render_tree::LinkTarget<'_>| gv_render_tree::ImageSize::Known {
+            width: 40.0,
+            height: 20.0,
+        };
+        let t = RenderTree::build(
+            &syntax,
+            &model,
+            md,
+            gv_render_tree::RenderOptions::commonmark(),
+            gv_render_tree::Sources {
+                links: &links,
+                images: &images,
+            },
+        );
+        let content = t.nodes()[0].inline().expect("inline");
+        let block = inline_block(content);
+        assert!(block.box_content(BoxRef::Image(0).id()).is_none());
+        assert!(matches!(
+            block.box_content(BoxRef::LinkSuffix(0).id()),
+            Some(BoxContent::Icon { .. })
+        ));
     }
 
     #[test]

@@ -14,6 +14,23 @@
 //! region only moves by the length difference. Blocks elsewhere whose
 //! reference lookups now resolve differently are rebuilt in place. The
 //! result equals a full build (property-tested).
+//!
+//! # Refreshes
+//!
+//! Link statuses and image sizes come from injected sources whose answers
+//! change on their own (the index finished, an image header arrived).
+//! [`RenderTree::refresh`] re-asks them for every link and image;
+//! [`RenderTree::refresh_where`] only for those a predicate selects (the
+//! caller knows which answers can have changed: only images, only links to
+//! local paths, only destinations under changed folders). Blocks with a
+//! changed answer are rebuilt whole.
+//!
+//! # Code wrap
+//!
+//! Whether a code block soft-wraps is [`Metrics::wrap_code`], unless the
+//! block has its own setting ([`RenderTree::set_code_wrap`], the code
+//! head's wrap toggle). Settings are kept by block id across updates,
+//! refreshes and metric changes.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -25,10 +42,10 @@ use gv_syntax::{BlockId, Changes, Container, Leaf, LeafKind, RefMap, SyntaxTree,
 use gv_text::TextSource;
 
 use crate::build::{NodeBuilder, Reuse};
-use crate::item::{Flatten, Item, ItemId, link};
+use crate::item::{Flatten, Item, ItemId, ItemKind, link};
 use crate::metrics::Metrics;
 use crate::node::{BlockNode, NodeKind};
-use crate::status::Sources;
+use crate::status::{LinkTarget, Sources};
 use crate::style::StyleTable;
 
 /// How front matter is shown.
@@ -111,6 +128,8 @@ pub struct RenderTree {
     items: Vec<Item>,
     refs: Option<Arc<RefMap>>,
     index: OnceLock<HashMap<ItemId, usize>>,
+    /// Per-block soft wrap of code blocks.
+    code_wrap: HashMap<BlockId, bool>,
 }
 
 impl RenderTree {
@@ -123,6 +142,17 @@ impl RenderTree {
         opts: RenderOptions,
         sources: Sources<'_>,
     ) -> RenderTree {
+        Self::build_with_wrap(tree, model, text, opts, sources, HashMap::new())
+    }
+
+    fn build_with_wrap<S: TextSource + ?Sized>(
+        tree: &SyntaxTree,
+        model: &DocModel,
+        text: &S,
+        opts: RenderOptions,
+        sources: Sources<'_>,
+        code_wrap: HashMap<BlockId, bool>,
+    ) -> RenderTree {
         let refs = tree.ref_map(text);
         let mut t = RenderTree {
             opts,
@@ -131,6 +161,7 @@ impl RenderTree {
             items: Vec::new(),
             refs: Some(Arc::clone(&refs)),
             index: OnceLock::new(),
+            code_wrap,
         };
         let mut b = NodeBuilder::new(text, refs, &t.opts, sources, None);
         gv_syntax::walk(tree, &mut b);
@@ -248,11 +279,7 @@ impl RenderTree {
         // Items of the new nodes: a reused node at the same indentation
         // takes over its old items (moved); others are flattened afresh
         // and reported changed.
-        let flat = Flatten {
-            styles: &self.opts.styles,
-            metrics: &self.opts.metrics,
-            chunk_lines: self.opts.chunk_lines,
-        };
+        let flat = self.flattener();
         let mut new_items = Vec::with_capacity(ib - ia);
         let mut changed = Vec::new();
         for (j, node) in new_nodes.iter().enumerate() {
@@ -331,42 +358,66 @@ impl RenderTree {
     /// Re-asks the sources for every link status and image size and
     /// rebuilds the blocks whose answers changed (the index finished, an
     /// image header arrived). Item ids and order stay; the report lists the
-    /// changed items.
+    /// changed items. Same as [`refresh_where`](Self::refresh_where) with a
+    /// predicate that selects everything.
     pub fn refresh<S: TextSource + ?Sized>(
         &mut self,
         tree: &SyntaxTree,
         text: &S,
         sources: Sources<'_>,
     ) -> UpdateReport {
-        use crate::status::LinkTarget;
+        self.refresh_where(tree, text, sources, &|_| true)
+    }
+
+    /// Like [`refresh`](Self::refresh), but only the links and images
+    /// `which` selects are re-asked ([`LinkTarget::image`] tells them
+    /// apart); the others are assumed unchanged. A block with a changed
+    /// answer is rebuilt whole, so its other links are re-asked too.
+    ///
+    /// A refresh costs one source query per selected link or image: when
+    /// only some answers can have changed, select those. For example,
+    /// after the path index changed, URLs keep their status
+    /// (`|t| !t.image && is_local(t.destination)`); after image headers
+    /// arrived, only images need asking (`|t| t.image`).
+    pub fn refresh_where<S: TextSource + ?Sized>(
+        &mut self,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        which: &dyn Fn(&LinkTarget<'_>) -> bool,
+    ) -> UpdateReport {
         let mut stale = Vec::new();
         for (k, n) in self.nodes.iter().enumerate() {
             let Some(c) = n.inline() else {
                 continue;
             };
-            let link_changed = c.links.iter().any(|l| {
-                sources.links.status(&LinkTarget {
-                    kind: l.kind,
-                    image: false,
-                    destination: &l.destination,
-                    title: l.title.as_deref(),
-                    range: n.to_document(l.source.start)..n.to_document(l.source.end),
-                    block: n.id,
-                }) != l.status
-            });
+            let link_changed = || {
+                c.links.iter().any(|l| {
+                    let target = LinkTarget {
+                        kind: l.kind,
+                        image: false,
+                        destination: &l.destination,
+                        title: l.title.as_deref(),
+                        range: n.to_document(l.source.start)..n.to_document(l.source.end),
+                        block: n.id,
+                    };
+                    which(&target) && sources.links.status(&target) != l.status
+                })
+            };
             let image_changed = || {
                 c.images.iter().any(|i| {
-                    sources.images.size(&LinkTarget {
+                    let target = LinkTarget {
                         kind: i.kind,
                         image: true,
                         destination: &i.destination,
                         title: i.title.as_deref(),
                         range: n.to_document(i.source.start)..n.to_document(i.source.end),
                         block: n.id,
-                    }) != i.size
+                    };
+                    which(&target) && sources.images.size(&target) != i.size
                 })
             };
-            if link_changed || image_changed() {
+            if link_changed() || image_changed() {
                 stale.push(k);
             }
         }
@@ -378,6 +429,37 @@ impl RenderTree {
             }
         }
         report
+    }
+
+    /// Soft-wraps code block `block` (a code or HTML block) or makes it
+    /// scroll sideways, overriding [`Metrics::wrap_code`] for it, and
+    /// re-estimates its items. Returns the indices of its items (their
+    /// measured heights and layouts are stale); empty if the block has no
+    /// items. The setting is kept by block id across updates and refreshes.
+    pub fn set_code_wrap(&mut self, block: BlockId, wrap: bool) -> Range<usize> {
+        self.code_wrap.insert(block, wrap);
+        let range = self.items_of(block);
+        for it in &mut self.items[range.clone()] {
+            if matches!(it.kind, ItemKind::Code { .. } | ItemKind::Html { .. }) {
+                it.estimate.wrap = wrap;
+            }
+        }
+        range
+    }
+
+    /// Whether code block `block` soft-wraps (its own setting, else
+    /// [`Metrics::wrap_code`]).
+    pub fn code_wrap(&self, block: BlockId) -> bool {
+        self.code_wrap
+            .get(&block)
+            .copied()
+            .unwrap_or(self.opts.metrics.wrap_code)
+    }
+
+    /// The blocks with their own code wrap setting, and the setting (to
+    /// carry them over to another tree of the same document).
+    pub fn code_wrap_settings(&self) -> impl Iterator<Item = (BlockId, bool)> + '_ {
+        self.code_wrap.iter().map(|(&b, &w)| (b, w))
     }
 
     /// Recomputes every item's estimate and gaps for new metrics (a font
@@ -398,7 +480,8 @@ impl RenderTree {
         sources: Sources<'_>,
     ) -> UpdateReport {
         let old = self.items.len();
-        *self = Self::build(tree, model, text, self.opts.clone(), sources);
+        let code_wrap = std::mem::take(&mut self.code_wrap);
+        *self = Self::build_with_wrap(tree, model, text, self.opts.clone(), sources, code_wrap);
         UpdateReport {
             removed: 0..old,
             inserted: 0..self.items.len(),
@@ -444,13 +527,8 @@ impl RenderTree {
         }
         let ia = self.items.partition_point(|it| it.node < k);
         let ib = self.items.partition_point(|it| it.node <= k);
-        let fresh = Flatten {
-            styles: &self.opts.styles,
-            metrics: &self.opts.metrics,
-            chunk_lines: self.opts.chunk_lines,
-        };
         let mut items = Vec::new();
-        fresh.node_items(&node, k, &mut items);
+        self.flattener().node_items(&node, k, &mut items);
         if items.len() != ib - ia {
             return false;
         }
@@ -472,13 +550,18 @@ impl RenderTree {
         out.extend(self.items[ia..ib].iter().map(|it| it.id));
     }
 
-    /// Items of nodes `range`.
-    fn flatten(&self, range: Range<usize>) -> Vec<Item> {
-        let f = Flatten {
+    fn flattener(&self) -> Flatten<'_> {
+        Flatten {
             styles: &self.opts.styles,
             metrics: &self.opts.metrics,
             chunk_lines: self.opts.chunk_lines,
-        };
+            code_wrap: &self.code_wrap,
+        }
+    }
+
+    /// Items of nodes `range`.
+    fn flatten(&self, range: Range<usize>) -> Vec<Item> {
+        let f = self.flattener();
         let mut out = Vec::with_capacity(range.len());
         for k in range {
             f.node_items(&self.nodes[k], k, &mut out);
@@ -565,6 +648,20 @@ impl RenderTree {
             })
             .get(&id)
             .copied()
+    }
+
+    /// The items of block `block` ([`ItemId::block`]): one, or the chunks
+    /// of a code block, HTML block or front matter. Empty if the block has
+    /// no items.
+    pub fn items_of(&self, block: BlockId) -> Range<usize> {
+        let Some(start) = self.index_of(ItemId { block, chunk: 0 }) else {
+            return 0..0;
+        };
+        let (_, chunks) = self.items[start].kind.chunk();
+        let end = start
+            .saturating_add(usize::try_from(chunks).unwrap_or(usize::MAX))
+            .min(self.items.len());
+        start..end
     }
 
     /// The item whose source contains `offset`, or the first item after
