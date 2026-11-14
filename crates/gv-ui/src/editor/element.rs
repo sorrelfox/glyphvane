@@ -3,12 +3,14 @@
 
 //! The Source view's element: one element for the whole view.
 //!
-//! - **Prepaint** asks the view for a [`Frame`]: it brings the caret into
-//!   view when asked to, clamps the scroll, highlights and shapes the
-//!   visible rows, and records what to draw: the code fill and the current
-//!   line under everything, selections, the rows, link underlines, the
-//!   composition underline and the carets inside the text column, the line
-//!   numbers in the gutter and the scrollbar thumb.
+//! - **Prepaint** asks the view for a [`Frame`]: it sets the soft-wrap
+//!   width to the text column's, brings the caret into view when asked to,
+//!   clamps the scroll, highlights and shapes the lines of the visible
+//!   display rows, and records what to draw: the code fill and the current
+//!   line (across all the rows of its line) under everything, selections,
+//!   the rows, link underlines, the composition underline and the carets
+//!   inside the text column, the line numbers in the gutter (on a line's
+//!   first row only) and the scrollbar thumb.
 //! - **Paint** draws the frame, registers the input handler for the focused
 //!   view and the pointer handlers (presses, drags, the wheel and the
 //!   scrollbar thumb).
@@ -30,6 +32,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use super::highlight::Underline;
 use super::input::Columns;
 use super::rows::RowEnv;
+use super::wrap::RowMap;
 use super::{EditorView, LINE, Top};
 use crate::appearance::Appearance;
 use crate::inline::{Palette, Token};
@@ -102,8 +105,17 @@ pub(crate) enum Line {
 pub(crate) struct Probe {
     /// The lines laid out.
     pub lines: Range<usize>,
+    /// The display rows laid out.
+    pub rows: Range<usize>,
+    /// Each display row drawn: its line and its continuation indent in px
+    /// (`None` on a line's first row).
+    pub row_lines: Vec<(usize, usize, Option<f32>)>,
     /// Lines with the current-line fill.
     pub current: Vec<usize>,
+    /// The current-line fills.
+    pub current_fills: Vec<Bounds<Pixels>>,
+    /// The display row of each line number.
+    pub number_rows: Vec<usize>,
     /// Lines with the code fill.
     pub code: Vec<usize>,
     /// Each line number and its colour.
@@ -161,10 +173,10 @@ fn baseline(line: &ShapedLine, top: f32) -> f32 {
     top + (LINE - ascent - descent) / 2.0 + ascent
 }
 
-/// The total height of the content: the rows between the column's top
-/// padding and as much again below.
-fn content_height(lines: usize) -> f64 {
-    2.0 * f64::from(document::PAD_TOP) + lines as f64 * f64::from(LINE)
+/// The total height of the content: the display rows between the
+/// column's top padding and as much again below.
+fn content_height(rows: usize) -> f64 {
+    2.0 * f64::from(document::PAD_TOP) + rows as f64 * f64::from(LINE)
 }
 
 impl EditorView {
@@ -184,7 +196,16 @@ impl EditorView {
         let Some(columns) = self.columns(Some(bounds), window) else {
             return frame;
         };
-        let Some(lines) = self.doc.as_ref().map(|d| d.editor.text().line_count()) else {
+        self.sync_wrap(columns.text_w, cx);
+        let Some((lines, rows_total, wrapping)) = self.row_map().map(|map| {
+            (
+                self.doc
+                    .as_ref()
+                    .map_or(0, |d| d.editor.text().line_count()),
+                map.row_count(),
+                map.is_wrapping(),
+            )
+        }) else {
             return frame;
         };
         let viewport = f32::from(bounds.size.height);
@@ -199,29 +220,34 @@ impl EditorView {
                 Top::Offset(offset) => text.line_of_offset(offset.min(text.len())).unwrap_or(0),
                 Top::Line(line) => line.min(text.line_count().saturating_sub(1)),
             };
+            let row = RowMap::new(text, doc.editor.wrap()).first_row(line);
             // The row's top at the top edge (the column's top padding
             // scrolls away).
-            self.scroll_y = if line == 0 {
+            self.scroll_y = if row == 0 {
                 0.0
             } else {
-                f64::from(document::PAD_TOP) + line as f64 * f64::from(LINE)
+                f64::from(document::PAD_TOP) + row as f64 * f64::from(LINE)
             };
         }
         if std::mem::take(&mut self.autoscroll) {
             self.scroll_into_view(&columns, viewport, space, window, cx);
         }
-        let max_y = (content_height(lines) - f64::from(viewport)).max(0.0);
+        let max_y = (content_height(rows_total) - f64::from(viewport)).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
-        let max_x = (self.widest + CARET_WIDTH + 4.0 * space - columns.text_w).max(0.0);
+        let max_x = if wrapping {
+            0.0
+        } else {
+            (self.widest + CARET_WIDTH + 4.0 * space - columns.text_w).max(0.0)
+        };
         self.scroll_x = self.scroll_x.clamp(0.0, max_x);
 
         let scroll_y = self.scroll_y;
         let pad = f64::from(document::PAD_TOP);
-        let first = ((scroll_y - pad) / f64::from(LINE)).floor().max(0.0) as usize;
-        let last = ((((scroll_y - pad + f64::from(viewport)) / f64::from(LINE)).ceil()).max(0.0)
-            as usize
-            + 1)
-        .min(lines);
+        let first_row = ((scroll_y - pad) / f64::from(LINE)).floor().max(0.0) as usize;
+        let last_row =
+            ((((scroll_y - pad + f64::from(viewport)) / f64::from(LINE)).ceil()).max(0.0) as usize
+                + 1)
+            .min(rows_total);
         let origin_x = self.text_origin_x(&columns);
         let whitespace = self.show_whitespace;
         let fonts = self.fonts.clone();
@@ -229,9 +255,17 @@ impl EditorView {
         let Some(doc) = doc.as_mut() else {
             return frame;
         };
+        let wrap = doc.editor.wrap().cloned();
+        let text = doc.editor.text().clone();
+        let map = RowMap::new(&text, wrap.as_ref());
+        let first = map.line_of_row(first_row);
+        let last = if last_row > first_row {
+            (map.line_of_row(last_row - 1) + 1).min(lines)
+        } else {
+            first
+        };
         doc.highlights.ensure(&doc.syntax, links, first..last);
 
-        let text = doc.editor.text().clone();
         let visible = text.line_start(first).unwrap_or(0)
             ..text
                 .line_range(last.saturating_sub(1).max(first))
@@ -253,6 +287,7 @@ impl EditorView {
             theme,
             whitespace,
             tab_size: doc.editor.display().tab_size().get(),
+            space,
         };
         let color = |t: Token| palette.color(t);
         let number_font = fonts.regular().clone();
@@ -260,28 +295,36 @@ impl EditorView {
         #[cfg(test)]
         let mut probe = Probe {
             lines: first..last,
+            rows: first_row..last_row,
             columns: Some(columns),
             ..Probe::default()
         };
+        let row_top = |row: usize| columns.top + (row as f64 * f64::from(LINE) - scroll_y) as f32;
 
         for line in first..last {
-            let top = columns.top + (line as f64 * f64::from(LINE) - scroll_y) as f32;
             let Ok(range) = text.line_range(line) else {
                 continue;
             };
             let has_terminator = text.line_terminator(line).ok().flatten().is_some();
-            let Some(row) = doc.rows.row(line, doc.highlights.get(line), env, window) else {
+            let line_row = map.first_row(line);
+            let breaks = map.breaks(line);
+            let Some(row) = doc
+                .rows
+                .row(line, doc.highlights.get(line), breaks, env, window)
+            else {
                 continue;
             };
             widest = widest.max(row.content_width());
             let local = |offset: usize| offset.saturating_sub(range.start).min(range.len());
             let on_line = |offset: usize| range.start <= offset && offset <= range.end;
+            let line_top = row_top(line_row);
+            let line_h = row.segments.len() as f32 * LINE;
 
             if row.code {
                 #[cfg(test)]
                 probe.code.push(line);
                 frame.under.push(fill(
-                    bounds_of(columns.text_x, top, columns.text_w, LINE),
+                    bounds_of(columns.text_x, line_top, columns.text_w, line_h),
                     color(Token::SurfaceSunken),
                 ));
             }
@@ -289,134 +332,177 @@ impl EditorView {
                 .iter()
                 .any(|(r, head)| r.is_empty() && on_line(*head));
             if current {
+                let rect = bounds_of(
+                    columns.gutter_left(),
+                    line_top,
+                    columns.text_right() - columns.gutter_left(),
+                    line_h,
+                );
                 #[cfg(test)]
-                probe.current.push(line);
-                frame.under.push(fill(
-                    bounds_of(
-                        columns.gutter_left(),
-                        top,
-                        columns.text_right() - columns.gutter_left(),
-                        LINE,
-                    ),
-                    color(Token::StateHover),
-                ));
+                {
+                    probe.current.push(line);
+                    probe.current_fills.push(rect);
+                }
+                frame.under.push(fill(rect, color(Token::StateHover)));
             }
+            let has_caret = selections.iter().any(|(_, h)| on_line(*h));
+            let last_segment = row.segments.len() - 1;
 
-            // Selections, past the line end when they hold its terminator.
-            let mut selected: Vec<Range<usize>> = Vec::new();
-            for (r, _) in selections.iter().filter(|(r, _)| !r.is_empty()) {
-                if r.end < range.start || r.start > range.end {
+            for (k, segment) in row.segments.iter().enumerate() {
+                let display_row = line_row + k;
+                if display_row < first_row || display_row >= last_row {
                     continue;
                 }
-                let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
-                let past_end = r.end > range.end && has_terminator;
-                if a == b && !past_end {
+                let top = row_top(display_row);
+                let is_last = k == last_segment;
+                let cols = segment.columns.clone();
+                #[cfg(test)]
+                probe
+                    .row_lines
+                    .push((display_row, line, (k > 0).then_some(segment.indent)));
+
+                // Selections, past the row's end when they go on, and past
+                // the line's end when they hold its terminator.
+                let mut selected: Vec<Range<usize>> = Vec::new();
+                for (r, _) in selections.iter().filter(|(r, _)| !r.is_empty()) {
+                    if r.end < range.start || r.start > range.end {
+                        continue;
+                    }
+                    let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
+                    if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
+                        continue;
+                    }
+                    let (a, b) = (a.max(cols.start), b.min(cols.end));
+                    let past_end = is_last && r.end > range.end && has_terminator;
+                    if a == b && !past_end {
+                        continue;
+                    }
+                    let x0 = row.x_in(k, a);
+                    let x1 = row.x_in(k, b) + if past_end { space } else { 0.0 };
+                    let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                    #[cfg(test)]
+                    probe.selections.push(rect);
+                    frame.selections.push(fill(rect, color(Token::Selection)));
+                    if a < b {
+                        selected.push(a..b);
+                    }
+                }
+                let shaped = if selected.is_empty() {
+                    segment.shaped.clone()
+                } else {
+                    row.with_selection(k, &selected, &fonts, &palette, window)
+                };
+                let base = baseline(&shaped, top);
+                let seg_x = origin_x + segment.indent;
+
+                // Link underlines.
+                for d in &row.decorations {
+                    let (a, b) = (
+                        d.range.start.max(segment.display.start),
+                        d.range.end.min(segment.display.end),
+                    );
+                    if a >= b {
+                        continue;
+                    }
+                    let x0 = f32::from(shaped.x_for_index(a - segment.display.start));
+                    let x1 = f32::from(shaped.x_for_index(b - segment.display.start));
+                    let y = base + inline::UNDERLINE_OFFSET;
+                    let c = color(d.color);
+                    frame.lines.push(match d.kind {
+                        Underline::Wavy => Line::Plain {
+                            origin: point(px(seg_x + x0), px(y)),
+                            width: px(x1 - x0),
+                            color: c,
+                            wavy: true,
+                        },
+                        Underline::Dashed => Line::Broken {
+                            bounds: bounds_of(seg_x + x0, y, x1 - x0, HAIRLINE),
+                            on: 3.0,
+                            off: 2.0,
+                            color: c,
+                        },
+                        Underline::Dotted => Line::Broken {
+                            bounds: bounds_of(seg_x + x0, y, x1 - x0, HAIRLINE),
+                            on: 1.0,
+                            off: 1.0,
+                            color: c,
+                        },
+                    });
+                }
+                // The composition: a thin underline.
+                for m in marked
+                    .iter()
+                    .filter(|m| m.start <= range.end && m.end >= range.start)
+                {
+                    let (a, b) = (local(m.start), local(m.end));
+                    let (a, b, on_row) = if a == b {
+                        (a, b, row.segment_of(a) == k)
+                    } else {
+                        let (a, b) = (a.max(cols.start), b.min(cols.end));
+                        (a, b, a < b)
+                    };
+                    if !on_row {
+                        continue;
+                    }
+                    let (x0, x1) = (row.x_in(k, a), row.x_in(k, b));
+                    let origin = point(px(origin_x + x0), px(base + inline::UNDERLINE_OFFSET));
+                    let width = px((x1 - x0).max(CARET_WIDTH));
+                    #[cfg(test)]
+                    probe.marked.push((origin, width));
+                    frame.lines.push(Line::Plain {
+                        origin,
+                        width,
+                        color: color(Token::TextPrimary),
+                        wavy: false,
+                    });
+                }
+                // Carets.
+                for (_, head) in selections.iter().filter(|(_, h)| on_line(*h)) {
+                    if !focused || row.segment_of(local(*head)) != k {
+                        continue;
+                    }
+                    let x = origin_x + row.x_in(k, local(*head));
+                    let y = top + (LINE - editor_size::CARET_HEIGHT) / 2.0;
+                    let rect = bounds_of(x, y, CARET_WIDTH, editor_size::CARET_HEIGHT);
+                    #[cfg(test)]
+                    probe.carets.push(rect);
+                    frame.carets.push(fill(rect, color(Token::AccentDefault)));
+                }
+                frame.rows.push((shaped, point(px(seg_x), px(top))));
+
+                // The line number, on the line's first row only.
+                if k > 0 {
                     continue;
                 }
-                let x0 = row.x(a);
-                let x1 = row.x(b) + if past_end { space } else { 0.0 };
-                let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                let number_token = if has_caret {
+                    Token::TextPrimary
+                } else {
+                    Token::TextTertiary
+                };
                 #[cfg(test)]
-                probe.selections.push(rect);
-                frame.selections.push(fill(rect, color(Token::Selection)));
-                if a < b {
-                    selected.push(a..b);
+                {
+                    probe.numbers.push((line, number_token));
+                    probe.number_rows.push(display_row);
                 }
+                let number_color = color(number_token);
+                let label = (line + 1).to_string();
+                let run = TextRun {
+                    len: label.len(),
+                    font: number_font.clone(),
+                    color: number_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let number = window.text_system().shape_line(
+                    SharedString::from(label),
+                    px(text::EDITOR_LINE_NUMBER.size),
+                    &[run],
+                    None,
+                );
+                let x = columns.numbers_right - f32::from(number.width);
+                frame.numbers.push((number, point(px(x), px(top))));
             }
-            let shaped = if selected.is_empty() {
-                row.shaped.clone()
-            } else {
-                row.with_selection(&selected, &fonts, &palette, window)
-            };
-            let base = baseline(&shaped, top);
-
-            // Link underlines.
-            for d in &row.decorations {
-                let x0 = f32::from(shaped.x_for_index(d.range.start));
-                let x1 = f32::from(shaped.x_for_index(d.range.end));
-                let y = base + inline::UNDERLINE_OFFSET;
-                let c = color(d.color);
-                frame.lines.push(match d.kind {
-                    Underline::Wavy => Line::Plain {
-                        origin: point(px(origin_x + x0), px(y)),
-                        width: px(x1 - x0),
-                        color: c,
-                        wavy: true,
-                    },
-                    Underline::Dashed => Line::Broken {
-                        bounds: bounds_of(origin_x + x0, y, x1 - x0, HAIRLINE),
-                        on: 3.0,
-                        off: 2.0,
-                        color: c,
-                    },
-                    Underline::Dotted => Line::Broken {
-                        bounds: bounds_of(origin_x + x0, y, x1 - x0, HAIRLINE),
-                        on: 1.0,
-                        off: 1.0,
-                        color: c,
-                    },
-                });
-            }
-            // The composition: a thin underline.
-            for m in marked
-                .iter()
-                .filter(|m| m.start <= range.end && m.end >= range.start)
-            {
-                let (a, b) = (local(m.start), local(m.end));
-                let (x0, x1) = (row.x(a), row.x(b));
-                let origin = point(px(origin_x + x0), px(base + inline::UNDERLINE_OFFSET));
-                let width = px((x1 - x0).max(CARET_WIDTH));
-                #[cfg(test)]
-                probe.marked.push((origin, width));
-                frame.lines.push(Line::Plain {
-                    origin,
-                    width,
-                    color: color(Token::TextPrimary),
-                    wavy: false,
-                });
-            }
-            // Carets.
-            let mut has_caret = false;
-            for (_, head) in selections.iter().filter(|(_, h)| on_line(*h)) {
-                has_caret = true;
-                if !focused {
-                    continue;
-                }
-                let x = origin_x + row.x(local(*head));
-                let y = top + (LINE - editor_size::CARET_HEIGHT) / 2.0;
-                let rect = bounds_of(x, y, CARET_WIDTH, editor_size::CARET_HEIGHT);
-                #[cfg(test)]
-                probe.carets.push(rect);
-                frame.carets.push(fill(rect, color(Token::AccentDefault)));
-            }
-            frame.rows.push((shaped, point(px(origin_x), px(top))));
-
-            // The line number.
-            let number_token = if has_caret {
-                Token::TextPrimary
-            } else {
-                Token::TextTertiary
-            };
-            #[cfg(test)]
-            probe.numbers.push((line, number_token));
-            let number_color = color(number_token);
-            let label = (line + 1).to_string();
-            let run = TextRun {
-                len: label.len(),
-                font: number_font.clone(),
-                color: number_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let number = window.text_system().shape_line(
-                SharedString::from(label),
-                px(text::EDITOR_LINE_NUMBER.size),
-                &[run],
-                None,
-            );
-            let x = columns.numbers_right - f32::from(number.width);
-            frame.numbers.push((number, point(px(x), px(top))));
         }
         doc.rows.end_frame();
         self.widest = self.widest.max(widest);
@@ -441,7 +527,7 @@ impl EditorView {
 
         // The scrollbar: a thumb, no track.
         self.scrollbar = None;
-        let content = content_height(lines);
+        let content = content_height(rows_total);
         if content > f64::from(viewport) {
             let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
             let track_h = viewport - 2.0 * scrollbar::INSET_Y;
@@ -472,7 +558,8 @@ impl EditorView {
     }
 
     /// Scrolls so that the primary caret is in view, with a row above and
-    /// below it and a few characters beside it.
+    /// below it and a few characters beside it (sideways only without soft
+    /// wrap).
     fn scroll_into_view(
         &mut self,
         columns: &Columns,
@@ -481,32 +568,43 @@ impl EditorView {
         window: &Window,
         cx: &App,
     ) {
-        let Some((line, column, lines)) = self.doc.as_ref().and_then(|doc| {
+        let Some((line, column, rows, wrapping)) = self.doc.as_ref().and_then(|doc| {
             let text = doc.editor.text();
             let head = doc.editor.selections().primary().head();
             let line = text.line_of_offset(head).ok()?;
-            Some((line, head - text.line_start(line).ok()?, text.line_count()))
+            let map = RowMap::new(text, doc.editor.wrap());
+            Some((
+                line,
+                head - text.line_start(line).ok()?,
+                map.row_count(),
+                map.is_wrapping(),
+            ))
         }) else {
             return;
         };
+        let Some((first, row)) = self.line_row(line, window, cx) else {
+            return;
+        };
+        let (segment, x) = row.x(column);
+        let display_row = first + segment;
         let pad = f64::from(document::PAD_TOP);
-        let row = f64::from(LINE);
-        let top = pad + line as f64 * row;
-        let wanted_top = if line == 0 { 0.0 } else { top - row };
-        let wanted_bottom = if line + 1 >= lines {
-            content_height(lines)
+        let row_h = f64::from(LINE);
+        let top = pad + display_row as f64 * row_h;
+        let wanted_top = if display_row == 0 { 0.0 } else { top - row_h };
+        let wanted_bottom = if display_row + 1 >= rows {
+            content_height(rows)
         } else {
-            top + 2.0 * row
+            top + 2.0 * row_h
         };
         if wanted_top < self.scroll_y {
             self.scroll_y = wanted_top;
         } else if wanted_bottom > self.scroll_y + f64::from(viewport) {
             self.scroll_y = wanted_bottom - f64::from(viewport);
         }
-        let Some(row) = self.row(line, window, cx) else {
+        if wrapping {
+            self.scroll_x = 0.0;
             return;
-        };
-        let x = row.x(column);
+        }
         let margin = 4.0 * space;
         if x - margin < self.scroll_x {
             self.scroll_x = (x - margin).max(0.0);
@@ -680,16 +778,19 @@ impl EditorView {
             (dx, dy) = (dy, 0.0);
         }
         self.scroll_y -= f64::from(dy);
-        self.scroll_x -= dx;
+        // Wrapped rows fit the column: no sideways scroll.
+        if self.doc.as_ref().is_some_and(|d| d.editor.wrap().is_none()) {
+            self.scroll_x -= dx;
+        }
         cx.notify();
     }
 
     /// Moves the thumb so that the point it is held at is under `position`.
     fn drag_thumb(&mut self, position: Point<Pixels>) {
-        let (Some(bar), Some(bounds), Some(lines)) = (
+        let (Some(bar), Some(bounds), Some(rows)) = (
             self.scrollbar,
             self.bounds,
-            self.doc.as_ref().map(|d| d.editor.text().line_count()),
+            self.row_map().map(RowMap::row_count),
         ) else {
             return;
         };
@@ -702,7 +803,7 @@ impl EditorView {
         }
         let top = f32::from(position.y - bar.track.top()) - grab;
         let ratio = f64::from((top / room).clamp(0.0, 1.0));
-        let max_y = (content_height(lines) - f64::from(f32::from(bounds.size.height))).max(0.0);
+        let max_y = (content_height(rows) - f64::from(f32::from(bounds.size.height))).max(0.0);
         self.scroll_y = ratio * max_y;
     }
 }

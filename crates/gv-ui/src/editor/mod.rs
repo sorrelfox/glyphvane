@@ -15,16 +15,18 @@
 //!    syntax tree (SPEC § Editor); link targets take their resolution
 //!    status from the window's path index.
 //! 4. One element ([`element`]) covers the view. It shapes only the visible
-//!    rows ([`rows`], one GPUI shaped line per buffer line, kept while the
-//!    line and its highlighting stay the same) and draws the gutter, the
-//!    current line, selections, carets, the composition underline, link
-//!    underlines and the scrollbar.
+//!    rows ([`rows`], one GPUI shaped line per wrap row of a buffer line,
+//!    kept while the line, its highlighting and its wraps stay the same)
+//!    and draws the gutter, the current line, selections, carets, the
+//!    composition underline, link underlines and the scrollbar.
 //!
-//! Display rows are buffer rows: soft wrap waits for the display map's
-//! wrap layer, so long lines scroll sideways instead. With or without side
-//! panels the text uses the Reading view's centred column, so text does
-//! not move sideways when the mode changes; split view, which starts at
-//! the pane's edge, is not built yet.
+//! Display rows are the wrap rows of the editor's wrap layer ([`wrap`]):
+//! lines soft-wrap at the text column's width, with a hanging indent for
+//! list items and quotes. In large-file mode, or with soft wrap turned
+//! off, display rows are buffer lines and long lines scroll sideways. With
+//! or without side panels the text uses the Reading view's centred column,
+//! so text does not move sideways when the mode changes; split view, which
+//! starts at the pane's edge, is not built yet.
 //!
 //! # Input
 //!
@@ -64,6 +66,7 @@ mod rows;
 mod syntax;
 #[cfg(test)]
 mod tests;
+mod wrap;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,6 +76,7 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
     ParentElement as _, Pixels, Render, SharedString, Styled as _, Task, Window, div, px,
 };
+use gv_editor::display_map::MarkdownHangingIndent;
 use gv_editor::{DeleteUnit, Editor, EditorEvent, MarkdownCommands, Motion};
 use gv_syntax::{ParseOptions, SyntaxTree};
 use gv_text::{Buffer, Revision};
@@ -95,6 +99,7 @@ use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
 use rows::{Fonts, RowCache};
 use syntax::{Background, EditQueue, Syntax, UI_BUDGET};
+use wrap::SoftWrap;
 
 gpui::actions!(
     source,
@@ -267,6 +272,8 @@ pub(crate) struct Doc {
     rows: RowCache,
     /// The file, journal and autosave side.
     state: DocState,
+    /// Large-file mode: soft wrap stays off.
+    large_file: bool,
 }
 
 impl std::fmt::Debug for Doc {
@@ -275,6 +282,7 @@ impl std::fmt::Debug for Doc {
             .field("editor", &self.editor)
             .field("syntax", &self.syntax)
             .field("state", &self.state)
+            .field("large_file", &self.large_file)
             .finish_non_exhaustive()
     }
 }
@@ -306,8 +314,10 @@ pub struct EditorView {
     /// Vertical scroll in px from the top of the content (f64: a long
     /// file is millions of px tall).
     scroll_y: f64,
-    /// Sideways scroll of the text column, in px.
+    /// Sideways scroll of the text column, in px (0 while wrapping).
     scroll_x: f32,
+    /// Soft wrap.
+    wrap: SoftWrap,
     /// The line to put at the top once the text is there.
     pending_top: Option<Top>,
     /// Bring the primary caret into view in the next frame.
@@ -332,6 +342,7 @@ pub struct EditorView {
     probe: element::Probe,
     _load: Option<Task<()>>,
     _reparse: Option<Task<()>>,
+    _rewrap: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -360,6 +371,7 @@ impl EditorView {
             availabilities: Availabilities::default(),
             scroll_y: 0.0,
             scroll_x: 0.0,
+            wrap: SoftWrap::default(),
             pending_top: None,
             autoscroll: false,
             bounds: None,
@@ -375,6 +387,7 @@ impl EditorView {
             probe: element::Probe::default(),
             _load: None,
             _reparse: None,
+            _rewrap: None,
         }
     }
 
@@ -471,7 +484,8 @@ impl EditorView {
         let tree = SyntaxTree::parse_with(buffer.text(), self.options);
         let clock = ExecutorClock(cx.background_executor().clone());
         let state = DocState::new(None, None, None, buffer.snapshot(), clock);
-        self.install(buffer, tree, state);
+        let limits = wrap::large_file_limits(cx);
+        self.install(buffer, tree, state, &limits);
         cx.notify();
     }
 
@@ -501,7 +515,8 @@ impl EditorView {
                     loaded.buffer.snapshot(),
                     ExecutorClock(executor),
                 );
-                self.install(loaded.buffer, loaded.tree, state);
+                let limits = wrap::large_file_limits(cx);
+                self.install(loaded.buffer, loaded.tree, state, &limits);
                 if let Some(recovered) = loaded.recovered {
                     self.apply_recovered(recovered, cx);
                 }
@@ -516,8 +531,17 @@ impl EditorView {
         cx.notify();
     }
 
-    fn install(&mut self, buffer: Buffer, tree: SyntaxTree, state: DocState) {
+    fn install(
+        &mut self,
+        buffer: Buffer,
+        tree: SyntaxTree,
+        state: DocState,
+        limits: &gv_settings::Editor,
+    ) {
         let mut editor = Editor::new(buffer);
+        // Soft wrap starts with the first frame, which knows the width.
+        editor.set_wrap_indent(Arc::new(MarkdownHangingIndent::default()));
+        let large_file = wrap::is_large_file(editor.text(), limits);
         let queue = EditQueue::default();
         let sink = queue.clone();
         let journal = state.worker().map(Worker::sender);
@@ -548,12 +572,16 @@ impl EditorView {
             highlights: HighlightCache::default(),
             rows: RowCache::default(),
             state,
+            large_file,
         });
         self.availabilities.reset();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
         self.widest = 0.0;
+        self.wrap.ready = false;
+        self.wrap.pending = None;
+        self._rewrap = None;
     }
 
     pub fn status(&self) -> &EditorStatus {
@@ -623,10 +651,11 @@ impl EditorView {
         cx.notify();
     }
 
-    /// The first line whose row is at least half visible.
+    /// The line of the first row that is at least half visible.
     fn top_line(&self) -> usize {
-        let line = (self.scroll_y - f64::from(document::PAD_TOP)) / f64::from(LINE);
-        line.round().max(0.0) as usize
+        let row = (self.scroll_y - f64::from(document::PAD_TOP)) / f64::from(LINE);
+        let row = row.round().max(0.0) as usize;
+        self.row_map().map_or(row, |map| map.line_of_row(row))
     }
 
     // ----- editing ---------------------------------------------------------------

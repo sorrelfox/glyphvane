@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Shaped rows: one GPUI [`ShapedLine`] per buffer line, with its styled
-//! runs, kept across frames while the line's text and highlighting stay
-//! the same.
+//! Shaped rows: a buffer line with its styled runs, shaped as one GPUI
+//! [`ShapedLine`] per wrap row ([`Segment`]), kept across frames while the
+//! line's text, highlighting and wraps stay the same.
 //!
 //! GPUI also caches glyph layouts for the lines of the last two frames, by
 //! text and fonts; this cache adds the display text, the run list and the
@@ -19,6 +19,7 @@ use gv_text::TextSnapshot;
 
 use super::highlight::{LineStyle, Style, Underline};
 use super::layout::{RowText, ends_in_hard_break};
+use super::wrap::Break;
 use crate::inline::{FontFamilies, Palette, Token, font_of};
 use crate::metrics::{HAIRLINE, text};
 use crate::theme::ThemeId;
@@ -65,7 +66,21 @@ pub(crate) struct Decoration {
     pub color: Token,
 }
 
-/// One shaped line.
+/// One wrap row of a line, shaped.
+#[derive(Debug, Clone)]
+pub(crate) struct Segment {
+    /// Its buffer columns (line-relative bytes): from its break to the next
+    /// one, or to the end of the content.
+    pub columns: Range<usize>,
+    /// Its display bytes; the last segment holds a `↵` mark too.
+    pub display: Range<usize>,
+    /// The continuation indent, in px from the left of the text.
+    pub indent: f32,
+    /// Shaped with the plain colours (no selection).
+    pub shaped: ShapedLine,
+}
+
+/// One shaped line, in one segment per wrap row.
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
     /// What it was made from.
@@ -74,46 +89,107 @@ pub(crate) struct Row {
     whitespace: bool,
     theme: ThemeId,
     tab_size: u32,
+    breaks: Vec<Break>,
+    space: f32,
     /// The display text and its mapping.
     pub text: RowText,
     /// The line's runs (line-relative buffer bytes).
     pub runs: Vec<(Range<usize>, Style)>,
-    /// Shaped with the plain colours (no selection).
-    pub shaped: ShapedLine,
+    /// One per wrap row, at least one.
+    pub segments: Vec<Segment>,
+    /// Link underlines, in display bytes of the whole line.
     pub decorations: Vec<Decoration>,
     /// Fenced code: drawn on the code fill.
     pub code: bool,
 }
 
 impl Row {
-    /// The x of buffer column `column` (line-relative bytes).
-    pub fn x(&self, column: usize) -> f32 {
-        f32::from(self.shaped.x_for_index(self.text.to_display(column)))
+    /// The segment a caret at buffer column `column` is drawn in: a column
+    /// where a row wraps is the start of the next row.
+    pub fn segment_of(&self, column: usize) -> usize {
+        self.segments
+            .partition_point(|s| s.columns.start <= column)
+            .saturating_sub(1)
     }
 
-    /// The width of the content (without a `↵` mark).
+    /// The x of buffer column `column` (line-relative bytes) in segment
+    /// `segment` (clamped to it), from the left of the text.
+    pub fn x_in(&self, segment: usize, column: usize) -> f32 {
+        let Some(s) = self.segments.get(segment) else {
+            return 0.0;
+        };
+        let column = column.clamp(s.columns.start, s.columns.end);
+        let display = self
+            .text
+            .to_display(column)
+            .clamp(s.display.start, s.display.end);
+        s.indent + f32::from(s.shaped.x_for_index(display - s.display.start))
+    }
+
+    /// The segment of buffer column `column` and its x there.
+    pub fn x(&self, column: usize) -> (usize, f32) {
+        let segment = self.segment_of(column);
+        (segment, self.x_in(segment, column))
+    }
+
+    /// The widest segment's content (without a `↵` mark).
     pub fn content_width(&self) -> f32 {
-        f32::from(self.shaped.x_for_index(self.text.content_end()))
+        let last = self.segments.len() - 1;
+        self.segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let end = if i == last {
+                    self.text
+                        .content_end()
+                        .clamp(s.display.start, s.display.end)
+                } else {
+                    s.display.end
+                };
+                s.indent + f32::from(s.shaped.x_for_index(end - s.display.start))
+            })
+            .fold(0.0, f32::max)
     }
 
-    /// The buffer column closest to `x`.
-    pub fn column_at(&self, x: f32) -> usize {
+    /// The buffer column of segment `segment` closest to `x` (from the left
+    /// of the text). Past the end of a row that wraps, the column before
+    /// its last character: the end is the next row's start.
+    pub fn column_at(&self, segment: usize, x: f32) -> usize {
+        let Some(s) = self.segments.get(segment) else {
+            return self.content.len();
+        };
+        let x = x - s.indent;
         if x <= 0.0 {
-            return 0;
+            return s.columns.start;
         }
-        let display = closest_index(&self.shaped, x);
-        self.text.to_buffer(display.min(self.text.content_end()))
+        let last = segment + 1 == self.segments.len();
+        let content_end = self
+            .text
+            .content_end()
+            .clamp(s.display.start, s.display.end);
+        let display = s.display.start + closest_index(&s.shaped, x);
+        let column = self.text.to_buffer(display.min(content_end));
+        if last {
+            return column.min(s.columns.end);
+        }
+        let before_last = self.content[..s.columns.end]
+            .char_indices()
+            .next_back()
+            .map_or(s.columns.start, |(at, _)| at)
+            .max(s.columns.start);
+        column.clamp(s.columns.start, before_last)
     }
 
     pub fn content_len(&self) -> usize {
         self.content.len()
     }
 
-    /// The row shaped again with tertiary text inside `selected` (buffer
-    /// columns) drawn in `text.secondary`: `text.tertiary` must not sit on
-    /// `selection.text`.
+    /// Segment `segment` shaped again with tertiary text inside `selected`
+    /// (buffer columns) drawn in `text.secondary`: `text.tertiary` must not
+    /// sit on `selection.text`.
     pub fn with_selection(
         &self,
+        segment: usize,
         selected: &[Range<usize>],
         fonts: &Fonts,
         palette: &Palette,
@@ -124,8 +200,35 @@ impl Row {
             .map(|r| self.text.display_range(r.clone()))
             .collect();
         let runs = text_runs(&self.text, &self.runs, &selected, fonts, palette);
-        shape(window, &self.text.display, &runs)
+        let display = self.segments[segment].display.clone();
+        shape(
+            window,
+            &self.text.display[display.clone()],
+            &slice_runs(&runs, display),
+        )
     }
+}
+
+/// The runs of display range `range`, from the runs of the whole display
+/// text.
+fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for run in runs {
+        let (start, end) = (at, at + run.len);
+        at = end;
+        let (a, b) = (start.max(range.start), end.min(range.end));
+        if a < b {
+            out.push(TextRun {
+                len: b - a,
+                ..run.clone()
+            });
+        }
+        if end >= range.end {
+            break;
+        }
+    }
+    out
 }
 
 /// The glyph boundary closest to `x`, the end of the line included.
@@ -272,6 +375,8 @@ pub(crate) struct RowEnv<'a> {
     pub theme: ThemeId,
     pub whitespace: bool,
     pub tab_size: u32,
+    /// The advance of a space, for continuation indents.
+    pub space: f32,
 }
 
 /// Rows by line, kept while they are drawn.
@@ -287,10 +392,12 @@ const SPARE_ROWS: usize = 256;
 
 impl RowCache {
     /// The row of `line`, shaped now unless the cached one still fits.
+    /// The line wraps at `breaks` (one at column 0 when it does not wrap).
     pub fn row(
         &mut self,
         line: usize,
         style: Option<&Rc<LineStyle>>,
+        breaks: Vec<Break>,
         env: RowEnv<'_>,
         window: &Window,
     ) -> Option<&Row> {
@@ -303,6 +410,8 @@ impl RowCache {
                     || row.whitespace != env.whitespace
                     || row.theme != env.theme
                     || row.tab_size != env.tab_size
+                    || row.breaks != breaks
+                    || row.space != env.space
                     || match (&row.style, style) {
                         (Some(a), Some(b)) => !Rc::ptr_eq(a, b) && **a != **b,
                         (None, None) => false,
@@ -312,7 +421,7 @@ impl RowCache {
             None => true,
         };
         if fresh {
-            let row = make_row(content, style.cloned(), env, window);
+            let row = make_row(content, style.cloned(), breaks, env, window);
             self.rows.insert(line, row);
         }
         self.rows.get(&line)
@@ -331,6 +440,7 @@ impl RowCache {
 fn make_row(
     content: String,
     style: Option<Rc<LineStyle>>,
+    mut breaks: Vec<Break>,
     env: RowEnv<'_>,
     window: &Window,
 ) -> Row {
@@ -341,11 +451,54 @@ fn make_row(
         None if content.is_empty() => Vec::new(),
         None => vec![(0..content.len(), Style::PLAIN)],
     };
-    let shaped = shape(
-        window,
-        &text.display,
-        &text_runs(&text, &runs, &[], env.fonts, env.palette),
-    );
+    let all_runs = text_runs(&text, &runs, &[], env.fonts, env.palette);
+    let key = breaks.clone();
+    // Breaks inside the content, in order, the first at column 0.
+    breaks.retain(|b| b.column < content.len() && content.is_char_boundary(b.column));
+    if breaks.first().is_none_or(|b| b.column != 0) {
+        breaks.insert(
+            0,
+            Break {
+                column: 0,
+                indent: 0,
+            },
+        );
+    }
+    breaks.dedup_by(|b, a| b.column <= a.column);
+    let segments = if breaks.len() == 1 {
+        vec![Segment {
+            columns: 0..content.len(),
+            display: 0..text.display.len(),
+            indent: 0.0,
+            shaped: shape(window, &text.display, &all_runs),
+        }]
+    } else {
+        breaks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let last = i + 1 == breaks.len();
+                let end = breaks.get(i + 1).map_or(content.len(), |n| n.column);
+                let display_end = if last {
+                    text.display.len()
+                } else {
+                    text.to_display(end)
+                };
+                let display = text.to_display(b.column).min(display_end)..display_end;
+                let shaped = shape(
+                    window,
+                    &text.display[display.clone()],
+                    &slice_runs(&all_runs, display.clone()),
+                );
+                Segment {
+                    columns: b.column..end,
+                    display,
+                    indent: b.indent as f32 * env.space,
+                    shaped,
+                }
+            })
+            .collect()
+    };
     let decorations = decorations(&text, &runs);
     let code = style.as_ref().is_some_and(|s| s.code);
     Row {
@@ -354,9 +507,11 @@ fn make_row(
         whitespace: env.whitespace,
         theme: env.theme,
         tab_size: env.tab_size,
+        breaks: key,
+        space: env.space,
         text,
         runs,
-        shaped,
+        segments,
         decorations,
         code,
     }

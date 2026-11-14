@@ -451,9 +451,11 @@ fn whitespace_toggle_shows_marks(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn long_lines_scroll_sideways_to_the_caret(cx: &mut TestAppContext) {
+fn long_lines_scroll_sideways_to_the_caret_without_soft_wrap(cx: &mut TestAppContext) {
     let long = "x".repeat(400);
     let (view, mut vcx) = editor(cx, &format!("{long}\n"));
+    view.update(&mut vcx, |v, cx| v.set_soft_wrap(false, cx));
+    draw(&mut vcx);
     vcx.simulate_keystrokes("end");
     draw(&mut vcx);
     let (scroll_x, carets, columns) = view.read_with(&vcx, |v, _| {
@@ -463,6 +465,326 @@ fn long_lines_scroll_sideways_to_the_caret(cx: &mut TestAppContext) {
     let caret = carets[0];
     assert!(f32::from(caret.right()) <= columns.text_right() + 2.0);
     assert!(f32::from(caret.left()) > columns.text_x);
+}
+
+// --- Soft wrap -------------------------------------------------------------------
+
+/// The text column of a 1280 px window: 680 px, 90 characters and a bit.
+const COLUMN: f32 = document::COLUMN_MAX;
+
+/// `count` numbered words of five characters and a space ("w0000 ").
+fn words(count: usize) -> String {
+    (0..count).map(|i| format!("w{i:04} ")).collect()
+}
+
+fn probe_of(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> super::element::Probe {
+    view.read_with(vcx, |v, _| v.probe.clone())
+}
+
+/// The rows drawn for `line`: (display row, continuation indent).
+fn rows_of(probe: &super::element::Probe, line: usize) -> Vec<(usize, Option<f32>)> {
+    probe
+        .row_lines
+        .iter()
+        .filter(|(_, l, _)| *l == line)
+        .map(|(row, _, indent)| (*row, *indent))
+        .collect()
+}
+
+#[gpui::test]
+fn a_long_list_item_wraps_at_the_column_with_a_hanging_indent(cx: &mut TestAppContext) {
+    // 40 words of 6 characters after "- ": 242 characters, three rows of at
+    // most 90.
+    let item = format!("- {}", words(40));
+    let (view, mut vcx) = editor(cx, &format!("{item}\nplain\n"));
+    let width = view.read_with(&vcx, |v, _| v.editor().unwrap().wrap_width());
+    assert_eq!(width, Some(COLUMN));
+    let probe = probe_of(&view, &mut vcx);
+    let rows = rows_of(&probe, 0);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    // Continuation rows start two characters in, under the item's text.
+    assert_eq!(rows[0], (0, None));
+    assert_eq!(rows[1], (1, Some(2.0 * CHAR)));
+    assert_eq!(rows[2], (2, Some(2.0 * CHAR)));
+    assert_eq!(rows_of(&probe, 1), [(3, None)]);
+    // No row is wider than the column, and words are not split.
+    let row = view.update_in(&mut vcx, |v, window, cx| v.row(0, window, cx).unwrap());
+    assert!(row.content_width() <= COLUMN, "{}", row.content_width());
+    for segment in &row.segments[1..] {
+        let first = &row.text.display[segment.display.clone()];
+        assert!(first.starts_with('w'), "{first:?}");
+        assert_eq!(segment.columns.start % 6, 2, "breaks after a word");
+    }
+    // Plain prose keeps its own indent (none).
+    let prose = words(40);
+    let (view, mut vcx) = editor(cx, &format!("{prose}\n"));
+    let probe = probe_of(&view, &mut vcx);
+    assert_eq!(rows_of(&probe, 0)[1], (1, Some(0.0)));
+}
+
+#[gpui::test]
+fn gutter_numbers_and_the_current_line_follow_wrapped_lines(cx: &mut TestAppContext) {
+    let text = format!("short\n{}\n> {}\nend\n", words(30), words(20));
+    let (view, mut vcx) = editor(cx, &text);
+    // The caret on the long line (line 1).
+    view.update(&mut vcx, |v, cx| {
+        v.doc.as_mut().unwrap().editor.set_cursor(10);
+        v.autoscroll = true;
+        cx.notify();
+    });
+    draw(&mut vcx);
+    let probe = probe_of(&view, &mut vcx);
+    // 180 characters: two rows; the quote 122: two rows.
+    // Line 4 is the empty line after the last line break.
+    let firsts: Vec<usize> = (0..5).map(|l| rows_of(&probe, l)[0].0).collect();
+    assert_eq!(firsts, [0, 1, 3, 5, 6]);
+    assert_eq!(probe.number_rows, firsts, "a number on first rows only");
+    assert_eq!(probe.numbers.len(), 5);
+    assert_eq!(probe.row_lines.len(), 7);
+    assert_eq!(probe.rows, 0..7);
+    assert_eq!(rows_of(&probe, 2)[1].1, Some(2.0 * CHAR), "quote hangs");
+    // The current-line fill covers both rows of line 1.
+    assert_eq!(probe.current, [1]);
+    let fill = probe.current_fills[0];
+    let columns = probe.columns.unwrap();
+    assert_eq!(fill.origin.y, px(columns.top + LINE));
+    assert_eq!(fill.size.height, px(2.0 * LINE));
+}
+
+#[gpui::test]
+fn resizing_rewraps_and_keeps_the_column(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, &format!("{}\n", words(40)));
+    let rows = |vcx: &mut VisualTestContext| rows_of(&probe_of(&view, vcx), 0).len();
+    assert_eq!(rows(&mut vcx), 3);
+    // 400 px less 2 × 40 px of padding: 320 px, 42 characters a row.
+    vcx.simulate_resize(size(px(400.0), px(HEIGHT)));
+    draw(&mut vcx);
+    let width = view.read_with(&vcx, |v, _| v.editor().unwrap().wrap_width());
+    assert_eq!(width, Some(320.0));
+    assert_eq!(rows(&mut vcx), 6);
+    vcx.simulate_resize(size(px(WIDTH), px(HEIGHT)));
+    draw(&mut vcx);
+    assert_eq!(rows(&mut vcx), 3);
+    // No sideways scroll while wrapping.
+    vcx.simulate_keystrokes("ctrl-end");
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.scroll_x), 0.0);
+}
+
+#[gpui::test]
+fn up_and_down_move_by_wrap_rows(cx: &mut TestAppContext) {
+    let paragraph = words(40);
+    let (view, mut vcx) = editor(cx, &format!("{paragraph}\nnext line\n"));
+    let breaks: Vec<usize> = view.update_in(&mut vcx, |v, window, cx| {
+        let row = v.row(0, window, cx).unwrap();
+        row.segments.iter().map(|s| s.columns.start).collect()
+    });
+    assert_eq!(breaks.len(), 3, "{breaks:?}");
+    vcx.simulate_keystrokes("right right right");
+    vcx.simulate_keystrokes("down");
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[1] + 3, breaks[1] + 3)]
+    );
+    vcx.simulate_keystrokes("down");
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[2] + 3, breaks[2] + 3)]
+    );
+    // The caret is drawn on the third row.
+    draw(&mut vcx);
+    let probe = probe_of(&view, &mut vcx);
+    let columns = probe.columns.unwrap();
+    let caret = probe.carets[0];
+    assert_eq!(caret.origin.y, px(columns.top + 2.0 * LINE + 2.0));
+    assert_eq!(caret.origin.x, px(columns.text_x + 3.0 * CHAR));
+    vcx.simulate_keystrokes("down");
+    let next = paragraph.len() + 1;
+    assert_eq!(selections(&view, &mut vcx), [(next + 3, next + 3)]);
+    vcx.simulate_keystrokes("up up");
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[1] + 3, breaks[1] + 3)]
+    );
+    // Home goes to the row's start first, then the line's; End to the
+    // row's end (before the space it wraps at), then the line's.
+    vcx.simulate_keystrokes("home");
+    assert_eq!(selections(&view, &mut vcx), [(breaks[1], breaks[1])]);
+    vcx.simulate_keystrokes("home");
+    assert_eq!(selections(&view, &mut vcx), [(0, 0)]);
+    vcx.simulate_keystrokes("down end");
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[2] - 1, breaks[2] - 1)]
+    );
+    vcx.simulate_keystrokes("end");
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(paragraph.len(), paragraph.len())]
+    );
+}
+
+#[gpui::test]
+fn clicks_on_continuation_rows_map_to_their_text(cx: &mut TestAppContext) {
+    let item = format!("- {}", words(40));
+    let (view, mut vcx) = editor(cx, &format!("{item}\n"));
+    let (breaks, columns) = view.update_in(&mut vcx, |v, window, cx| {
+        let row = v.row(0, window, cx).unwrap();
+        let breaks: Vec<usize> = row.segments.iter().map(|s| s.columns.start).collect();
+        (breaks, v.probe.columns.unwrap())
+    });
+    // The fourth character of the second row, after the hanging indent.
+    let at = point(
+        px(columns.text_x + 2.0 * CHAR + 3.0 * CHAR + 1.0),
+        px(columns.top + LINE + LINE / 2.0),
+    );
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[1] + 3, breaks[1] + 3)]
+    );
+    // In the indent: the row's start.
+    let at = point(px(columns.text_x + 4.0), px(columns.top + LINE + 4.0));
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(selections(&view, &mut vcx), [(breaks[1], breaks[1])]);
+    // Past the end of a row that wraps: before its last character, on it.
+    let at = point(
+        px(columns.text_right() - 2.0),
+        px(columns.top + LINE + LINE / 2.0),
+    );
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(breaks[2] - 1, breaks[2] - 1)]
+    );
+    let probe = probe_of(&view, &mut vcx);
+    assert_eq!(
+        probe.carets[0].origin.y,
+        px(columns.top + LINE + 2.0),
+        "the caret stays on the row clicked"
+    );
+    // A drag from the first row to the third selects across rows: one
+    // rectangle per row.
+    let from = point(px(columns.text_x + 1.0), px(columns.top + LINE / 2.0));
+    let to = point(
+        px(columns.text_x + 2.0 * CHAR + 1.0),
+        px(columns.top + 2.0 * LINE + LINE / 2.0),
+    );
+    vcx.simulate_event(MouseDownEvent {
+        position: from,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    vcx.simulate_event(MouseUpEvent {
+        position: to,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    draw(&mut vcx);
+    assert_eq!(selections(&view, &mut vcx), [(0, breaks[2])]);
+    assert_eq!(probe_selections(&view, &mut vcx), 2);
+}
+
+fn probe_selections(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> usize {
+    view.read_with(vcx, |v, _| v.probe.selections.len())
+}
+
+#[gpui::test]
+fn input_method_bounds_on_a_wrapped_row(cx: &mut TestAppContext) {
+    let item = format!("- {}", words(40));
+    let (view, mut vcx) = editor(cx, &format!("{item}\n"));
+    let (breaks, columns) = view.update_in(&mut vcx, |v, window, cx| {
+        let row = v.row(0, window, cx).unwrap();
+        let breaks: Vec<usize> = row.segments.iter().map(|s| s.columns.start).collect();
+        (breaks, v.probe.columns.unwrap())
+    });
+    // Compose on the second row, two characters in (all ASCII: UTF-16
+    // offsets are bytes).
+    let at = breaks[1] + 2;
+    view.update_in(&mut vcx, |v, window, cx| {
+        v.doc.as_mut().unwrap().editor.set_cursor(at);
+        v.replace_and_mark_text_in_range(None, "xy", None, window, cx);
+    });
+    draw(&mut vcx);
+    let bounds = view
+        .update_in(&mut vcx, |v, window, cx| {
+            let element = Bounds::new(point(px(0.0), px(0.0)), size(px(WIDTH), px(HEIGHT)));
+            v.bounds_for_range(at..at + 2, element, window, cx)
+        })
+        .expect("bounds");
+    assert_eq!(bounds.top(), px(columns.top + LINE));
+    assert_eq!(bounds.left(), px(columns.text_x + 2.0 * CHAR + 2.0 * CHAR));
+    assert_eq!(bounds.size.height, px(LINE));
+    let probe = probe_of(&view, &mut vcx);
+    assert_eq!(probe.marked.len(), 1);
+    assert_eq!(probe.marked[0].0.x, bounds.left());
+    // And the point there maps back to the same character.
+    let back = view.update_in(&mut vcx, |v, window, cx| {
+        v.character_index_for_point(bounds.origin + point(px(1.0), px(LINE / 2.0)), window, cx)
+    });
+    assert_eq!(back, Some(at));
+}
+
+#[gpui::test]
+fn large_file_mode_keeps_soft_wrap_off(cx: &mut TestAppContext) {
+    let limits = gv_settings::Editor {
+        large_file_bytes: 1024,
+        large_file_lines: 1000,
+        large_file_line_chars: 1000,
+        ..gv_settings::Editor::default()
+    };
+    let small = gv_text::TextSnapshot::new("a\nb\n");
+    assert!(!super::wrap::is_large_file(&small, &limits));
+    let big = gv_text::TextSnapshot::new(&"x".repeat(2000));
+    assert!(super::wrap::is_large_file(&big, &limits));
+    let roomy = gv_settings::Editor {
+        large_file_bytes: 1 << 20,
+        ..limits.clone()
+    };
+    let long_line = gv_text::TextSnapshot::new(&format!("{}\n", "é".repeat(900)));
+    assert!(
+        !super::wrap::is_large_file(&long_line, &roomy),
+        "900 characters in 1800 bytes"
+    );
+    let longer = gv_text::TextSnapshot::new(&format!("a\n{}\n", "é".repeat(1001)));
+    assert!(super::wrap::is_large_file(&longer, &roomy));
+    let many = gv_text::TextSnapshot::new(&"\n".repeat(1001));
+    assert!(super::wrap::is_large_file(&many, &roomy));
+
+    let (view, mut vcx) = editor(cx, &format!("{}\n", words(40)));
+    view.update(&mut vcx, |v, cx| {
+        v.doc.as_mut().unwrap().large_file = true;
+        cx.notify();
+    });
+    draw(&mut vcx);
+    let (width, large) = view.read_with(&vcx, |v, _| {
+        (v.editor().unwrap().wrap_width(), v.is_large_file())
+    });
+    assert!(large);
+    assert_eq!(width, None);
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 1);
+}
+
+#[gpui::test]
+fn the_top_line_stays_when_the_wrap_width_changes(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    for _ in 0..100 {
+        text.push_str(&words(40));
+        text.push('\n');
+    }
+    let (view, mut vcx) = editor(cx, &text);
+    view.update(&mut vcx, |v, cx| v.scroll_to_line(50, cx));
+    draw(&mut vcx);
+    let top = view.read_with(&vcx, |v, _| v.top_line());
+    assert_eq!(top, 50);
+    vcx.simulate_resize(size(px(400.0), px(HEIGHT)));
+    draw(&mut vcx);
+    let top = view.read_with(&vcx, |v, _| v.top_line());
+    assert_eq!(top, 50);
 }
 
 // --- In the window: Mod+E -----------------------------------------------------------
@@ -875,8 +1197,11 @@ mod timing {
     }
 
     /// Typing in the middle of a generated document: per keystroke, the
-    /// input event to the frame drawn (layout and scene, no GPU).
-    fn run(name: &str, bytes: usize) {
+    /// input event to the frame drawn (layout and scene, no GPU). `wrap`:
+    /// `None` leaves soft wrap as the view sets it (on, off in large-file
+    /// mode), `Some(true)` forces it on whatever the size, `Some(false)`
+    /// turns it off.
+    fn run(name: &str, bytes: usize, wrap: Option<bool>) {
         let markdown = generated(bytes);
         // What opening costs the UI thread: the editor over a decoded
         // buffer (read, decode and parse run in the background).
@@ -903,6 +1228,41 @@ mod timing {
             let editor = workspace
                 .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
                 .expect("editor");
+            if wrap == Some(false) {
+                editor.update(&mut vcx, |e, cx| e.set_soft_wrap(false, cx));
+                draw(&mut vcx);
+            }
+            if wrap == Some(true) {
+                // Running the test executor draws the notified window.
+                let t = Instant::now();
+                editor.update(&mut vcx, |e, cx| {
+                    e.wrap.force = true;
+                    cx.notify();
+                });
+                draw(&mut vcx);
+                let first = t.elapsed();
+                // A new width, re-wrapped at once (what a resize costs a
+                // document under the synchronous limit).
+                let t = Instant::now();
+                editor.update(&mut vcx, |e, _| {
+                    let width = e.doc.as_ref().unwrap().editor.wrap_width().unwrap();
+                    e.apply_wrap_width(Some(width - 100.0));
+                });
+                let rewrap = t.elapsed();
+                let rows = editor.read_with(&vcx, |e, _| {
+                    e.row_map().map_or(0, super::super::wrap::RowMap::row_count)
+                });
+                editor.update(&mut vcx, |e, cx| {
+                    e.apply_wrap_width(Some(super::COLUMN));
+                    cx.notify();
+                });
+                draw(&mut vcx);
+                eprintln!(
+                    "{name}: soft wrap turned on (first wrap, frame) {:.1} ms; re-wrap at a new width {:.1} ms ({rows} rows)",
+                    first.as_secs_f64() * 1e3,
+                    rewrap.as_secs_f64() * 1e3,
+                );
+            }
             // The caret in the middle of the text, in a paragraph.
             editor.update(&mut vcx, |e, cx| {
                 let doc = e.doc.as_mut().unwrap();
@@ -981,7 +1341,9 @@ mod timing {
     #[test]
     #[ignore = "timing run; see the module docs"]
     fn timing_typing_in_one_and_ten_megabytes() {
-        run("generated 1 MB", 1 << 20);
-        run("generated 10 MB", 10 << 20);
+        run("generated 1 MB, no wrap", 1 << 20, Some(false));
+        run("generated 1 MB, soft wrap", 1 << 20, Some(true));
+        run("generated 10 MB, large-file mode (no wrap)", 10 << 20, None);
+        run("generated 10 MB, soft wrap forced", 10 << 20, Some(true));
     }
 }

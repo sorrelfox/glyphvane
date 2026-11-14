@@ -8,7 +8,8 @@
 //! never from the last paint: Wayland asks for the input method's area
 //! inside the event that delivered the preedit, before the next frame is
 //! laid out (IME spike, Problem 1). A row that changed since the last frame
-//! is shaped again on the spot ([`super::rows::RowCache`]).
+//! is shaped again on the spot ([`super::rows::RowCache`]). Positions are
+//! on display rows: the wrap rows of the wrap layer while soft wrap is on.
 //!
 //! UTF-16 ranges from the platform go through `gv-editor`'s input-method
 //! API, which clips them to characters and never splits a surrogate pair
@@ -21,6 +22,7 @@ use gv_editor::boundaries::{clip_caret, snap_to_grapheme};
 use gv_text::{Bias, OffsetUtf16};
 
 use super::rows::{Row, RowEnv};
+use super::wrap::RowMap;
 use super::{EditorView, LINE};
 use crate::appearance::Appearance;
 use crate::inline::Palette;
@@ -88,9 +90,9 @@ impl EditorView {
         Some(Columns::new(bounds, lines, digit))
     }
 
-    /// The top of `line`'s row in window coordinates.
-    pub(crate) fn row_top(&self, columns: &Columns, line: usize) -> f32 {
-        let y = line as f64 * f64::from(LINE) - self.scroll_y;
+    /// The top of display row `row` in window coordinates.
+    pub(crate) fn row_top(&self, columns: &Columns, row: usize) -> f32 {
+        let y = row as f64 * f64::from(LINE) - self.scroll_y;
         columns.top + y as f32
     }
 
@@ -99,13 +101,23 @@ impl EditorView {
         columns.text_x - self.scroll_x
     }
 
-    /// The shaped row of `line` in the current text.
-    pub(crate) fn row(&mut self, line: usize, window: &Window, cx: &gpui::App) -> Option<Row> {
+    /// The shaped row of `line` in the current text, and its first
+    /// display row.
+    pub(crate) fn line_row(
+        &mut self,
+        line: usize,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<(usize, Row)> {
         let theme = Appearance::current_id(cx);
         let palette = Palette::of(theme);
         let whitespace = self.show_whitespace;
         let fonts = self.fonts.clone();
+        let (_, space) = self.advances(window);
         let doc = self.doc.as_mut()?;
+        let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
+        let first = map.first_row(line);
+        let breaks = map.breaks(line);
         let env = RowEnv {
             text: doc.editor.text(),
             fonts: &fonts,
@@ -113,10 +125,19 @@ impl EditorView {
             theme,
             whitespace,
             tab_size: doc.editor.display().tab_size().get(),
+            space,
         };
-        doc.rows
-            .row(line, doc.highlights.get(line), env, window)
-            .cloned()
+        let row = doc
+            .rows
+            .row(line, doc.highlights.get(line), breaks, env, window)
+            .cloned()?;
+        Some((first, row))
+    }
+
+    /// The shaped row of `line` in the current text.
+    #[cfg(test)]
+    pub(crate) fn row(&mut self, line: usize, window: &Window, cx: &gpui::App) -> Option<Row> {
+        self.line_row(line, window, cx).map(|(_, row)| row)
     }
 
     /// The caret offset nearest to window point `position`.
@@ -127,29 +148,31 @@ impl EditorView {
         cx: &gpui::App,
     ) -> Option<usize> {
         let columns = self.columns(None, window)?;
-        let (line_count, len) = {
-            let text = self.doc.as_ref()?.editor.text();
-            (text.line_count(), text.len())
+        let (row_count, line, len, display_row) = {
+            let map = self.row_map()?;
+            let y = f64::from(f32::from(position.y) - columns.top) + self.scroll_y;
+            if y < 0.0 {
+                return Some(0);
+            }
+            let row = (y / f64::from(LINE)).floor() as usize;
+            let len = self.doc.as_ref()?.editor.text().len();
+            (map.row_count(), map.line_of_row(row), len, row)
         };
-        let y = f64::from(f32::from(position.y) - columns.top) + self.scroll_y;
-        if y < 0.0 {
-            return Some(0);
-        }
-        let line = (y / f64::from(LINE)).floor() as usize;
-        if line >= line_count {
+        if display_row >= row_count {
             return Some(len);
         }
-        let row = self.row(line, window, cx)?;
+        let (first, row) = self.line_row(line, window, cx)?;
+        let segment = display_row.saturating_sub(first);
         let x = f32::from(position.x) - self.text_origin_x(&columns);
-        let column = row.column_at(x).min(row.content_len());
+        let column = row.column_at(segment, x).min(row.content_len());
         let text = self.doc.as_ref()?.editor.text();
         let start = text.line_start(line).ok()?;
         let offset = snap_to_grapheme(text, start + column);
         Some(clip_caret(text, offset, Bias::Left))
     }
 
-    /// The window bounds of byte range `range` on its first line: from its
-    /// start to its end, or to the end of the line if it goes on.
+    /// The window bounds of byte range `range` on its first display row:
+    /// from its start to its end, or to the end of the row if it goes on.
     pub(crate) fn range_bounds(
         &mut self,
         range: Range<usize>,
@@ -167,12 +190,14 @@ impl EditorView {
             let end = (range.end.min(line_range.end)).saturating_sub(line_range.start);
             (line, start, end.max(start))
         };
-        let row = self.row(line, window, cx)?;
+        let (first, row) = self.line_row(line, window, cx)?;
+        let (segment, x0) = row.x(start);
+        let x1 = row.x_in(segment, end);
         let x = self.text_origin_x(&columns);
-        let top = self.row_top(&columns, line);
+        let top = self.row_top(&columns, first + segment);
         Some(Bounds::from_corners(
-            point(px(x + row.x(start)), px(top)),
-            point(px(x + row.x(end)), px(top + LINE)),
+            point(px(x + x0), px(top)),
+            point(px(x + x1.max(x0)), px(top + LINE)),
         ))
     }
 
