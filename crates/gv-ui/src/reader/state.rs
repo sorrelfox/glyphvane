@@ -19,6 +19,7 @@ use gv_syntax::BlockId;
 
 use super::bench::Bench;
 use super::engine::Engine;
+use super::find::FindMarks;
 use super::items::{DocItems, ItemCache};
 use super::load::Loaded;
 use crate::inline::{InlineBlock, InlineText};
@@ -162,6 +163,10 @@ pub(crate) struct State {
     pub bench: Option<Bench>,
     /// Items whose content changed since the last frame (link statuses).
     pub stale: Vec<ItemId>,
+    /// Bumped per installed document: find results belong to one.
+    pub doc_version: u64,
+    /// Find in page: the matches to paint.
+    pub find: FindMarks,
 }
 
 impl std::fmt::Debug for State {
@@ -191,6 +196,8 @@ impl State {
             timing: Timing::default(),
             bench: None,
             stale: Vec::new(),
+            doc_version: 0,
+            find: FindMarks::default(),
         }
     }
 
@@ -205,6 +212,7 @@ impl State {
         self.press = Press::None;
         self.geometry = Geometry::default();
         self.stale.clear();
+        self.doc_version += 1;
     }
 
     /// The selection as a non-empty range.
@@ -322,7 +330,7 @@ impl State {
         } = self;
         if let Some(doc) = doc {
             let wrap = !doc.tree.code_wrap(block);
-            let range = doc.tree.set_code_wrap(block, wrap);
+            let range = Arc::make_mut(&mut doc.tree).set_code_wrap(block, wrap);
             let items = DocItems {
                 tree: &doc.tree,
                 cache,

@@ -16,8 +16,7 @@ use gv_text::DecodeStatus;
 
 use super::links::{PROFILE, Resolver};
 
-/// A loaded document. Cloning is cheap except for the render tree's item
-/// list.
+/// A loaded document. Cloning is cheap.
 #[derive(Debug, Clone)]
 pub(crate) struct Loaded {
     pub path: PathBuf,
@@ -25,7 +24,8 @@ pub(crate) struct Loaded {
     pub text: Arc<str>,
     pub syntax: SyntaxTree,
     pub model: DocModel,
-    pub tree: RenderTree,
+    /// Shared with find in page's background searches.
+    pub tree: Arc<RenderTree>,
     /// Why the text is not an exact decode, if it is not (undecodable bytes
     /// show as U+FFFD).
     pub lossy: Option<String>,
@@ -97,7 +97,7 @@ pub(crate) fn load(
         text,
         syntax,
         model,
-        tree,
+        tree: Arc::new(tree),
         lossy,
         timings,
     })
@@ -112,7 +112,7 @@ pub(crate) fn refresh(doc: &mut Loaded, links: &Resolver) -> Vec<gv_render_tree:
         images: &NoImageSizes,
     };
     let which = |t: &LinkTarget<'_>| !t.image && links.depends_on_index(t);
-    doc.tree
+    Arc::make_mut(&mut doc.tree)
         .refresh_where(&doc.syntax, &*doc.text, sources, &which)
         .changed
 }

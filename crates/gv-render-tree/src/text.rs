@@ -13,7 +13,7 @@
 //!   across items: blocks separated by a newline, or a blank line where the
 //!   blocks have a gap between them; list markers optional.
 //! - [`RenderTree::find`]: matches in every item's text, with source
-//!   ranges.
+//!   ranges (the matcher and the find index are in `find`).
 
 use std::ops::Range;
 
@@ -213,11 +213,17 @@ pub struct FindMatch {
     pub source: Range<usize>,
 }
 
-/// Options of [`RenderTree::find`].
+/// Options of [`RenderTree::find`] and [`Finder`](crate::Finder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FindOptions {
-    /// Match case exactly (else ASCII letters match either case).
+    /// Match case exactly (else letters match either case, by Unicode
+    /// simple case folding).
     pub case_sensitive: bool,
+    /// Only matches that are not part of a longer word (see
+    /// [`Finder`](crate::Finder)).
+    pub whole_word: bool,
+    /// The needle is a regular expression in Rust `regex` syntax.
+    pub regex: bool,
 }
 
 impl RenderTree {
@@ -299,35 +305,13 @@ impl RenderTree {
         self.plain_text(r, opts)
     }
 
-    /// Every match of `needle` in the items' texts, in document order.
+    /// Every match of `needle` in the items' texts, in document order
+    /// (none for an invalid regular expression; see
+    /// [`Finder`](crate::Finder) for the rules).
     pub fn find(&self, needle: &str, opts: FindOptions) -> Vec<FindMatch> {
         let mut out = Vec::new();
-        if needle.is_empty() {
-            return out;
-        }
-        let needle_l = needle.to_ascii_lowercase();
-        for ix in 0..self.items().len() {
-            let t = self.item_text(ix);
-            let hay = if opts.case_sensitive {
-                std::borrow::Cow::Borrowed(t.text.as_str())
-            } else {
-                std::borrow::Cow::Owned(t.text.to_ascii_lowercase())
-            };
-            let n = if opts.case_sensitive {
-                needle
-            } else {
-                needle_l.as_str()
-            };
-            let mut from = 0;
-            while let Some(k) = hay[from..].find(n) {
-                let r = from + k..from + k + n.len();
-                out.push(FindMatch {
-                    item: ix,
-                    source: t.source_range(r.clone()),
-                    text: r.clone(),
-                });
-                from = r.end;
-            }
+        if let Ok(finder) = crate::Finder::new(needle, opts) {
+            self.find_with(&finder, 0..self.items().len(), usize::MAX, &mut out);
         }
         out
     }

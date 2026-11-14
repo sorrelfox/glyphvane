@@ -13,6 +13,7 @@ gv-inline.workspace = true
 gv-model.workspace = true
 gv-syntax.workspace = true
 gv-text.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

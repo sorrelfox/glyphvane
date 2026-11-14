@@ -3089,6 +3089,7 @@ dependencies = [
  "gv-syntax",
  "gv-text",
  "proptest",
+ "regex",
  "serde_json",
 ]
 

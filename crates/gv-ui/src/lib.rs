@@ -5,6 +5,7 @@
 
 pub mod appearance;
 pub mod chrome;
+pub mod find;
 pub mod icons;
 pub mod inline;
 pub mod metrics;
@@ -110,6 +111,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     );
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
+    cx.bind_keys(find::key_bindings());
     cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_window_closed(|cx, _| {

@@ -25,7 +25,9 @@
 //!    and reports the item splice ([`UpdateReport`]).
 //! 4. [`RenderTree::item_text`], [`RenderTree::plain_text`] and
 //!    [`RenderTree::find`] project the tree to plain text with a mapping
-//!    back to source offsets, for copy and find in page.
+//!    back to source offsets, for copy and find in page; a [`Finder`]
+//!    (literal or regex, case, whole word) runs over them, or over a
+//!    [`FindIndex`] built once per tree.
 //!
 //! # Profiles
 //!
@@ -43,6 +45,7 @@
 
 mod build;
 mod dump;
+mod find;
 mod inline;
 mod item;
 mod metrics;
@@ -53,6 +56,7 @@ mod text;
 mod tree;
 
 pub use build::MAX_FRAMES;
+pub use find::{FindError, FindIndex, Finder, Matches};
 pub use item::{Estimate, Item, ItemId, ItemKind, indent};
 pub use metrics::{Metrics, Spacing};
 pub use node::{

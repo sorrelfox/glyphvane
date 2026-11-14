@@ -38,7 +38,7 @@ use super::items::{
 use super::state::{
     ButtonKind, CodeButton, CodeGeom, Geometry, Hover, LinkHit, PlacedGeom, Press, Selection, State,
 };
-use super::{Disposition, LinkRequest, Reader, ReaderEvent};
+use super::{Disposition, LinkRequest, Reader, ReaderEvent, find};
 use crate::icons::Icon;
 use crate::inline::{InlineParagraph, Palette, Token};
 use crate::metrics::size::{CHECKBOX, CODE_BUTTON, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, document};
@@ -238,6 +238,7 @@ impl Host<'_> {
         &self,
         block: &Rc<RefCell<crate::inline::InlineBlock>>,
         selection: Option<std::ops::Range<usize>>,
+        highlights: Vec<(std::ops::Range<usize>, Token)>,
         place: Place,
         window: &mut Window,
         cx: &mut App,
@@ -246,6 +247,9 @@ impl Host<'_> {
             InlineParagraph::new(block.clone(), self.text.clone(), self.palette.clone());
         if let Some(r) = selection {
             paragraph = paragraph.selection(r);
+        }
+        if !highlights.is_empty() {
+            paragraph = paragraph.highlights(highlights);
         }
         let mut element = paragraph.into_any_element();
         element.layout_as_root(
@@ -325,6 +329,13 @@ impl Element for ReaderElement {
             bounds,
             ..Geometry::default()
         };
+        // The text column: at most 680 wide, centred, 40 px side padding.
+        let width = f32::from(bounds.size.width);
+        let column = (width - 2.0 * document::PAD_X)
+            .clamp(1.0, document::COLUMN_MAX)
+            .floor();
+        let x0 = f32::from(bounds.left()) + ((width - column) / 2.0).max(0.0).floor();
+        find::reveal_current(st, column, &ts);
         let State {
             doc,
             engine,
@@ -334,6 +345,8 @@ impl Element for ReaderElement {
             hscroll,
             geometry,
             hover,
+            find: marks,
+            doc_version,
             ..
         } = st;
         let Some(doc) = doc.as_ref() else {
@@ -350,13 +363,9 @@ impl Element for ReaderElement {
             palette,
         };
 
-        // The text column: at most 680 wide, centred, 40 px side padding.
-        let width = f32::from(bounds.size.width);
-        let column = (width - 2.0 * document::PAD_X)
-            .clamp(1.0, document::COLUMN_MAX)
-            .floor();
-        let x0 = f32::from(bounds.left()) + ((width - column) / 2.0).max(0.0).floor();
         geometry.column = (x0, column);
+        // Find matches are painted while they belong to this document.
+        let marks = (marks.version == *doc_version && !marks.matches.is_empty()).then_some(&*marks);
 
         {
             let mut items = DocItems {
@@ -401,6 +410,9 @@ impl Element for ReaderElement {
                 let b = r.end.saturating_sub(node.source.start);
                 (b > a).then_some(a..b)
             });
+            let highlights = marks
+                .map(|m| m.highlights(p.ix, node.source.start))
+                .unwrap_or_default();
 
             // Quote bars, and the markers of list items that start here.
             let mut markers = Vec::new();
@@ -579,6 +591,7 @@ impl Element for ReaderElement {
                         out.children.push(host.child(
                             block,
                             local_selection.clone(),
+                            highlights.clone(),
                             Place {
                                 origin,
                                 width: tw,
@@ -613,6 +626,7 @@ impl Element for ReaderElement {
                         out.children.push(host.child(
                             block,
                             local_selection.clone(),
+                            highlights.clone(),
                             Place {
                                 origin: point(px(left), px(content_top)),
                                 width: tw,

@@ -84,6 +84,10 @@ pub enum Icon {
     CopyCode,
     /// A code block's soft wrap toggle.
     WrapCode,
+    /// Find in page: previous match, next match, close.
+    FindPrevious,
+    FindNext,
+    CloseFind,
 }
 
 impl Icon {
@@ -133,6 +137,9 @@ impl Icon {
             Self::WindowClose => IconName::WindowClose,
             Self::CopyCode => IconName::Copy,
             Self::WrapCode => IconName::TextWrap,
+            Self::FindPrevious => IconName::ArrowUp,
+            Self::FindNext => IconName::ArrowDown,
+            Self::CloseFind => IconName::X,
         }
     }
 }
@@ -268,7 +275,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 36] = [
+    const ALL: [Icon; 39] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -305,6 +312,9 @@ mod tests {
         Icon::WindowClose,
         Icon::CopyCode,
         Icon::WrapCode,
+        Icon::FindPrevious,
+        Icon::FindNext,
+        Icon::CloseFind,
     ];
 
     #[test]

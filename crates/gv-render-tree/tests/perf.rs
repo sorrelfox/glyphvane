@@ -188,3 +188,109 @@ fn perf() {
     report("spec", &spec(1 << 20));
     report("outliner", &outliner(1 << 20));
 }
+
+/// About `bytes` of mixed prose, lists, quotes and code (the Reading
+/// view's generated timing document).
+fn generated(bytes: usize) -> String {
+    let mut s = String::with_capacity(bytes + 4096);
+    let mut i = 0;
+    while s.len() < bytes {
+        match i % 10 {
+            0 => s.push_str(&format!("## Section {i}\n\n")),
+            1..=5 => s.push_str(&format!(
+                "Paragraph {i} with **strong** and *emphasised* words, `inline code` and a \
+                 [link](other-{i}.md#part) to another note, written long enough to wrap \
+                 over two or three lines of the text column.\n\n"
+            )),
+            6 => s.push_str(&format!("- item {i} one\n- item two\n  - nested three\n\n")),
+            7 => s.push_str(&format!(
+                "> A quote {i} that also has some words in it.\n\n"
+            )),
+            _ => s.push_str(&format!(
+                "```rust\nfn f{i}(x: u32) -> u32 {{\n    x * 2 + {i}\n}}\n```\n\n"
+            )),
+        }
+        i += 1;
+    }
+    s
+}
+
+/// Find in page on the generated 10 MB document: the find index, and
+/// searches over it (all matches, the first 10,000, whole word, regex),
+/// against projecting every item's text on the way.
+#[test]
+#[ignore = "timing; run in release with --ignored --nocapture"]
+fn find_perf() {
+    use gv_render_tree::{FindOptions, Finder};
+
+    let text = generated(10 << 20);
+    let tree = SyntaxTree::parse(&text);
+    let model = DocModel::build(&tree, &text);
+    let rt = RenderTree::build(
+        &tree,
+        &model,
+        text.as_str(),
+        RenderOptions::default(),
+        Sources::default(),
+    );
+    let runs = 5;
+    let index = rt.find_index();
+    let build = time(runs, || rt.find_index());
+    let finder = |needle: &str, o: FindOptions| Finder::new(needle, o).expect("compiles");
+    let plain = finder("the", FindOptions::default());
+    let (all, _) = index.find(&plain, usize::MAX);
+    let all_t = time(runs, || index.find(&plain, usize::MAX));
+    let capped_t = time(runs, || index.find(&plain, 10_000));
+    // The first match: the first chunk of items that holds one.
+    let first_t = time(runs, || {
+        let mut out = Vec::new();
+        let mut start = 0;
+        while out.is_empty() && start < index.len() {
+            index.find_in(&plain, start..start + 1024, 1, &mut out);
+            start += 1024;
+        }
+        out
+    });
+    let word = finder(
+        "the",
+        FindOptions {
+            whole_word: true,
+            ..FindOptions::default()
+        },
+    );
+    let (words, _) = index.find(&word, usize::MAX);
+    let word_t = time(runs, || index.find(&word, usize::MAX));
+    let re = finder(
+        r"wr\w+",
+        FindOptions {
+            regex: true,
+            ..FindOptions::default()
+        },
+    );
+    let (res, _) = index.find(&re, usize::MAX);
+    let re_t = time(runs, || index.find(&re, usize::MAX));
+    let rare = finder("Section 99990", FindOptions::default());
+    let rare_t = time(runs, || index.find(&rare, usize::MAX));
+    let direct_t = time(runs, || {
+        let mut out = Vec::new();
+        rt.find_with(&plain, 0..rt.items().len(), usize::MAX, &mut out);
+        out
+    });
+    let bytes: usize = (0..index.len())
+        .filter_map(|ix| index.item(ix))
+        .map(|t| t.text.len())
+        .sum();
+    println!(
+        "find, generated {:.1} MB, {} items ({:.1} MB of text): index build {build:.2?}\n\
+         \"the\": {} matches, all {all_t:.2?}, first 10,000 {capped_t:.2?}, first match {first_t:.2?}\n\
+         whole word \"the\": {} matches {word_t:.2?}; regex wr\\w+: {} matches {re_t:.2?}; \
+         rare literal (full scan) {rare_t:.2?}\n\
+         without the index (projecting every item): {direct_t:.2?}",
+        text.len() as f64 / 1e6,
+        rt.items().len(),
+        bytes as f64 / 1e6,
+        all.len(),
+        words.len(),
+        res.len(),
+    );
+}

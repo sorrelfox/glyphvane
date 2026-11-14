@@ -220,6 +220,7 @@ fn find_reports_source_ranges() {
         "alpha",
         FindOptions {
             case_sensitive: true,
+            ..FindOptions::default()
         },
     );
     assert_eq!(exact.len(), 1);

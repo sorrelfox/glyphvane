@@ -32,10 +32,14 @@
 //! - Wheel scrolling (sideways in code blocks that do not wrap), the
 //!   scrollbar thumb, and the keys of [`key_bindings`].
 //! - A code block's head copies the block and toggles its soft wrap.
+//! - Find in page ([`find`]): Mod+F opens the find popover at the top right
+//!   of the document area; matches are highlighted and the current one is
+//!   scrolled into view.
 
 mod bench;
 mod element;
 mod engine;
+mod find;
 mod heights;
 mod items;
 mod links;
@@ -63,6 +67,7 @@ use crate::appearance::Appearance;
 use crate::inline::{FontFamilies, InlineText, Palette};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
+use crate::metrics::spacing::find as find_spacing;
 use crate::metrics::text;
 use crate::theme::Theme;
 use bench::Bench;
@@ -72,6 +77,7 @@ use load::Loaded;
 use state::{Selection, State};
 
 pub use bench::DEBUG_READER_BENCH_ENV;
+pub use find::DEBUG_FIND_ENV;
 pub(crate) use links::{Navigation, PROFILE, navigation};
 
 gpui::actions!(
@@ -97,7 +103,7 @@ gpui::actions!(
 );
 
 /// The key context of the Reading view.
-const KEY_CONTEXT: &str = "Reader";
+pub(crate) const KEY_CONTEXT: &str = "Reader";
 
 /// The Reading view's keys. They apply while it has the focus.
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
@@ -194,6 +200,8 @@ pub struct Reader {
     statuses_from: Option<(u64, bool)>,
     /// Where to scroll once the document is loaded.
     target: Option<ScrollTarget>,
+    /// Find in page.
+    find: find::FindState,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
 }
@@ -229,6 +237,7 @@ impl Reader {
             index: None,
             statuses_from: None,
             target: None,
+            find: find::FindState::default(),
             _load: None,
             _refresh: None,
         }
@@ -307,6 +316,7 @@ impl Reader {
                 if index_key(self.index.as_ref()) != self.statuses_from {
                     self.refresh_statuses(cx);
                 }
+                self.find_document_changed(cx);
             }
             Err(err) => {
                 let name = self
@@ -362,7 +372,7 @@ impl Reader {
                     let mut tree = doc.tree;
                     // Code blocks whose wrap was toggled meanwhile.
                     for (block, wrap) in current.tree.code_wrap_settings() {
-                        tree.set_code_wrap(block, wrap);
+                        Arc::make_mut(&mut tree).set_code_wrap(block, wrap);
                     }
                     current.tree = tree;
                 }
@@ -527,8 +537,11 @@ fn notice(title: SharedString, message: SharedString, theme: &Theme) -> impl Int
 }
 
 impl Render for Reader {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
+        if self.status == LoadStatus::Ready {
+            self.debug_find(window, cx);
+        }
         self.state.borrow_mut().timing.frame_start = Some(Instant::now());
         let line = text::PREVIEW_BODY.line;
         let root = div()
@@ -553,15 +566,39 @@ impl Render for Reader {
                 this.state.borrow_mut().engine.scroll_to_end();
                 cx.notify();
             }))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::on_find_next))
+            .on_action(cx.listener(Self::on_find_previous))
+            .on_action(cx.listener(Self::on_close_find))
+            .relative()
             .size_full()
             .bg(theme.surface.page);
+        // The find popover, at the top right of the document area.
+        let popover = self
+            .find
+            .bar
+            .clone()
+            // Kept while another document loads in the tab, so the field
+            // keeps the keyboard.
+            .filter(|_| {
+                self.find.open && matches!(self.status, LoadStatus::Ready | LoadStatus::Loading)
+            })
+            .map(|bar| {
+                div()
+                    .absolute()
+                    .top(px(find_spacing::INSET_TOP))
+                    .right(px(find_spacing::INSET_RIGHT))
+                    .child(bar)
+            });
         match &self.status {
-            LoadStatus::Ready => root.child(ReaderElement::new(
-                self.state.clone(),
-                cx.weak_entity(),
-                self.focus.clone(),
-                Palette::of(Appearance::current_id(cx)),
-            )),
+            LoadStatus::Ready => root
+                .child(ReaderElement::new(
+                    self.state.clone(),
+                    cx.weak_entity(),
+                    self.focus.clone(),
+                    Palette::of(Appearance::current_id(cx)),
+                ))
+                .children(popover),
             LoadStatus::Failed(err) => {
                 let name: SharedString = self
                     .path
@@ -576,7 +613,7 @@ impl Render for Reader {
                     theme,
                 ))
             }
-            LoadStatus::Loading | LoadStatus::Empty => root,
+            LoadStatus::Loading | LoadStatus::Empty => root.children(popover),
         }
     }
 }

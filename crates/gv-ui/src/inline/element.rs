@@ -34,6 +34,8 @@ pub struct PaintStats {
     /// Underlines and strikethroughs.
     pub decorations: u32,
     pub selection_rects: u32,
+    /// Rectangles of highlighted ranges (find matches).
+    pub highlight_rects: u32,
     pub boxes: u32,
     pub caret: bool,
 }
@@ -51,6 +53,7 @@ pub struct InlineParagraph {
     text: Rc<RefCell<InlineText>>,
     palette: Arc<Palette>,
     selection: Option<Range<usize>>,
+    highlights: Vec<(Range<usize>, Token)>,
     caret: Option<(usize, Bias)>,
     cull: bool,
 }
@@ -66,6 +69,7 @@ impl InlineParagraph {
             text,
             palette,
             selection: None,
+            highlights: Vec::new(),
             caret: None,
             cull: true,
         }
@@ -76,6 +80,15 @@ impl InlineParagraph {
     /// tint on top.
     pub fn selection(mut self, source: Range<usize>) -> Self {
         self.selection = (source.start < source.end).then_some(source);
+        self
+    }
+
+    /// Paints the source ranges `ranges` (offsets as for the selection),
+    /// each filled with its token, over the run backgrounds and under the
+    /// selection and the glyphs (find matches). Empty ranges and the parts
+    /// outside the paragraph are ignored.
+    pub fn highlights(mut self, ranges: Vec<(Range<usize>, Token)>) -> Self {
+        self.highlights = ranges;
         self
     }
 
@@ -195,7 +208,12 @@ impl Element for InlineParagraph {
                 block: &block,
                 stats: PaintStats::default(),
             };
-            painter.paint(self.selection.clone(), self.caret, self.cull);
+            painter.paint(
+                self.selection.clone(),
+                &self.highlights,
+                self.caret,
+                self.cull,
+            );
             painter.stats
         };
         if let Some(painted) = self.block.borrow_mut().painted.as_mut() {
@@ -224,7 +242,13 @@ impl Painter<'_> {
         Bounds::new(self.at(r.x, r.y), size(px(r.width), px(r.height)))
     }
 
-    fn paint(&mut self, selection: Option<Range<usize>>, caret: Option<(usize, Bias)>, cull: bool) {
+    fn paint(
+        &mut self,
+        selection: Option<Range<usize>>,
+        highlights: &[(Range<usize>, Token)],
+        caret: Option<(usize, Bias)>,
+        cull: bool,
+    ) {
         let layout = self.layout;
         let paragraph = layout.paragraph();
         // Block-local y range to paint.
@@ -262,7 +286,24 @@ impl Painter<'_> {
             line_decorations.push(decorations);
         }
 
-        // 2. Selection, under the glyphs.
+        // 2. Highlights, then the selection, under the glyphs.
+        let span = paragraph.source_span();
+        for (r, token) in highlights {
+            let (start, end) = (r.start.max(span.start), r.end.min(span.end));
+            if start >= end {
+                continue;
+            }
+            let (a, _) = paragraph.logical_offset(start, Bias::Left);
+            let (b, _) = paragraph.logical_offset(end, Bias::Right);
+            let color = self.palette.color(*token);
+            for rect in layout.selection_rects(a, b) {
+                if rect.bottom() < y0 || rect.y > y1 {
+                    continue;
+                }
+                self.window.paint_quad(fill(self.rect(rect), color));
+                self.stats.highlight_rects += 1;
+            }
+        }
         if let Some(r) = &selected {
             let color = self.palette.color(Token::Selection);
             for rect in layout.selection_rects(r.start, r.end) {

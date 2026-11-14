@@ -92,6 +92,16 @@ pub mod size {
         pub const PLAIN: f32 = 36.0;
         pub const WITH_DESCRIPTION: f32 = 40.0;
     }
+
+    /// The find popover (SPEC § Popovers, "Find and replace"): 380 wide;
+    /// toggles 20 × 18; the match count at least 58 wide; previous, next
+    /// and close are `SMALL_ICON_BUTTON`.
+    pub mod find {
+        pub const WIDTH: f32 = 380.0;
+        pub const TOGGLE_WIDTH: f32 = 20.0;
+        pub const TOGGLE_HEIGHT: f32 = 18.0;
+        pub const COUNT_MIN_WIDTH: f32 = 58.0;
+    }
 }
 
 /// Spacing inside components, as the specification gives it per component.
@@ -223,6 +233,22 @@ pub mod spacing {
         pub const PAD_LEFT: f32 = 10.0;
         pub const PAD_RIGHT: f32 = 8.0;
         pub const SECTION_PAD_BOTTOM: f32 = 8.0;
+    }
+
+    /// The find popover: padding 4, rows 4 apart, 2 between the controls
+    /// of a row; the field has padding `0 2 0 7` and 4 between its text
+    /// and its toggles. The popover sits 8 below the top of the document
+    /// area and 16 from its right edge, clear of the scrollbar (not
+    /// designed).
+    pub mod find {
+        pub const PAD: f32 = 4.0;
+        pub const ROW_GAP: f32 = 4.0;
+        pub const GAP: f32 = 2.0;
+        pub const FIELD_PAD_LEFT: f32 = 7.0;
+        pub const FIELD_PAD_RIGHT: f32 = 2.0;
+        pub const FIELD_GAP: f32 = 4.0;
+        pub const INSET_TOP: f32 = 8.0;
+        pub const INSET_RIGHT: f32 = 16.0;
     }
 
     /// Window controls drawn by the application on Linux: 8 apart, 8 from the
@@ -374,6 +400,8 @@ pub mod text {
         line: 20.0,
     };
     pub const KEYCAP_SIZE: f32 = 11.5;
+    /// The find field's toggles (`Aa`, `ab`, `.*`), mono.
+    pub const FIELD_TOGGLE_SIZE: f32 = 10.5;
     /// Inline code in the preview (mono).
     pub const INLINE_CODE_SIZE: f32 = 13.0;
 
@@ -401,6 +429,10 @@ pub mod font {
 
 /// Width of every line: borders, rings, separators.
 pub const HAIRLINE: f32 = 1.0;
+
+/// The focus halo around a focused field: 2 px of `accent.tint` outside
+/// its 1 px `accent.default` border (SPEC § Controls).
+pub const FOCUS_HALO: f32 = 2.0;
 
 /// Opacity of disabled controls.
 pub const DISABLED_OPACITY: f32 = 0.5;

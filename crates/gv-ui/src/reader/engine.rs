@@ -385,6 +385,17 @@ impl Engine {
         });
     }
 
+    /// Scrolls so that `offset` px below item `ix`'s top is in the middle
+    /// of the viewport (a find match that was off screen).
+    pub fn jump_centred(&mut self, ix: usize, offset: f32) {
+        self.text_anchor = None;
+        self.target = Some(Target::Item {
+            ix,
+            offset,
+            above: 0.5,
+        });
+    }
+
     /// Document y of the viewport top, from the height index (as of the
     /// last frame).
     pub fn scroll_top(&self) -> f64 {

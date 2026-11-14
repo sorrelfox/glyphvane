@@ -643,6 +643,8 @@ fn statuses_follow_the_vault_once_it_exists(cx: &mut TestAppContext) {
     );
 }
 
+mod find_tests;
+
 /// Timing runs with the platform's real text system (Linux), for the
 /// report: the CommonMark spec examples and a generated 10 MB document,
 /// from the open request to the first frame with content, and frame CPU
@@ -768,6 +770,64 @@ mod timing {
                 "{name}: {items} items; {load}; open request to first frame with content {:.1} ms",
                 first.as_secs_f64() * 1e3
             );
+        }
+        cx.run_until_parked();
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        drop(cx);
+        dispatcher.drain_tasks();
+    }
+
+    /// Find in page on the generated 10 MB document: Mod+F (which builds
+    /// the find index), then "t", "th", "the" typed one by one; each from
+    /// the keystroke to the frame with the new highlights drawn.
+    #[test]
+    #[ignore = "timing run; see the module docs"]
+    fn timing_find_in_ten_megabytes() {
+        let dir = temp(&[("doc.md", &generated(10 << 20))]);
+        let dispatcher = TestDispatcher::new(0);
+        let mut cx = TestAppContext::build_with_text_system(
+            dispatcher.clone(),
+            Some("find_timing"),
+            platform_text_system(),
+        );
+        {
+            let (window, workspace) = open(&mut cx, &dir.path().join("doc.md"));
+            let mut vcx = VisualTestContext::from_window(window, &cx);
+            draw(&mut vcx);
+            let reader = reader(&workspace, &mut vcx);
+            let st = state(&reader, &mut vcx);
+            let t = Instant::now();
+            vcx.simulate_keystrokes("secondary-f");
+            draw(&mut vcx);
+            eprintln!(
+                "find, generated 10 MB: Mod+F to the popover drawn, find index built: {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+            for key in ["t", "h", "e"] {
+                let t = Instant::now();
+                vcx.simulate_input(key);
+                vcx.run_until_parked();
+                let found = t.elapsed();
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                let drawn = t.elapsed();
+                let s = st.borrow();
+                let rects: u32 = s
+                    .geometry
+                    .items
+                    .iter()
+                    .filter_map(|g| g.text.as_ref())
+                    .map(|b| b.borrow().paint_stats().highlight_rects)
+                    .sum();
+                eprintln!(
+                    "find, generated 10 MB: typed {key:?}: {} matches{} found in {:.1} ms, \
+                     drawn with {rects} highlights at {:.1} ms",
+                    s.find.matches.len(),
+                    if s.find.more { "+" } else { "" },
+                    found.as_secs_f64() * 1e3,
+                    drawn.as_secs_f64() * 1e3,
+                );
+            }
         }
         cx.run_until_parked();
         cx.update(|cx| cx.quit());
