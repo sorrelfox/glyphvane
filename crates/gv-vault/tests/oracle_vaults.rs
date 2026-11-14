@@ -497,7 +497,15 @@ fn validate(v: &Value) -> Result<(), String> {
                 Some("missing" | "passthrough") => true,
                 _ => false,
             };
-            if !ok {
+            // `loose` is optional and only written when true.
+            let loose_ok = match sp.get("loose") {
+                None => true,
+                Some(b) => {
+                    b.as_bool() == Some(true)
+                        && matches!(sp["kind"].as_str(), Some("heading" | "block"))
+                }
+            };
+            if !ok || !loose_ok {
                 return Err(format!("subpath {sp}"));
             }
         }
@@ -531,10 +539,10 @@ fn synthetic_oracle(expected: &ExpectFile) -> Value {
         }
         let sp = match &l.subpath {
             None => Value::Null,
-            Some(gv_vault::expect::ExpectSubpath::Heading { heading, line }) => {
+            Some(gv_vault::expect::ExpectSubpath::Heading { heading, line, .. }) => {
                 json!({"type": "heading", "heading": heading, "line": line})
             }
-            Some(gv_vault::expect::ExpectSubpath::Block { id, line }) => {
+            Some(gv_vault::expect::ExpectSubpath::Block { id, line, .. }) => {
                 json!({"type": "block", "id": id, "line": line})
             }
             Some(gv_vault::expect::ExpectSubpath::Missing) => json!({"type": "unresolved"}),
@@ -681,7 +689,7 @@ fn mini_vault_round_trip() {
         ("Folder/Note.md", "# Folder note\nPara ^abc\n"),
         (
             "Folder/Source.md",
-            "[[Note]] [[./Note]] [[Note#Part 2#Detail]] [[Note#Nope]] [[Folder/Note#^ABC]]\n[x](../Note.md) [[Missing]] ![[pic.png|300]] https://example.com [js](javascript:x)\n",
+            "[[Note]] [[./Note]] [[Note#Part 2#Detail]] [[Note#Nope]] [[Folder/Note#^ABC]] [[Note#part-2]]\n[x](../Note.md) [[Missing]] ![[pic.png|300]] https://example.com [js](javascript:x)\n",
         ),
         ("a/Meeting.md", ""),
         ("b/Meeting.md", ""),
@@ -715,7 +723,16 @@ fn mini_vault_round_trip() {
         find(&file, s, "[[Note#Part 2#Detail]]").subpath,
         Some(gv_vault::expect::ExpectSubpath::Heading {
             heading: "Detail".into(),
-            line: 3
+            line: 3,
+            loose: false
+        })
+    );
+    assert_eq!(
+        find(&file, s, "[[Note#part-2]]").subpath,
+        Some(gv_vault::expect::ExpectSubpath::Heading {
+            heading: "Part 2".into(),
+            line: 2,
+            loose: true
         })
     );
     assert_eq!(
@@ -726,7 +743,8 @@ fn mini_vault_round_trip() {
         find(&file, s, "[[Folder/Note#^ABC]]").subpath,
         Some(gv_vault::expect::ExpectSubpath::Block {
             id: "abc".into(),
-            line: 1
+            line: 1,
+            loose: true
         })
     );
     assert_eq!(find(&file, s, "[[Missing]]").status, "Unresolved");

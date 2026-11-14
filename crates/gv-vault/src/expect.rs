@@ -7,7 +7,9 @@
 //! Links are keyed by `(source, kind, original, ordinal)`, never by
 //! offsets. Statuses are the [`Status`] strings (`Ambiguous(3)`); subpaths
 //! are `heading {heading, line}`, `block {id, line}`, `missing`,
-//! `passthrough`, or `null`. Lines are 0-based.
+//! `passthrough`, or `null`. Lines are 0-based. A heading or block found
+//! only through a fallback carries `loose: true`; the field is omitted
+//! (and read as `false`) for exact matches, so older files stay valid.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +41,10 @@ pub enum ExpectSubpath {
         heading: String,
         /// 0-based line.
         line: u32,
+        /// Found only through a fallback (another slug algorithm, a
+        /// case-insensitive comparison).
+        #[serde(default, skip_serializing_if = "is_false")]
+        loose: bool,
     },
     /// A block id.
     Block {
@@ -46,11 +52,20 @@ pub enum ExpectSubpath {
         id: String,
         /// 0-based line.
         line: u32,
+        /// Matched only case-insensitively.
+        #[serde(default, skip_serializing_if = "is_false")]
+        loose: bool,
     },
     /// A fragment that was not found in the target.
     Missing,
     /// Handled by a viewer (`page=`, `t=`, image size).
     Passthrough,
+}
+
+// serde's `skip_serializing_if` passes a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One link.
@@ -154,13 +169,15 @@ impl Resolution {
         match fragment {
             None if self.size.is_some() => Some(ExpectSubpath::Passthrough),
             None | Some(FragmentTarget::Top | FragmentTarget::Unchecked) => None,
-            Some(FragmentTarget::Heading { text, line, .. }) => Some(ExpectSubpath::Heading {
+            Some(FragmentTarget::Heading { text, line, loose }) => Some(ExpectSubpath::Heading {
                 heading: text.clone(),
                 line: *line,
+                loose: *loose,
             }),
-            Some(FragmentTarget::Block { id, line, .. }) => Some(ExpectSubpath::Block {
+            Some(FragmentTarget::Block { id, line, loose }) => Some(ExpectSubpath::Block {
                 id: id.clone(),
                 line: *line,
+                loose: *loose,
             }),
             Some(FragmentTarget::Missing) => Some(ExpectSubpath::Missing),
             Some(FragmentTarget::Lines { .. } | FragmentTarget::Passthrough) => {
@@ -205,5 +222,48 @@ mod tests {
             assert!(!is_valid_status(s), "{s}");
         }
         assert!(is_valid_status(&Status::Ambiguous(12).to_string()));
+    }
+
+    #[test]
+    fn loose_is_optional() {
+        let exact = ExpectSubpath::Heading {
+            heading: "Part 2".into(),
+            line: 3,
+            loose: false,
+        };
+        let loose = ExpectSubpath::Heading {
+            heading: "Part 2".into(),
+            line: 3,
+            loose: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&exact).unwrap(),
+            r#"{"kind":"heading","heading":"Part 2","line":3}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&loose).unwrap(),
+            r#"{"kind":"heading","heading":"Part 2","line":3,"loose":true}"#
+        );
+        let old: ExpectSubpath =
+            serde_json::from_str(r#"{"kind":"block","id":"abc","line":2}"#).unwrap();
+        assert_eq!(
+            old,
+            ExpectSubpath::Block {
+                id: "abc".into(),
+                line: 2,
+                loose: false
+            }
+        );
+        let r: ExpectSubpath =
+            serde_json::from_str(r#"{"kind":"heading","heading":"H","line":0,"loose":true}"#)
+                .unwrap();
+        assert_eq!(
+            r,
+            ExpectSubpath::Heading {
+                heading: "H".into(),
+                line: 0,
+                loose: true
+            }
+        );
     }
 }
