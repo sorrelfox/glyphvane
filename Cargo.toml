@@ -140,6 +140,10 @@ nucleo-matcher = "0.3.1"
 # HTML (gv-html): the HTML5 parser, building into gv-html's own tree sink
 # (MIT OR Apache-2.0). The WHATWG URL parser above resolves pasted links.
 html5ever = "0.40.1"
+# App (gv-app): the clipboard's HTML flavor for smart paste, which GPUI's
+# clipboard does not carry (MIT OR Apache-2.0). Without the default
+# `image-data` feature: no image decoder. gv-app adds Wayland data-control.
+arboard = { version = "3.7.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -4,6 +4,7 @@
 //! The `glyphvane` binary.
 
 mod cli;
+mod clipboard;
 mod gpu;
 mod instance;
 mod no_gpu_dialog;
@@ -169,6 +170,7 @@ fn main() -> ExitCode {
         move |cx| {
             startup::mark("GPUI application started");
             gv_ui::init(cx, app_settings);
+            gv_ui::editor::set_html_clipboard(cx, Some(clipboard::system_reader()));
             gv_ui::keymap::install(cx, locations.as_ref());
             // The crash journal and file watching; safe mode keeps both:
             // they protect the user's text.
