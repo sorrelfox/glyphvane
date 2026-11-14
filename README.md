@@ -29,6 +29,9 @@ checks as CI:
 cargo xtask ci
 ```
 
+`glyphvane render notes.md -o notes.html` renders a file to HTML without
+opening a window (CommonMark only, for now).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Commits must be signed off under the

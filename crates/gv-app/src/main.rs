@@ -6,6 +6,7 @@
 mod cli;
 mod gpu;
 mod instance;
+mod render;
 mod settings;
 
 use std::cell::Cell;
@@ -21,7 +22,7 @@ use gpui::{AnyWindowHandle, App};
 use gv_ui::{AppSettings, OpenTarget, Placement, ThemeChoice};
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, OpenRequest};
+use crate::cli::{Cli, Command, OpenRequest};
 use crate::instance::Claim;
 
 /// Logs go to standard error, warnings and errors by default. `RUST_LOG`
@@ -39,6 +40,12 @@ fn init_logging() {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Headless commands start no GUI, logger, settings or instance.
+    if let Some(command) = &cli.command {
+        return match command {
+            Command::Render(args) => render::run(args),
+        };
+    }
     init_logging();
     let cwd = std::env::current_dir().unwrap_or_default();
     let request = OpenRequest::from_cli(&cli, &cwd);

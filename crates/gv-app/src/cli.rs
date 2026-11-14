@@ -6,13 +6,17 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use gv_ui::{OpenTarget, TextPosition, ThemeChoice};
 
 /// A Markdown viewer and editor.
 #[derive(Debug, Parser)]
-#[command(name = "glyphvane", version)]
+#[command(name = "glyphvane", version, args_conflicts_with_subcommands = true)]
 pub struct Cli {
+    /// A command that runs without a window.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Theme for this run, over `appearance.theme` in the settings. `system`
     /// follows the operating system's appearance.
     #[arg(long, value_enum)]
@@ -39,6 +43,59 @@ pub struct Cli {
     /// they open as tabs in its most recently used window.
     #[arg(value_name = "PATH[:LINE[:COL]]")]
     pub paths: Vec<OsString>,
+}
+
+/// The commands that run without starting the GUI.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Render a Markdown file to HTML or to a syntax tree dump, without
+    /// opening a window.
+    ///
+    /// Exit status: 0 on success, 1 when the input cannot be read (or is
+    /// binary) or the output cannot be written, 2 for a usage error or an
+    /// unsupported profile, 3 when the input does not decode exactly and
+    /// `--strict` is given.
+    Render(RenderArgs),
+}
+
+/// Arguments of `glyphvane render`.
+#[derive(Debug, clap::Args)]
+pub struct RenderArgs {
+    /// The Markdown file, or `-` for standard input. The encoding is
+    /// detected: a byte-order mark, UTF-8, or a legacy encoding.
+    #[arg(value_name = "IN")]
+    pub input: PathBuf,
+
+    /// Write to this file instead of standard output (`-` is standard
+    /// output). The file is replaced atomically.
+    #[arg(short, long, value_name = "OUT")]
+    pub output: Option<PathBuf>,
+
+    /// The flavor profile. Only `commonmark` is available so far.
+    #[arg(long, value_name = "P", default_value = "commonmark")]
+    pub profile: String,
+
+    /// What to write.
+    #[arg(long, value_enum, default_value_t = RenderFormat::Html)]
+    pub format: RenderFormat,
+
+    /// Fail (status 3) instead of warning when the input does not decode
+    /// exactly, for example invalid UTF-8 or malformed UTF-16.
+    #[arg(long)]
+    pub strict: bool,
+}
+
+/// Output formats of `glyphvane render`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RenderFormat {
+    /// HTML for reading. For now the same as `commonmark-html`.
+    // TODO(M8): switch to the rich HTML emitter of the exporter (classes,
+    // source positions, heading ids) once it exists.
+    Html,
+    /// CommonMark-exact HTML, as the reference implementation writes it.
+    CommonmarkHtml,
+    /// The concrete syntax tree as a deterministic S-expression dump.
+    Cst,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -262,6 +319,43 @@ mod tests {
             parse_location(&arg, false, |_| false),
             (PathBuf::from(&arg), None)
         );
+    }
+
+    #[test]
+    fn render_is_a_subcommand() {
+        let cli = parse(&[
+            "glyphvane",
+            "render",
+            "a.md",
+            "-o",
+            "a.html",
+            "--format",
+            "cst",
+        ]);
+        let Some(Command::Render(args)) = cli.command else {
+            panic!("render subcommand expected");
+        };
+        assert_eq!(args.input, PathBuf::from("a.md"));
+        assert_eq!(args.output, Some(PathBuf::from("a.html")));
+        assert_eq!(args.format, RenderFormat::Cst);
+        assert_eq!(args.profile, "commonmark");
+        assert!(!args.strict);
+        assert!(cli.paths.is_empty());
+
+        let defaults = parse(&["glyphvane", "render", "-"]);
+        let Some(Command::Render(args)) = defaults.command else {
+            panic!("render subcommand expected");
+        };
+        assert_eq!(args.format, RenderFormat::Html);
+        assert_eq!(args.output, None);
+
+        // After an option of the GUI, or written as a path, `render` is a
+        // file to open.
+        assert!(parse(&["glyphvane", "./render"]).command.is_none());
+        let cli = parse(&["glyphvane", "--new-window", "render", "a.md"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.paths, ["render", "a.md"]);
+        assert!(Cli::try_parse_from(["glyphvane", "render"]).is_err());
     }
 
     #[test]

@@ -33,6 +33,7 @@ commands:
 | `cargo xtask fetch-spec --verify` | Checks the vendored spec fixtures against their SHA-256 sums |
 | `cargo xtask pathological` | Linear-time checks on pathological inputs (release build) |
 | `cargo xtask fuzz-seed` | Writes the fuzz seed corpora from the spec examples |
+| `cargo run --bin glyphvane -- render FILE [--format cst]` | Renders a Markdown file (or `-` for standard input) to HTML or a syntax tree dump, without a window |
 
 Run `cargo xtask ci` before opening a pull request.
 

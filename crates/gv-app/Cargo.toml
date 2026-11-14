@@ -18,6 +18,8 @@ clap = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
 gv-settings = { workspace = true }
+gv-syntax = { workspace = true }
+gv-text = { workspace = true }
 gv-ui = { workspace = true }
 notify-debouncer-full = { workspace = true }
 serde = { workspace = true }

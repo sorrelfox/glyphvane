@@ -3000,6 +3000,8 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gv-settings",
+ "gv-syntax",
+ "gv-text",
  "gv-ui",
  "interprocess",
  "notify-debouncer-full",
