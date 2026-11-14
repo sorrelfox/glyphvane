@@ -17,6 +17,7 @@ pub mod palette;
 pub mod reader;
 pub mod settings;
 pub mod shell;
+pub mod split;
 pub mod theme;
 
 use gpui::{

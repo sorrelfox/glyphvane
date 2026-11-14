@@ -23,10 +23,11 @@ use gv_text::{Bias, OffsetUtf16};
 
 use super::rows::{Row, RowEnv};
 use super::wrap::RowMap;
-use super::{EditorView, LINE};
+use super::{EditorLayout, EditorView, LINE};
 use crate::appearance::Appearance;
 use crate::inline::Palette;
-use crate::metrics::size::{document, editor};
+use crate::metrics::size::{SCROLLBAR_THUMB, document, editor, split};
+use crate::metrics::spacing::scrollbar;
 
 /// Where the parts of the editor are, for given bounds and line count. It
 /// does not depend on the text's content or on a paint.
@@ -41,30 +42,64 @@ pub(crate) struct Columns {
     pub numbers_w: f32,
     /// The top of the first row at no scroll.
     pub top: f32,
+    /// Where the current line's fill ends on the right.
+    pub fill_right: f32,
 }
 
 impl Columns {
     /// The columns in `bounds` for `lines` lines, with `digit` the advance
-    /// of a line-number digit. The line numbers are 26 wide and grow to
-    /// the left when the numbers do not fit.
-    pub fn new(bounds: Bounds<Pixels>, lines: usize, digit: f32) -> Self {
+    /// of a line-number digit.
+    ///
+    /// - [`EditorLayout::Column`]: the Reading view's text column, centred;
+    ///   the line numbers are 26 wide, 14 before the text, and grow to the
+    ///   left when the numbers do not fit.
+    /// - [`EditorLayout::Pane`]: from the pane's left edge; the line
+    ///   numbers are 28 wide and grow to the right, then the fold
+    ///   chevron's place (no folding yet, so nothing is drawn there) and
+    ///   the text, which ends clear of the scrollbar.
+    pub fn new(bounds: Bounds<Pixels>, lines: usize, digit: f32, layout: EditorLayout) -> Self {
         let left = f32::from(bounds.left());
         let width = f32::from(bounds.size.width);
-        let column = (width - 2.0 * document::PAD_X)
-            .clamp(1.0, document::COLUMN_MAX)
-            .floor();
         let digits = lines.max(1).ilog10() + 1;
-        let numbers_w = editor::LINE_NUMBER_WIDTH.max((digits as f32 * digit).ceil());
-        let gutter = numbers_w + editor::GUTTER_GAP;
-        let text_x = (left + ((width - column) / 2.0).max(0.0).floor()).max(left + gutter);
-        let text_w = column.min(left + width - text_x).max(1.0);
-        Self {
-            bounds,
-            text_x,
-            text_w,
-            numbers_right: text_x - editor::GUTTER_GAP,
-            numbers_w,
-            top: f32::from(bounds.top()) + document::PAD_TOP,
+        let digits_w = (digits as f32 * digit).ceil();
+        let top = f32::from(bounds.top()) + layout.pad_top();
+        match layout {
+            EditorLayout::Column => {
+                let column = (width - 2.0 * document::PAD_X)
+                    .clamp(1.0, document::COLUMN_MAX)
+                    .floor();
+                let numbers_w = editor::LINE_NUMBER_WIDTH.max(digits_w);
+                let gutter = numbers_w + editor::GUTTER_GAP;
+                let text_x = (left + ((width - column) / 2.0).max(0.0).floor()).max(left + gutter);
+                let text_w = column.min(left + width - text_x).max(1.0);
+                Self {
+                    bounds,
+                    text_x,
+                    text_w,
+                    numbers_right: text_x - editor::GUTTER_GAP,
+                    numbers_w,
+                    top,
+                    fill_right: text_x + text_w,
+                }
+            }
+            EditorLayout::Pane => {
+                let numbers_w = split::LINE_NUMBER_WIDTH.max(digits_w);
+                let numbers_right = left + numbers_w;
+                let text_x = numbers_right
+                    + (split::GUTTER - split::LINE_NUMBER_WIDTH)
+                    + split::TEXT_PAD_LEFT;
+                let clear = 2.0 * scrollbar::INSET_X + SCROLLBAR_THUMB;
+                let text_w = (left + width - clear - text_x).floor().max(1.0);
+                Self {
+                    bounds,
+                    text_x,
+                    text_w,
+                    numbers_right,
+                    numbers_w,
+                    top,
+                    fill_right: left + width,
+                }
+            }
         }
     }
 
@@ -72,6 +107,7 @@ impl Columns {
         self.numbers_right - self.numbers_w
     }
 
+    #[cfg(test)]
     pub fn text_right(&self) -> f32 {
         self.text_x + self.text_w
     }
@@ -87,7 +123,7 @@ impl EditorView {
         let bounds = bounds.or(self.bounds)?;
         let lines = self.doc.as_ref()?.editor.text().line_count();
         let (digit, _) = self.advances(window);
-        Some(Columns::new(bounds, lines, digit))
+        Some(Columns::new(bounds, lines, digit, self.layout))
     }
 
     /// The top of display row `row` in window coordinates.

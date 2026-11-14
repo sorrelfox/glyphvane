@@ -14,14 +14,20 @@
 //! another. While a background reparse runs, the shown pair can be a few
 //! edits behind the buffer; highlighting then applies to the current lines
 //! by line number and is clamped to them.
+//!
+//! The complete tree is also handed to a Reading view that follows the
+//! editor (the Split view's preview, [`Syntax::take_handoff`]) with the
+//! reparses' [`Changes`] since the last hand-off, composed, so that the
+//! Reading view's model and render tree update incrementally.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use gv_syntax::{Budget, Reparse, ReparseTask, SyntaxTree};
-use gv_text::{EditSummary, TextSnapshot};
+use gv_syntax::{Budget, Changes, Reparse, ReparseTask, SyntaxTree};
+use gv_text::{EditSummary, Revision, TextSnapshot};
 
 /// How long a reparse may run on the UI thread per batch of edits
 /// (NFR-PERF-06 asks for 1 ms at p95; the measured typing reparse is a few
@@ -49,12 +55,36 @@ impl std::fmt::Debug for Background {
 
 impl Background {
     /// Runs the reparse to the end.
-    pub fn finish(mut self) -> (SyntaxTree, TextSnapshot) {
+    pub fn finish(mut self) -> (SyntaxTree, TextSnapshot, Changes) {
         self.task.run(&self.text, Budget::Unlimited);
-        let (tree, _) = self.task.finish();
-        (tree, self.text)
+        let (tree, changes) = self.task.finish();
+        (tree, self.text, changes)
     }
 }
+
+/// Names one text of one document: which document (each document loaded
+/// into a view gets its own number) and the text's revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextStamp {
+    pub doc: u64,
+    pub revision: Revision,
+}
+
+/// The syntax tree of the editor's text, handed to a Reading view that
+/// follows the editor.
+#[derive(Debug, Clone)]
+pub(crate) struct SyntaxHandoff {
+    pub tree: SyntaxTree,
+    /// The text `tree` is the tree of.
+    pub text: TextSnapshot,
+    pub stamp: TextStamp,
+    /// The text of the previous hand-off and the reparses since, composed;
+    /// `None` at the first hand-off of a document.
+    pub since: Option<(TextStamp, Changes)>,
+}
+
+/// The number of the next document.
+static NEXT_DOC: AtomicU64 = AtomicU64::new(1);
 
 /// The syntax tree of the editor's text.
 #[derive(Debug)]
@@ -69,6 +99,10 @@ pub(crate) struct Syntax {
     generation: u64,
     /// A reparse is running in the background.
     running: bool,
+    /// The document's number, for hand-offs.
+    doc: u64,
+    /// The revision last handed off and the reparses since, composed.
+    handed: Option<(Revision, Changes)>,
 }
 
 impl Syntax {
@@ -80,6 +114,40 @@ impl Syntax {
             text,
             generation: 0,
             running: false,
+            doc: NEXT_DOC.fetch_add(1, Ordering::Relaxed),
+            handed: None,
+        }
+    }
+
+    /// The complete tree and its text, if they changed since the last
+    /// hand-off, with the reparses since then.
+    pub fn take_handoff(&mut self) -> Option<SyntaxHandoff> {
+        let revision = self.text.revision();
+        let stamp = |revision| TextStamp {
+            doc: self.doc,
+            revision,
+        };
+        let since = match self.handed.take() {
+            Some((at, changes)) if at == revision && changes.is_empty() => {
+                self.handed = Some((at, changes));
+                return None;
+            }
+            Some((at, changes)) => Some((stamp(at), changes)),
+            None => None,
+        };
+        self.handed = Some((revision, Changes::default()));
+        Some(SyntaxHandoff {
+            tree: self.tree.clone(),
+            text: self.text.clone(),
+            stamp: stamp(revision),
+            since,
+        })
+    }
+
+    /// A reparse to `self.tree` reported `changes`.
+    fn note(&mut self, changes: &Changes) {
+        if let Some((_, since)) = &mut self.handed {
+            *since = since.compose(changes);
         }
     }
 
@@ -124,7 +192,8 @@ impl Syntax {
         }
         while let Some((text, summary)) = queue.pop_front() {
             match self.tree.reparse(&text, &summary, Budget::Until(deadline)) {
-                Reparse::Done { tree, .. } => {
+                Reparse::Done { tree, changes } => {
+                    self.note(&changes);
                     self.tree = tree;
                     self.text = text;
                     self.shown = (self.tree.clone(), self.text.clone());
@@ -142,7 +211,8 @@ impl Syntax {
     }
 
     /// A background reparse finished with the tree of `text`.
-    pub fn finished(&mut self, tree: SyntaxTree, text: TextSnapshot) {
+    pub fn finished(&mut self, tree: SyntaxTree, text: TextSnapshot, changes: &Changes) {
+        self.note(changes);
         self.running = false;
         self.tree = tree;
         self.text = text;
@@ -190,8 +260,8 @@ mod tests {
         let background = syntax.advance(&mut queue, past).expect("runs out of time");
         assert!(syntax.is_running());
         assert!(syntax.shown().0.is_interim());
-        let (tree, text) = background.finish();
-        syntax.finished(tree, text);
+        let (tree, text, changes) = background.finish();
+        syntax.finished(tree, text, &changes);
         assert!(syntax.is_current(buffer.text()));
         let full = SyntaxTree::parse(buffer.text());
         syntax.shown().0.same_structure(&full).unwrap();

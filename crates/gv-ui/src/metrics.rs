@@ -110,6 +110,30 @@ pub mod size {
         pub const CARET_HEIGHT: f32 = 16.0;
     }
 
+    /// Split view (SPEC § Split, screens `split.*`): two panes of equal
+    /// width with a `HAIRLINE` between them.
+    ///
+    /// - The editor pane starts at its left edge: a 46 px gutter holds the
+    ///   line numbers, right-aligned in its first 28, and the fold chevron
+    ///   (`icon::TINY`) 4 after them; the text starts 4 after the gutter,
+    ///   8 below the pane's top. Wrapped text keeps clear of the
+    ///   scrollbar on the right.
+    /// - The preview pane has padding `20 28 0`; its text column fills the
+    ///   pane between the side paddings.
+    /// - The caret's block in the preview gets a `state.hover` band that
+    ///   reaches 6 beyond the text on each side and 2 above and below it,
+    ///   radius `radius::CHIP`.
+    pub mod split {
+        pub const GUTTER: f32 = 46.0;
+        pub const LINE_NUMBER_WIDTH: f32 = 28.0;
+        pub const TEXT_PAD_LEFT: f32 = 4.0;
+        pub const EDITOR_PAD_TOP: f32 = 8.0;
+        pub const PREVIEW_PAD_X: f32 = 28.0;
+        pub const PREVIEW_PAD_TOP: f32 = 20.0;
+        pub const CARET_BAND_PAD_X: f32 = 6.0;
+        pub const CARET_BAND_PAD_Y: f32 = 2.0;
+    }
+
     pub mod settings_row {
         pub const PLAIN: f32 = 36.0;
         pub const WITH_DESCRIPTION: f32 = 40.0;

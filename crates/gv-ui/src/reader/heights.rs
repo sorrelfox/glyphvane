@@ -7,6 +7,7 @@
 //! range update per frame.
 
 use std::cmp::Ordering;
+use std::ops::Range;
 use sum_tree::{Bias, ContextLessSummary, Dimension, SeekTarget, SumTree};
 
 /// The height of one item, gap above it included.
@@ -135,6 +136,20 @@ impl Heights {
         item.copied()
     }
 
+    /// Replaces slots `range` (clamped to the slots there are) by `slots`.
+    pub fn splice(&mut self, range: Range<usize>, slots: impl IntoIterator<Item = Slot>) {
+        let n = self.len();
+        let (start, end) = (range.start.min(n), range.end.min(n).max(range.start.min(n)));
+        let mut cursor = self.tree.cursor::<Count>(());
+        let mut new = cursor.slice(&Count(start), Bias::Right);
+        drop(cursor.slice(&Count(end), Bias::Right));
+        new.extend(slots, ());
+        new.append(cursor.suffix(), ());
+        drop(cursor);
+        self.tree = new;
+        self.updates += 1;
+    }
+
     /// Writes `updates` (`(index, slot)`, any order, later entries win) in
     /// one rebuild of the range they span.
     pub fn write(&mut self, updates: &mut Vec<(usize, Slot)>) {
@@ -228,5 +243,19 @@ mod tests {
         assert_eq!(h.len(), 100);
         assert_eq!(h.total(), 98.0 + 2.0 + 4.0);
         assert_eq!(h.measured(), 2);
+    }
+
+    #[test]
+    fn splices_replace_a_range() {
+        let mut h = Heights::new([1.0, 2.0, 3.0, 4.0].map(slot));
+        h.splice(1..3, [10.0, 20.0, 30.0].map(slot));
+        assert_eq!(h.len(), 5);
+        assert_eq!(h.total(), 1.0 + 10.0 + 20.0 + 30.0 + 4.0);
+        assert_eq!(h.get(4), Some(slot(4.0)));
+        h.splice(0..0, [5.0].map(slot));
+        assert_eq!(h.get(0), Some(slot(5.0)));
+        h.splice(2..9, []);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.total(), 6.0);
     }
 }

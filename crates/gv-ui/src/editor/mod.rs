@@ -25,8 +25,18 @@
 //! list items and quotes. In large-file mode, or with soft wrap turned
 //! off, display rows are buffer lines and long lines scroll sideways. With
 //! or without side panels the text uses the Reading view's centred column,
-//! so text does not move sideways when the mode changes; split view, which
-//! starts at the pane's edge, is not built yet.
+//! so text does not move sideways when the mode changes
+//! ([`EditorLayout::Column`]); in the Split view it starts at the pane's
+//! left edge and wraps at the pane's width ([`EditorLayout::Pane`]).
+//!
+//! # The Split view
+//!
+//! The Split view ([`crate::split`]) shows this view beside a Reading view
+//! that follows its text: [`EditorView::take_handoff`] hands out the syntax
+//! tree after each reparse with the reparses since the last hand-off, so
+//! the Reading view updates incrementally. Scroll sync reads and sets the
+//! top of the view as a fractional source line
+//! ([`EditorView::top_position`], [`EditorView::scroll_to_position`]).
 //!
 //! # Input
 //!
@@ -90,7 +100,7 @@ use crate::files::{self, ExecutorClock};
 use crate::inline::FontFamilies;
 use crate::keymap::actions::editor as commands;
 use crate::keymap::actions::view as view_commands;
-use crate::metrics::size::document;
+use crate::metrics::size::{document, split};
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
 use element::{EditorElement, Press, Scrollbar};
@@ -100,7 +110,8 @@ use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
 use rows::{Fonts, RowCache};
 use syntax::{Background, EditQueue, Syntax, UI_BUDGET};
-use wrap::SoftWrap;
+pub(crate) use syntax::{SyntaxHandoff, TextStamp};
+use wrap::{RowMap, SoftWrap};
 
 gpui::actions!(
     source,
@@ -288,6 +299,27 @@ impl std::fmt::Debug for Doc {
     }
 }
 
+/// Where the view puts its text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EditorLayout {
+    /// The Reading view's centred text column (Edit mode).
+    #[default]
+    Column,
+    /// From the pane's left edge, wrapping at the pane's width (the Split
+    /// view's editor pane).
+    Pane,
+}
+
+impl EditorLayout {
+    /// Px above the first row, and below the last.
+    pub(crate) fn pad_top(self) -> f32 {
+        match self {
+            Self::Column => document::PAD_TOP,
+            Self::Pane => split::EDITOR_PAD_TOP,
+        }
+    }
+}
+
 /// A line to scroll to the top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Top {
@@ -319,6 +351,8 @@ pub struct EditorView {
     scroll_x: f32,
     /// Soft wrap.
     wrap: SoftWrap,
+    /// The centred column, or the pane's edge.
+    layout: EditorLayout,
     /// The line to put at the top once the text is there.
     pending_top: Option<Top>,
     /// Bring the primary caret into view in the next frame.
@@ -376,6 +410,7 @@ impl EditorView {
             scroll_y: 0.0,
             scroll_x: 0.0,
             wrap: SoftWrap::default(),
+            layout: EditorLayout::default(),
             pending_top: None,
             autoscroll: false,
             bounds: None,
@@ -659,9 +694,107 @@ impl EditorView {
 
     /// The line of the first row that is at least half visible.
     fn top_line(&self) -> usize {
-        let row = (self.scroll_y - f64::from(document::PAD_TOP)) / f64::from(LINE);
+        let row = (self.scroll_y - f64::from(self.layout.pad_top())) / f64::from(LINE);
         let row = row.round().max(0.0) as usize;
         self.row_map().map_or(row, |map| map.line_of_row(row))
+    }
+
+    // ----- layout and the Split view ---------------------------------------------
+
+    /// Where the view puts its text.
+    pub fn layout(&self) -> EditorLayout {
+        self.layout
+    }
+
+    /// Puts the text in the centred column or at the pane's edge. The line
+    /// at the top stays at the top.
+    pub fn set_layout(&mut self, layout: EditorLayout, cx: &mut Context<'_, Self>) {
+        if self.layout == layout {
+            return;
+        }
+        let top = self.top_offset();
+        self.layout = layout;
+        if let Some(top) = top {
+            self.pending_top = Some(Top::Offset(top));
+        }
+        cx.notify();
+    }
+
+    /// The top of the view as a fractional source line: line `n` plus the
+    /// part of its rows above the view's top edge. Negative while the top
+    /// padding shows: -1 at the very top, up to 0 where the first row
+    /// starts. As of the last frame.
+    pub(crate) fn top_position(&self) -> Option<f64> {
+        if let Some(top) = self.pending_top {
+            let text = self.doc.as_ref()?.editor.text();
+            let line = match top {
+                Top::Offset(offset) => text.line_of_offset(offset.min(text.len())).ok()?,
+                Top::Line(line) => line.min(text.line_count().saturating_sub(1)),
+            };
+            return Some(line as f64);
+        }
+        let lines = self.doc.as_ref()?.editor.text().line_count();
+        let map = self.row_map()?;
+        let pad = f64::from(self.layout.pad_top());
+        if self.scroll_y < pad {
+            return Some(self.scroll_y / pad.max(1.0) - 1.0);
+        }
+        let row = (self.scroll_y - pad) / f64::from(LINE);
+        let line = map.line_of_row(row.floor() as usize);
+        let (first, rows) = line_rows(map, lines, line);
+        Some(line as f64 + ((row - first as f64) / rows as f64).clamp(0.0, 1.0))
+    }
+
+    /// Scrolls so that the top of the view is at fractional source line
+    /// `position` (as [`Self::top_position`] gives it).
+    pub(crate) fn scroll_to_position(&mut self, position: f64, cx: &mut Context<'_, Self>) {
+        let Some(lines) = self.doc.as_ref().map(|d| d.editor.text().line_count()) else {
+            return;
+        };
+        let Some(map) = self.row_map() else {
+            return;
+        };
+        let pad = f64::from(self.layout.pad_top());
+        let y = if position < 0.0 {
+            (position + 1.0).max(0.0) * pad
+        } else {
+            let line = (position.floor() as usize).min(lines.saturating_sub(1));
+            let (first, rows) = line_rows(map, lines, line);
+            let frac = (position - line as f64).clamp(0.0, 1.0);
+            pad + (first as f64 + frac * rows as f64) * f64::from(LINE)
+        };
+        self.pending_top = None;
+        if (y - self.scroll_y).abs() > f64::EPSILON {
+            self.scroll_y = y;
+            cx.notify();
+        }
+    }
+
+    /// The primary caret's offset and the text's revision.
+    pub(crate) fn caret(&self) -> Option<(usize, Revision)> {
+        let editor = &self.doc.as_ref()?.editor;
+        Some((
+            editor.selections().primary().head(),
+            editor.text().revision(),
+        ))
+    }
+
+    /// Puts the caret at `offset` and brings it into view.
+    #[cfg(test)]
+    pub(crate) fn set_cursor(&mut self, offset: usize, cx: &mut Context<'_, Self>) {
+        if let Some(doc) = self.doc.as_mut() {
+            doc.editor.set_cursor(offset);
+            self.autoscroll = true;
+            cx.notify();
+        }
+    }
+
+    /// The syntax tree and its text for a Reading view that follows this
+    /// view, when they changed since the last hand-off: the latest complete
+    /// tree (a reparse still running in the background hands off when it
+    /// lands).
+    pub(crate) fn take_handoff(&mut self) -> Option<SyntaxHandoff> {
+        self.doc.as_mut()?.syntax.take_handoff()
     }
 
     // ----- editing ---------------------------------------------------------------
@@ -694,12 +827,12 @@ impl EditorView {
         let background = doc.syntax.advance(&mut doc.queue.borrow_mut(), deadline);
         if let Some(job) = background {
             self._reparse = Some(cx.spawn(async move |this, cx| {
-                let (tree, text) = cx
+                let (tree, text, changes) = cx
                     .background_spawn(async move { Background::finish(job) })
                     .await;
                 this.update(cx, |view, cx| {
                     if let Some(doc) = view.doc.as_mut() {
-                        doc.syntax.finished(tree, text);
+                        doc.syntax.finished(tree, text, &changes);
                     }
                     view.pump_syntax(cx);
                     cx.notify();
@@ -927,6 +1060,17 @@ fn split_for_carets(text: &str, lengths: Option<&[usize]>, count: usize) -> Opti
 
 /// The row height.
 const LINE: f32 = text::EDITOR.line;
+
+/// The first display row of `line` (of `lines`) and its number of rows.
+fn line_rows(map: RowMap<'_>, lines: usize, line: usize) -> (usize, usize) {
+    let first = map.first_row(line);
+    let next = if line + 1 < lines {
+        map.first_row(line + 1)
+    } else {
+        map.row_count()
+    };
+    (first, next.saturating_sub(first).max(1))
+}
 
 impl EventEmitter<DocEvent> for EditorView {}
 

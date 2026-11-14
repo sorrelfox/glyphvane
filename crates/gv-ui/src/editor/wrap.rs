@@ -40,7 +40,6 @@ use gv_editor::display_map::{
 use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
 use super::{EditorView, LINE};
-use crate::metrics::size::document;
 use crate::metrics::text;
 
 /// The largest document re-wrapped on the UI thread as soon as the width
@@ -447,7 +446,7 @@ impl EditorView {
     /// Runs `change` on the editor, keeping the line at the top in place
     /// (and the offset into it, within its new rows).
     pub(super) fn keep_top_line<R>(&mut self, change: impl FnOnce(&mut Editor) -> R) -> Option<R> {
-        let pad = f64::from(document::PAD_TOP);
+        let pad = f64::from(self.layout.pad_top());
         let row_px = f64::from(LINE);
         let doc = self.doc.as_mut()?;
         let (line, delta) = {

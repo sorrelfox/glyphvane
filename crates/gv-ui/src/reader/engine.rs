@@ -19,9 +19,16 @@
 //!   index, so a big jump lays out only the new viewport.
 //! - Measured heights are written to the height index in one batched update
 //!   at the end of each frame.
+//! - When the document is updated in place (the Split view's preview
+//!   follows the editor), the replaced items' heights are spliced into the
+//!   index as estimates ([`Engine::splice`]) and the anchor stays on its
+//!   item. Scroll sync asks for a place inside an item and, optionally, for
+//!   a block to be shown whole ([`Engine::sync_to`]).
 //!
 //! Document coordinates start at the top of the document area: the first
 //! item's box starts `lead` px down (the column's top padding).
+
+use std::ops::Range;
 
 use gv_render_tree::ItemId;
 
@@ -166,6 +173,169 @@ impl Engine {
 
     pub fn viewport(&self) -> f32 {
         self.viewport
+    }
+
+    /// The px above the first item.
+    pub fn lead(&self) -> f32 {
+        self.lead
+    }
+
+    /// The height of item `ix` in the height index (measured, or an
+    /// estimate), gap included.
+    pub fn height_of(&self, ix: usize) -> Option<f32> {
+        self.heights.get(ix).map(|s| s.height)
+    }
+
+    /// The document was updated in place: items `removed` of the old list
+    /// were replaced by items `inserted` of the new one (`items`), and the
+    /// content of items `changed` is new. Their heights become estimates;
+    /// the others keep theirs. The anchor stays on its item, or goes to
+    /// the item that took its place.
+    pub fn splice(
+        &mut self,
+        items: &impl Items,
+        removed: Range<usize>,
+        inserted: Range<usize>,
+        changed: impl IntoIterator<Item = usize>,
+    ) {
+        self.heights.write(&mut self.pending);
+        self.placed.clear();
+        let width = self.width;
+        let n = items.len();
+        let old = self.heights.len();
+        let removed = removed.start.min(old)..removed.end.min(old).max(removed.start.min(old));
+        let added = inserted.len();
+        self.heights.splice(
+            removed.clone(),
+            inserted.clone().map(|ix| Slot {
+                height: items.estimate(ix, width),
+                measured: false,
+            }),
+        );
+        if self.heights.len() != n {
+            // Not a splice of these items: start over where the anchor was.
+            self.heights = estimates(items, width);
+        }
+        let changed: Vec<usize> = changed
+            .into_iter()
+            .filter(|ix| *ix < n && !inserted.contains(ix))
+            .collect();
+        self.invalidate(items, changed);
+        if self
+            .text_anchor
+            .is_some_and(|(id, _)| items.index_of(id).is_none())
+        {
+            self.text_anchor = None;
+        }
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        if n == 0 {
+            self.anchor = None;
+            return;
+        }
+        let ix = match items.index_of(anchor.id) {
+            Some(ix) => ix,
+            None => {
+                let was = self.anchor_ix;
+                let ix = if was < removed.start {
+                    was
+                } else if was >= removed.end {
+                    (was + added).saturating_sub(removed.len())
+                } else {
+                    inserted.start + (was - removed.start).min(added.saturating_sub(1))
+                };
+                let ix = ix.min(n - 1);
+                self.anchor = Some(Anchor {
+                    id: items.id(ix),
+                    offset: if ix == 0 {
+                        anchor.offset
+                    } else {
+                        anchor.offset.max(0.0)
+                    },
+                });
+                ix
+            }
+        };
+        self.anchor_ix = ix;
+    }
+
+    /// Scrolls so that `offset` px below item `ix`'s top is at the viewport
+    /// top; then, when `reveal` is given, by as little as shows items
+    /// `reveal` whole, `margin` px clear of the edges (their top, when they
+    /// are taller than the viewport). The items in between are measured as
+    /// far as two viewports; a block further away goes to the top.
+    pub fn sync_to(
+        &mut self,
+        items: &mut impl Items,
+        ix: usize,
+        offset: f32,
+        reveal: Option<Range<usize>>,
+        margin: f32,
+    ) {
+        self.text_anchor = None;
+        let n = items.len();
+        if n == 0 {
+            return;
+        }
+        let ix = ix.min(n - 1);
+        let mut top = offset;
+        if let Some(r) = reveal.filter(|r| r.start < r.end && r.end <= n) {
+            let viewport = self.viewport;
+            let reach = 2.0 * viewport.max(1.0);
+            let last = r.end - 1;
+            let start = self.relative_top(items, ix, r.start, reach);
+            let end = self
+                .relative_top(items, ix, last, reach)
+                .map(|y| y + self.measure(items, last));
+            let (Some(start), Some(end)) = (start, end) else {
+                self.target = Some(Target::Item {
+                    ix: r.start,
+                    offset: -margin,
+                    above: 0.0,
+                });
+                return;
+            };
+            if end - top > viewport - margin {
+                top = end - viewport + margin;
+            }
+            if start - margin < top {
+                top = start - margin;
+            }
+        }
+        self.target = Some(Target::Item {
+            ix,
+            offset: top,
+            above: 0.0,
+        });
+    }
+
+    /// The top of item `to` below the top of item `from`, measuring the
+    /// items between; `None` when it is more than `reach` px away.
+    fn relative_top(
+        &mut self,
+        items: &mut impl Items,
+        from: usize,
+        to: usize,
+        reach: f32,
+    ) -> Option<f32> {
+        let mut y = 0.0;
+        if to >= from {
+            for j in from..to {
+                y += self.measure(items, j);
+                if y > reach {
+                    return None;
+                }
+            }
+        } else {
+            for j in (to..from).rev() {
+                y -= self.measure(items, j);
+                if -y > reach {
+                    return None;
+                }
+            }
+        }
+        Some(y)
     }
 
     fn measure(&mut self, items: &mut impl Items, ix: usize) -> f32 {
@@ -482,6 +652,8 @@ mod tests {
     /// item's source starts at `1000 * ix`. Estimates are 10 % low.
     struct Fake {
         chars: Vec<u32>,
+        /// The block id of each item.
+        ids: Vec<u64>,
         gap: f32,
         /// Width the item was last measured at (its "painted" layout).
         laid_out: HashMap<usize, f32>,
@@ -494,6 +666,7 @@ mod tests {
     impl Fake {
         fn new(chars: Vec<u32>) -> Self {
             Self {
+                ids: (0..chars.len() as u64).collect(),
                 chars,
                 gap: 4.0,
                 laid_out: HashMap::new(),
@@ -517,14 +690,17 @@ mod tests {
 
         fn id(&self, ix: usize) -> ItemId {
             ItemId {
-                block: BlockId(ix as u64),
+                block: BlockId(self.ids[ix]),
                 chunk: 0,
             }
         }
 
         fn index_of(&self, id: ItemId) -> Option<usize> {
             let ix = id.block.0 as usize;
-            (ix < self.len()).then_some(ix)
+            if self.ids.get(ix) == Some(&id.block.0) {
+                return Some(ix);
+            }
+            self.ids.iter().position(|&b| b == id.block.0)
         }
 
         fn estimate(&self, ix: usize, width: f32) -> f32 {
@@ -661,6 +837,46 @@ mod tests {
         e.scroll_by(1.0);
         e.frame(&mut items, 400.0, 100.0);
         assert_eq!(top_line(&e, &mut items).1, y - 1.0);
+    }
+
+    #[test]
+    fn a_splice_keeps_the_anchor_on_its_item() {
+        let mut items = Fake::new(vec![100; 100]);
+        let mut e = engine(&mut items, 200.0, 100.0);
+        e.jump_to(50, 5.0);
+        e.frame(&mut items, 200.0, 100.0);
+        let before = e.placed()[0];
+        // Items 10..12 become three items: one more above the anchor.
+        items.chars.insert(10, 300);
+        items.ids.splice(10..12, [1000, 1001, 1002]);
+        e.splice(&items, 10..12, 10..13, []);
+        assert_eq!(e.heights.len(), 101);
+        assert_eq!(e.anchor().map(|a| a.id), Some(items.id(51)));
+        e.frame(&mut items, 200.0, 100.0);
+        assert_eq!(e.placed()[0].ix, 51);
+        assert_eq!(e.placed()[0].y, before.y);
+    }
+
+    #[test]
+    fn sync_to_reveals_a_block_below() {
+        let mut items = Fake::new(vec![100; 100]);
+        let mut e = engine(&mut items, 200.0, 100.0);
+        // Items are 34 px: item 10 at the top would leave item 14 below
+        // the viewport.
+        e.sync_to(&mut items, 10, 0.0, Some(14..15), 2.0);
+        e.frame(&mut items, 200.0, 100.0);
+        let below = e.placed().iter().find(|p| p.ix == 14).expect("item 14");
+        assert!((below.y + below.height - 98.0).abs() < 1e-3, "{below:?}");
+        // A block above the top is shown at the top.
+        e.sync_to(&mut items, 10, 0.0, Some(8..9), 2.0);
+        e.frame(&mut items, 200.0, 100.0);
+        let first = e.placed().iter().find(|p| p.ix == 8).expect("item 8");
+        assert!((first.y - 2.0).abs() < 1e-3, "{first:?}");
+        // One that is far away goes to the top.
+        e.sync_to(&mut items, 10, 0.0, Some(90..91), 2.0);
+        e.frame(&mut items, 200.0, 100.0);
+        let far = e.placed().iter().find(|p| p.ix == 90).expect("item 90");
+        assert!((far.y - 2.0).abs() < 1e-3, "{far:?}");
     }
 
     #[test]

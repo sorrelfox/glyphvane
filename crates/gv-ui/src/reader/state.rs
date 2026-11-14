@@ -21,13 +21,53 @@ use super::bench::Bench;
 use super::engine::Engine;
 use super::find::FindMarks;
 use super::items::{DocItems, ItemCache};
+use super::live::SyncRequest;
 use super::load::Loaded;
 use crate::inline::{InlineBlock, InlineText};
-use crate::metrics::size::document;
+use crate::metrics::size::{document, split};
 
 /// Px laid out beyond each edge of the viewport, so that scrolling finds
 /// measured items (the virtual list spike's value).
 pub(crate) const OVERDRAW: f32 = 200.0;
+
+/// Where the view puts its text column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReaderLayout {
+    /// Preview: at most 680 wide, centred, 40 px side padding, 22 above.
+    #[default]
+    Column,
+    /// The Split view's preview pane: padding `20 28 0`, the column fills
+    /// the pane.
+    Pane,
+}
+
+impl ReaderLayout {
+    /// The px above the first item.
+    pub(crate) fn lead(self) -> f32 {
+        match self {
+            Self::Column => document::PAD_TOP,
+            Self::Pane => split::PREVIEW_PAD_TOP,
+        }
+    }
+
+    /// The window x of the text column and its width, in `bounds`.
+    pub(crate) fn column(self, bounds: Bounds<Pixels>) -> (f32, f32) {
+        let width = f32::from(bounds.size.width);
+        let left = f32::from(bounds.left());
+        match self {
+            Self::Column => {
+                let column = (width - 2.0 * document::PAD_X)
+                    .clamp(1.0, document::COLUMN_MAX)
+                    .floor();
+                (left + ((width - column) / 2.0).max(0.0).floor(), column)
+            }
+            Self::Pane => {
+                let column = (width - 2.0 * split::PREVIEW_PAD_X).floor().max(1.0);
+                (left + split::PREVIEW_PAD_X, column)
+            }
+        }
+    }
+}
 
 /// A selection in document source offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +209,12 @@ pub(crate) struct State {
     pub doc_version: u64,
     /// Find in page: the matches to paint.
     pub find: FindMarks,
+    pub layout: ReaderLayout,
+    /// The source offset whose block gets the caret band (the Split view's
+    /// preview: the editor's caret).
+    pub band: Option<usize>,
+    /// Scroll sync's request for the next frame.
+    pub sync: Option<SyncRequest>,
 }
 
 impl std::fmt::Debug for State {
@@ -200,13 +246,23 @@ impl State {
             stale: Vec::new(),
             doc_version: 0,
             find: FindMarks::default(),
+            layout: ReaderLayout::Column,
+            band: None,
+            sync: None,
         }
+    }
+
+    /// Puts the text column in `layout`.
+    pub fn set_layout(&mut self, layout: ReaderLayout) {
+        self.layout = layout;
+        self.engine = Engine::new(layout.lead(), OVERDRAW);
     }
 
     /// Shows `doc`, scrolled to the top.
     pub fn install(&mut self, doc: Loaded) {
         self.doc = Some(doc);
-        self.engine = Engine::new(document::PAD_TOP, OVERDRAW);
+        self.engine = Engine::new(self.layout.lead(), OVERDRAW);
+        self.sync = None;
         self.cache.clear();
         self.selection = None;
         self.hscroll.clear();

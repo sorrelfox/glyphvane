@@ -37,7 +37,7 @@ use super::{EditorView, LINE, Top};
 use crate::appearance::Appearance;
 use crate::inline::{Palette, Token};
 use crate::metrics::size::{
-    CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, document, editor as editor_size,
+    CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, editor as editor_size,
 };
 use crate::metrics::spacing::{inline, scrollbar};
 use crate::metrics::{HAIRLINE, radius, text};
@@ -173,10 +173,10 @@ fn baseline(line: &ShapedLine, top: f32) -> f32 {
     top + (LINE - ascent - descent) / 2.0 + ascent
 }
 
-/// The total height of the content: the display rows between the
-/// column's top padding and as much again below.
-fn content_height(rows: usize) -> f64 {
-    2.0 * f64::from(document::PAD_TOP) + rows as f64 * f64::from(LINE)
+/// The total height of the content: the display rows between the top
+/// padding `pad` and as much again below.
+fn content_height(rows: usize, pad: f32) -> f64 {
+    2.0 * f64::from(pad) + rows as f64 * f64::from(LINE)
 }
 
 impl EditorView {
@@ -209,6 +209,7 @@ impl EditorView {
             return frame;
         };
         let viewport = f32::from(bounds.size.height);
+        let pad_top = self.layout.pad_top();
 
         // Scrolling: a line asked for at the top, the caret into view, then
         // the limits.
@@ -226,13 +227,13 @@ impl EditorView {
             self.scroll_y = if row == 0 {
                 0.0
             } else {
-                f64::from(document::PAD_TOP) + row as f64 * f64::from(LINE)
+                f64::from(pad_top) + row as f64 * f64::from(LINE)
             };
         }
         if std::mem::take(&mut self.autoscroll) {
             self.scroll_into_view(&columns, viewport, space, window, cx);
         }
-        let max_y = (content_height(rows_total) - f64::from(viewport)).max(0.0);
+        let max_y = (content_height(rows_total, pad_top) - f64::from(viewport)).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         let max_x = if wrapping {
             0.0
@@ -242,7 +243,7 @@ impl EditorView {
         self.scroll_x = self.scroll_x.clamp(0.0, max_x);
 
         let scroll_y = self.scroll_y;
-        let pad = f64::from(document::PAD_TOP);
+        let pad = f64::from(pad_top);
         let first_row = ((scroll_y - pad) / f64::from(LINE)).floor().max(0.0) as usize;
         let last_row =
             ((((scroll_y - pad + f64::from(viewport)) / f64::from(LINE)).ceil()).max(0.0) as usize
@@ -335,7 +336,7 @@ impl EditorView {
                 let rect = bounds_of(
                     columns.gutter_left(),
                     line_top,
-                    columns.text_right() - columns.gutter_left(),
+                    columns.fill_right - columns.gutter_left(),
                     line_h,
                 );
                 #[cfg(test)]
@@ -527,7 +528,7 @@ impl EditorView {
 
         // The scrollbar: a thumb, no track.
         self.scrollbar = None;
-        let content = content_height(rows_total);
+        let content = content_height(rows_total, pad_top);
         if content > f64::from(viewport) {
             let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
             let track_h = viewport - 2.0 * scrollbar::INSET_Y;
@@ -587,12 +588,13 @@ impl EditorView {
         };
         let (segment, x) = row.x(column);
         let display_row = first + segment;
-        let pad = f64::from(document::PAD_TOP);
+        let pad_top = self.layout.pad_top();
+        let pad = f64::from(pad_top);
         let row_h = f64::from(LINE);
         let top = pad + display_row as f64 * row_h;
         let wanted_top = if display_row == 0 { 0.0 } else { top - row_h };
         let wanted_bottom = if display_row + 1 >= rows {
-            content_height(rows)
+            content_height(rows, pad_top)
         } else {
             top + 2.0 * row_h
         };
@@ -803,7 +805,9 @@ impl EditorView {
         }
         let top = f32::from(position.y - bar.track.top()) - grab;
         let ratio = f64::from((top / room).clamp(0.0, 1.0));
-        let max_y = (content_height(rows) - f64::from(f32::from(bounds.size.height))).max(0.0);
+        let max_y = (content_height(rows, self.layout.pad_top())
+            - f64::from(f32::from(bounds.size.height)))
+        .max(0.0);
         self.scroll_y = ratio * max_y;
     }
 }

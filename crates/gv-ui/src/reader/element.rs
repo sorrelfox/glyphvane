@@ -3,11 +3,13 @@
 
 //! The Reading view's element: one element for the whole viewport.
 //!
-//! - **Prepaint** runs the engine's frame pass for the text column, then
-//!   hosts an [`InlineParagraph`] per visible text item (laid out as a root
-//!   at the item's width and prepainted at its place) and records what to
-//!   draw around them: code block frames and heads, quote bars, list
-//!   markers, rules, the ambiguity badges of links and the scrollbar.
+//! - **Prepaint** turns a scroll-sync request into the engine's target,
+//!   runs the engine's frame pass for the text column, then hosts an
+//!   [`InlineParagraph`] per visible text item (laid out as a root at the
+//!   item's width and prepainted at its place) and records what to draw
+//!   around them: the caret band (Split view), code block frames and
+//!   heads, quote bars, list markers, rules, the ambiguity badges of links
+//!   and the scrollbar.
 //! - **Paint** draws the frames, the paragraphs (code clipped to its box),
 //!   then the head buttons, badges and the scrollbar, and registers the
 //!   pointer handlers: wheel scrolling (sideways inside code blocks),
@@ -32,17 +34,19 @@ use gv_inline::ItemKind as PieceKind;
 use gv_render_tree::{FrameKind, ItemKind, ListMarker, StatusIcon, TextRole, Variant, style_id};
 
 use super::bench::{load_line, percentiles};
+use super::engine::{Engine, Items as _};
 use super::follow::{Cause, begin as note_navigation};
 use super::items::{
     DocItems, NO_WRAP, chunk_ends, code_inset, is_code, status_icon_path, text_top, text_width,
 };
+use super::live::{Spot, SyncRequest, block_items_at};
 use super::state::{
     ButtonKind, CodeButton, CodeGeom, Geometry, Hover, LinkHit, PlacedGeom, Press, Selection, State,
 };
 use super::{Disposition, LinkRequest, Reader, ReaderEvent, find, startup};
 use crate::icons::Icon;
 use crate::inline::{InlineParagraph, Palette, Token};
-use crate::metrics::size::{CHECKBOX, CODE_BUTTON, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, document};
+use crate::metrics::size::{CHECKBOX, CODE_BUTTON, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, split};
 use crate::metrics::spacing::{code_head, document as doc_spacing, inline, scrollbar};
 use crate::metrics::{HAIRLINE, icon, radius, text};
 
@@ -330,12 +334,8 @@ impl Element for ReaderElement {
             bounds,
             ..Geometry::default()
         };
-        // The text column: at most 680 wide, centred, 40 px side padding.
-        let width = f32::from(bounds.size.width);
-        let column = (width - 2.0 * document::PAD_X)
-            .clamp(1.0, document::COLUMN_MAX)
-            .floor();
-        let x0 = f32::from(bounds.left()) + ((width - column) / 2.0).max(0.0).floor();
+        // The text column: Preview's centred column, or the Split pane's.
+        let (x0, column) = st.layout.column(bounds);
         find::reveal_current(st, column, &ts);
         let State {
             doc,
@@ -348,6 +348,8 @@ impl Element for ReaderElement {
             hover,
             find: marks,
             doc_version,
+            sync,
+            band,
             ..
         } = st;
         let Some(doc) = doc.as_ref() else {
@@ -375,9 +377,13 @@ impl Element for ReaderElement {
                 text,
                 ts: &ts,
             };
+            if let Some(request) = sync.take() {
+                resolve_sync(engine, &mut items, request, column);
+            }
             engine.frame(&mut items, column, f32::from(bounds.size.height));
         }
         let placed = engine.placed().to_vec();
+        let band_items = band.and_then(|offset| block_items_at(tree, offset));
         let selected = selection
             .map(|s: Selection| s.range())
             .filter(|r| !r.is_empty());
@@ -414,6 +420,40 @@ impl Element for ReaderElement {
             let highlights = marks
                 .map(|m| m.highlights(p.ix, node.source.start))
                 .unwrap_or_default();
+
+            // The caret band: the block's content and 2 px more above and
+            // below, 6 px beyond it on each side.
+            if let Some(band) = band_items.as_ref().filter(|r| r.contains(&p.ix)) {
+                let (first, last) = (p.ix == band.start, p.ix + 1 == band.end);
+                let (r, zero) = (px(radius::CHIP), px(0.0));
+                let y0 = if first {
+                    content_top - split::CARET_BAND_PAD_Y
+                } else {
+                    top
+                };
+                let y1 = if last {
+                    bottom + split::CARET_BAND_PAD_Y
+                } else {
+                    bottom
+                };
+                out.under.push(Op::Frame {
+                    bounds: bounds_of(
+                        left - split::CARET_BAND_PAD_X,
+                        y0,
+                        content_w + 2.0 * split::CARET_BAND_PAD_X,
+                        y1 - y0,
+                    ),
+                    borders: Edges::default(),
+                    corners: Corners {
+                        top_left: if first { r } else { zero },
+                        top_right: if first { r } else { zero },
+                        bottom_right: if last { r } else { zero },
+                        bottom_left: if last { r } else { zero },
+                    },
+                    fill: color(Token::StateHover),
+                    border: color(Token::StateHover),
+                });
+            }
 
             // Quote bars, and the markers of list items that start here.
             let mut markers = Vec::new();
@@ -1127,6 +1167,29 @@ impl ReaderElement {
         st.timing.frame_start = Some(Instant::now());
         window.request_animation_frame();
     }
+}
+
+/// Turns scroll sync's request into the engine's target: the place in
+/// the item, measured at the column's width, and the caret's block to
+/// show whole.
+fn resolve_sync(engine: &mut Engine, items: &mut DocItems<'_>, request: SyncRequest, column: f32) {
+    let tree = items.tree;
+    let n = tree.items().len();
+    if n == 0 {
+        return;
+    }
+    let ix = request.ix.min(n - 1);
+    let gap = tree.items()[ix].gap_before;
+    let offset = match request.spot {
+        Spot::Lead(f) => f.clamp(-1.0, 0.0) * engine.lead(),
+        Spot::Gap(g) => g.clamp(0.0, 1.0) * gap,
+        Spot::Content(c) => {
+            let height = items.measure(ix, column);
+            gap + c.clamp(0.0, 1.0) * (height - gap).max(0.0)
+        }
+    };
+    let reveal = request.reveal.and_then(|o| block_items_at(tree, o));
+    engine.sync_to(items, ix, offset, reveal, split::CARET_BAND_PAD_Y);
 }
 
 fn same_link(a: &LinkHit, b: &LinkHit) -> bool {

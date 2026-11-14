@@ -4,15 +4,20 @@
 //! Loading a document for the Reading view: read, decode, parse, model and
 //! render tree, all off the UI thread. The UI thread only lays out what is
 //! on screen.
+//!
+//! A Reading view that follows an editor (the Split view's preview) builds
+//! from the editor's syntax tree instead of parsing ([`build_tree`]), and
+//! then updates the model and the render tree incrementally from the
+//! reparses' changes ([`update_tree`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gv_model::DocModel;
-use gv_render_tree::{LinkTarget, NoImageSizes, RenderOptions, RenderTree, Sources};
-use gv_syntax::{ParseOptions, SyntaxTree};
-use gv_text::DecodeStatus;
+use gv_render_tree::{LinkTarget, NoImageSizes, RenderOptions, RenderTree, Sources, UpdateReport};
+use gv_syntax::{Changes, ParseOptions, SyntaxTree};
+use gv_text::{DecodeStatus, TextSnapshot};
 
 use super::links::{PROFILE, Resolver};
 use super::startup;
@@ -31,6 +36,9 @@ pub(crate) struct Loaded {
     /// show as U+FFFD).
     pub lossy: Option<String>,
     pub timings: Timings,
+    /// The editor's text the document was built from, when it follows an
+    /// editor: its line index serves scroll sync.
+    pub lines: Option<TextSnapshot>,
 }
 
 /// Where loading spent its time.
@@ -151,6 +159,91 @@ fn build(
         tree: Arc::new(tree),
         lossy,
         timings,
+        lines: None,
+    }
+}
+
+/// Builds the document at `path` from an editor's text and its syntax
+/// tree: the model and the render tree, without parsing.
+pub(crate) fn build_tree(
+    path: &Path,
+    syntax: SyntaxTree,
+    text: TextSnapshot,
+    links: &Resolver,
+    options: RenderOptions,
+) -> Loaded {
+    let mut timings = Timings {
+        bytes: text.len(),
+        ..Timings::default()
+    };
+    let t = Instant::now();
+    let model = DocModel::build(&syntax, &text);
+    timings.model = t.elapsed();
+    let t = Instant::now();
+    let sources = Sources {
+        links,
+        images: &NoImageSizes,
+    };
+    let tree = RenderTree::build(&syntax, &model, &text, options, sources);
+    warm_index(&tree);
+    timings.tree = t.elapsed();
+    Loaded {
+        path: path.to_path_buf(),
+        text: Arc::from(text.text_for_range(0..text.len()).unwrap_or_default()),
+        syntax,
+        model,
+        tree: Arc::new(tree),
+        lossy: None,
+        timings,
+        lines: Some(text),
+    }
+}
+
+/// `base` updated to an editor's text and its syntax tree, which the
+/// reparses `changes` made from the tree `base` was built from: the blocks
+/// outside the reparsed window keep their records and render nodes. The
+/// report says which items were replaced.
+pub(crate) fn update_tree(
+    base: &Loaded,
+    syntax: SyntaxTree,
+    text: TextSnapshot,
+    changes: &Changes,
+    links: &Resolver,
+) -> (Loaded, UpdateReport) {
+    let mut timings = Timings {
+        bytes: text.len(),
+        ..Timings::default()
+    };
+    let t = Instant::now();
+    let model = base.model.update(&syntax, &text, changes);
+    timings.model = t.elapsed();
+    let t = Instant::now();
+    let sources = Sources {
+        links,
+        images: &NoImageSizes,
+    };
+    let mut tree = RenderTree::clone(&base.tree);
+    let report = tree.update(&syntax, &model, &text, changes, sources);
+    warm_index(&tree);
+    timings.tree = t.elapsed();
+    let loaded = Loaded {
+        path: base.path.clone(),
+        text: Arc::from(text.text_for_range(0..text.len()).unwrap_or_default()),
+        syntax,
+        model,
+        tree: Arc::new(tree),
+        lossy: None,
+        timings,
+        lines: Some(text),
+    };
+    (loaded, report)
+}
+
+/// Builds the tree's item index here, off the UI thread, rather than at
+/// its first lookup.
+fn warm_index(tree: &RenderTree) {
+    if let Some(first) = tree.items().first() {
+        let _ = tree.index_of(first.id);
     }
 }
 

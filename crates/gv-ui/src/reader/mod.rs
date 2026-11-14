@@ -37,6 +37,14 @@
 //! - Find in page ([`find`]): Mod+F opens the find popover at the top right
 //!   of the document area; matches are highlighted and the current one is
 //!   scrolled into view.
+//!
+//! # Following an editor
+//!
+//! The Split view's preview pane is a Reading view made with
+//! [`Reader::for_split`] (padding `20 28 0`, the split type scale) that
+//! follows the editor's text ([`live`]): the model and the render tree are
+//! updated incrementally from the editor's reparses, and scroll sync reads
+//! and sets the top of the view as a place in an item.
 
 mod bench;
 mod element;
@@ -46,6 +54,7 @@ pub(crate) mod follow;
 mod heights;
 mod items;
 mod links;
+mod live;
 mod load;
 pub mod startup;
 mod state;
@@ -78,6 +87,9 @@ use bench::Bench;
 use element::ReaderElement;
 use load::Loaded;
 use state::{Selection, State};
+
+pub(crate) use live::{Spot, SyncRequest};
+pub use state::ReaderLayout;
 
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
@@ -204,6 +216,10 @@ pub struct Reader {
     target: Option<ScrollTarget>,
     /// Find in page.
     find: find::FindState,
+    /// What documents are built with: the type scale and the metrics.
+    options: RenderOptions,
+    /// Following an editor's text (the Split view's preview).
+    live: live::Live,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
 }
@@ -240,9 +256,16 @@ impl Reader {
             statuses_from: None,
             target: None,
             find: find::FindState::default(),
+            options: RenderOptions::commonmark(),
+            live: live::Live::default(),
             _load: None,
             _refresh: None,
         }
+    }
+
+    /// Where the view puts its text column.
+    pub fn layout(&self) -> ReaderLayout {
+        self.state.borrow().layout
     }
 
     /// The file shown (or being loaded).
@@ -273,9 +296,10 @@ impl Reader {
         self.status = LoadStatus::Loading;
         self.target = target;
         self._refresh = None;
+        self.live.forget();
         let resolver = Resolver::statuses(&path, self.index.as_ref());
         self.statuses_from = index_key(self.index.as_ref());
-        let options = RenderOptions::commonmark();
+        let options = self.options.clone();
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { load::load(&path, &resolver, options) })
@@ -308,9 +332,10 @@ impl Reader {
         self.status = LoadStatus::Loading;
         self.target = target;
         self._refresh = None;
+        self.live.forget();
         let resolver = Resolver::statuses(&path, self.index.as_ref());
         self.statuses_from = index_key(self.index.as_ref());
-        let options = RenderOptions::commonmark();
+        let options = self.options.clone();
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(
@@ -546,6 +571,18 @@ impl Reader {
     /// The height of the view, in px.
     pub(crate) fn viewport_height(&self) -> f32 {
         self.state.borrow().engine.viewport()
+    }
+
+    /// The bounds of the last frame and its text column (window x, width).
+    pub(crate) fn frame_geometry(&self) -> (gpui::Bounds<gpui::Pixels>, (f32, f32)) {
+        let st = self.state.borrow();
+        (st.geometry.bounds, st.geometry.column)
+    }
+
+    /// The type of the document shown.
+    pub(crate) fn styles(&self) -> Option<StyleTable> {
+        let st = self.state.borrow();
+        Some(st.doc.as_ref()?.tree.options().styles.clone())
     }
 }
 

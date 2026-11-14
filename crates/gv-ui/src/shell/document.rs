@@ -1,34 +1,43 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The document area: the active tab's Reading view in Preview mode and
-//! its Source view in Edit mode. Split holds a placeholder until it exists.
+//! The document area: the active tab's Reading view in Preview mode, its
+//! Source view in Edit mode, and both side by side in Split mode
+//! ([`crate::split`]).
 //!
 //! # Switching modes
 //!
-//! A tab's Source view is made the first time the tab goes to Edit and kept
-//! while the tab shows the same file (an untitled tab has one from the
-//! start). The panels are never touched.
+//! A tab's Source view is made the first time the tab goes to Edit or
+//! Split and kept while the tab shows the same file (an untitled tab has
+//! one from the start); its Split view likewise. The panels are never
+//! touched (FR-VIEW-16). The source line at the top stays at the top:
 //!
-//! - **Preview → Edit:** the editor scrolls so that the source line of the
-//!   block at the top of the Reading view is at its top.
-//! - **Edit → Preview:** the Reading view scrolls to the line at the top of
-//!   the editor. When the text changed since the Reading view last got it
-//!   (saved or not), the Reading view is rebuilt from the editor's text
+//! - **Preview → Edit or Split:** the editor scrolls so that the source
+//!   line of the block at the top of the Reading view is at its top; in
+//!   Split the preview pane follows the editor.
+//! - **Edit ↔ Split:** the editor moves between the centred column and the
+//!   pane's edge, keeping its top line.
+//! - **Edit or Split → Preview:** the Reading view scrolls to the line at
+//!   the top of the editor (of the leading pane, from Split). When the text
+//!   changed since the Reading view last got it (saved or not), the Reading
+//!   view is rebuilt from the editor's text
 //!   ([`Reader::open_text`](crate::reader::Reader::open_text)) instead of
 //!   the file.
 
+use std::path::PathBuf;
+
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
     Styled as _, div, px,
 };
 
 use super::{TextPosition, ViewMode, Workspace};
-use crate::editor::{EditorView, Top};
+use crate::editor::{EditorLayout, EditorView, Top};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
-use crate::reader::ScrollTarget;
+use crate::reader::{Reader, ReaderEvent, ScrollTarget};
+use crate::split::{Side, SplitView};
 use crate::theme::Theme;
 
 impl Workspace {
@@ -40,19 +49,19 @@ impl Workspace {
             .overflow_hidden()
             .bg(theme.surface.page);
         let tab = self.active_tab();
-        match (self.mode(), &tab.reader, &tab.editor) {
-            (ViewMode::Preview, Some(reader), _) => {
+        match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
+            (ViewMode::Preview, Some(reader), _, _) => {
                 return area.child(reader.clone()).into_any_element();
             }
-            (ViewMode::Edit, _, Some(editor)) => {
+            (ViewMode::Edit, _, Some(editor), _) => {
                 return area.child(editor.clone()).into_any_element();
+            }
+            (ViewMode::Split, _, _, Some(split)) => {
+                return area.child(split.clone()).into_any_element();
             }
             _ => {}
         }
-        let note = match self.mode() {
-            ViewMode::Preview | ViewMode::Edit => "Nothing to show",
-            ViewMode::Split => "Split view not implemented yet",
-        };
+        let note = "Nothing to show";
         // The text column is at most 680 wide plus its side padding, centred,
         // in every mode, so text does not move sideways when the mode changes.
         let column_width = document::COLUMN_MAX + 2.0 * document::PAD_X;
@@ -87,12 +96,108 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The Source view on screen: the active tab's, in Edit mode.
+    /// The Source view on screen: the active tab's, in Edit and Split
+    /// mode.
     pub(super) fn shown_editor(&self) -> Option<&Entity<EditorView>> {
         match self.mode() {
-            ViewMode::Edit => self.active_tab().editor.as_ref(),
-            ViewMode::Preview | ViewMode::Split => None,
+            ViewMode::Edit | ViewMode::Split => self.active_tab().editor.as_ref(),
+            ViewMode::Preview => None,
         }
+    }
+
+    /// The Split view's preview on screen: the active tab's, in Split mode.
+    pub(super) fn shown_split_reader(&self, cx: &App) -> Option<Entity<Reader>> {
+        match self.mode() {
+            ViewMode::Split => self.active_tab().split_reader(cx),
+            ViewMode::Preview | ViewMode::Edit => None,
+        }
+    }
+
+    /// The Split view of tab `index`, made with its Source view on first
+    /// use. The editor goes to the pane's edge.
+    pub(super) fn ensure_split(
+        &mut self,
+        index: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Entity<SplitView>> {
+        let editor = self.ensure_editor(index, cx)?;
+        let tab = self.tabs.get(index)?;
+        if let Some(split) = &tab.split {
+            editor.update(cx, |e, cx| e.set_layout(EditorLayout::Pane, cx));
+            return Some(split.clone());
+        }
+        let path = tab
+            .path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(tab.label.name.as_ref()));
+        let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
+        let split = cx.new(|cx| SplitView::new(editor, path, snapshot, cx));
+        // A link followed in the preview pane goes where it goes from
+        // Preview.
+        let reader = split.read(cx).reader().clone();
+        cx.subscribe(&reader, |ws, reader, event: &ReaderEvent, cx| {
+            ws.follow_split_link(&reader, event.clone(), cx);
+        })
+        .detach();
+        self.tabs[index].split = Some(split.clone());
+        Some(split)
+    }
+
+    /// Follows a link clicked in a Split view's preview pane `reader`, as
+    /// if in its tab's Reading view.
+    fn follow_split_link(
+        &mut self,
+        reader: &Entity<Reader>,
+        event: ReaderEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let ReaderEvent::FollowLink(request) = event;
+        let Some(preview) = self
+            .tabs
+            .iter()
+            .find(|t| t.split_reader(cx).as_ref() == Some(reader))
+            .and_then(|t| t.reader.clone())
+        else {
+            return;
+        };
+        let window = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            // Fails only when the window has closed.
+            let _ = cx.update_window(window, |_, window, cx| {
+                this.update(cx, |ws, cx| ws.follow_link(preview, request, window, cx))
+            });
+        })
+        .detach();
+    }
+
+    /// A jump inside tab `index`'s document (a heading, a fragment, Back):
+    /// in Split mode the preview pane goes there and the editor follows.
+    pub(super) fn split_scroll_to(
+        &mut self,
+        index: usize,
+        target: ScrollTarget,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let (ViewMode::Split, Some(split)) = (tab.mode, tab.split.clone()) else {
+            return;
+        };
+        split.update(cx, |s, cx| {
+            s.set_leader(Side::Preview);
+            s.reader().update(cx, |r, cx| r.scroll_to(target, cx));
+        });
+    }
+
+    /// Shows the active tab in Split mode, or in Edit mode when it is in
+    /// Split (`view.toggle_split`).
+    pub(super) fn toggle_split(&mut self, cx: &mut Context<'_, Self>) {
+        let mode = match self.mode() {
+            ViewMode::Split => ViewMode::Edit,
+            ViewMode::Preview | ViewMode::Edit => ViewMode::Split,
+        };
+        self.set_mode(mode, cx);
     }
 
     /// The Source view of tab `index`, made and loading on first use.
@@ -145,20 +250,45 @@ impl Workspace {
             return;
         }
         let index = self.active;
+        // The top line in the mode left: the Reading view's, or the
+        // leading pane's in Split.
+        let preview_top = || match self.tabs[index].reader.as_ref()?.read(cx).position() {
+            Some(ScrollTarget::Offset(offset)) => Some(offset),
+            _ => None,
+        };
+        let split_top = || self.tabs[index].split.as_ref()?.read(cx).top_offset(cx);
         match (from, to) {
             (_, ViewMode::Edit) => {
+                let top = match from {
+                    ViewMode::Split => split_top(),
+                    ViewMode::Preview | ViewMode::Edit => preview_top(),
+                };
                 let Some(editor) = self.ensure_editor(index, cx) else {
                     return;
                 };
-                let top = self.tabs[index]
-                    .reader
-                    .as_ref()
-                    .and_then(|r| r.read(cx).position());
-                if let Some(ScrollTarget::Offset(offset)) = top {
+                editor.update(cx, |e, cx| {
+                    e.set_layout(EditorLayout::Column, cx);
+                    if let Some(offset) = top {
+                        e.scroll_to_offset(offset, cx);
+                    }
+                });
+            }
+            (_, ViewMode::Split) => {
+                let top = match from {
+                    ViewMode::Preview => preview_top(),
+                    ViewMode::Edit | ViewMode::Split => None,
+                };
+                let Some(split) = self.ensure_split(index, cx) else {
+                    return;
+                };
+                let editor = split.read(cx).editor().clone();
+                if let Some(offset) = top {
                     editor.update(cx, |e, cx| e.scroll_to_offset(offset, cx));
                 }
+                split.update(cx, |s, _| s.restart());
             }
-            (ViewMode::Edit, ViewMode::Preview) => {
+            (ViewMode::Edit | ViewMode::Split, ViewMode::Preview) => {
+                let split = self.tabs[index].split.clone();
                 let tab = &self.tabs[index];
                 let (Some(editor), Some(reader), Some(path)) =
                     (tab.editor.clone(), tab.reader.clone(), tab.path.clone())
@@ -166,6 +296,10 @@ impl Workspace {
                     return;
                 };
                 let (text, top) = editor.update(cx, |e, _| (e.take_preview_text(), e.top_offset()));
+                let top = match (from, split) {
+                    (ViewMode::Split, Some(split)) => split.read(cx).top_offset(cx).or(top),
+                    _ => top,
+                };
                 let target = top.map(ScrollTarget::Offset);
                 reader.update(cx, |r, cx| match text {
                     Some(text) => r.open_text(path, text, target, cx),

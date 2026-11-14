@@ -455,6 +455,40 @@ impl Items for DocItems<'_> {
     }
 }
 
+/// The engine's view of a render tree that only estimates: for splicing
+/// the height index outside a frame, where nothing is laid out.
+pub(crate) struct TreeItems<'a>(pub &'a RenderTree);
+
+impl Items for TreeItems<'_> {
+    fn len(&self) -> usize {
+        self.0.items().len()
+    }
+
+    fn id(&self, ix: usize) -> ItemId {
+        self.0.items()[ix].id
+    }
+
+    fn index_of(&self, id: ItemId) -> Option<usize> {
+        self.0.index_of(id)
+    }
+
+    fn estimate(&self, ix: usize, width: f32) -> f32 {
+        self.0.items()[ix].height_estimate(width)
+    }
+
+    fn measure(&mut self, ix: usize, width: f32) -> f32 {
+        self.estimate(ix, width)
+    }
+
+    fn text_anchor(&mut self, _: usize, _: f32) -> Option<TextAnchor> {
+        None
+    }
+
+    fn offset_of(&mut self, _: usize, _: &TextAnchor, _: f32) -> Option<f32> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gv_inline::ItemKind as PieceKind;

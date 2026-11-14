@@ -57,12 +57,14 @@ use crate::chrome::WindowChrome;
 use crate::editor::EditorView;
 use crate::files::notice::Notice;
 use crate::files::watch::WatchHandle;
+use crate::keymap::actions::view::ToggleSplit;
 use crate::keymap::actions::{file as file_commands, tabs as tab_commands};
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
 use crate::reader::{
     Disposition, LinkRequest, LoadStatus, Navigation, Reader, ReaderEvent, ScrollTarget,
 };
+use crate::split::SplitView;
 use crate::{
     CloseTab, GoBack, GoForward, ReopenClosedTab, ToggleEditMode, TogglePanel, ToggleSidebar,
 };
@@ -85,6 +87,10 @@ pub const DEBUG_SHOW_RIGHT_PANEL_ENV: &str = "GLYPHVANE_DEBUG_SHOW_RIGHT_PANEL";
 /// Set to `1` to open main windows in Edit mode, for screenshots and
 /// manual checks.
 pub const DEBUG_EDIT_ENV: &str = "GLYPHVANE_DEBUG_EDIT";
+
+/// Set to `1` to open main windows in Split mode, for screenshots and
+/// manual checks.
+pub const DEBUG_SPLIT_ENV: &str = "GLYPHVANE_DEBUG_SPLIT";
 
 /// What the document area shows. Each tab has its own mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +293,9 @@ pub struct Tab {
     /// long as the tab shows the same file; when it goes, unsaved text is
     /// saved or kept in the crash journal ([`crate::files`]).
     editor: Option<Entity<EditorView>>,
+    /// The Split view, made with the Source view when the tab first goes
+    /// to Split; it goes with the Source view.
+    split: Option<Entity<SplitView>>,
     /// The number of an untitled document (`tabs.new`), which has no path.
     untitled: Option<u64>,
     /// The tab's own infobar, for what happens to its file while only the
@@ -312,6 +321,7 @@ impl Tab {
             mode: ViewMode::default(),
             reader: None,
             editor: None,
+            split: None,
             untitled: None,
             notice: None,
             history: History::default(),
@@ -356,6 +366,15 @@ impl Tab {
 
     pub fn editor(&self) -> Option<&Entity<EditorView>> {
         self.editor.as_ref()
+    }
+
+    pub fn split(&self) -> Option<&Entity<SplitView>> {
+        self.split.as_ref()
+    }
+
+    /// The Split view's preview pane, once the tab has a Split view.
+    fn split_reader(&self, cx: &App) -> Option<Entity<Reader>> {
+        Some(self.split.as_ref()?.read(cx).reader().clone())
     }
 
     /// Where Back goes, oldest first.
@@ -525,6 +544,9 @@ impl Workspace {
         }
         if std::env::var_os(DEBUG_EDIT_ENV).is_some_and(|v| v == "1") {
             this.set_mode(ViewMode::Edit, cx);
+        }
+        if std::env::var_os(DEBUG_SPLIT_ENV).is_some_and(|v| v == "1") {
+            this.set_mode(ViewMode::Split, cx);
         }
         this
     }
@@ -790,6 +812,9 @@ impl Workspace {
                 .editor
                 .as_ref()
                 .is_some_and(|e| e.read(cx).focus_handle(cx).contains_focused(window, cx))
+            || tab
+                .split_reader(cx)
+                .is_some_and(|r| r.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
     fn focus_reader_if(&self, focused: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -820,25 +845,38 @@ impl Workspace {
     /// view that leaves the screen (a mode switch) hands it to the window,
     /// and the window hands it to the view that comes back.
     fn settle_focus(&self, window: &mut Window, cx: &mut App) {
-        let shown = self
+        let shown: Vec<EntityId> = self
             .shown_reader()
             .map(Entity::entity_id)
-            .or_else(|| self.shown_editor().map(Entity::entity_id));
-        let readers = self.tabs.iter().filter_map(|t| t.reader.as_ref());
+            .into_iter()
+            .chain(self.shown_editor().map(Entity::entity_id))
+            .chain(self.shown_split_reader(cx).map(|r| r.entity_id()))
+            .collect();
+        let readers = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.reader.clone())
+            .chain(self.tabs.iter().filter_map(|t| t.split_reader(cx)));
         let editors = self.tabs.iter().filter_map(|t| t.editor.as_ref());
         let hidden_focused = readers
             .map(|r| (r.entity_id(), r.read(cx).focus_handle(cx)))
             .chain(editors.map(|e| (e.entity_id(), e.read(cx).focus_handle(cx))))
-            .any(|(id, focus)| Some(id) != shown && focus.contains_focused(window, cx));
-        if hidden_focused || (shown.is_some() && self.focus.is_focused(window)) {
+            .any(|(id, focus)| !shown.contains(&id) && focus.contains_focused(window, cx));
+        if hidden_focused || (!shown.is_empty() && self.focus.is_focused(window)) {
             self.focus_document(window, cx);
         }
     }
 
     fn tabs_changed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.ensure_reader(self.active, window, cx);
-        if self.mode() == ViewMode::Edit {
-            self.ensure_editor(self.active, cx);
+        match self.mode() {
+            ViewMode::Edit => {
+                self.ensure_editor(self.active, cx);
+            }
+            ViewMode::Split => {
+                self.ensure_split(self.active, cx);
+            }
+            ViewMode::Preview => {}
         }
         window.set_window_title(&self.active_tab().label.window_title());
         if let Some(files) = self.files.clone() {
@@ -905,6 +943,10 @@ impl Workspace {
         for editor in self.tabs.iter().filter_map(|t| t.editor.clone()) {
             let index = index.clone();
             editor.update(cx, |e, cx| e.set_index(Some(index), cx));
+        }
+        for split in self.tabs.iter().filter_map(|t| t.split.clone()) {
+            let index = index.clone();
+            split.update(cx, |s, cx| s.set_index(Some(index), cx));
         }
     }
 
@@ -1211,6 +1253,15 @@ impl Workspace {
             let shown = reader.status() == &LoadStatus::Ready && reader.path() == Some(&path);
             if shown { reader.position() } else { None }
         });
+        // In Split, the top of the leading pane.
+        let scroll = match (tab.mode, &tab.split) {
+            (ViewMode::Split, Some(split)) => split
+                .read(cx)
+                .top_offset(cx)
+                .map(ScrollTarget::Offset)
+                .or(scroll),
+            _ => scroll,
+        };
         let scroll = scroll
             .or_else(|| tab.scroll.clone())
             .or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
@@ -1237,6 +1288,7 @@ impl Workspace {
         let editor = if same { None } else { tab.editor.take() };
         if !same {
             tab.notice = None;
+            tab.split = None;
         }
         let on_close = if same { None } else { tab.on_close.take() };
         tab.label = FileLabel::new(Some(&path));
@@ -1255,17 +1307,22 @@ impl Workspace {
         }
         let tab = &mut self.tabs[index];
         match tab.reader.clone() {
-            Some(reader) if same => reader.update(cx, |r, cx| {
-                r.scroll_to(scroll.unwrap_or(ScrollTarget::Offset(0)), cx);
-            }),
-            Some(reader) => reader.update(cx, |r, cx| r.open(path, scroll, cx)),
+            Some(reader) if same => {
+                let target = scroll.clone().unwrap_or(ScrollTarget::Offset(0));
+                self.split_scroll_to(index, target.clone(), cx);
+                reader.update(cx, |r, cx| r.scroll_to(target, cx));
+            }
+            Some(reader) => reader.update(cx, |r, cx| r.open(path, scroll.clone(), cx)),
             None => {
-                let reader = self.make_reader(index, scroll, window, cx);
+                let reader = self.make_reader(index, scroll.clone(), window, cx);
                 self.tabs[index].reader = reader;
             }
         }
         if index == self.active {
             self.tabs_changed(window, cx);
+            if let (false, Some(target)) = (same, scroll) {
+                self.split_scroll_to(index, target, cx);
+            }
         } else {
             self.session_changed(cx);
             cx.notify();
@@ -1515,6 +1572,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleEditMode, _, cx| this.toggle_edit_mode(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| this.toggle_split(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.toggle_sidebar(window, cx);
             }))
