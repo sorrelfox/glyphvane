@@ -3000,6 +3000,7 @@ dependencies = [
  "clap",
  "futures",
  "gpui-kit",
+ "gpui-pre",
  "gv-settings",
  "gv-syntax",
  "gv-text",

@@ -26,7 +26,9 @@ pub use appearance::Appearance;
 pub use chrome::WindowChrome;
 pub use icons::Assets;
 pub use settings::AppSettings;
-pub use shell::{OpenTarget, TextPosition, WorkspaceWindow, most_recent_window};
+pub use shell::{
+    CloseHook, FileClosed, OpenTarget, TextPosition, WorkspaceWindow, most_recent_window,
+};
 pub use theme::{PreferredLight, ThemeChoice, ThemeId};
 
 use crate::metrics::size as sz;
@@ -122,6 +124,37 @@ pub fn open(
     };
     for target in targets {
         window.open_tab(target, cx)?;
+    }
+    window.activate(cx);
+    Ok(window.window)
+}
+
+/// Opens files for an edit that someone waits for (`--wait`): as [`open`]
+/// does, but each file opens in Edit mode (Source), and its [`CloseHook`] is
+/// told when its tab lets go of it.
+pub fn open_for_edit(
+    cx: &mut App,
+    targets: Vec<(OpenTarget, CloseHook)>,
+    placement: Placement,
+) -> Result<AnyWindowHandle> {
+    let existing = match placement {
+        Placement::RecentWindow => most_recent_window(cx),
+        Placement::NewWindow => None,
+    };
+    let mut targets = targets.into_iter();
+    let window = match existing {
+        Some(window) => window,
+        None => {
+            let (target, hook) = targets.next().unzip();
+            let window = open_workspace_window(cx, target)?;
+            if hook.is_some() {
+                window.edit_active_tab(hook, cx)?;
+            }
+            window
+        }
+    };
+    for (target, hook) in targets {
+        window.open_tab_for_edit(target, Some(hook), cx)?;
     }
     window.activate(cx);
     Ok(window.window)

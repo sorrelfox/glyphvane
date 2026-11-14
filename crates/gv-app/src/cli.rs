@@ -40,6 +40,15 @@ pub struct Cli {
     #[arg(long)]
     pub new_window: bool,
 
+    /// Open the files for editing and wait until they are closed, for use as
+    /// `$EDITOR` or `GIT_EDITOR`. They open in a new window, in the editor
+    /// rather than Preview. Glyphvane waits until each file's tab is closed
+    /// (or its window), with the file saved when autosave is on. When
+    /// Glyphvane was not running, this process is the one that starts it,
+    /// and it quits once the files are closed.
+    #[arg(long)]
+    pub wait: bool,
+
     /// Files or folders to open. Files open in Preview; `PATH:LINE` and
     /// `PATH:LINE:COL` scroll to that line. When Glyphvane is already running,
     /// they open as tabs in its most recently used window.
@@ -129,8 +138,7 @@ pub struct OpenRequest {
     /// Folders to open as vaults.
     pub folders: Vec<PathBuf>,
     pub new_window: bool,
-    /// Block until the files are closed (`--wait`). Not offered on the
-    /// command line yet; the protocol carries it already.
+    /// Block until the files are closed (`--wait`).
     pub wait: bool,
 }
 
@@ -142,7 +150,7 @@ impl OpenRequest {
             files: Vec::new(),
             folders: Vec::new(),
             new_window: cli.new_window,
-            wait: false,
+            wait: cli.wait,
         };
         for arg in &cli.paths {
             let (path, position) = parse_location(arg, cfg!(windows), |p| cwd.join(p).exists());
@@ -358,6 +366,16 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.paths, ["render", "a.md"]);
         assert!(Cli::try_parse_from(["glyphvane", "render"]).is_err());
+    }
+
+    #[test]
+    fn wait_is_carried_into_the_request() {
+        let cwd = std::env::temp_dir();
+        let request = |args: &[&str]| OpenRequest::from_cli(&parse(args), &cwd);
+        assert!(!request(&["glyphvane", "a.md"]).wait);
+        let waiting = request(&["glyphvane", "--wait", "COMMIT_EDITMSG"]);
+        assert!(waiting.wait);
+        assert_eq!(waiting.files, [OpenTarget::new(cwd.join("COMMIT_EDITMSG"))]);
     }
 
     #[test]

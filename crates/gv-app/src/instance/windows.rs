@@ -16,7 +16,7 @@ use interprocess::os::windows::named_pipe::{
 };
 
 use super::protocol::Response;
-use super::{Handler, client_exchange, remaining, serve_connection};
+use super::{Handler, Waiters, client_exchange, remaining, report, serve_connection};
 
 const LOCK: &str = "instance.lock";
 
@@ -25,6 +25,15 @@ const LOCK: &str = "instance.lock";
 const RETRY: Duration = Duration::from_millis(20);
 
 type Stream = DuplexPipeStream<pipe_mode::Bytes>;
+
+/// A client's connection to the running instance.
+pub(super) type Connection = Stream;
+
+/// Pipe reads have no timeout: a waiting client reads for as long as the
+/// files stay open already.
+pub(super) fn unbounded(_stream: &Connection) -> io::Result<()> {
+    Ok(())
+}
 
 /// The pipe and the folder holding the lock file.
 #[derive(Debug, Clone)]
@@ -91,16 +100,22 @@ impl Endpoint {
 
     /// Connects, sends `body` and reads the answer by `deadline`. Pipe I/O
     /// has no timeouts, so the exchange runs on a helper thread that is
-    /// abandoned when the deadline passes.
-    pub(super) fn exchange(&self, body: &[u8], deadline: Instant) -> io::Result<Response> {
+    /// abandoned when the deadline passes. The connection is returned with
+    /// the answer, for a waiting client.
+    pub(super) fn exchange(
+        &self,
+        body: &[u8],
+        deadline: Instant,
+    ) -> io::Result<(Response, Connection)> {
         let pipe = self.pipe.clone();
         let body = body.to_vec();
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("glyphvane-instance-client".to_owned())
             .spawn(move || {
-                let result = connect(&pipe, deadline)
-                    .and_then(|mut stream| client_exchange(&mut stream, &body));
+                let result = connect(&pipe, deadline).and_then(|mut stream| {
+                    client_exchange(&mut stream, &body).map(|response| (response, stream))
+                });
                 let _ = sender.send(result);
             })?;
         match receiver.recv_timeout(remaining(deadline)?) {
@@ -132,8 +147,9 @@ pub struct Listener {
 
 impl Listener {
     /// Serves each connection on its own thread, as pipe reads cannot time
-    /// out. Runs until the process ends.
-    pub(super) fn run(self, handler: &Handler) {
+    /// out; a waiting client is reported to from that thread. Runs until
+    /// the process ends.
+    pub(super) fn run(self, handler: &Handler, waiters: &Waiters) {
         for stream in self.listener.incoming() {
             let mut stream = match stream {
                 Ok(stream) => stream,
@@ -147,12 +163,11 @@ impl Listener {
                 continue;
             }
             let handler = handler.clone();
-            let spawned = std::thread::Builder::new()
-                .name("glyphvane-instance-client".to_owned())
-                .spawn(move || serve_connection(&mut stream, &handler));
-            if let Err(err) = spawned {
-                tracing::warn!("single instance: {err}");
-            }
+            waiters.spawn(move || {
+                if let Some(events) = serve_connection(&mut stream, &handler) {
+                    report(&mut stream, &events);
+                }
+            });
         }
     }
 }

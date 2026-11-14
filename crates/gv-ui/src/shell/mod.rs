@@ -35,6 +35,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use futures::channel::oneshot;
 
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
@@ -119,6 +122,151 @@ impl OpenTarget {
     }
 }
 
+/// What a tab's [`CloseHook`] is told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileClosed {
+    pub path: PathBuf,
+    /// The document had changes that are not in the file: autosave is off,
+    /// held back, or could not write. They stay in the recovery journal.
+    pub unsaved: bool,
+}
+
+/// Called once when a tab lets go of its file: the tab closes, its window
+/// closes, the tab goes on to show another file, or the application quits.
+/// When closing saves the document (autosave), the hook is called once that
+/// save has finished, so the file on disk is final by then.
+#[derive(Clone)]
+pub struct CloseHook(Rc<RefCell<Option<CloseFn>>>);
+
+type CloseFn = Box<dyn FnOnce(FileClosed, &mut App)>;
+
+impl CloseHook {
+    pub fn new(hook: impl FnOnce(FileClosed, &mut App) + 'static) -> Self {
+        Self(Rc::new(RefCell::new(Some(Box::new(hook)))))
+    }
+
+    /// Calls the hook, the first time only.
+    fn fire(&self, closed: FileClosed, cx: &mut App) {
+        let hook = self.0.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook(closed, cx);
+        }
+    }
+
+    fn is(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for CloseHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pending = self.0.borrow().is_some();
+        f.debug_struct("CloseHook")
+            .field("pending", &pending)
+            .finish()
+    }
+}
+
+/// How long a closed document's save may take before its hook is called
+/// anyway (as unsaved).
+const CLOSE_HOOK_WAIT: Duration = crate::files::CLOSE_WAIT;
+
+/// How often a closed document's save is looked at.
+const CLOSE_HOOK_POLL: Duration = Duration::from_millis(10);
+
+/// Documents whose tab let go of them while their save was still running:
+/// their hooks are called when it ends, or by [`release_close_hooks`].
+#[derive(Default)]
+struct ClosingFiles(Vec<(CloseHook, PathBuf, Entity<EditorView>)>);
+
+impl Global for ClosingFiles {}
+
+/// Tells `hook` that its tab let go of `path`. `editor` is the tab's Source
+/// view, already asked to save what autosave may save; when that save is
+/// still running, the hook waits for it.
+fn let_go(hook: CloseHook, path: PathBuf, editor: Option<Entity<EditorView>>, cx: &mut App) {
+    let Some(editor) = editor else {
+        hook.fire(
+            FileClosed {
+                path,
+                unsaved: false,
+            },
+            cx,
+        );
+        return;
+    };
+    if !editor.read(cx).is_saving() {
+        let unsaved = editor.read(cx).is_modified();
+        hook.fire(FileClosed { path, unsaved }, cx);
+        return;
+    }
+    cx.default_global::<ClosingFiles>()
+        .0
+        .push((hook.clone(), path.clone(), editor.clone()));
+    cx.spawn(async move |cx| {
+        let deadline = Instant::now() + CLOSE_HOOK_WAIT;
+        while cx.update(|cx| editor.read(cx).is_saving()) && Instant::now() < deadline {
+            cx.background_executor().timer(CLOSE_HOOK_POLL).await;
+        }
+        cx.update(|cx| {
+            cx.default_global::<ClosingFiles>()
+                .0
+                .retain(|(h, ..)| !h.is(&hook));
+            let unsaved = editor.read(cx).is_modified();
+            hook.fire(FileClosed { path, unsaved }, cx);
+        });
+    })
+    .detach();
+}
+
+/// Calls every close hook still waiting, for the application quitting: the
+/// tabs that are still open let go of their files now. Their documents
+/// were saved by [`crate::files::quit`]; a save still running is waited
+/// for here, blocking, for at most [`CLOSE_HOOK_WAIT`].
+pub fn release_close_hooks(cx: &mut App) {
+    let workspaces: Vec<_> = cx
+        .default_global::<RecentWindows>()
+        .0
+        .iter()
+        .filter_map(|w| w.workspace.upgrade())
+        .collect();
+    let mut hooks: Vec<_> = workspaces
+        .into_iter()
+        .flat_map(|ws| ws.update(cx, |ws, _| ws.take_close_hooks()))
+        .collect();
+    hooks.extend(
+        std::mem::take(&mut cx.default_global::<ClosingFiles>().0)
+            .into_iter()
+            .map(|(hook, path, editor)| (hook, path, Some(editor))),
+    );
+    for (hook, path, editor) in hooks {
+        let unsaved = editor.is_some_and(|editor| {
+            let wait = editor.update(cx, |e, cx| e.prepare_close(cx));
+            if editor.read(cx).is_saving() {
+                // The save's reply is handled on this thread, which is
+                // blocked: the worker's queue says when it is written.
+                !wait.is_some_and(|wait| block_until_done(wait, CLOSE_HOOK_WAIT))
+            } else {
+                editor.read(cx).is_modified()
+            }
+        });
+        hook.fire(FileClosed { path, unsaved }, cx);
+    }
+}
+
+/// Blocks until `wait` fires or is dropped, for at most `limit`. Returns
+/// whether it did.
+fn block_until_done(mut wait: oneshot::Receiver<()>, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        match wait.try_recv() {
+            Ok(Some(())) | Err(oneshot::Canceled) => return true,
+            Ok(None) if Instant::now() >= deadline => return false,
+            Ok(None) => std::thread::sleep(CLOSE_HOOK_POLL),
+        }
+    }
+}
+
 /// One open document in a window.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -144,6 +292,8 @@ pub struct Tab {
     notice: Option<Notice>,
     /// Where Back and Forward go.
     history: History,
+    /// Told when the tab lets go of its file (`--wait`).
+    on_close: Option<CloseHook>,
 }
 
 impl Tab {
@@ -163,6 +313,7 @@ impl Tab {
             untitled: None,
             notice: None,
             history: History::default(),
+            on_close: None,
         }
     }
 
@@ -338,6 +489,8 @@ pub struct Workspace {
     _appearance: Subscription,
     _activation: Subscription,
     _bounds: Subscription,
+    /// Calls the close hooks of the tabs that are open when the window goes.
+    _release: Subscription,
 }
 
 impl fmt::Debug for Workspace {
@@ -413,6 +566,18 @@ impl Workspace {
             this.session_changed(cx);
         });
         let in_session = !for_file && session::track(window.window_handle(), cx.weak_entity(), cx);
+        // However the window goes (closed, removed, the app quitting), the
+        // tabs let go of their files.
+        let release = cx.on_release(|ws: &mut Self, cx| {
+            for (hook, path, editor) in ws.take_close_hooks() {
+                if let Some(editor) = &editor {
+                    editor.update(cx, |e, cx| {
+                        e.prepare_close(cx);
+                    });
+                }
+                let_go(hook, path, editor, cx);
+            }
+        });
         let mut this = Self {
             focus,
             chrome,
@@ -441,6 +606,7 @@ impl Workspace {
             _appearance: appearance,
             _activation: activation,
             _bounds: bounds,
+            _release: release,
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -507,6 +673,48 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         self.insert_tab(target, None, true, window, cx);
+    }
+
+    /// Opens `target` like [`Self::open_tab`], in Edit mode, with `on_close`
+    /// told when the tab lets go of the file (`--wait`).
+    pub fn open_tab_for_edit(
+        &mut self,
+        target: OpenTarget,
+        on_close: Option<CloseHook>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.insert_tab(target, None, true, window, cx);
+        self.edit_active_tab(on_close, window, cx);
+    }
+
+    /// Puts the active tab in Edit mode with the keyboard in its Source
+    /// view, and gives it `on_close` when it has a file.
+    pub fn edit_active_tab(
+        &mut self,
+        on_close: Option<CloseHook>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let tab = &mut self.tabs[self.active];
+        if tab.path.is_some() && on_close.is_some() {
+            tab.on_close = on_close;
+        }
+        self.set_mode(ViewMode::Edit, cx);
+        self.focus_document(window, cx);
+    }
+
+    /// Takes the close hooks of every tab, with the tab's file and Source
+    /// view.
+    fn take_close_hooks(&mut self) -> Vec<(CloseHook, PathBuf, Option<Entity<EditorView>>)> {
+        self.tabs
+            .iter_mut()
+            .filter_map(|tab| {
+                let path = tab.path.clone()?;
+                let hook = tab.on_close.take()?;
+                Some((hook, path, tab.editor.clone()))
+            })
+            .collect()
     }
 
     /// Adds a tab for `target` after the active one, scrolled to `scroll`
@@ -1028,13 +1236,17 @@ impl Workspace {
         if !same {
             tab.notice = None;
         }
+        let on_close = if same { None } else { tab.on_close.take() };
         tab.label = FileLabel::new(Some(&path));
         tab.path = Some(path.clone());
         tab.position = None;
         tab.scroll = None;
         // The Source view goes with the file it edits (saved or journaled).
-        if let Some(editor) = editor {
-            self.drop_editor(&editor, cx);
+        if let Some(editor) = &editor {
+            self.drop_editor(editor, cx);
+        }
+        if let (Some(hook), Some(left)) = (on_close, left.clone()) {
+            let_go(hook, left, editor, cx);
         }
         if let Some(left) = left {
             self.untrack_if_unused(&left);
@@ -1146,6 +1358,9 @@ impl Workspace {
         }
         if let Some(path) = &tab.path {
             self.untrack_if_unused(path);
+        }
+        if let (Some(hook), Some(path)) = (tab.on_close, tab.path) {
+            let_go(hook, path, tab.editor, cx);
         }
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(None));
@@ -1419,6 +1634,30 @@ impl WorkspaceWindow {
         })?
     }
 
+    /// Opens `target` as a tab in Edit mode (see
+    /// [`Workspace::open_tab_for_edit`]).
+    pub fn open_tab_for_edit(
+        &self,
+        target: OpenTarget,
+        on_close: Option<CloseHook>,
+        cx: &mut App,
+    ) -> Result<()> {
+        let workspace = self.workspace.clone();
+        cx.update_window(self.window, |_, window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.open_tab_for_edit(target, on_close, window, cx);
+            })
+        })?
+    }
+
+    /// Puts the active tab in Edit mode (see [`Workspace::edit_active_tab`]).
+    pub fn edit_active_tab(&self, on_close: Option<CloseHook>, cx: &mut App) -> Result<()> {
+        let workspace = self.workspace.clone();
+        cx.update_window(self.window, |_, window, cx| {
+            workspace.update(cx, |ws, cx| ws.edit_active_tab(on_close, window, cx))
+        })?
+    }
+
     /// Brings the window to the front.
     pub fn activate(&self, cx: &mut App) {
         // Fails only when the window has closed.
@@ -1446,4 +1685,295 @@ pub fn most_recent_window(cx: &mut App) -> Option<WorkspaceWindow> {
     let order = &mut cx.default_global::<RecentWindows>().0;
     order.retain(|w| open.contains(&w.window) && w.workspace.upgrade().is_some());
     order.first().cloned()
+}
+
+/// Files opened for an edit someone waits for (`--wait`): Edit mode, and
+/// the close hook, called once the file is final.
+#[cfg(test)]
+mod close_hook_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{TestAppContext, VisualTestContext};
+    use gv_vault::files::journal::JournalStore;
+
+    use super::*;
+    use crate::{AppSettings, Placement, ThemeChoice};
+
+    const NOTE: &str = "# Title\n\nFirst paragraph.\n";
+
+    /// What a hook saw when it was called: the report and the file's text
+    /// at that moment.
+    type Seen = Rc<RefCell<Vec<(FileClosed, String)>>>;
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        /// Weak, so that closing the window releases the workspace.
+        workspace: WeakEntity<Workspace>,
+        vcx: VisualTestContext,
+        seen: Seen,
+    }
+
+    fn hook(seen: &Seen) -> CloseHook {
+        let seen = Rc::clone(seen);
+        CloseHook::new(move |closed, _| {
+            let text = std::fs::read_to_string(&closed.path).unwrap_or_default();
+            seen.borrow_mut().push((closed, text));
+        })
+    }
+
+    /// `names` written in a temporary folder with a journal, opened for
+    /// editing in a new window, each with a hook that notes what it saw.
+    fn fixture(cx: &mut TestAppContext, names: &[&str], autosave: bool) -> Fixture {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for name in names {
+            std::fs::write(dir.path().join(name), NOTE).expect("write");
+        }
+        let seen = Seen::default();
+        let targets: Vec<_> = names
+            .iter()
+            .map(|name| (OpenTarget::new(dir.path().join(name)), hook(&seen)))
+            .collect();
+        let journal = dir.path().join("journal");
+        let (window, workspace) = cx.update(|cx| {
+            crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+            let store = JournalStore::open(journal).expect("journal store");
+            crate::files::install_store(cx, Some(store), false);
+            crate::files::override_autosave(cx, Some(autosave));
+            let window =
+                crate::open_for_edit(cx, targets, Placement::NewWindow).expect("files open");
+            let workspace = most_recent_window(cx).expect("a workspace").workspace;
+            (window, workspace)
+        });
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        draw(&mut vcx);
+        Fixture {
+            dir,
+            workspace,
+            vcx,
+            seen,
+        }
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    impl Fixture {
+        fn workspace(&self) -> Entity<Workspace> {
+            self.workspace.upgrade().expect("the window is open")
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.dir.path().join(name)
+        }
+
+        fn type_at_end(&mut self, text: &str) {
+            self.vcx.simulate_keystrokes("secondary-end");
+            self.vcx.simulate_input(text);
+            draw(&mut self.vcx);
+        }
+
+        fn close_active_tab(&mut self) {
+            self.workspace().update_in(&mut self.vcx, |ws, window, cx| {
+                ws.close_tab(ws.active, window, cx);
+            });
+            draw(&mut self.vcx);
+        }
+
+        fn seen(&self) -> Vec<(FileClosed, String)> {
+            self.seen.borrow().clone()
+        }
+
+        fn journals(&self) -> usize {
+            std::fs::read_dir(self.dir.path().join("journal"))
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+    }
+
+    #[gpui::test]
+    fn files_open_in_edit_mode_with_the_panels_hidden(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["a.md", "b.md"], true);
+        let (a, b) = (f.path("a.md"), f.path("b.md"));
+        f.workspace().read_with(&f.vcx, |ws, cx| {
+            assert_eq!(ws.panels_open(), (false, false));
+            assert!(
+                !ws.in_session(),
+                "a window for files stays out of the session"
+            );
+            let tabs: Vec<_> = ws.tabs().iter().map(|t| (t.path(), t.mode())).collect();
+            assert_eq!(
+                tabs,
+                [
+                    (Some(a.as_path()), ViewMode::Edit),
+                    (Some(b.as_path()), ViewMode::Edit)
+                ]
+            );
+            assert_eq!(ws.active, 1);
+            let editor = ws.active_tab().editor().expect("a Source view");
+            assert_eq!(
+                editor.read(cx).status(),
+                &crate::editor::EditorStatus::Ready
+            );
+        });
+        // The editor has the keyboard: typing edits the file.
+        f.type_at_end("B");
+        let modified = f.workspace().read_with(&f.vcx, |ws, cx| {
+            ws.active_tab()
+                .editor()
+                .is_some_and(|e| e.read(cx).is_modified())
+        });
+        assert!(modified);
+        assert!(f.seen().is_empty(), "nothing is closed yet");
+    }
+
+    #[gpui::test]
+    fn closing_the_tab_saves_then_calls_the_hook(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["msg.md"], true);
+        f.type_at_end("Done.");
+        f.close_active_tab();
+        let edited = format!("{NOTE}Done.");
+        assert_eq!(
+            f.seen(),
+            [(
+                FileClosed {
+                    path: f.path("msg.md"),
+                    unsaved: false
+                },
+                edited.clone()
+            )],
+            "the hook sees the saved file"
+        );
+        assert_eq!(f.journals(), 0);
+
+        // Once only: reopening the tab and closing it again is not reported.
+        f.workspace().update_in(&mut f.vcx, |ws, window, cx| {
+            ws.reopen_closed_tab(window, cx)
+        });
+        draw(&mut f.vcx);
+        f.close_active_tab();
+        assert_eq!(f.seen().len(), 1);
+    }
+
+    #[gpui::test]
+    fn without_autosave_the_change_stays_in_the_journal(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["msg.md"], false);
+        f.type_at_end("Done.");
+        f.close_active_tab();
+        assert_eq!(
+            f.seen(),
+            [(
+                FileClosed {
+                    path: f.path("msg.md"),
+                    unsaved: true
+                },
+                NOTE.to_owned()
+            )],
+            "reported closed with the file untouched"
+        );
+        assert_eq!(f.journals(), 1, "the change is kept for recovery");
+    }
+
+    #[gpui::test]
+    fn closing_the_window_calls_every_hook(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["a.md", "b.md"], true);
+        f.type_at_end("B");
+        assert!(!f.vcx.simulate_close(), "the window waits for its save");
+        f.vcx.run_until_parked();
+        assert!(f.workspace.upgrade().is_none(), "the window is gone");
+        let mut seen = f.seen();
+        seen.sort_by(|x, y| x.0.path.cmp(&y.0.path));
+        assert_eq!(
+            seen,
+            [
+                (
+                    FileClosed {
+                        path: f.path("a.md"),
+                        unsaved: false
+                    },
+                    NOTE.to_owned()
+                ),
+                (
+                    FileClosed {
+                        path: f.path("b.md"),
+                        unsaved: false
+                    },
+                    format!("{NOTE}B")
+                ),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_window_removed_without_asking_still_saves_first(cx: &mut TestAppContext) {
+        // The client-drawn close button removes the window directly.
+        let mut f = fixture(cx, &["msg.md"], true);
+        f.type_at_end("Done.");
+        f.vcx.update(|window, _| window.remove_window());
+        f.vcx.run_until_parked();
+        assert!(f.workspace.upgrade().is_none(), "the window is gone");
+        assert_eq!(
+            f.seen(),
+            [(
+                FileClosed {
+                    path: f.path("msg.md"),
+                    unsaved: false
+                },
+                format!("{NOTE}Done.")
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn showing_another_file_lets_go_of_the_first(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["a.md", "b.md"], true);
+        let (a, b) = (f.path("a.md"), f.path("b.md"));
+        f.workspace().update_in(&mut f.vcx, |ws, window, cx| {
+            ws.navigate(0, b, None, window, cx);
+        });
+        draw(&mut f.vcx);
+        assert_eq!(
+            f.seen(),
+            [(
+                FileClosed {
+                    path: a,
+                    unsaved: false
+                },
+                NOTE.to_owned()
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn quitting_calls_the_hooks_of_open_tabs(cx: &mut TestAppContext) {
+        let mut f = fixture(cx, &["a.md"], true);
+        f.type_at_end("A");
+        // As `app.quit` does: save first, then let the tabs go.
+        f.vcx.update(|_, cx| {
+            crate::shell::prepare_quit(cx);
+        });
+        draw(&mut f.vcx);
+        f.vcx.update(|_, cx| release_close_hooks(cx));
+        assert_eq!(
+            f.seen(),
+            [(
+                FileClosed {
+                    path: f.path("a.md"),
+                    unsaved: false
+                },
+                format!("{NOTE}A")
+            )]
+        );
+        // Nothing is called twice when the window then goes.
+        f.vcx.simulate_close();
+        f.vcx.run_until_parked();
+        assert_eq!(f.seen().len(), 1);
+    }
 }

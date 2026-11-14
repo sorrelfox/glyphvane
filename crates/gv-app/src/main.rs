@@ -12,6 +12,7 @@ mod safe_mode;
 mod session;
 mod settings;
 mod startup;
+mod wait;
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser as _;
 use futures::StreamExt as _;
@@ -30,7 +32,7 @@ use gv_ui::{AppSettings, OpenTarget, Placement, ThemeChoice};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command, OpenRequest};
-use crate::instance::Claim;
+use crate::instance::{Claim, Reporter, WaitEvent, Waiting};
 use crate::no_gpu_dialog::Choice;
 use crate::safe_mode::{Platform, Start};
 
@@ -82,6 +84,10 @@ fn main() -> ExitCode {
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let request = OpenRequest::from_cli(&cli, &cwd);
+    if request.wait && request.files.is_empty() {
+        eprintln!("glyphvane: --wait needs a file to open");
+        return ExitCode::from(2);
+    }
     let locations = settings::locations(cli.config_dir.as_deref());
     let log_dir = locations
         .as_ref()
@@ -105,6 +111,10 @@ fn main() -> ExitCode {
         Claim::Delivered => {
             startup::mark("single-instance claim done (delivered to the running instance)");
             return ExitCode::SUCCESS;
+        }
+        Claim::Waiting(waiting) => {
+            startup::mark("single-instance claim done (delivered, waiting)");
+            return wait_for_running_instance(waiting);
         }
         Claim::Primary(primary) => {
             startup::mark("single-instance claim done (primary)");
@@ -132,23 +142,25 @@ fn main() -> ExitCode {
     let restart_safe = Rc::new(Cell::new(false));
 
     // Requests from later invocations and from the platform reach the UI
-    // thread through this channel.
-    let (sender, mut requests) = mpsc::unbounded::<OpenRequest>();
+    // thread through this channel, a `--wait` request with its reporter.
+    let (sender, mut requests) = mpsc::unbounded::<(OpenRequest, Option<Reporter>)>();
     let instance = primary.map(|primary| {
         let sender = sender.clone();
-        primary.serve(Arc::new(move |request| {
+        primary.serve(Arc::new(move |request, reporter| {
             sender
-                .unbounded_send(request)
+                .unbounded_send((request, reporter))
                 .map_err(|_| "the application is quitting".to_owned())
         }))
     });
+    let waiters = instance.as_ref().map(instance::Guard::waiters);
+    let quit_waiters = waiters.clone();
 
     let application = gpui::application().with_assets(gv_ui::Assets);
     startup::mark("GPUI application created");
     application.on_open_urls(move |urls| {
         if let Some(request) = request_from_urls(&urls) {
             // The receiver is gone only when the app is quitting.
-            let _ = sender.unbounded_send(request);
+            let _ = sender.unbounded_send((request, None));
         }
     });
     application.run({
@@ -165,8 +177,22 @@ fn main() -> ExitCode {
             if let Some(path) = watched {
                 settings::watch(path, cx);
             }
+            // Quitting lets every tab go: waiting clients are told their
+            // files are closed (saved first by the quit), and get the time
+            // to read it.
+            cx.on_app_quit(move |cx| {
+                gv_ui::shell::release_close_hooks(cx);
+                if let Some(waiters) = &quit_waiters {
+                    waiters.finish(WAITERS_AT_EXIT);
+                }
+                async {}
+            })
+            .detach();
             startup::mark("UI set up (theme, keymap, journal, session, settings watcher)");
-            let opened = if restores_session(&request) {
+            let waits = request.wait;
+            let opened = if waits {
+                wait::open(request, wait::Waiter::Local, cx)
+            } else if restores_session(&request) {
                 restore(request, cx)
             } else {
                 open(request, cx)
@@ -176,8 +202,12 @@ fn main() -> ExitCode {
                     startup::mark("window created");
                     gpu::report_adapter(window, cx);
                     // Documents with unsaved changes from a crash (or a
-                    // close without saving) reopen with their text.
-                    gv_ui::files::recover_unsaved(cx);
+                    // close without saving) reopen with their text. Not in
+                    // a window for `--wait`, which quits when its files are
+                    // closed: they wait for the next start.
+                    if !waits {
+                        gv_ui::files::recover_unsaved(cx);
+                    }
                 }
                 Err(err) => {
                     if gpu::is_gpu_error(&err) {
@@ -200,9 +230,15 @@ fn main() -> ExitCode {
                 }
             }
             cx.spawn(async move |cx| {
-                while let Some(request) = requests.next().await {
+                while let Some((request, reporter)) = requests.next().await {
                     cx.update(|cx| {
-                        if let Err(err) = open(request, cx) {
+                        let opened = match reporter {
+                            Some(reporter) => {
+                                wait::open(request, wait::Waiter::Remote(reporter), cx)
+                            }
+                            None => open(request, cx),
+                        };
+                        if let Err(err) = opened {
                             tracing::error!("cannot open the requested files: {err:#}");
                         }
                     });
@@ -212,6 +248,9 @@ fn main() -> ExitCode {
         }
     });
 
+    if let Some(waiters) = &waiters {
+        waiters.finish(WAITERS_AT_EXIT);
+    }
     if restart_safe.get() {
         // Give up the single-instance endpoint first: the new process does
         // not take it, and a later normal start should.
@@ -227,6 +266,33 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// How long a quitting instance gives its waiting clients to read that
+/// their files are closed.
+const WAITERS_AT_EXIT: Duration = Duration::from_secs(2);
+
+/// `--wait` handed to the running instance: blocks until it reports the
+/// files closed. Fails when it ends first.
+fn wait_for_running_instance(waiting: Waiting) -> ExitCode {
+    let waited = waiting.wait(|event| {
+        if let WaitEvent::Closed {
+            path,
+            unsaved: true,
+        } = event
+        {
+            eprintln!("{}", wait::unsaved_message(path));
+        }
+    });
+    match waited {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!(
+                "glyphvane: stopped waiting: Glyphvane ended before the files were closed ({err})"
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 

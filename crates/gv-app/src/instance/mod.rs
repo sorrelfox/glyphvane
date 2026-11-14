@@ -19,6 +19,10 @@
 //!   administrators may write to it), refusing remote clients and clients
 //!   from other sessions, and created as the first instance of its name so
 //!   that a pipe squatted by another process is never joined.
+//!
+//! A `--wait` request keeps its connection: the server reports each file as
+//! its tab lets go of it, then that all are done ([`protocol`]), from a
+//! thread of its own so that other invocations are not held up.
 
 mod protocol;
 #[cfg(unix)]
@@ -29,12 +33,14 @@ mod windows;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gv_settings::Locations;
 
 use crate::cli::OpenRequest;
+pub use protocol::WaitEvent;
 use protocol::{Response, Status};
 #[cfg(unix)]
 pub use unix::Endpoint;
@@ -45,9 +51,34 @@ pub use windows::Endpoint;
 /// before starting on its own.
 pub const TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Takes a request on the listening thread and passes it to the UI. The
-/// error is the reason given to the client.
-pub type Handler = Arc<dyn Fn(OpenRequest) -> Result<(), String> + Send + Sync>;
+/// Takes a request on the listening thread and passes it to the UI. A
+/// `--wait` request comes with the [`Reporter`] to tell its files' closing
+/// to. The error is the reason given to the client.
+pub type Handler = Arc<dyn Fn(OpenRequest, Option<Reporter>) -> Result<(), String> + Send + Sync>;
+
+/// Tells a waiting client (`--wait`) about its files. Dropping it before
+/// [`Reporter::done`] ends the connection without `done`, which the client
+/// reports as a failure.
+#[derive(Debug)]
+pub struct Reporter(mpsc::Sender<WaitEvent>);
+
+impl Reporter {
+    pub(crate) fn channel() -> (Self, mpsc::Receiver<WaitEvent>) {
+        let (sender, receiver) = mpsc::channel();
+        (Self(sender), receiver)
+    }
+
+    /// The tab let go of the file at `path`.
+    pub fn closed(&self, path: PathBuf, unsaved: bool) {
+        // The client may be gone; nothing is left to tell then.
+        let _ = self.0.send(WaitEvent::Closed { path, unsaved });
+    }
+
+    /// Every file is closed.
+    pub fn done(self) {
+        let _ = self.0.send(WaitEvent::Done);
+    }
+}
 
 /// The outcome of [`claim`].
 #[derive(Debug)]
@@ -57,6 +88,9 @@ pub enum Claim {
     Primary(Primary),
     /// The running instance took the request; this process can exit.
     Delivered,
+    /// The running instance took a `--wait` request: wait with
+    /// [`Waiting::wait`] until it reports the files closed.
+    Waiting(Waiting),
     /// There is no usable single-instance endpoint, or the running instance
     /// did not answer: this process runs on its own without serving.
     Standalone,
@@ -75,6 +109,92 @@ pub struct Primary {
 pub struct Guard {
     _lock: File,
     endpoint: Endpoint,
+    waiters: Waiters,
+}
+
+impl Guard {
+    /// The threads that report to waiting clients.
+    pub fn waiters(&self) -> Waiters {
+        self.waiters.clone()
+    }
+}
+
+/// The threads that report to waiting clients (`--wait`), so that the
+/// process can let them finish before it exits.
+#[derive(Debug, Clone, Default)]
+pub struct Waiters(Arc<Mutex<Vec<JoinHandle<()>>>>);
+
+impl Waiters {
+    /// Runs `work` on a thread of its own.
+    fn spawn(&self, work: impl FnOnce() + Send + 'static) {
+        let spawned = std::thread::Builder::new()
+            .name("glyphvane-instance-wait".to_owned())
+            .spawn(work);
+        match spawned {
+            Ok(handle) => {
+                let mut threads = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                threads.retain(|t| !t.is_finished());
+                threads.push(handle);
+            }
+            Err(err) => tracing::warn!("single instance: cannot start a thread: {err}"),
+        }
+    }
+
+    /// Waits until every thread has finished, for at most `limit`. Returns
+    /// whether they all did.
+    pub fn finish(&self, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            let running = self
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|t| !t.is_finished());
+            if !running {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("single instance: a waiting client was not told in time");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// A connection to the running instance, which has accepted a `--wait`
+/// request.
+#[derive(Debug)]
+pub struct Waiting {
+    stream: Connection,
+}
+
+impl Waiting {
+    /// Blocks until the running instance reports every file closed, passing
+    /// each event to `on_event`. An error when the connection ends before
+    /// that: the instance ended, or could not open the files.
+    pub fn wait(mut self, mut on_event: impl FnMut(&WaitEvent)) -> io::Result<()> {
+        unbounded(&self.stream)?;
+        loop {
+            let body = protocol::read_frame(&mut self.stream).map_err(|err| match err.kind() {
+                io::ErrorKind::UnexpectedEof => io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the running instance closed the connection",
+                ),
+                _ => err,
+            })?;
+            match protocol::decode_event(&body)? {
+                Some(event) => {
+                    on_event(&event);
+                    if event == WaitEvent::Done {
+                        return Ok(());
+                    }
+                }
+                None => tracing::debug!("single instance: skipped an unknown event"),
+            }
+        }
+    }
 }
 
 impl Drop for Guard {
@@ -85,9 +205,9 @@ impl Drop for Guard {
 }
 
 #[cfg(unix)]
-use unix::Listener;
+use unix::{Connection, Listener, unbounded};
 #[cfg(windows)]
-use windows::Listener;
+use windows::{Connection, Listener, unbounded};
 
 /// The endpoint for `locations`, which identify the instance. `runtime_dir`
 /// is a per-user folder for sockets (`XDG_RUNTIME_DIR`); without one the
@@ -135,9 +255,15 @@ pub fn claim(endpoint: Endpoint, request: &OpenRequest, timeout: Duration) -> Cl
             }
         },
         Ok(None) => match send(&endpoint, request, timeout) {
-            Ok(()) => {
+            Ok(None) => {
                 tracing::info!("single instance: handed over to the running instance");
                 Claim::Delivered
+            }
+            Ok(Some(waiting)) => {
+                tracing::info!(
+                    "single instance: handed over to the running instance, waiting for the files to close"
+                );
+                Claim::Waiting(waiting)
             }
             Err(err) => {
                 tracing::warn!(
@@ -163,26 +289,36 @@ impl Primary {
             listener,
             endpoint,
         } = self;
+        let waiters = Waiters::default();
         let spawned = std::thread::Builder::new()
             .name("glyphvane-instance".to_owned())
-            .spawn(move || listener.run(&handler));
+            .spawn({
+                let waiters = waiters.clone();
+                move || listener.run(&handler, &waiters)
+            });
         if let Err(err) = spawned {
             tracing::warn!("single instance: cannot start the listener thread: {err}");
         }
         Guard {
             _lock: lock,
             endpoint,
+            waiters,
         }
     }
 }
 
-/// Sends `request` and waits for the answer, all within `timeout`.
-fn send(endpoint: &Endpoint, request: &OpenRequest, timeout: Duration) -> io::Result<()> {
+/// Sends `request` and waits for the answer, all within `timeout`. For a
+/// `--wait` request, the connection to wait on.
+fn send(
+    endpoint: &Endpoint,
+    request: &OpenRequest,
+    timeout: Duration,
+) -> io::Result<Option<Waiting>> {
     let deadline = Instant::now() + timeout;
     let body = protocol::encode_request(request);
-    let response = endpoint.exchange(&body, deadline)?;
+    let (response, stream) = endpoint.exchange(&body, deadline)?;
     match response.status {
-        Status::Accepted => Ok(()),
+        Status::Accepted => Ok(request.wait.then_some(Waiting { stream })),
         Status::Rejected => Err(io::Error::other(format!(
             "rejected: {}",
             response.reason.unwrap_or_default()
@@ -197,27 +333,38 @@ fn client_exchange(stream: &mut (impl Read + Write), body: &[u8]) -> io::Result<
 }
 
 /// The server's side of one connection: read the request, hand it over,
-/// answer.
-fn serve_connection(stream: &mut (impl Read + Write), handler: &Handler) {
+/// answer. For an accepted `--wait` request, returns the events to pass on
+/// with [`report`].
+fn serve_connection(
+    stream: &mut (impl Read + Write),
+    handler: &Handler,
+) -> Option<mpsc::Receiver<WaitEvent>> {
+    let mut events = None;
     let response = match protocol::read_frame(stream) {
         Ok(body) => match protocol::decode_request(&body) {
-            Ok(request) if request.wait => {
-                Response::rejected("--wait is not supported by this version")
-            }
             Ok(request) => {
                 tracing::info!(
-                    "single instance: request for {} file(s) and {} folder(s){}",
+                    "single instance: request for {} file(s) and {} folder(s){}{}",
                     request.files.len(),
                     request.folders.len(),
                     if request.new_window {
                         " in a new window"
                     } else {
                         ""
-                    }
+                    },
+                    if request.wait { ", waiting" } else { "" }
                 );
-                match handler(request) {
+                let reporter = request.wait.then(|| {
+                    let (reporter, receiver) = Reporter::channel();
+                    events = Some(receiver);
+                    reporter
+                });
+                match handler(request, reporter) {
                     Ok(()) => Response::accepted(),
-                    Err(reason) => Response::rejected(reason),
+                    Err(reason) => {
+                        events = None;
+                        Response::rejected(reason)
+                    }
                 }
             }
             Err(reason) => {
@@ -227,12 +374,30 @@ fn serve_connection(stream: &mut (impl Read + Write), handler: &Handler) {
         },
         Err(err) => {
             tracing::warn!("single instance: unreadable request: {err}");
-            return;
+            return None;
         }
     };
     if let Err(err) = protocol::write_frame(stream, &response.encode()) {
         tracing::warn!("single instance: cannot answer: {err}");
+        return None;
     }
+    events
+}
+
+/// Passes a waiting client its events until `done`. When the UI drops its
+/// reporter first (it could not open the files, or the application ends),
+/// the connection ends without `done`.
+fn report(stream: &mut impl Write, events: &mpsc::Receiver<WaitEvent>) {
+    while let Ok(event) = events.recv() {
+        if let Err(err) = protocol::write_frame(stream, &protocol::encode_event(&event)) {
+            tracing::info!("single instance: a waiting client is gone: {err}");
+            return;
+        }
+        if event == WaitEvent::Done {
+            return;
+        }
+    }
+    tracing::warn!("single instance: a waiting client was let go before its files closed");
 }
 
 /// Time left until `deadline`, or a timeout error.

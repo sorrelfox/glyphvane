@@ -39,6 +39,7 @@ interprocess = { workspace = true }
 rfd = { workspace = true }
 
 [dev-dependencies]
+gpui-pre = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]

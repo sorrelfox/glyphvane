@@ -24,7 +24,15 @@ use std::time::{Duration, Instant};
 use gv_settings::Locations;
 
 use super::protocol::Response;
-use super::{Handler, client_exchange, remaining, serve_connection};
+use super::{Handler, Waiters, client_exchange, remaining, report, serve_connection};
+
+/// A client's connection to the running instance.
+pub(super) type Connection = UnixStream;
+
+/// Lets a waiting client read for as long as the files stay open.
+pub(super) fn unbounded(stream: &Connection) -> io::Result<()> {
+    stream.set_read_timeout(None)
+}
 
 /// The name of the socket and lock in the data folder, which is the
 /// instance's own.
@@ -159,8 +167,13 @@ impl Endpoint {
 
     /// Connects, sends `body` and reads the answer by `deadline`. While the
     /// first instance is still starting (lock taken, socket not yet there)
-    /// the connection is retried.
-    pub(super) fn exchange(&self, body: &[u8], deadline: Instant) -> io::Result<Response> {
+    /// the connection is retried. The connection is returned with the
+    /// answer, for a waiting client.
+    pub(super) fn exchange(
+        &self,
+        body: &[u8],
+        deadline: Instant,
+    ) -> io::Result<(Response, Connection)> {
         let socket = self.socket();
         let mut stream = loop {
             match self.connect(&socket) {
@@ -180,12 +193,13 @@ impl Endpoint {
         let left = remaining(deadline)?;
         stream.set_read_timeout(Some(left))?;
         stream.set_write_timeout(Some(left))?;
-        client_exchange(&mut stream, body).map_err(|err| match err.kind() {
+        let response = client_exchange(&mut stream, body).map_err(|err| match err.kind() {
             io::ErrorKind::WouldBlock => {
                 io::Error::new(io::ErrorKind::TimedOut, "no answer in time")
             }
             _ => err,
-        })
+        })?;
+        Ok((response, stream))
     }
 
     /// Connects to the socket after checking that it is the user's.
@@ -216,8 +230,9 @@ pub struct Listener {
 
 impl Listener {
     /// Serves connections one after another, so requests open in the order
-    /// they came. Runs until the process ends.
-    pub(super) fn run(self, handler: &Handler) {
+    /// they came; a waiting client is then reported to from a thread of its
+    /// own. Runs until the process ends.
+    pub(super) fn run(self, handler: &Handler, waiters: &Waiters) {
         for stream in self.listener.incoming() {
             let mut stream = match stream {
                 Ok(stream) => stream,
@@ -238,7 +253,9 @@ impl Listener {
                 tracing::warn!("single instance: {err}");
                 continue;
             }
-            serve_connection(&mut stream, handler);
+            if let Some(events) = serve_connection(&mut stream, handler) {
+                waiters.spawn(move || report(&mut stream, &events));
+            }
         }
     }
 

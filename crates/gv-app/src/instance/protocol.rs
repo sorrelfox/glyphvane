@@ -24,10 +24,21 @@
 //! `{"version":N,"status":"rejected","reason":"..."}` with its own version,
 //! and the client then starts on its own.
 //!
-//! `wait` (FR-CLI-02) is reserved: a server that supports it keeps the
-//! connection open after `accepted` and sends `{"version":1,"event":"closed",
-//! "path":{...}}` for each file whose tab closes, then `{"version":1,
-//! "event":"done"}`. Until then the server rejects `wait`.
+//! With `"wait":true` (`--wait`) the server keeps the connection open after
+//! `accepted` and sends one frame per file as its tab lets go of it (the tab
+//! or its window closes, or the application quits), once the file is saved
+//! if closing saves it, then a last frame:
+//!
+//! ```json
+//! {"version":1,"event":"closed","path":{"utf8":"/home/me/a.md"},"unsaved":false}
+//! {"version":1,"event":"done"}
+//! ```
+//!
+//! `unsaved` is true when the document had changes that are not in the file
+//! (autosave off or held back, or the save failed); they stay in the
+//! recovery journal. A client ignores events it does not know. A connection
+//! that ends before `done` means the server could not open the files or
+//! ended.
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -210,6 +221,73 @@ impl Response {
     }
 }
 
+/// What a waiting client is told after `accepted`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitEvent {
+    /// The tab let go of the file at `path`.
+    Closed { path: PathBuf, unsaved: bool },
+    /// Every file of the request is closed; the server ends the connection.
+    Done,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum WireEvent {
+    Closed {
+        path: WirePath,
+        #[serde(default)]
+        unsaved: bool,
+    },
+    Done,
+    /// An event of a later version.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize)]
+struct EventFrame<'a> {
+    version: u32,
+    #[serde(flatten)]
+    event: &'a WireEvent,
+}
+
+/// The frame body for `event`.
+pub fn encode_event(event: &WaitEvent) -> Vec<u8> {
+    let event = match event {
+        WaitEvent::Closed { path, unsaved } => WireEvent::Closed {
+            path: WirePath::new(path),
+            unsaved: *unsaved,
+        },
+        WaitEvent::Done => WireEvent::Done,
+    };
+    serde_json::to_vec(&EventFrame {
+        version: VERSION,
+        event: &event,
+    })
+    .unwrap_or_default()
+}
+
+/// Reads an event frame body; `None` for an event this version does not
+/// know.
+pub fn decode_event(body: &[u8]) -> io::Result<Option<WaitEvent>> {
+    let bad = |err: serde_json::Error| invalid(format!("bad event: {err}"));
+    let header: Header = serde_json::from_slice(body).map_err(bad)?;
+    if header.version != VERSION {
+        return Err(invalid(format!(
+            "event of protocol version {}",
+            header.version
+        )));
+    }
+    Ok(match serde_json::from_slice(body).map_err(bad)? {
+        WireEvent::Closed { path, unsaved } => Some(WaitEvent::Closed {
+            path: path.into_path()?,
+            unsaved,
+        }),
+        WireEvent::Done => Some(WaitEvent::Done),
+        WireEvent::Unknown => None,
+    })
+}
+
 /// The request body for `request`.
 pub fn encode_request(request: &OpenRequest) -> Vec<u8> {
     let wire = WireRequest {
@@ -364,6 +442,76 @@ mod tests {
         value["later_flag"] = serde_json::Value::Bool(true);
         let body = serde_json::to_vec(&value).expect("json");
         assert_eq!(decode_request(&body), Ok(sample()));
+    }
+
+    #[test]
+    fn wait_requests_say_so() {
+        let mut request = sample();
+        request.wait = true;
+        let body = encode_request(&request);
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["wait"], serde_json::Value::Bool(true));
+        assert_eq!(decode_request(&body), Ok(request));
+    }
+
+    #[test]
+    fn wait_events_round_trip() {
+        let path = root().join("a b.md");
+        let events = [
+            WaitEvent::Closed {
+                path: path.clone(),
+                unsaved: false,
+            },
+            WaitEvent::Closed {
+                path: path.clone(),
+                unsaved: true,
+            },
+            WaitEvent::Done,
+        ];
+        for event in events {
+            let body = encode_event(&event);
+            assert_eq!(decode_event(&body).expect("decodes"), Some(event));
+        }
+        assert_eq!(
+            encode_event(&WaitEvent::Done),
+            br#"{"version":1,"event":"done"}"#
+        );
+        let closed: serde_json::Value = serde_json::from_slice(&encode_event(&WaitEvent::Closed {
+            path: PathBuf::from("/n/a.md"),
+            unsaved: false,
+        }))
+        .expect("json");
+        assert_eq!(
+            closed,
+            serde_json::json!({
+                "version": 1,
+                "event": "closed",
+                "path": {"utf8": "/n/a.md"},
+                "unsaved": false,
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_events_are_skipped_and_bad_ones_refused() {
+        let later = br#"{"version":1,"event":"progress","percent":50}"#;
+        assert_eq!(decode_event(later).expect("known version"), None);
+        // `unsaved` may be left out, and unknown fields are ignored.
+        #[cfg(unix)]
+        {
+            let short = br#"{"version":1,"event":"closed","path":{"utf8":"/a.md"},"x":1}"#;
+            assert_eq!(
+                decode_event(short).expect("decodes"),
+                Some(WaitEvent::Closed {
+                    path: PathBuf::from("/a.md"),
+                    unsaved: false
+                })
+            );
+        }
+        let relative = br#"{"version":1,"event":"closed","path":{"utf8":"a.md"}}"#;
+        assert!(decode_event(relative).is_err());
+        assert!(decode_event(br#"{"version":2,"event":"done"}"#).is_err());
+        assert!(decode_event(b"[]").is_err());
     }
 
     #[test]
