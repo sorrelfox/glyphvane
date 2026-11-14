@@ -9,13 +9,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The Markdown commands read the block and inline structure at the carets.
+gv-syntax.workspace = true
 gv-text.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-# The edit path end to end: editor transactions feed the incremental parser.
-gv-syntax.workspace = true
 proptest.workspace = true
 rand.workspace = true
 # `RandomCharIter` for the ported Zed tests (third_party/zed/PROVENANCE.md).

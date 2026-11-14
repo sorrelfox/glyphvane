@@ -49,11 +49,14 @@
 //!
 //! - [`boundaries`]: grapheme, word and line boundaries on a snapshot;
 //! - [`movement`]: caret motions;
+//! - [`commands`]: the Markdown-aware editing commands (list continuation,
+//!   indentation, renumbering, formatting, headings, quotes, links);
 //! - [`display_map`]: the replace layer (an identity layer for now) and the
 //!   tab layer, ported from Zed.
 
 pub mod boundaries;
 mod clock;
+pub mod commands;
 pub mod display_map;
 mod editor;
 mod history;
@@ -61,6 +64,9 @@ pub mod movement;
 mod selection;
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use commands::{
+    Availability, CommandSettings, Flavor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef,
+};
 pub use editor::{
     DeleteUnit, EditCause, EditEvent, Editor, EditorConfig, EditorEvent, ObserverId, SavePoint,
     Utf16Selection,

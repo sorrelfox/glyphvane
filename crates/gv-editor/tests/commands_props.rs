@@ -1,0 +1,492 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Glyphvane contributors
+
+//! Property tests of the Markdown commands on random documents built from
+//! list, quote, heading, code and paragraph lines (LF or CRLF), with random
+//! carets and selections, in every flavor:
+//!
+//! - every command is one undo step: undo restores the bytes and the
+//!   selections, redo the result;
+//! - the edit is a patch: the top-level blocks the edit touches may grow
+//!   (CommonMark joins across it), every other top-level block parses
+//!   exactly as before (shifted), and no code or HTML block is opened; for
+//!   commands that change what a line is (heading, paragraph, task, quote,
+//!   link), CommonMark reads the following lines anew (a list even across
+//!   blank lines), so only the blocks before the last blank line before the
+//!   edit are checked;
+//! - a CRLF document stays CRLF;
+//! - the editor's text is the command's own result (checked inside the
+//!   crate on every commit in debug builds).
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gv_editor::commands::{CommandSettings, Flavor, MarkdownCommand, MarkdownCommands, SyntaxRef};
+use gv_editor::{Editor, EditorConfig, EditorEvent, SelectionSpec, UndoOutcome};
+use gv_syntax::{BlockKind, BlockSpan, SyntaxTree};
+use gv_text::Buffer;
+use proptest::prelude::*;
+use proptest::sample::Index;
+
+const LINES: &[&str] = &[
+    "- a",
+    "- bb cc",
+    "  - d",
+    "    - e",
+    "* f",
+    "+ g",
+    "1. h",
+    "2. i",
+    "9. j",
+    "10. k",
+    "   l",
+    "    m",
+    "> n",
+    "> - o",
+    ">",
+    "> > p",
+    "",
+    "",
+    "```",
+    "# q",
+    "r s t",
+    "- [ ] u",
+    "- [x] v",
+    "-\tw",
+    "\tx",
+    "1) y",
+    "-",
+    "1.",
+    "==z== x",
+    "~~w~~ y",
+    "**b** *i* `c`",
+    "Title",
+    "===",
+    "---",
+    "  1. nested",
+    "     deep",
+    "   - three",
+    "8. eight",
+    "> 1. quoted",
+];
+
+/// A transaction's replacements: old range and new length.
+type Replacements = Vec<(std::ops::Range<usize>, usize)>;
+
+/// The commands under test: every command, plus insert link with a URL.
+fn command(index: usize) -> (MarkdownCommand, Option<&'static str>) {
+    let all = MarkdownCommand::ALL;
+    match all.get(index) {
+        Some(&command) => (command, None),
+        None => (MarkdownCommand::InsertLink, Some("https://example.com/a")),
+    }
+}
+
+fn document() -> impl Strategy<Value = String> {
+    (
+        prop::collection::vec(prop::sample::select(LINES), 1..12),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(|(lines, crlf, trailing)| {
+            let ending = if crlf { "\r\n" } else { "\n" };
+            let mut text = lines.join(ending);
+            if trailing {
+                text.push_str(ending);
+            }
+            text
+        })
+}
+
+/// Selections from (position, length) pairs, clipped to the text (all
+/// lines are ASCII, but a caret must not split a CRLF).
+fn selections(text: &str, picks: &[(usize, u8)]) -> Vec<SelectionSpec> {
+    let clip = |mut offset: usize| {
+        offset = offset.min(text.len());
+        if offset > 0
+            && text.as_bytes()[offset - 1] == b'\r'
+            && text.as_bytes().get(offset) == Some(&b'\n')
+        {
+            offset -= 1;
+        }
+        offset
+    };
+    picks
+        .iter()
+        .map(|&(start, len)| {
+            let start = clip(start);
+            let end = clip(start + usize::from(len % 4).saturating_sub(1));
+            SelectionSpec::new(start, end.max(start))
+        })
+        .collect()
+}
+
+/// The blocks inside `range`, with ranges relative to `range.start`.
+fn blocks_within(
+    blocks: &[BlockSpan],
+    range: std::ops::Range<usize>,
+) -> Vec<(String, u32, usize, usize)> {
+    blocks
+        .iter()
+        .filter(|block| block.range.start >= range.start && block.range.end <= range.end)
+        .map(|block| {
+            (
+                format!("{:?}", block.kind),
+                block.depth,
+                block.range.start - range.start,
+                block.range.end - range.start,
+            )
+        })
+        .collect()
+}
+
+/// Checks the blocks outside the edit. `edited` is the old range spanning
+/// every replacement of the command's transaction.
+///
+/// The top-level blocks of the new parse that touch the edited range may
+/// have grown (CommonMark joins across the edit: a paragraph continues, a
+/// list or quote gains lines, adjacent lists or quotes merge); every
+/// top-level block wholly outside their span must parse exactly as before
+/// (shifted), and the edit must not have opened a code or HTML block.
+fn check_structure(
+    flavor: Flavor,
+    before: &str,
+    after: &str,
+    edits: &[(std::ops::Range<usize>, usize)],
+    separated: bool,
+) -> Result<(), String> {
+    let (Some(first), Some(last)) = (edits.first(), edits.last()) else {
+        return Ok(());
+    };
+    let edited = first.0.start..last.0.end;
+    // An old offset outside the edits, in the new text.
+    let map = |offset: usize| -> usize {
+        let delta: isize = edits
+            .iter()
+            .filter(|(old, _)| old.end <= offset)
+            .map(|(old, new_len)| *new_len as isize - old.len() as isize)
+            .sum();
+        offset.saturating_add_signed(delta)
+    };
+    let new_end = map(edited.end);
+    let old_tree = SyntaxTree::parse_with(before, flavor.parse_options());
+    let new_tree = SyntaxTree::parse_with(after, flavor.parse_options());
+    let old = old_tree.blocks();
+    let new = new_tree.blocks();
+    let touched: Vec<&BlockSpan> = new
+        .iter()
+        .filter(|block| {
+            block.depth == 0 && block.range.start <= new_end && block.range.end >= edited.start
+        })
+        .collect();
+    let mut span_start = touched
+        .iter()
+        .map(|block| block.range.start)
+        .min()
+        .unwrap_or(edited.start);
+    let mut span_end = touched
+        .iter()
+        .map(|block| block.range.end)
+        .max()
+        .unwrap_or(new_end);
+    if separated {
+        // The lines after the edit are read anew: only the blocks before
+        // the old text's last blank line before the edit are checked.
+        span_start = span_start.min(
+            line_ranges(before)
+                .filter(|range| before[range.clone()].trim().is_empty())
+                .filter(|range| range.end <= edited.start)
+                .last()
+                .map_or(0, |range| range.end),
+        );
+        span_end = usize::MAX;
+    }
+    for block in &touched {
+        let verbatim = matches!(block.kind, BlockKind::FencedCode | BlockKind::Html { .. });
+        let existed = old
+            .iter()
+            .any(|o| o.kind == block.kind && map(o.range.start) == block.range.start);
+        if verbatim && !existed && block.range.end > new_end {
+            return Err(format!(
+                "the edit opened {:?} at {:?}",
+                block.kind, block.range
+            ));
+        }
+    }
+    for top in old.iter().filter(|block| block.depth == 0) {
+        let shifted = if top.range.end <= span_start && top.range.end <= edited.start {
+            top.range.clone()
+        } else if top.range.start >= edited.end && map(top.range.start) >= span_end {
+            map(top.range.start)..map(top.range.end)
+        } else {
+            continue;
+        };
+        let was = blocks_within(&old, top.range.clone());
+        let is = blocks_within(&new, shifted.clone());
+        if was != is {
+            return Err(format!(
+                "block {:?} at {:?} changed (edit {edited:?}):\n  was {was:?}\n  is  {is:?}",
+                top.kind, top.range
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The byte ranges of the lines of `text`, with their terminators.
+fn line_ranges(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut start = 0;
+    text.split_inclusive('\n').map(move |line| {
+        let range = start..start + line.len();
+        start = range.end;
+        range
+    })
+}
+
+/// Whether `offset` is at or before the text of a list item's marker line
+/// (in its quote markers, indentation, marker or padding).
+fn before_item_text(text: &str, offset: usize) -> bool {
+    let start = text[..offset].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+    let rest = &text[start..];
+    let line = &rest[..rest.find(['\n', '\r']).unwrap_or(rest.len())];
+    let b = line.as_bytes();
+    let ws = |c: u8| c == b' ' || c == b'\t';
+    let mut i = 0;
+    while i < b.len() && (b[i] == b'>' || ws(b[i])) {
+        i += 1;
+    }
+    if b.get(i).is_some_and(|c| b"-+*".contains(c)) {
+        i += 1;
+    } else {
+        let digits = b[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 || !matches!(b.get(i + digits), Some(b'.' | b')')) {
+            return false;
+        }
+        i += digits + 1;
+    }
+    if b.get(i).is_some_and(|&c| !ws(c)) {
+        return false;
+    }
+    while i < b.len() && ws(b[i]) {
+        i += 1;
+    }
+    offset - start <= i
+}
+
+/// Whether the line at `offset` is blank (but for quote markers) and the
+/// next line is not.
+fn fills_blank_line(text: &str, offset: usize) -> bool {
+    let blank = |line: &str| line.chars().all(|c| c == '>' || c.is_whitespace());
+    let start = text[..offset].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+    let mut rest = text[start..].split_inclusive('\n');
+    let (Some(line), next) = (rest.next(), rest.next()) else {
+        return false;
+    };
+    blank(line) && next.is_some_and(|next| !blank(next))
+}
+
+fn run_case(
+    text: &str,
+    picks: &[(usize, u8)],
+    command_index: usize,
+    flavor: Flavor,
+) -> Result<(), TestCaseError> {
+    let (command, url) = command(command_index);
+    let mut editor = Editor::with_config(
+        Buffer::new(text),
+        EditorConfig::default(),
+        Box::new(gv_editor::ManualClock::new()),
+    );
+    let specs = selections(text, picks);
+    editor.set_selections(&specs, specs.len() - 1);
+    let edited: Rc<RefCell<Replacements>> = Rc::default();
+    let sink = edited.clone();
+    let observer = editor.observe(move |event| {
+        if let EditorEvent::Edited(edit) = event {
+            *sink.borrow_mut() = edit
+                .summary
+                .edits()
+                .iter()
+                .map(|e| (e.old.clone(), e.new.len()))
+                .collect();
+        }
+    });
+    let before_selections = editor.selections().specs();
+    let snapshot = editor.snapshot();
+    let tree = SyntaxTree::parse_with(&snapshot, flavor.parse_options());
+    let commands = MarkdownCommands::new(flavor, CommandSettings::default());
+    let syntax = Some(SyntaxRef::new(&tree, &snapshot));
+    if command == MarkdownCommand::InsertLink {
+        commands.insert_link(&mut editor, syntax, url);
+    } else {
+        commands.run(command, &mut editor, syntax);
+    }
+    let after = editor.text().to_string();
+    editor.unobserve(observer);
+    let edited = edited.borrow().clone();
+    let old_tree = SyntaxTree::parse_with(text, flavor.parse_options());
+    let old_blocks = old_tree.blocks();
+    // Enter, Tab and Shift+Tab fall back to plain text edits outside list
+    // items and quotes and in code: their reinterpretation is the text's.
+    let in_containers = specs.iter().all(|spec| {
+        let at = spec.head;
+        let inside = |block: &BlockSpan| {
+            block.range.start <= at && at < block.range.end.max(block.range.start + 1)
+        };
+        old_blocks.iter().any(|block| {
+            matches!(block.kind, BlockKind::Item | BlockKind::BlockQuote) && inside(block)
+        }) && !old_blocks.iter().any(|block| {
+            matches!(
+                block.kind,
+                BlockKind::FencedCode | BlockKind::IndentedCode | BlockKind::Html { .. }
+            ) && inside(block)
+        })
+    });
+    let marked: Vec<(usize, usize)> = specs.iter().map(|spec| (spec.tail, spec.head)).collect();
+    let label = format!(
+        "{flavor} {} on {text:?} with {marked:?} gave {after:?}",
+        command.id()
+    );
+    editor
+        .selections()
+        .check(editor.text())
+        .map_err(|e| TestCaseError::fail(format!("{label}: selections: {e}")))?;
+    if after != text {
+        prop_assert_eq!(editor.history().undo_len(), 1, "{}", label);
+        prop_assert_eq!(editor.undo(), UndoOutcome::Undone, "{}", label);
+        prop_assert_eq!(editor.text().to_string(), text, "{}: undo", label);
+        prop_assert_eq!(
+            editor.selections().specs(),
+            before_selections,
+            "{}: undo selections",
+            label
+        );
+        prop_assert!(editor.redo(), "{}", label);
+        prop_assert_eq!(editor.text().to_string(), after.clone(), "{}: redo", label);
+    } else {
+        prop_assert_eq!(editor.history().undo_len(), 0, "{}", label);
+    }
+    let crlf_only = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
+    if crlf_only {
+        prop_assert!(
+            !after.replace("\r\n", "").contains('\n'),
+            "{}: a lone LF in a CRLF document",
+            label
+        );
+    }
+    // Enter replaces the selection: deleting a selected line break joins
+    // lines, which may join blocks.
+    let joins_lines = matches!(
+        command,
+        MarkdownCommand::Newline | MarkdownCommand::NewlinePlain
+    ) && specs.iter().any(|spec| {
+        text[spec.tail.min(spec.head)..spec.tail.max(spec.head)].contains(['\n', '\r'])
+    });
+    // A task box or link put on a blank line followed by text makes the
+    // following lines continue its paragraph: the user's join.
+    let fills_separator = matches!(
+        command,
+        MarkdownCommand::ToggleTask | MarkdownCommand::InsertLink
+    ) && specs.iter().any(|spec| fills_blank_line(text, spec.head));
+    // Enter before an item's text leaves an empty item above it, which
+    // cannot interrupt a paragraph before the list (CommonMark).
+    let empties_item = matches!(
+        command,
+        MarkdownCommand::Newline | MarkdownCommand::NewlinePlain
+    ) && specs
+        .iter()
+        .any(|spec| before_item_text(text, spec.tail.min(spec.head)));
+    let plain = matches!(
+        command,
+        MarkdownCommand::Newline
+            | MarkdownCommand::NewlinePlain
+            | MarkdownCommand::Indent
+            | MarkdownCommand::Outdent
+    ) && !in_containers;
+    // Commands that keep the container structure are checked strictly;
+    // commands that change what a line is (a heading, a paragraph, a task
+    // item, quoted) let CommonMark read the lines after it anew, so only
+    // the blocks before it are checked. Inline toggles on a blank line
+    // insert a bare delimiter pair (`~~~~`, `====`, `****`) that the next
+    // keystroke completes: not checked.
+    // Tab and Shift+Tab in a quote change what the paragraph is (quoted
+    // one level deeper or less).
+    let in_items = specs.iter().all(|spec| {
+        let at = spec.head;
+        old_blocks
+            .iter()
+            .filter(|block| {
+                matches!(block.kind, BlockKind::Item | BlockKind::BlockQuote)
+                    && block.range.start <= at
+                    && at < block.range.end.max(block.range.start + 1)
+            })
+            .max_by_key(|block| block.depth)
+            .is_some_and(|block| block.kind == BlockKind::Item)
+    });
+    let mode = match command {
+        MarkdownCommand::Bold
+        | MarkdownCommand::Italic
+        | MarkdownCommand::Strikethrough
+        | MarkdownCommand::Highlight
+        | MarkdownCommand::InlineCode => None,
+        MarkdownCommand::Heading(_)
+        | MarkdownCommand::Paragraph
+        | MarkdownCommand::Quote
+        | MarkdownCommand::ToggleTask
+        | MarkdownCommand::InsertLink => Some(true),
+        MarkdownCommand::Indent | MarkdownCommand::Outdent => Some(!in_items),
+        _ => Some(false),
+    };
+    if let Some(separated) =
+        mode.filter(|_| !joins_lines && !plain && !fills_separator && !empties_item)
+    {
+        check_structure(flavor, text, &after, &edited, separated)
+            .map_err(|e| TestCaseError::fail(format!("{label}: {e}")))?;
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 2000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn commands_are_patches_and_undo_exactly(
+        text in document(),
+        picks in prop::collection::vec((any::<Index>(), any::<u8>()), 1..4),
+        command_index in 0..=MarkdownCommand::ALL.len(),
+        flavor in prop::sample::select(Flavor::ALL.to_vec()),
+    ) {
+        let picks: Vec<(usize, u8)> = picks
+            .iter()
+            .map(|(index, len)| (index.index(text.len() + 1), *len))
+            .collect();
+        run_case(&text, &picks, command_index, flavor)?;
+    }
+}
+
+/// Every command on every caret position of a few nested documents.
+#[test]
+fn every_caret_of_nested_documents() {
+    let docs = [
+        "- a\n  - b\n    - c\n  - d\n- e\n",
+        "1. a\n   1. b\n   2. c\n2. d\n10. e\n    f\n",
+        "> - a\n>   > b\n> - c\n\npara\n",
+        "-\ta\n\t-\tb\n-\tc\r\n",
+        "- [ ] a\n  - [x] b\n- c\nlazy\n",
+    ];
+    for text in docs {
+        for offset in 0..=text.len() {
+            for command_index in 0..=MarkdownCommand::ALL.len() {
+                for flavor in [Flavor::CommonMark, Flavor::Obsidian] {
+                    if let Err(e) = run_case(text, &[(offset, 0)], command_index, flavor) {
+                        panic!("{e}");
+                    }
+                }
+            }
+        }
+    }
+}
