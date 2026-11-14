@@ -60,7 +60,12 @@ fn the_menus_follow_each_platform() {
     for platform in Platform::ALL {
         assert_eq!(
             items(platform, "Edit"),
-            ["editor.copy", "editor.select_all", "search.find"]
+            [
+                "editor.copy",
+                "editor.copy_as_markdown",
+                "editor.select_all",
+                "search.find"
+            ]
         );
         assert_eq!(
             items(platform, "View"),
@@ -195,6 +200,11 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         actions(&menus[2]),
         [
             ("Copy".to_owned(), "editor::Copy", true),
+            (
+                "Copy as Markdown".to_owned(),
+                "editor::CopyAsMarkdown",
+                false
+            ),
             ("Select all".to_owned(), "editor::SelectAll", true),
             ("Find".to_owned(), "search::Find", false),
         ]
@@ -203,7 +213,7 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         .items()
         .map(|i| i.role)
         .collect();
-    assert_eq!(roles, [Some(Role::Copy), Some(Role::SelectAll), None]);
+    assert_eq!(roles, [Some(Role::Copy), None, Some(Role::SelectAll), None]);
 }
 
 // --- The popover ----------------------------------------------------------------
@@ -414,7 +424,7 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
 
     // Edit ▸ Select all, then Edit ▸ Copy, run in the document.
     f.click("app-menu");
-    f.keys("down right down enter");
+    f.keys("down right down down enter");
     f.click("app-menu");
     f.keys("down right enter");
     let copied = f

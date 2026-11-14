@@ -32,13 +32,14 @@ use gv_inline::ItemKind as PieceKind;
 use gv_render_tree::{FrameKind, ItemKind, ListMarker, StatusIcon, TextRole, Variant, style_id};
 
 use super::bench::{load_line, percentiles};
+use super::follow::{Cause, begin as note_navigation};
 use super::items::{
     DocItems, NO_WRAP, chunk_ends, code_inset, is_code, status_icon_path, text_top, text_width,
 };
 use super::state::{
     ButtonKind, CodeButton, CodeGeom, Geometry, Hover, LinkHit, PlacedGeom, Press, Selection, State,
 };
-use super::{Disposition, LinkRequest, Reader, ReaderEvent, find};
+use super::{Disposition, LinkRequest, Reader, ReaderEvent, find, startup};
 use crate::icons::Icon;
 use crate::inline::{InlineParagraph, Palette, Token};
 use crate::metrics::size::{CHECKBOX, CODE_BUTTON, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, document};
@@ -1020,6 +1021,10 @@ impl ReaderElement {
                 }
                 drop(st);
                 if let Some(req) = follow {
+                    note_navigation(Cause::Link {
+                        destination: req.destination.clone(),
+                        background: req.disposition == Disposition::Background,
+                    });
                     let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::FollowLink(req)));
                 }
                 notify(cx);
@@ -1046,7 +1051,22 @@ impl ReaderElement {
                     elapsed.as_secs_f64() * 1e3,
                     load_line(&doc.timings)
                 );
+                if startup::enabled() {
+                    let name = doc
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let what = format!("{name}, {} items", doc.tree.items().len());
+                    startup::first_content_painted(&what, window, cx);
+                }
             }
+        }
+        if has_content
+            && let Some(nav) = st.timing.navigation.take()
+            && let Some(doc) = &st.doc
+        {
+            tracing::info!("{}", nav.line(&doc.path, Some(nav.at.elapsed())));
         }
         if let Some(start) = st.timing.frame_start.take()
             && st.timing.record

@@ -104,6 +104,7 @@ command_actions! {
         Redo = "editor.redo",
         Cut = "editor.cut",
         Copy = "editor.copy",
+        CopyAsMarkdown = "editor.copy_as_markdown",
         Paste = "editor.paste",
         PastePlain = "editor.paste_plain",
         SelectAll = "editor.select_all",

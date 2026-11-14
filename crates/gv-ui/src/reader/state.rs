@@ -144,6 +144,8 @@ pub(crate) struct Timing {
     /// Frame CPU times (render to the end of paint), when recording.
     pub frames: Vec<Duration>,
     pub record: bool,
+    /// A followed link, Back or Forward, logged when its target is painted.
+    pub navigation: Option<super::follow::Navigation>,
 }
 
 pub(crate) struct State {

@@ -19,7 +19,7 @@ use gv_inline::Bias;
 use gv_render_tree::{InlineRole, LinkStatus};
 
 use super::state::{ButtonKind, State};
-use super::{Copy as CopyAction, LoadStatus, Reader, SelectAll};
+use super::{Copy as CopyAction, CopyAsMarkdown, LoadStatus, Reader, SelectAll};
 use crate::chrome::WindowChrome;
 use crate::metrics::size::{SCROLLBAR_THUMB, document};
 use crate::metrics::spacing::scrollbar;
@@ -527,6 +527,39 @@ fn dragging_selects_across_items_and_copy_takes_the_text(cx: &mut TestAppContext
         clipboard(&mut vcx).as_deref(),
         Some("Title\n\nHello brave new world.\n\nSecond paragraph here.")
     );
+}
+
+#[gpui::test]
+fn copy_as_markdown_takes_the_source(cx: &mut TestAppContext) {
+    let text = "# Title\r\n\r\n- one with **bold** text\r\n- two [link](b.md) end\r\n";
+    let dir = temp(&[("a.md", text)]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let st = state(&reader, &mut vcx);
+    // From inside the bold text to inside the link text.
+    let (from, to) = {
+        let s = st.borrow();
+        let start = text.find("old").expect("start");
+        let end = text.find("nk]").expect("end");
+        (caret_point(&s, start), caret_point(&s, end))
+    };
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    draw(&mut vcx);
+    vcx.dispatch_action(CopyAsMarkdown);
+    assert_eq!(
+        clipboard(&mut vcx).as_deref(),
+        Some("- **bold** text\r\n- two [link](b.md)")
+    );
+    // Plain copy is unchanged.
+    vcx.dispatch_action(CopyAction);
+    assert_eq!(clipboard(&mut vcx).as_deref(), Some("old text\n- two li"));
+    // The whole document, byte for byte.
+    vcx.dispatch_action(SelectAll);
+    vcx.dispatch_action(CopyAsMarkdown);
+    assert_eq!(clipboard(&mut vcx).as_deref(), Some(text));
 }
 
 #[gpui::test]

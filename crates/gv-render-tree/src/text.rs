@@ -14,10 +14,25 @@
 //!   blocks have a gap between them; list markers optional.
 //! - [`RenderTree::find`]: matches in every item's text, with source
 //!   ranges (the matcher and the find index are in `find`).
+//! - [`RenderTree::markdown_for`]: the Markdown of a selection, taken from
+//!   the source bytes as they are (never re-serialized):
+//!   - an end inside an inline construct (emphasis, strong, code span,
+//!     link, image, autolink, raw HTML, escape, entity) moves out to the
+//!     whole construct, so `**bo|ld** text` copies `**bold** text`;
+//!   - a selection over more than one line also gets the container prefix
+//!     of its first line (block quote markers, list markers, the
+//!     indentation of list item content and of indented code), so that
+//!     every copied line carries its prefixes as the source has them: from
+//!     `- o|ne` to `- two`, the copy is `- ne` + line ending + `- two`.
+//!     Leaf block syntax before the selection (heading markers, code
+//!     fences) is not added;
+//!   - line endings are the document's (CRLF stays CRLF).
 
 use std::ops::Range;
 
 use gv_inline::{Affinity, Bias, Paragraph};
+use gv_syntax::inline::InlineKind;
+use gv_syntax::{Leaf, LeafKind, SyntaxTree, TokenKind, Visitor, walk_range};
 
 use crate::item::{Item, ItemKind};
 use crate::node::{BlockNode, CodeBlock, FrameKind, InlineContent, ListMarker};
@@ -305,6 +320,123 @@ impl RenderTree {
         self.plain_text(r, opts)
     }
 
+    /// The Markdown of the document range `range` (a selection in source
+    /// offsets): the source bytes of the range with its ends moved out of
+    /// partly selected inline constructs, and the container prefix of its
+    /// first line when it spans lines (see the module documentation).
+    /// `syntax` and `text` are the parse and the text the tree was built
+    /// from.
+    pub fn markdown_for(&self, syntax: &SyntaxTree, text: &str, range: Range<usize>) -> String {
+        let end = floor_char(text, range.end.min(text.len()));
+        let start = floor_char(text, range.start.min(end));
+        if start >= end {
+            return String::new();
+        }
+        let (mut start, mut end) = (start, end);
+        for p in [start, end] {
+            let (a, b) = self.construct_around(syntax, text, p);
+            start = start.min(a);
+            end = end.max(b);
+        }
+        let slice = &text[start..end];
+        let mut out = String::with_capacity(slice.len() + 8);
+        if slice.contains(['\n', '\r']) {
+            let line = text[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+            if line < start {
+                let prefix = container_prefix(syntax, line..start);
+                out.push_str(&text[prefix]);
+            }
+        }
+        out.push_str(slice);
+        out
+    }
+
+    /// The extent of the outermost inline constructs that have `p`
+    /// strictly inside them (`p..p` if there is none).
+    fn construct_around(&self, syntax: &SyntaxTree, text: &str, p: usize) -> (usize, usize) {
+        let mut around = (p, p);
+        let Some(node) = self.item_at(p).and_then(|ix| self.node_of(ix)) else {
+            return around;
+        };
+        if node.inline().is_none() || !(node.source.start < p && p < node.source.end) {
+            return around;
+        }
+        let mut find = FindLeaf {
+            id: node.id,
+            at: p,
+            syntax,
+            text,
+            around: &mut around,
+        };
+        walk_range(syntax, p..p, &mut find);
+        around
+    }
+}
+
+/// Visits the paragraph or heading `id` and widens `around` to the inline
+/// constructs that have `at` strictly inside them.
+struct FindLeaf<'a> {
+    id: gv_syntax::BlockId,
+    at: usize,
+    syntax: &'a SyntaxTree,
+    text: &'a str,
+    around: &'a mut (usize, usize),
+}
+
+impl Visitor for FindLeaf<'_> {
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if leaf.id != self.id
+            || !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
+        {
+            return;
+        }
+        let inlines = self.syntax.inlines(leaf, self.text);
+        for n in inlines.nodes() {
+            let atomic =
+                !n.kind().is_token() || matches!(n.kind(), InlineKind::Escape | InlineKind::Entity);
+            let r = n.range();
+            if atomic && r.start < self.at && self.at < r.end {
+                self.around.0 = self.around.0.min(r.start);
+                self.around.1 = self.around.1.max(r.end);
+            }
+        }
+    }
+}
+
+/// The container prefix at the start of the line `line` (up to the
+/// selection's start `line.end`): the line's leading block quote markers,
+/// list markers, container and code indentation. A byte order mark is
+/// left out.
+fn container_prefix(syntax: &SyntaxTree, line: Range<usize>) -> Range<usize> {
+    let (mut start, mut end) = (line.start, line.start);
+    for (r, t) in syntax.tokens(line.clone()) {
+        if r.start != end {
+            break;
+        }
+        match t.kind {
+            TokenKind::Bom if r.start == start => {
+                start = r.end;
+                end = r.end;
+            }
+            TokenKind::ContainerPrefix
+            | TokenKind::QuoteMarker
+            | TokenKind::ListMarker
+            | TokenKind::CodeIndent => end = r.end,
+            _ => break,
+        }
+    }
+    start.min(line.end)..end.min(line.end)
+}
+
+/// The largest char boundary of `text` at or before `i`.
+fn floor_char(text: &str, mut i: usize) -> usize {
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+impl RenderTree {
     /// Every match of `needle` in the items' texts, in document order
     /// (none for an invalid regular expression; see
     /// [`Finder`](crate::Finder) for the rules).

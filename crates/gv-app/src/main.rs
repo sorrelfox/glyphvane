@@ -11,6 +11,7 @@ mod render;
 mod safe_mode;
 mod session;
 mod settings;
+mod startup;
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -47,7 +48,10 @@ fn init_logging() {
 }
 
 fn main() -> ExitCode {
+    // First, so that the trace starts as early as it can.
+    startup::start();
     let cli = Cli::parse();
+    startup::mark("arguments parsed");
     // Headless commands start no GUI, logger, settings or instance.
     if let Some(command) = &cli.command {
         return match command {
@@ -98,9 +102,18 @@ fn main() -> ExitCode {
         _ => Claim::Standalone,
     };
     let primary = match claim {
-        Claim::Delivered => return ExitCode::SUCCESS,
-        Claim::Primary(primary) => Some(primary),
-        Claim::Standalone => None,
+        Claim::Delivered => {
+            startup::mark("single-instance claim done (delivered to the running instance)");
+            return ExitCode::SUCCESS;
+        }
+        Claim::Primary(primary) => {
+            startup::mark("single-instance claim done (primary)");
+            Some(primary)
+        }
+        Claim::Standalone => {
+            startup::mark("single-instance claim done (standalone)");
+            None
+        }
     };
 
     let settings_file = settings::load(locations.as_ref());
@@ -110,8 +123,10 @@ fn main() -> ExitCode {
         app_settings = app_settings.with_safe_mode();
     }
     settings::report(&app_settings);
+    startup::mark("settings loaded");
     // Read before the event loop starts, like the settings.
     let session_store = session::store(locations.as_ref());
+    startup::mark("session store read");
     let failed = Rc::new(Cell::new(false));
     // Set when the user chooses safe mode in the no-GPU message.
     let restart_safe = Rc::new(Cell::new(false));
@@ -129,6 +144,7 @@ fn main() -> ExitCode {
     });
 
     let application = gpui::application().with_assets(gv_ui::Assets);
+    startup::mark("GPUI application created");
     application.on_open_urls(move |urls| {
         if let Some(request) = request_from_urls(&urls) {
             // The receiver is gone only when the app is quitting.
@@ -139,19 +155,24 @@ fn main() -> ExitCode {
         let failed = Rc::clone(&failed);
         let restart_safe = Rc::clone(&restart_safe);
         move |cx| {
+            startup::mark("GPUI application started");
             gv_ui::init(cx, app_settings);
             gv_ui::keymap::install(cx, locations.as_ref());
             ui_session::install(cx, session_store);
             if let Some(path) = watched {
                 settings::watch(path, cx);
             }
+            startup::mark("UI set up (theme, keymap, session, settings watcher)");
             let opened = if restores_session(&request) {
                 restore(request, cx)
             } else {
                 open(request, cx)
             };
             match opened {
-                Ok(window) => gpu::report_adapter(window, cx),
+                Ok(window) => {
+                    startup::mark("window created");
+                    gpu::report_adapter(window, cx);
+                }
                 Err(err) => {
                     if gpu::is_gpu_error(&err) {
                         tracing::error!("no usable GPU: {err:#}");

@@ -122,6 +122,7 @@ const BUILTIN: &[Row] = &[
         &[("secondary-shift-z", ALL), ("ctrl-y", NOT_MAC)]),
     ("editor.cut", "Cut", Category::Editing, Some(EDITOR), &[("secondary-x", ALL)]),
     ("editor.copy", "Copy", Category::Editing, Some(DOCUMENT), &[("secondary-c", ALL)]),
+    ("editor.copy_as_markdown", "Copy as Markdown", Category::Editing, Some(DOCUMENT), &[]),
     ("editor.paste", "Paste", Category::Editing, Some(EDITOR), &[("secondary-v", ALL)]),
     ("editor.paste_plain", "Paste as plain text", Category::Editing, Some(EDITOR),
         &[("secondary-shift-v", ALL)]),

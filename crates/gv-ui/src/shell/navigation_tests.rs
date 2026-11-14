@@ -232,6 +232,56 @@ fn back_and_forward_across_a_link_and_a_tab_switch(cx: &mut TestAppContext) {
     assert_eq!(back, [(true, ViewMode::Preview)]);
 }
 
+/// The items the active Reading view painted: (source offset, content top
+/// below the view's top).
+fn painted(workspace: &Entity<Workspace>, vcx: &mut VisualTestContext) -> Vec<(usize, f32)> {
+    let reader = reader(workspace, vcx);
+    reader.read_with(vcx, |r, _| r.painted_items())
+}
+
+#[gpui::test]
+fn a_link_to_a_heading_in_another_file_and_back(cx: &mut TestAppContext) {
+    let a = outlined_doc();
+    let b = outlined_doc().replace("# Guide", "# Other guide");
+    let dir = temp(&[("a.md", &a), ("b.md", &b)]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+
+    // Read a.md from "### From source".
+    let from_source = heading_offset(&a, "### From source");
+    scroll_reader_to(&workspace, &mut vcx, from_source);
+    assert_eq!(top_offset(&workspace, &mut vcx), Some(from_source));
+    let before = painted(&workspace, &mut vcx);
+    assert!(before.contains(&(from_source, 0.0)), "{before:?}");
+
+    // The link lands on b.md's "## Usage", a quarter of the view down.
+    follow(&workspace, &mut vcx, "b.md#usage", Disposition::InPlace);
+    assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    let usage = heading_offset(&b, "## Usage");
+    let viewport = reader(&workspace, &mut vcx).read_with(&vcx, |r, _| r.viewport_height());
+    assert!(viewport > 0.0);
+    let arrived = painted(&workspace, &mut vcx);
+    let at = arrived
+        .iter()
+        .find(|(offset, _)| *offset == usage)
+        .map(|&(_, y)| y)
+        .unwrap_or_else(|| panic!("## Usage is painted: {arrived:?}"));
+    assert!(
+        (at - viewport / 4.0).abs() < 0.5,
+        "## Usage at {at} px, expected {} px",
+        viewport / 4.0
+    );
+    assert_eq!(can_travel(&workspace, &mut vcx), (true, false));
+
+    // Back shows a.md exactly as it was left.
+    cx.dispatch_action(window, crate::GoBack);
+    draw(&mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "a.md");
+    assert_eq!(top_offset(&workspace, &mut vcx), Some(from_source));
+    assert_eq!(painted(&workspace, &mut vcx), before);
+    assert_eq!(can_travel(&workspace, &mut vcx), (false, true));
+}
+
 #[gpui::test]
 fn the_history_buttons_keys_and_mouse_buttons(cx: &mut TestAppContext) {
     let dir = temp(&[("a.md", "# A\n"), ("b.md", "# B\n")]);

@@ -15,6 +15,7 @@ use gv_syntax::{ParseOptions, SyntaxTree};
 use gv_text::DecodeStatus;
 
 use super::links::{PROFILE, Resolver};
+use super::startup;
 
 /// A loaded document. Cloning is cheap.
 #[derive(Debug, Clone)]
@@ -56,11 +57,21 @@ pub(crate) fn load(
     links: &Resolver,
     options: RenderOptions,
 ) -> Result<Loaded, String> {
+    // The start-up trace follows the documents loaded while it runs.
+    let trace = startup::enabled().then(|| {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
     let mut timings = Timings::default();
     let t = Instant::now();
     let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
     timings.read = t.elapsed();
     timings.bytes = bytes.len();
+    mark(
+        trace.as_deref(),
+        format_args!("read, {} bytes", bytes.len()),
+    );
 
     let t = Instant::now();
     let decoded = gv_text::decode(&bytes).map_err(|err| err.to_string())?;
@@ -74,15 +85,18 @@ pub(crate) fn load(
     };
     let text: Arc<str> = Arc::from(decoded.text);
     timings.decode = t.elapsed();
+    mark(trace.as_deref(), format_args!("decoded"));
 
     let t = Instant::now();
     let parse_options = ParseOptions::for_profile(PROFILE.as_str()).unwrap_or_default();
     let syntax = gv_syntax::parse_with(&*text, parse_options);
     timings.parse = t.elapsed();
+    mark(trace.as_deref(), format_args!("parsed"));
 
     let t = Instant::now();
     let model = DocModel::build(&syntax, &*text);
     timings.model = t.elapsed();
+    mark(trace.as_deref(), format_args!("modelled"));
 
     let t = Instant::now();
     let sources = Sources {
@@ -91,6 +105,7 @@ pub(crate) fn load(
     };
     let tree = RenderTree::build(&syntax, &model, &*text, options, sources);
     timings.tree = t.elapsed();
+    mark(trace.as_deref(), format_args!("render tree built"));
 
     Ok(Loaded {
         path: path.to_path_buf(),
@@ -101,6 +116,13 @@ pub(crate) fn load(
         lossy,
         timings,
     })
+}
+
+/// A start-up trace milestone of loading the document `name`.
+fn mark(name: Option<&str>, step: std::fmt::Arguments<'_>) {
+    if let Some(name) = name {
+        startup::mark(&format!("document {step} ({name})"));
+    }
 }
 
 /// Re-asks the status of every link the index can change (the index

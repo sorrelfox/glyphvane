@@ -24,8 +24,10 @@
 //! # Interaction
 //!
 //! - Selection in source offsets by dragging (Shift extends); Mod+C copies
-//!   the plain text of the selection ([`RenderTree::plain_text`]); Mod+A
-//!   selects everything. No caret is shown.
+//!   the plain text of the selection ([`RenderTree::plain_text`]), Copy as
+//!   Markdown (a command without a default key) its source bytes
+//!   ([`RenderTree::markdown_for`]); Mod+A selects everything. No caret is
+//!   shown.
 //! - A click on a link emits [`ReaderEvent::FollowLink`]; Mod-click asks for
 //!   a new tab and a middle click for a background tab. The window decides
 //!   what to do ([`navigation`]).
@@ -40,10 +42,12 @@ mod bench;
 mod element;
 mod engine;
 mod find;
+mod follow;
 mod heights;
 mod items;
 mod links;
 mod load;
+pub mod startup;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -57,14 +61,16 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, div, px,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    NavigationDirection, ParentElement as _, Render, SharedString, Styled as _, Task, Window, div,
+    px,
 };
 use gv_render_tree::{CopyOptions, RenderOptions, StyleTable};
 use gv_vault::{Fragment, PathIndex, ProfileParams};
 
 use crate::appearance::Appearance;
 use crate::inline::{FontFamilies, InlineText, Palette};
+use crate::keymap::actions::navigation::{Back, Forward};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::spacing::find as find_spacing;
@@ -80,9 +86,10 @@ pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
 pub(crate) use links::{Navigation, PROFILE, navigation};
 
-/// Copy the selection as plain text (`editor.copy`), and select the whole
-/// document (`editor.select_all`): commands of the keymap.
-pub use crate::keymap::actions::editor::{Copy, SelectAll};
+/// Copy the selection as plain text (`editor.copy`) or as Markdown
+/// (`editor.copy_as_markdown`), and select the whole document
+/// (`editor.select_all`): commands of the keymap.
+pub use crate::keymap::actions::editor::{Copy, CopyAsMarkdown, SelectAll};
 
 gpui::actions!(
     reader,
@@ -262,6 +269,7 @@ impl Reader {
             st.revision += 1;
             st.timing.opened = Some(Instant::now());
             st.timing.first_content = None;
+            st.timing.navigation = taken_navigation(&path, target.as_ref());
             st.revision
         };
         self.path = Some(path.clone());
@@ -384,6 +392,11 @@ impl Reader {
 
     /// Scrolls the shown document to `target`.
     pub fn scroll_to(&mut self, target: ScrollTarget, cx: &mut Context<'_, Self>) {
+        if let Some(path) = self.path.clone()
+            && let Some(nav) = taken_navigation(&path, Some(&target))
+        {
+            self.state.borrow_mut().timing.navigation = Some(nav);
+        }
         if self.status != LoadStatus::Ready {
             self.target = Some(target);
             return;
@@ -433,8 +446,23 @@ impl Reader {
         )
     }
 
+    /// The selection as Markdown: its source bytes, with partly selected
+    /// inline constructs whole and the first line's container prefix.
+    pub fn selected_markdown(&self) -> Option<String> {
+        let st = self.state.borrow();
+        let range = st.selected()?;
+        let doc = st.doc.as_ref()?;
+        Some(doc.tree.markdown_for(&doc.syntax, &doc.text, range))
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<'_, Self>) {
         if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn copy_as_markdown(&mut self, _: &CopyAsMarkdown, _: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(text) = self.selected_markdown().filter(|t| !t.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -458,6 +486,55 @@ impl Reader {
         st.engine.scroll_by(dy(viewport));
         drop(st);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+impl Reader {
+    /// The items the last frame painted: the source offset each starts at
+    /// and its content's top in px below the top of the view, in order.
+    pub(crate) fn painted_items(&self) -> Vec<(usize, f32)> {
+        let st = self.state.borrow();
+        let Some(doc) = &st.doc else {
+            return Vec::new();
+        };
+        let top = f32::from(st.geometry.bounds.top());
+        st.geometry
+            .items
+            .iter()
+            .map(|g| {
+                let item = &doc.tree.items()[g.ix];
+                (item.source.start, g.top + item.gap_before - top)
+            })
+            .collect()
+    }
+
+    /// The height of the view, in px.
+    pub(crate) fn viewport_height(&self) -> f32 {
+        self.state.borrow().engine.viewport()
+    }
+}
+
+/// The navigation that is showing `path` at `target` now, if an input
+/// started one; logged at the first frame that paints the target. One that
+/// opens in a background tab is logged now, untimed.
+fn taken_navigation(path: &Path, target: Option<&ScrollTarget>) -> Option<follow::Navigation> {
+    let nav = follow::Navigation::new(follow::take()?, target.cloned());
+    if nav.in_background() {
+        tracing::info!("{}", nav.line(path, None));
+        return None;
+    }
+    Some(nav)
+}
+
+/// Notes Back and Forward for the navigation log; the window does them.
+fn note_history_button(event: &MouseDownEvent) {
+    match event.button {
+        MouseButton::Navigate(NavigationDirection::Back) => follow::begin(follow::Cause::Back),
+        MouseButton::Navigate(NavigationDirection::Forward) => {
+            follow::begin(follow::Cause::Forward);
+        }
+        _ => {}
     }
 }
 
@@ -546,7 +623,13 @@ impl Render for Reader {
             .id("reader")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            // Noted for the navigation log on the way down; the window
+            // handles them.
+            .capture_action(|_: &Back, _, _| follow::begin(follow::Cause::Back))
+            .capture_action(|_: &Forward, _, _| follow::begin(follow::Cause::Forward))
+            .capture_any_mouse_down(|event, _, _| note_history_button(event))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::copy_as_markdown))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(move |this, _: &LineUp, _, cx| this.scroll(|_| -line, cx)))
             .on_action(cx.listener(move |this, _: &LineDown, _, cx| this.scroll(|_| line, cx)))

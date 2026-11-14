@@ -200,6 +200,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
         "Edit",
         [
             with_role("editor.copy", "Copy", Role::Copy),
+            item("editor.copy_as_markdown", "Copy as Markdown"),
             with_role("editor.select_all", "Select all", Role::SelectAll),
             SEPARATOR,
             item("search.find", "Find"),
