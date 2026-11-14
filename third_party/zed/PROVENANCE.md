@@ -407,3 +407,121 @@ the two-column crab of `test_extra_columns_overflow_guard` comes from
 As for the other display-map ports, and also: diff `line_wrapper.rs` and
 `LICENSE-APACHE`, and if upstream changes its segmenter or its break rules,
 check them against `unicode-linebreak` with the break-opportunity tests.
+
+## Display map: folds in the replace layer (ported 2026-11-14)
+
+The transform core of Zed's `fold_map.rs` is now ported into the replace
+layer, which supersedes "an identity layer until folds and inline
+replacements are ported" and "not ported yet" for `fold_map.rs` in the
+first display-map section. Same commit as above; the SHA-256 of
+`fold_map.rs` is in that section's list.
+
+| File in `crates/gv-editor/` | Upstream (commit above) | Kind | Ported |
+|---|---|---|---|
+| `src/display_map/replace_map.rs` | `crates/editor/src/display_map/fold_map.rs` (`FoldMap::sync`, the transform tree and summaries, `push_isomorphic`, `consolidate_*_edits`, `FoldSnapshot::{to_fold_point, clip_point, folds_in_range, is_line_folded, placeholder_range_at}`, `FoldChunks`, `FoldMapWriter::{fold, unfold_intersecting, remove_folds}`) | ported | 2026-11-14 |
+| `src/display_map/replace_map/tests.rs` | the `tests` module of the same file | ported, with all 8 upstream tests | 2026-11-14 |
+
+Written for Glyphvane, not taken from Zed: `src/folds.rs` (the foldable
+regions of a Markdown document, from the gv-syntax tree), the folding parts
+of `src/editor.rs` (fold commands, motions over folds, unfolding at carets
+and on deletes, folds brought back by undo, `FoldPlaceholder`),
+`tests/folds.rs`, `tests/editor_folds.rs` and `tests/fold_ranges.rs`. The
+line-terminator handling of the replace layer (`BufferChunks`, the CRLF
+widening of edits) is the earlier identity layer's, kept.
+
+Not ported: `inlay_map.rs` (no inline replacements yet; Live Preview adds
+them to this layer), `FoldPlaceholder`'s render closure, width constraint,
+type tag and collapsed text, fold widths (`update_fold_widths`,
+`ChunkRenderer`), `FoldRows` / `row_infos`, `FoldOffset`,
+`FoldPointCursor` and `crease_map.rs`.
+
+### Modifications to `fold_map.rs`
+
+1. **Input layer.** The layer sits directly on a gv-text `TextSnapshot`
+   instead of the inlay map over a multi-buffer, and its text turns every
+   line terminator into one `\n` (as the identity layer did). Inlay offsets
+   and points become buffer byte offsets and buffer points (the private
+   `InputOffset` and `InputPoint` dimensions); `FoldPoint` is
+   `ReplacePoint`. There is no output offset: `chunks` takes a
+   `Range<ReplacePoint>` (clipped first; a range from inside a placeholder
+   starts at it, where upstream yields the whole placeholder), and
+   `line_len` is computed from the tree in points.
+2. **Summaries.** `TransformSummary { input, output }` of rope text
+   summaries becomes buffer bytes and lines on the input side and lines on
+   the output side. Character counts are not kept in the tree, so
+   `text_summary_for_range` scans the range (as the identity layer did) and
+   building or syncing never reads the text.
+3. **Folds.** Multi-buffer anchor ranges in a `SumTree<Fold>` become byte
+   ranges in a sorted `Vec` (behind an `Arc`), moved through each
+   `EditSummary`: the start sticks to the text after it and the end to the
+   text before it (upstream's `anchor_after` / `anchor_before`), and both
+   stay out of CRLFs. Folds wholly before or after the edits only stay or
+   shift. **An edit that changes text inside a fold removes it**
+   (`sync_with_unfolded` returns the removed folds, a replacement by the
+   same text does not count); upstream keeps the fold. Folds that an edit
+   brings to one range become one; a range folded already is not folded
+   again. `FoldMapWriter`'s methods are `ReplaceMap::fold`,
+   `unfold_intersecting`, `remove_folds` (by `FoldId`, not by type tag) and
+   `unfold_all` (new).
+4. **Placeholders.** A fold shows the constant `PLACEHOLDER` (`⋯`, as
+   upstream's default) and its transform carries the `FoldId` of the first
+   fold of its run instead of a render closure; `placeholders`,
+   `placeholder_at` and `folded_range_at` (new) give the view what it needs
+   to paint and hit-test them. **Folds that only touch keep a placeholder
+   each** (upstream merges them unless `merge_adjacent` is off), so the
+   position between them stays a visible caret position.
+5. **Sync.** The step that joins the isomorphic transform before an edit to
+   the last new transform only joins one that ends before the edit, and the
+   transforms after the last edit are joined the same way: with folds
+   removed by edits, the region of one edit can end with the text of a
+   removed fold and the next edit can start in the text after it, which the
+   unconditional join of upstream would skip. The edits of the layer are
+   widened in input offsets exactly as upstream and converted to points
+   with a three-dimension cursor. `consolidate_inlay_edits` /
+   `consolidate_fold_edits` are plain loops (upstream scans in place and
+   asserts the allocation is reused).
+6. **Queries.** `to_fold_point(InlayPoint, Bias)` is
+   `to_replace_point(BufferPoint, Bias)` and `to_inlay_point` is
+   `to_buffer_point(ReplacePoint, Bias)`; both clip first, and the ends of a
+   placeholder map to the ends of its fold. `is_line_folded` takes a buffer
+   line. `row_infos` becomes `buffer_line` / `buffer_lines` (the buffer
+   line at a row's start). `intersects_fold` is replaced by
+   `folded_range_at`, which only counts positions strictly inside.
+7. **Removed:** highlighting and `LanguageAwareStyling`, the renderer and
+   width fields of `Chunk`, fold metadata, `#[ztracing::instrument]`.
+   `check_invariants` also checks the placeholders against the folds; it
+   runs in the unit tests.
+8. **Lints and docs.** `Debug` on every type, doc comments on the public
+   API, no `unwrap()` outside tests.
+
+### Modifications to the upstream tests
+
+All 8 tests are kept, in `src/display_map/replace_map/tests.rs`, next to
+the identity layer's own tests.
+
+1. `#[gpui::test]` becomes `#[test]`; `#[gpui::test(iterations = 100)]`
+   becomes `for_each_seed(100, …)`. `sample_text` is a local copy of
+   `util::test::sample_text`. Ranges are byte ranges built from buffer
+   points, and the expected edits are in points.
+2. `test_adjacent_folds` and `test_merging_folds_via_edit` expect a
+   placeholder per fold where folds only touch (`⋯b⋯⋯ijkl`, `aa⋯⋯eeeee`),
+   and the edit inside a fold in `test_adjacent_folds` removes it
+   (`12345b⋯fghijkl`).
+3. `test_random_folds`: no inlay mutations (60 % fold changes, 40 % random
+   buffer edits through `random_edit`); the text is random, up to 200
+   characters; the conversions are checked with both biases; it also
+   checks `folded_range_at` for every offset, `text_summary_for_range` on
+   the random ranges, and that rebuilding the layer from its folds gives the
+   same placeholders. `row_infos` becomes `buffer_lines`.
+4. `test_buffer_rows` reads `buffer_lines`; `test_random_chunk_bitmaps`
+   checks every chunk's bitmaps against `Chunk::new` (upstream: `chars` and
+   `tabs`).
+
+The random tests of `tab_map.rs` and `wrap_map.rs` still have no fold
+mutations (those files are unchanged); the tab and wrap layers over folds
+are property-tested in `tests/folds.rs` instead.
+
+### Updating the replace layer
+
+As for the other display-map ports. When `inlay_map.rs` is ported for Live
+Preview, merge it into this layer rather than stacking it below.

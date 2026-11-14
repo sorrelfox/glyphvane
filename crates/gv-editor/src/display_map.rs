@@ -12,7 +12,7 @@
 //! | Layer | Module | Point | What it does |
 //! |---|---|---|---|
 //! | Buffer | `gv_text` | [`BufferPoint`] (line, byte column, `usize`) | The exact text, with LF, CRLF and lone CR line endings |
-//! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds and inline replacements (not yet: an identity layer); every line ending becomes one `\n` |
+//! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds (each shown as one [`PLACEHOLDER`]), later inline replacements; every line ending becomes one `\n` |
 //! | Tab | [`tab_map`] | [`TabPoint`] | Expands hard tabs to tab stops |
 //! | Wrap | [`wrap_map`] | [`WrapPoint`] | Soft wrap, measured through [`TextMeasure`], with continuation indents from a [`WrapIndent`] |
 //! | Block | not yet | | Block widgets with pixel heights |
@@ -60,7 +60,10 @@ mod test_support;
 
 pub use line_wrapper::{Boundary, IndentAdjustment, LineFragment, LineWrapper};
 pub use primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
-pub use replace_map::{ReplaceChunks, ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot};
+pub use replace_map::{
+    Fold, FoldId, PLACEHOLDER, Placeholder, ReplaceChunks, ReplaceEdit, ReplaceMap, ReplacePoint,
+    ReplaceSnapshot,
+};
 pub use tab_map::{
     MAX_EXPANSION_COLUMN, MAX_TAB_SIZE, TabChunks, TabEdit, TabMap, TabPoint, TabPointCursor,
     TabSnapshot,

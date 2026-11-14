@@ -21,6 +21,10 @@
 //! - the [`display_map`] layers (replace and tab, and the wrap layer while
 //!   soft wrap is on: [`Editor::set_wrap_width`]), synced on every edit;
 //!   vertical motion runs on display rows (wrap rows when wrapping);
+//! - folds: regions of the text shown as one placeholder (see
+//!   [`Editor::fold_at`] and [`folds`] for the foldable regions); motions
+//!   skip them, a caret placed inside one and an edit inside one unfold it,
+//!   and undo brings back folds an edit removed;
 //! - input-method state: marked text and the UTF-16 queries and
 //!   replacements a platform text-input handler needs;
 //! - observers, told about every change with its
@@ -52,14 +56,16 @@
 //! - [`movement`]: caret motions;
 //! - [`commands`]: the Markdown-aware editing commands (list continuation,
 //!   indentation, renumbering, formatting, headings, quotes, links);
-//! - [`display_map`]: the replace layer (an identity layer for now), and
-//!   the tab and wrap layers, ported from Zed.
+//! - [`display_map`]: the replace layer (folds), the tab layer and the
+//!   wrap layer, ported from Zed;
+//! - [`folds`]: the foldable regions of a Markdown document.
 
 pub mod boundaries;
 mod clock;
 pub mod commands;
 pub mod display_map;
 mod editor;
+pub mod folds;
 mod history;
 pub mod movement;
 mod selection;
@@ -69,9 +75,10 @@ pub use commands::{
     Availability, CommandSettings, Flavor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef,
 };
 pub use editor::{
-    DeleteUnit, EditCause, EditEvent, Editor, EditorConfig, EditorEvent, ObserverId, SavePoint,
-    Utf16Selection,
+    DeleteUnit, EditCause, EditEvent, Editor, EditorConfig, EditorEvent, FoldPlaceholder,
+    ObserverId, SavePoint, Utf16Selection,
 };
+pub use folds::{FoldCandidate, FoldKind, foldable_ranges};
 pub use history::{EditKind, History, HistoryConfig, StateId, UndoOutcome};
 pub use movement::Motion;
 pub use selection::{Selection, SelectionGoal, SelectionId, SelectionSpec, Selections};

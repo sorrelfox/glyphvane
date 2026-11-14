@@ -3,24 +3,30 @@
 
 //! [`Editor`]: the GUI-free editing model of one document.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
+
+use gv_syntax::SyntaxTree;
 
 use gv_text::{
     Anchor, Bias, Buffer, EditError, EditSummary, OffsetUtf16, Revision, TextSnapshot, Transaction,
 };
 
 use crate::boundaries::{
-    clip_caret, line_end, line_start, next_grapheme_boundary, next_word_end,
+    clip_caret, indent_end, line_end, line_start, next_grapheme_boundary, next_word_end,
     prev_grapheme_boundary, prev_word_start, snap_to_grapheme,
 };
 use crate::clock::{Clock, SystemClock};
+use crate::commands::SyntaxRef;
 use crate::display_map::{
-    IndentAdjustment, MonospaceMeasure, ReplaceMap, RewrapJob, TabEdit, TabMap, TabPoint,
-    TabSnapshot, TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
+    Fold, FoldId, IndentAdjustment, MonospaceMeasure, ReplaceEdit, ReplaceMap, ReplacePoint,
+    ReplaceSnapshot, RewrapJob, TabEdit, TabMap, TabPoint, TabSnapshot, TextMeasure, WrapEdit,
+    WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
 };
+use crate::folds::{FoldCandidate, FoldKind, foldable_ranges};
 use crate::history::{
     EditKind, History, HistoryConfig, Record, SelectionState, StateId, UndoOutcome, UndoPlan,
     patch_of,
@@ -112,7 +118,8 @@ pub enum EditorEvent<'a> {
     /// An input-method composition started, changed or ended without a
     /// text change.
     CompositionChanged,
-    /// The display map changed without a text change (the tab size).
+    /// The display map changed without a text change: the tab size, or
+    /// folds were added or removed.
     DisplayChanged {
         /// The display map after the change.
         display: &'a TabSnapshot,
@@ -147,6 +154,45 @@ pub struct Utf16Selection {
     /// Whether the caret (head) is at the start of the range.
     pub reversed: bool,
 }
+
+/// A fold placeholder on the display, for the view to paint and hit-test
+/// (see [`Editor::fold_placeholders`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FoldPlaceholder {
+    /// The first fold of the placeholder's run (overlapping folds share one
+    /// placeholder).
+    pub fold: FoldId,
+    /// The buffer bytes it hides.
+    pub buffer_range: Range<usize>,
+    /// Where it is in the tab layer ([`Editor::display`]): one
+    /// [`PLACEHOLDER`](crate::display_map::PLACEHOLDER) on one row.
+    pub tab_range: Range<TabPoint>,
+    /// Where it is in the wrap layer, while soft wrap is on.
+    pub wrap_range: Option<Range<WrapPoint>>,
+}
+
+/// A foldable region from [`Editor::update_foldable`], moved through edits
+/// since.
+#[derive(Clone, Debug)]
+struct Foldable {
+    /// The start of the line its marker is on.
+    header: usize,
+    range: Range<usize>,
+    kind: FoldKind,
+}
+
+/// Folds that the step from text state `from` to `to` removed, with their
+/// ranges in the text of `from`: brought back when undo or redo returns
+/// from `to` to `from`.
+#[derive(Clone, Debug)]
+struct FoldRestore {
+    from: StateId,
+    to: StateId,
+    ranges: Vec<Range<usize>>,
+}
+
+/// How many [`FoldRestore`]s the editor keeps.
+const MAX_FOLD_RESTORES: usize = 64;
 
 /// A state to record as saved once a save of `revision` completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -230,8 +276,37 @@ impl DisplayLayers {
         self.wrap.as_ref().map(|wrap| &wrap.snapshot)
     }
 
-    fn sync(&mut self, text: TextSnapshot, summary: &EditSummary) -> (Vec<TabEdit>, Vec<WrapEdit>) {
-        let (replace, replace_edits) = self.replace_map.sync(text, summary);
+    fn replace(&self) -> &ReplaceSnapshot {
+        self.snapshot.replace_snapshot()
+    }
+
+    /// Syncs every layer to `text`. Also returns the folds the edits
+    /// removed (see [`ReplaceMap::sync_with_unfolded`]).
+    fn sync(
+        &mut self,
+        text: TextSnapshot,
+        summary: &EditSummary,
+    ) -> (Vec<TabEdit>, Vec<WrapEdit>, Vec<Fold>) {
+        let (replace, replace_edits, unfolded) = self.replace_map.sync_with_unfolded(text, summary);
+        let (edits, wrap_edits) = self.apply_replace(replace, replace_edits);
+        (edits, wrap_edits, unfolded)
+    }
+
+    /// Changes the folds with `change` and passes the edits up the layers.
+    fn change_folds(
+        &mut self,
+        change: impl FnOnce(&mut ReplaceMap) -> (ReplaceSnapshot, Vec<ReplaceEdit>),
+    ) -> (Vec<TabEdit>, Vec<WrapEdit>) {
+        let (replace, replace_edits) = change(&mut self.replace_map);
+        self.apply_replace(replace, replace_edits)
+    }
+
+    /// Passes a change of the replace layer up the tab and wrap layers.
+    fn apply_replace(
+        &mut self,
+        replace: ReplaceSnapshot,
+        replace_edits: Vec<ReplaceEdit>,
+    ) -> (Vec<TabEdit>, Vec<WrapEdit>) {
         let (snapshot, edits) = self.tab_map.sync(replace, replace_edits, self.tab_size);
         self.snapshot = snapshot;
         let wrap_edits = self.sync_wrap(&edits);
@@ -429,6 +504,27 @@ struct Composition {
 /// Byte offsets passed in are clipped (to the text, out of multi-byte
 /// characters and out of a CRLF), never trusted. UTF-16 positions from an
 /// input method are clipped the same way and never split a surrogate pair.
+///
+/// # Folds
+///
+/// Folds live in the display map's replace layer (see
+/// [`ReplaceMap`]): each shows as one placeholder at the end of its first
+/// row. The fold commands that take a line ([`fold_at`](Self::fold_at),
+/// [`toggle_fold`](Self::toggle_fold), …) work on the foldable regions of
+/// [`update_foldable`](Self::update_foldable); [`fold_ranges`](Self::fold_ranges)
+/// folds any ranges. Folds are display state, not undo steps. No selection
+/// end is ever hidden in a fold:
+///
+/// - motions skip folded text as a whole (Left and Right jump over it,
+///   vertical motion skips folded rows, Home and End work on the display
+///   line);
+/// - folding moves carets inside the new fold to its start;
+/// - a caret or selection end placed inside a fold (a click, a search
+///   result) unfolds it, and so does Backspace after a placeholder or
+///   Delete before one, instead of deleting hidden text;
+/// - an edit that changes text inside a fold unfolds it; undoing the edit
+///   folds it again, and redoing it unfolds it again. Such an edit is an
+///   undo step of its own.
 pub struct Editor {
     buffer: Buffer,
     selections: Selections,
@@ -438,6 +534,12 @@ pub struct Editor {
     composition: Option<Composition>,
     observers: Vec<(ObserverId, Observer)>,
     next_observer: u64,
+    /// Sorted by header.
+    foldable: Vec<Foldable>,
+    fold_restores: VecDeque<FoldRestore>,
+    /// The folds the last undo or redo transaction removed, in the text
+    /// before it.
+    step_unfolded: Vec<Fold>,
 }
 
 impl fmt::Debug for Editor {
@@ -482,6 +584,9 @@ impl Editor {
             composition: None,
             observers: Vec::new(),
             next_observer: 0,
+            foldable: Vec::new(),
+            fold_restores: VecDeque::new(),
+            step_unfolded: Vec::new(),
         }
     }
 
@@ -702,11 +807,20 @@ impl Editor {
             }
             return Ok((None, result));
         }
+        let (display_edits, wrap_edits, unfolded) =
+            self.display.sync(self.buffer.snapshot(), &summary);
+        self.move_foldable(&summary);
         if let EditCause::Edit(kind) = cause {
             // Replacing text with the same text changes no byte: nothing to
             // undo.
             let patch = patch_of(&old, transaction);
             if !patch.is_empty() {
+                // An edit that removes folds is an undo step of its own, so
+                // undoing it returns to exactly the text the folds were in.
+                if !unfolded.is_empty() {
+                    self.history.seal();
+                }
+                let from = self.history.state();
                 self.history.record(Record {
                     kind,
                     patch,
@@ -715,9 +829,15 @@ impl Editor {
                     now: self.clock.now(),
                     force_group,
                 });
+                if !unfolded.is_empty() {
+                    self.history.seal();
+                    let to = self.history.state();
+                    self.remember_unfolded(from, to, &unfolded);
+                }
             }
+        } else {
+            self.step_unfolded = unfolded;
         }
-        let (display_edits, wrap_edits) = self.display.sync(self.buffer.snapshot(), &summary);
         if let Some(composition) = &mut self.composition {
             for (start, end) in &mut composition.ranges {
                 *start = start.transform(&summary);
@@ -860,6 +980,7 @@ impl Editor {
                 start..head
             })
             .collect();
+        let ranges = self.unfold_instead_of_deleting(ranges);
         self.delete_ranges(ranges, EditKind::DeleteBackward)
     }
 
@@ -891,6 +1012,7 @@ impl Editor {
                 head..end
             })
             .collect();
+        let ranges = self.unfold_instead_of_deleting(ranges);
         self.delete_ranges(ranges, EditKind::DeleteForward)
     }
 
@@ -939,8 +1061,10 @@ impl Editor {
             UndoPlan::Nothing => UndoOutcome::NothingToUndo,
             UndoPlan::StopAtSavePoint => UndoOutcome::StoppedAtSavePoint,
             UndoPlan::Apply(transaction, selections) => {
+                let from = self.history.state();
                 if self.apply_history_step(&transaction, EditCause::Undo, selections) {
                     self.history.commit_undo();
+                    self.after_history_step(from);
                     UndoOutcome::Undone
                 } else {
                     UndoOutcome::NothingToUndo
@@ -956,8 +1080,10 @@ impl Editor {
         let Some((transaction, selections)) = self.history.begin_redo() else {
             return false;
         };
+        let from = self.history.state();
         if self.apply_history_step(&transaction, EditCause::Redo, selections) {
             self.history.commit_redo();
+            self.after_history_step(from);
             true
         } else {
             false
@@ -1021,6 +1147,7 @@ impl Editor {
     /// undo step, tell observers.
     fn user_selection_change(&mut self) {
         self.history.seal();
+        self.unfold_at_selections();
         self.selections_changed();
     }
 
@@ -1177,6 +1304,416 @@ impl Editor {
             goal,
         });
         true
+    }
+
+    // ----- folding ------------------------------------------------------------
+
+    /// Recomputes the foldable regions (see [`crate::folds`]) from
+    /// `syntax`. A tree that is not the parse of the current text is
+    /// replaced by a fresh parse with the tree's options.
+    ///
+    /// The regions move with edits until the next update, so call this
+    /// again after a reparse. The fold commands ([`fold_at`](Self::fold_at)
+    /// and the others that take a line) and [`is_foldable`](Self::is_foldable)
+    /// use them; existing folds do not depend on them.
+    pub fn update_foldable(&mut self, syntax: SyntaxRef<'_>) {
+        let text = self.buffer.text();
+        let candidates = if syntax.is_parse_of(text) {
+            foldable_ranges(syntax.tree, text)
+        } else {
+            let tree = SyntaxTree::parse_with(text, syntax.tree.options());
+            foldable_ranges(&tree, text)
+        };
+        self.foldable = candidates
+            .into_iter()
+            .map(|candidate| Foldable {
+                header: text
+                    .line_start(candidate.line)
+                    .unwrap_or(candidate.range.start),
+                range: candidate.range,
+                kind: candidate.kind,
+            })
+            .collect();
+    }
+
+    /// The foldable regions, as [`update_foldable`](Self::update_foldable)
+    /// found them and moved through the edits since.
+    pub fn foldable(&self) -> Vec<FoldCandidate> {
+        let text = self.buffer.text();
+        self.foldable
+            .iter()
+            .map(|foldable| FoldCandidate {
+                line: text.line_of_offset(foldable.header).unwrap_or(0),
+                range: foldable.range.clone(),
+                kind: foldable.kind,
+            })
+            .collect()
+    }
+
+    /// The foldable regions whose marker is on buffer line `line`.
+    fn foldable_on(&self, line: usize) -> &[Foldable] {
+        let Ok(range) = self.buffer.text().line_range(line) else {
+            return &[];
+        };
+        let first = self
+            .foldable
+            .partition_point(|foldable| foldable.header < range.start);
+        let end = self
+            .foldable
+            .partition_point(|foldable| foldable.header <= range.end);
+        &self.foldable[first..end.max(first)]
+    }
+
+    /// Whether a foldable region starts on buffer line `line` (where a
+    /// fold marker goes).
+    pub fn is_foldable(&self, line: usize) -> bool {
+        !self.foldable_on(line).is_empty()
+    }
+
+    /// Whether the display row of buffer line `line` is folded: a fold
+    /// starts on the line, or at the region whose marker is on it (a setext
+    /// heading folds after its underline).
+    pub fn is_row_folded(&self, line: usize) -> bool {
+        let text = self.buffer.text();
+        let Ok(range) = text.line_range(line) else {
+            return false;
+        };
+        let folds = self.folds();
+        let starts_at = |start: usize, end: usize| {
+            let first = folds.partition_point(|fold| fold.range.start < start);
+            folds.get(first).is_some_and(|fold| fold.range.start <= end)
+        };
+        starts_at(range.start, range.end)
+            || self
+                .foldable_on(line)
+                .iter()
+                .any(|foldable| starts_at(foldable.range.start, foldable.range.start))
+    }
+
+    /// Whether buffer line `line` shows a placeholder or is hidden (see
+    /// [`ReplaceSnapshot::is_line_folded`]).
+    pub fn is_line_folded(&self, line: usize) -> bool {
+        self.display.replace().is_line_folded(line)
+    }
+
+    /// The folds, sorted by start (see [`Fold`]).
+    pub fn folds(&self) -> &[Fold] {
+        self.display.replace().folds()
+    }
+
+    /// The folded byte ranges, sorted: what to store to fold them again
+    /// later with [`fold_ranges`](Self::fold_ranges).
+    pub fn folded_ranges(&self) -> Vec<Range<usize>> {
+        self.folds().iter().map(|fold| fold.range.clone()).collect()
+    }
+
+    /// Folds the region whose marker is on buffer line `line` (the largest
+    /// one not folded yet), or else the smallest unfolded region that
+    /// contains the line. Returns whether anything was folded.
+    pub fn fold_at(&mut self, line: usize) -> bool {
+        let folded: HashSet<Range<usize>> = self.folded_ranges().into_iter().collect();
+        let unfolded = |foldable: &&Foldable| !folded.contains(&foldable.range);
+        let on_line = self
+            .foldable_on(line)
+            .iter()
+            .filter(unfolded)
+            .max_by_key(|foldable| foldable.range.len());
+        let target = on_line.or_else(|| {
+            let start = self.buffer.text().line_start(line).ok()?;
+            self.foldable
+                .iter()
+                .filter(unfolded)
+                .filter(|foldable| foldable.range.start < start && start <= foldable.range.end)
+                .min_by_key(|foldable| foldable.range.len())
+        });
+        match target.map(|foldable| foldable.range.clone()) {
+            Some(range) => self.fold_ranges([range]),
+            None => false,
+        }
+    }
+
+    /// Unfolds the folds on the display row of buffer line `line`: those
+    /// that touch the line or start at a region whose marker is on it.
+    /// Returns whether anything was unfolded.
+    pub fn unfold_at(&mut self, line: usize) -> bool {
+        let Ok(range) = self.buffer.text().line_range(line) else {
+            return false;
+        };
+        let mut ranges = vec![range];
+        ranges.extend(
+            self.foldable_on(line)
+                .iter()
+                .map(|foldable| foldable.range.start..foldable.range.start),
+        );
+        self.unfold_ranges(ranges, true)
+    }
+
+    /// Unfolds the row of `line` if it is folded
+    /// ([`is_row_folded`](Self::is_row_folded)), else folds at it. Returns
+    /// whether anything changed.
+    pub fn toggle_fold(&mut self, line: usize) -> bool {
+        if self.is_row_folded(line) {
+            self.unfold_at(line)
+        } else {
+            self.fold_at(line)
+        }
+    }
+
+    /// Folds every foldable region.
+    pub fn fold_all(&mut self) -> bool {
+        let ranges: Vec<Range<usize>> = self
+            .foldable
+            .iter()
+            .map(|foldable| foldable.range.clone())
+            .collect();
+        self.fold_ranges(ranges)
+    }
+
+    /// Folds the sections of the headings of level `level` or deeper: the
+    /// outline stays visible down to level `level` (1 folds every heading).
+    pub fn fold_headings(&mut self, level: u8) -> bool {
+        let ranges: Vec<Range<usize>> = self
+            .foldable
+            .iter()
+            .filter(
+                |foldable| matches!(foldable.kind, FoldKind::Heading { level: l } if l >= level),
+            )
+            .map(|foldable| foldable.range.clone())
+            .collect();
+        self.fold_ranges(ranges)
+    }
+
+    /// Unfolds the folded sections of the headings of level `level` or
+    /// deeper.
+    pub fn unfold_headings(&mut self, level: u8) -> bool {
+        let sections: HashSet<Range<usize>> = self
+            .foldable
+            .iter()
+            .filter(
+                |foldable| matches!(foldable.kind, FoldKind::Heading { level: l } if l >= level),
+            )
+            .map(|foldable| foldable.range.clone())
+            .collect();
+        let ids: Vec<FoldId> = self
+            .folds()
+            .iter()
+            .filter(|fold| sections.contains(&fold.range))
+            .map(|fold| fold.id)
+            .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        self.change_folds(|map| map.remove_folds(ids))
+    }
+
+    /// Removes every fold.
+    pub fn unfold_all(&mut self) -> bool {
+        self.change_folds(ReplaceMap::unfold_all)
+    }
+
+    /// Folds byte ranges of the current text (any ranges: regions, a
+    /// selection, ranges stored with the session). Ranges are clipped;
+    /// empty ones and ranges folded already are skipped. Carets inside a
+    /// new fold move to its start. Returns whether anything was folded.
+    pub fn fold_ranges(&mut self, ranges: impl IntoIterator<Item = Range<usize>>) -> bool {
+        let changed = self.change_folds(|map| map.fold(ranges));
+        if changed {
+            self.move_selections_out_of_folds();
+        }
+        changed
+    }
+
+    /// Removes the folds that intersect `ranges` (see
+    /// [`ReplaceMap::unfold_intersecting`]). Returns whether any was.
+    pub fn unfold_ranges(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<usize>>,
+        inclusive: bool,
+    ) -> bool {
+        self.change_folds(|map| map.unfold_intersecting(ranges, inclusive))
+    }
+
+    /// The placeholders on display rows `rows` (wrap rows while soft wrap
+    /// is on, tab rows otherwise), in order.
+    pub fn fold_placeholders(&self, rows: Range<u32>) -> Vec<FoldPlaceholder> {
+        let tabs = &self.display.snapshot;
+        let wrap = self.display.wrap_snapshot();
+        let tab_rows = match wrap {
+            Some(wrap) => {
+                let start = wrap.to_tab_point(WrapPoint::new(WrapRow(rows.start), 0));
+                let end = wrap.to_tab_point(WrapPoint::new(WrapRow(rows.end), 0));
+                start.row()..end.row().saturating_add(1)
+            }
+            None => rows.clone(),
+        };
+        tabs.replace_snapshot()
+            .placeholders(tab_rows)
+            .into_iter()
+            .filter_map(|placeholder| {
+                let tab_range = tabs.replace_point_to_tab_point(placeholder.range.start)
+                    ..tabs.replace_point_to_tab_point(placeholder.range.end);
+                let wrap_range = wrap.map(|wrap| {
+                    wrap.tab_point_to_wrap_point(tab_range.start)
+                        ..wrap.tab_point_to_wrap_point(tab_range.end)
+                });
+                let row = wrap_range
+                    .as_ref()
+                    .map_or(tab_range.start.row(), |range| range.start.row().0);
+                rows.contains(&row).then_some(FoldPlaceholder {
+                    fold: placeholder.fold,
+                    buffer_range: placeholder.buffer_range,
+                    tab_range,
+                    wrap_range,
+                })
+            })
+            .collect()
+    }
+
+    /// Changes the folds and tells observers. Returns whether the display
+    /// changed.
+    fn change_folds(
+        &mut self,
+        change: impl FnOnce(&mut ReplaceMap) -> (ReplaceSnapshot, Vec<ReplaceEdit>),
+    ) -> bool {
+        let (edits, wrap_edits) = self.display.change_folds(change);
+        if !edits.is_empty() {
+            let event = EditorEvent::DisplayChanged {
+                display: &self.display.snapshot,
+                edits: &edits,
+            };
+            emit(&mut self.observers, &event);
+        }
+        if !wrap_edits.is_empty() {
+            self.wrap_changed(&wrap_edits);
+        }
+        !edits.is_empty()
+    }
+
+    /// Moves selection ends inside a fold to its start.
+    fn move_selections_out_of_folds(&mut self) {
+        let replace = self.display.replace().clone();
+        let out = |offset: usize| {
+            replace
+                .folded_range_at(offset)
+                .map_or(offset, |range| range.start)
+        };
+        let moved = self.selections.iter().any(|selection| {
+            out(selection.tail()) != selection.tail() || out(selection.head()) != selection.head()
+        });
+        if !moved {
+            return;
+        }
+        self.selections
+            .update(self.buffer.text(), |selection| SelectionSpec {
+                tail: out(selection.tail()),
+                head: out(selection.head()),
+                goal: selection.goal(),
+            });
+        self.history.seal();
+        self.selections_changed();
+    }
+
+    /// Unfolds the folds a selection end is inside of (a caret placed in
+    /// folded text reveals it). Returns whether any was.
+    fn unfold_at_selections(&mut self) -> bool {
+        let replace = self.display.replace();
+        if !replace.has_folds() {
+            return false;
+        }
+        let runs: Vec<Range<usize>> = self
+            .selections
+            .iter()
+            .flat_map(|selection| [selection.tail(), selection.head()])
+            .filter_map(|offset| replace.folded_range_at(offset))
+            .collect();
+        if runs.is_empty() {
+            return false;
+        }
+        self.change_folds(|map| map.unfold_intersecting(runs, false))
+    }
+
+    /// For deletions from carets: a range that would reach into a fold
+    /// (Backspace after a placeholder, Delete before one) unfolds the fold
+    /// instead and deletes nothing there.
+    fn unfold_instead_of_deleting(&mut self, mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+        let replace = self.display.replace();
+        if !replace.has_folds() {
+            return ranges;
+        }
+        let mut runs = Vec::new();
+        for range in &mut ranges {
+            if let Some(run) = replace.folded_range_at(range.start) {
+                runs.push(run);
+                *range = range.end..range.end;
+            } else if let Some(run) = replace.folded_range_at(range.end) {
+                runs.push(run);
+                *range = range.start..range.start;
+            }
+        }
+        if !runs.is_empty() {
+            self.change_folds(|map| map.unfold_intersecting(runs, false));
+        }
+        ranges
+    }
+
+    /// Moves the foldable regions through an edit.
+    fn move_foldable(&mut self, summary: &EditSummary) {
+        let (Some(first), Some(last)) = (summary.edits().first(), summary.edits().last()) else {
+            return;
+        };
+        let (before, after) = (first.old.start, last.old.end);
+        let shift = |offset: usize| (offset + last.new.end) - last.old.end;
+        self.foldable.retain_mut(|foldable| {
+            // Regions wholly before the first edit or after the last one
+            // only stay or shift.
+            if foldable.range.end < before {
+                return true;
+            }
+            if foldable.header > after {
+                foldable.header = shift(foldable.header);
+                foldable.range = shift(foldable.range.start)..shift(foldable.range.end);
+                return true;
+            }
+            // A line start stays with the text after it.
+            foldable.header = summary.transform_offset(foldable.header, Bias::Right);
+            let start = summary.transform_offset(foldable.range.start, Bias::Right);
+            let end = summary.transform_offset(foldable.range.end, Bias::Left);
+            foldable.range = start..end;
+            start < end
+        });
+    }
+
+    /// Remembers folds that the step from state `from` to `to` removed.
+    fn remember_unfolded(&mut self, from: StateId, to: StateId, unfolded: &[Fold]) {
+        if self.fold_restores.len() == MAX_FOLD_RESTORES {
+            self.fold_restores.pop_front();
+        }
+        self.fold_restores.push_back(FoldRestore {
+            from,
+            to,
+            ranges: unfolded.iter().map(|fold| fold.range.clone()).collect(),
+        });
+    }
+
+    /// After an undo or redo from state `from`: brings back the folds that
+    /// the step into `from` removed from the text now shown, remembers the
+    /// folds this step removed, and reveals folds the restored selections
+    /// are in.
+    fn after_history_step(&mut self, from: StateId) {
+        let to = self.history.state();
+        let unfolded = std::mem::take(&mut self.step_unfolded);
+        let restore = self
+            .fold_restores
+            .iter()
+            .rposition(|restore| restore.from == to && restore.to == from)
+            .and_then(|index| self.fold_restores.remove(index));
+        if let Some(restore) = restore {
+            self.change_folds(|map| map.fold(restore.ranges));
+        }
+        if !unfolded.is_empty() {
+            self.remember_unfolded(from, to, &unfolded);
+        }
+        self.unfold_at_selections();
     }
 
     // ----- input method -----------------------------------------------------------
@@ -1475,6 +2012,12 @@ fn move_selection(
         SelectionGoal::None
     };
     let (to, goal) = display.move_caret(from, goal, motion);
+    // Folded text is skipped as a whole.
+    let to = match display.replace().folded_range_at(to) {
+        Some(range) if to > from => range.end,
+        Some(range) => range.start,
+        None => to,
+    };
     let tail = if extend { selection.tail() } else { to };
     SelectionSpec {
         tail,
@@ -1493,6 +2036,13 @@ enum DisplayRows<'a> {
 }
 
 impl<'a> DisplayRows<'a> {
+    fn replace(self) -> &'a ReplaceSnapshot {
+        match self {
+            Self::Tab(tabs) => tabs.replace_snapshot(),
+            Self::Wrap(wrap) => wrap.tab_snapshot().replace_snapshot(),
+        }
+    }
+
     fn text(self) -> &'a TextSnapshot {
         match self {
             Self::Tab(tabs) => tabs.buffer(),
@@ -1554,7 +2104,23 @@ impl<'a> DisplayRows<'a> {
         motion: Motion,
     ) -> (usize, SelectionGoal) {
         let wrap = match self {
-            Self::Tab(tabs) => return move_caret(tabs, offset, goal, motion),
+            Self::Tab(tabs) => {
+                let replace = tabs.replace_snapshot();
+                if replace.has_folds() {
+                    let text = tabs.buffer();
+                    let offset = clip_caret(text, offset, Bias::Left);
+                    let target = match motion {
+                        Motion::LineStart => Some(row_start(replace, offset)),
+                        Motion::SmartLineStart => Some(smart_row_start(replace, offset)),
+                        Motion::LineEnd => Some(row_end(replace, offset)),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        return (clip_caret(text, target, Bias::Left), SelectionGoal::None);
+                    }
+                }
+                return move_caret(tabs, offset, goal, motion);
+            }
             Self::Wrap(wrap) => wrap,
         };
         let text = wrap.buffer();
@@ -1692,39 +2258,91 @@ fn wrap_offset_at(wrap: &WrapSnapshot, row: WrapRow, column: u32, earlier: bool)
 
 /// Home on wrap rows: the start of a continuation row's text, then (pressed
 /// there, or on the first row of a line) the line start, or the smart line
-/// start with `smart`.
+/// start with `smart` (of the display line: see [`row_start`]).
 fn wrap_line_start(wrap: &WrapSnapshot, offset: usize, smart: bool) -> usize {
-    let text = wrap.buffer();
     let row = offset_to_wrap_point(wrap, offset).row();
     let continuation = row
         .0
         .checked_sub(1)
         .is_some_and(|previous| wrap.soft_wrap_indent(WrapRow(previous)).is_some());
     if continuation {
-        let row_start = wrap_point_to_offset(wrap, WrapPoint::new(row, 0), Bias::Right);
-        if offset > row_start && offset_to_wrap_point(wrap, row_start).row() == row {
-            return row_start;
+        let wrap_row_start = wrap_point_to_offset(wrap, WrapPoint::new(row, 0), Bias::Right);
+        if offset > wrap_row_start && offset_to_wrap_point(wrap, wrap_row_start).row() == row {
+            return wrap_row_start;
         }
     }
+    let replace = wrap.tab_snapshot().replace_snapshot();
     if smart {
-        smart_line_start(text, offset)
+        smart_row_start(replace, offset)
     } else {
-        line_start(text, offset)
+        row_start(replace, offset)
     }
 }
 
 /// End on wrap rows: before the last character of a row that continues,
-/// then (pressed there, or on the last row of a line) the line end.
+/// then (pressed there, or on the last row of a line) the line end (of the
+/// display line: see [`row_end`]).
 fn wrap_line_end(wrap: &WrapSnapshot, offset: usize) -> usize {
-    let text = wrap.buffer();
     let row = offset_to_wrap_point(wrap, offset).row();
     if wrap.soft_wrap_indent(row).is_some() {
-        let row_end = wrap_offset_at(wrap, row, u32::MAX, true);
-        if offset < row_end {
-            return row_end;
+        let wrap_row_end = wrap_offset_at(wrap, row, u32::MAX, true);
+        if offset < wrap_row_end {
+            return wrap_row_end;
         }
     }
-    line_end(text, offset)
+    row_end(wrap.tab_snapshot().replace_snapshot(), offset)
+}
+
+/// The replace row of a caret offset: its buffer line, unless a fold puts
+/// it on the row of an earlier line.
+fn caret_row(replace: &ReplaceSnapshot, offset: usize) -> u32 {
+    let text = replace.buffer();
+    let point = text
+        .offset_to_point(offset)
+        .unwrap_or_else(|_| text.max_point());
+    replace.to_replace_point(point, Bias::Left).row()
+}
+
+fn replace_point_to_offset(replace: &ReplaceSnapshot, point: ReplacePoint, bias: Bias) -> usize {
+    let text = replace.buffer();
+    text.point_to_offset(replace.to_buffer_point(point, bias))
+        .unwrap_or(text.len())
+}
+
+/// Home on a display line: the start of the caret's line, or with folds
+/// the start of the first line its row shows.
+fn row_start(replace: &ReplaceSnapshot, offset: usize) -> usize {
+    if !replace.has_folds() {
+        return line_start(replace.buffer(), offset);
+    }
+    let row = caret_row(replace, offset);
+    replace_point_to_offset(replace, ReplacePoint::new(row, 0), Bias::Left)
+}
+
+/// Smart home on a display line: the first non-blank character of the
+/// row's first line, or the row start if the caret is there.
+fn smart_row_start(replace: &ReplaceSnapshot, offset: usize) -> usize {
+    let text = replace.buffer();
+    if !replace.has_folds() {
+        return smart_line_start(text, offset);
+    }
+    let start = row_start(replace, offset);
+    let indent = indent_end(text, start);
+    if offset == indent { start } else { indent }
+}
+
+/// End on a display line: the end of the caret's line, or with folds the
+/// end of the last line its row shows (after a placeholder that ends it).
+fn row_end(replace: &ReplaceSnapshot, offset: usize) -> usize {
+    if !replace.has_folds() {
+        return line_end(replace.buffer(), offset);
+    }
+    let row = caret_row(replace, offset);
+    replace_point_to_offset(
+        replace,
+        ReplacePoint::new(row, replace.line_len(row)),
+        Bias::Right,
+    )
 }
 
 /// The byte offset in `text` of a UTF-16 offset, clamped to the text and
