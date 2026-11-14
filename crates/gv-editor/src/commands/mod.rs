@@ -19,7 +19,7 @@
 //!
 //! | Command | Behaviour |
 //! |---|---|
-//! | [`Newline`](MarkdownCommand::Newline) (Enter) | In a list item: a new item at the item's indentation with the same marker and padding (W + N), the next number of an ordered list (or the same number if all items share one), `[ ]` for a task item; the text after the caret and the rest of the item move to the new item (re-indented for a wider marker); the following items are renumbered. On an empty item: a nested item is outdented, a top-level one ends the list (the marker is removed). In a block quote: the `> ` chain continues; an empty quote line leaves the innermost quote. In code blocks the container prefixes continue. |
+//! | [`Newline`](MarkdownCommand::Newline) (Enter) | In a list item: a new item at the item's indentation with the same marker and padding (W + N), the next number of an ordered list (or the same number if all items share one), `[ ]` for a task item; the text after the caret and the rest of the item move to the new item (re-indented for a wider marker); the following items are renumbered. On an empty item: a nested item is outdented, a top-level one ends the list (the marker is removed); in the middle of an ordered list the blank line left behind does not split the list, so the following items are renumbered to stay sequential. In a block quote: the `> ` chain continues; an empty quote line leaves the innermost quote. In code blocks the container prefixes continue. |
 //! | [`NewlinePlain`](MarkdownCommand::NewlinePlain) (Shift+Enter) | A new line that continues the containers without a new marker: the line belongs to the same item or quote. A caret in a line's prefix or marker opens a line above instead. |
 //! | [`Indent`](MarkdownCommand::Indent) (Tab) | List items the selections cover become children of their previous sibling (moved by its content offset), joining a list at its end; both lists are renumbered. In a quote, the paragraph gets one more `>` level. Elsewhere the indent unit is inserted. |
 //! | [`Outdent`](MarkdownCommand::Outdent) (Shift+Tab) | A nested item becomes the next sibling of its parent, taking the parent list's marker; what followed it in the parent becomes its children. In a quote, one `>` level is removed. Elsewhere one indent unit is removed from the line starts. |
@@ -149,8 +149,8 @@ impl MarkdownCommand {
         MarkdownCommand::Quote,
     ];
 
-    /// The command id (`editor.bold`, …). `editor.newline` and
-    /// `editor.renumber_list` are not bound to keys by default.
+    /// The command id (`editor.bold`, …). `editor.newline` is bound to
+    /// Enter by default; `editor.renumber_list` is not bound to a key.
     pub fn id(self) -> &'static str {
         match self {
             MarkdownCommand::Newline => "editor.newline",

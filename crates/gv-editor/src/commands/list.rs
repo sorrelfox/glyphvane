@@ -231,10 +231,22 @@ fn renumber_items(
 /// Renumbers the ordered list with `range` from its first number. One
 /// step.
 pub(crate) fn renumber_list(doc: &mut Doc, range: &Range<usize>, style: Style) -> bool {
+    renumber_list_from(doc, range, style, None)
+}
+
+/// Renumbers the ordered list with `range` from `start`, or from its first
+/// number when `start` is `None`. One step.
+fn renumber_list_from(
+    doc: &mut Doc,
+    range: &Range<usize>,
+    style: Style,
+    start: Option<u32>,
+) -> bool {
     let Some((_, items)) = list_items(doc, range) else {
         return false;
     };
-    let Some(start) = items.first().and_then(|(_, item)| item.marker.number()) else {
+    let Some(start) = start.or_else(|| items.first().and_then(|(_, item)| item.marker.number()))
+    else {
         return false;
     };
     let numbers = (0..).map(|k: u32| match style {
@@ -247,6 +259,16 @@ pub(crate) fn renumber_list(doc: &mut Doc, range: &Range<usize>, style: Style) -
 /// Renumbers the list of the item that starts at `item_start`, if it is
 /// ordered.
 fn renumber_list_of_item(doc: &mut Doc, item_start: usize, style: Style) -> bool {
+    renumber_list_of_item_from(doc, item_start, style, None)
+}
+
+/// [`renumber_list_of_item`] from `start` (see [`renumber_list_from`]).
+fn renumber_list_of_item_from(
+    doc: &mut Doc,
+    item_start: usize,
+    style: Style,
+    start: Option<u32>,
+) -> bool {
     let ctx = ctx_at(doc, item_start);
     let Some(k) = ctx
         .chain
@@ -258,7 +280,7 @@ fn renumber_list_of_item(doc: &mut Doc, item_start: usize, style: Style) -> bool
     match k.checked_sub(1).map(|list| &ctx.chain[list]) {
         Some(list) if list.list().is_some_and(|info| info.ordered) => {
             let range = list.range.clone();
-            renumber_list(doc, &range, style)
+            renumber_list_from(doc, &range, style, start)
         }
         _ => false,
     }
@@ -450,10 +472,21 @@ fn continue_list(
             }
             return;
         }
-        // An empty item at the top level ends the list.
+        // An empty item at the top level ends the list: its marker is
+        // removed. In the middle of a list the blank line left behind does
+        // not split it (CommonMark keeps one, now loose, list), so the
+        // following items are renumbered from the list's start number to
+        // stay sequential.
+        let following = following_renumber(doc, settings, ctx, ii);
         let start = item.token.start;
-        replace_and_place(doc, i, start..ctx.line.end(), String::new());
-        doc.sels[i] = SelectionSpec::caret(start);
+        let Some(summary) = doc.apply(vec![(start..ctx.line.end(), String::new())]) else {
+            return;
+        };
+        doc.sels[i] = SelectionSpec::caret(summary.transform_offset(start, Bias::Left));
+        if let Some((next, first)) = following {
+            let next = summary.transform_offset(next, Bias::Right);
+            renumber_list_of_item_from(doc, next, Style::Sequential, Some(first));
+        }
         return;
     }
     if ctx.blank && !on_marker {
@@ -582,6 +615,31 @@ fn continue_list(
     if renumber {
         renumber_list_of_item(doc, item_start, style);
     }
+}
+
+/// For the empty item at level `ii` of `ctx` in a sequentially numbered
+/// ordered list: the start of the item after it and the list's start
+/// number, if there is a following item.
+fn following_renumber(
+    doc: &Doc,
+    settings: &CommandSettings,
+    ctx: &LineCtx,
+    ii: usize,
+) -> Option<(usize, u32)> {
+    let list = ctx.chain.get(ii.checked_sub(1)?)?;
+    if !list.list().is_some_and(|info| info.ordered) {
+        return None;
+    }
+    let (_, items) = list_items(doc, &list.range)?;
+    if detect_style(&items, settings) != Style::Sequential {
+        return None;
+    }
+    let here = items
+        .iter()
+        .position(|(range, _)| *range == ctx.chain[ii].range)?;
+    let (next, _) = items.get(here + 1)?;
+    let first = items.first()?.1.marker.number()?;
+    Some((next.start, first))
 }
 
 /// Whether `rest` is a list marker alone (with trailing whitespace).

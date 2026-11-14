@@ -187,6 +187,44 @@ fn enter_on_empty_items() {
 }
 
 #[test]
+fn enter_on_empty_item_mid_list_renumbers() {
+    // The blank line left by the removed marker keeps one (loose) list, so
+    // the items after it are renumbered to stay sequential.
+    check_all(&[
+        (
+            CM,
+            Newline,
+            "1. one\n2. new\n3. |\n4. two\n",
+            "1. one\n2. new\n|\n3. two\n",
+        ),
+        (
+            CM,
+            Newline,
+            "1) one\n2) new\n3) |\n4) two\n",
+            "1) one\n2) new\n|\n3) two\n",
+        ),
+        (
+            CM,
+            Newline,
+            "1. one\r\n2. new\r\n3. |\r\n4. two\r\n",
+            "1. one\r\n2. new\r\n|\r\n3. two\r\n",
+        ),
+        (
+            CM,
+            Newline,
+            "1) one\r\n2) new\r\n3) |\r\n4) two\r\n",
+            "1) one\r\n2) new\r\n|\r\n3) two\r\n",
+        ),
+        (GF, Newline, "3. a\n4. |\n5. b\n6. c", "3. a\n|\n4. b\n5. c"),
+        (GF, Newline, "1. |\n2. b\n3. c", "|\n1. b\n2. c"),
+        (GF, Newline, "> 1. a\n> 2. |\n> 3. b", "> 1. a\n> |\n> 2. b"),
+        // Already sequential after the removal, or numbered all alike.
+        (GF, Newline, "1. a\n1. |\n1. b", "1. a\n|\n1. b"),
+        (GF, Newline, "1. a\n2. |", "1. a\n|"),
+    ]);
+}
+
+#[test]
 fn enter_in_quotes_and_code() {
     check_all(&[
         (GF, Newline, "> a|", "> a\n> |"),
