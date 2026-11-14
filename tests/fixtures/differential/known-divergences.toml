@@ -23,6 +23,11 @@
 #   decision     what gv-syntax does: "undecided" (decide in M1, against the
 #                spec text, never towards a bug), "match-comrak" or
 #                "match-spec"
+#   spec         the spec sections and examples a "match-spec" decision rests
+#                on (CommonMark 0.31.2 unless named)
+#   gv_html      gv-syntax's output for `input` (required when `input` is
+#                given and the decision is not "undecided");
+#                `decided_divergences_are_pinned` checks it
 #
 # [[comrak_spec_failure]] lists spec examples comrak itself fails, with the
 # reason; `comrak_passes_commonmark_spec` and
@@ -42,7 +47,24 @@ it and gives a thematic break. Spec example 216 shows the `===` variant
 becoming paragraph text, which both agree on because `===` cannot be a
 thematic break. The spec text supports the thematic break.
 """
-decision = "undecided"
+decision = "match-spec"
+spec = "4.7 Link reference definitions (example 216 for `===`), 4.3 Setext headings, 4.1 Thematic breaks"
+gv_html = "<hr />\n"
+
+[[divergence]]
+id = "refdef-then-dash-underline-in-list-item"
+profile = "commonmark"
+input = "- [a]: /u\n  ---\n- b\n"
+comrak_html = "<ul>\n<li>---</li>\n<li>b</li>\n</ul>\n"
+other = "commonmark.js: a thematic break in the first item"
+reason = """
+The same quirk as `refdef-then-dash-underline`, inside a list item: once the
+definition is removed nothing is left to underline, so `---` is a thematic
+break.
+"""
+decision = "match-spec"
+spec = "4.7 Link reference definitions, 4.3 Setext headings, 4.1 Thematic breaks"
+gv_html = "<ul>\n<li>\n<hr />\n</li>\n<li>b</li>\n</ul>\n"
 
 [[divergence]]
 id = "ordered-marker-at-eof"
@@ -56,7 +78,9 @@ cmark and comrak require an actual character after the marker, so a marker at
 the very end of input without a newline is not a list item. A bullet marker
 in the same position (`-`) is an empty list item in all implementations.
 """
-decision = "undecided"
+decision = "match-spec"
+spec = "5.2 List items, rule 3 (item starting with a blank line; examples 281, 283, 284)"
+gv_html = "<ol>\n<li></li>\n</ol>\n"
 
 [[divergence]]
 id = "html-type-7-after-lazy-paragraph"
@@ -70,7 +94,9 @@ lazy continuation of the paragraph inside the block quote. cmark and comrak
 check for block starts before lazy continuation and start an HTML block
 there.
 """
-decision = "undecided"
+decision = "match-spec"
+spec = "4.6 HTML blocks, type 7 cannot interrupt a paragraph (example 187); 5.1 Block quotes, laziness (examples 233, 247)"
+gv_html = "<blockquote>\n<p>foo\n<custom-tag></p>\n</blockquote>\n"
 
 [[divergence]]
 id = "list-starts-per-line-cap"
@@ -80,10 +106,91 @@ other = "spec: 101 nested lists"
 reason = """
 cmark and comrak open at most 100 list items on one line (a guard against
 quadratic behaviour); further markers become paragraph text. The spec has no
-limit. gv-syntax needs a nesting cap of its own (deep nesting is a
-pathological input), which may differ.
+limit. gv-syntax has no per-line limit; its nesting cap (MAX_NESTING, over a
+million open blocks) bounds the work instead.
 """
-decision = "undecided"
+decision = "match-spec"
+spec = "5.2 List items and 5.3 Lists: no limit on nesting or on markers per line"
+
+[[divergence]]
+id = "lone-cr-fence-line-joined-with-next-lf"
+profile = "commonmark"
+input = "> ```\r>\n"
+comrak_html = "<blockquote>\n<pre><code></code></pre>\n</blockquote>\n"
+other = "cmark (which normalizes line endings first): one empty line of code, as gv-syntax"
+reason = """
+The opening fence line ends with a lone CR, and the next line is `>` plus LF.
+comrak treats that CR and the LF of the next line as a single CRLF, so the
+empty code line disappears. A lone CR is a line ending of its own, so the
+code block holds one empty line.
+"""
+decision = "match-spec"
+spec = "2.1 Characters and lines (a line ending is LF, CR not followed by LF, or CRLF); 4.5 Fenced code blocks"
+gv_html = "<blockquote>\n<pre><code>\n</code></pre>\n</blockquote>\n"
+
+[[divergence]]
+id = "code-span-after-unmatched-longer-run"
+profile = "commonmark"
+input = "`` `e`x`e`\n"
+comrak_html = "<p>`` <code>e</code>x`e`</p>\n"
+other = "spec reading: two code spans, `<code>e</code>x<code>e</code>`"
+reason = """
+After a backtick string that has no closer (the leading ``), comrak finds the
+first single-backtick code span but not the second one. Each backtick string
+of length 1 after `x` begins a code span that ends at the next backtick string
+of the same length, so both spans exist.
+"""
+decision = "match-spec"
+spec = "6.1 Code spans (examples 339, 349)"
+gv_html = "<p>`` <code>e</code>x<code>e</code></p>\n"
+
+[[divergence]]
+id = "code-span-crlf-keeps-cr"
+profile = "commonmark"
+input = "`a\r\nb`"
+comrak_html = "<p><code>a\r b</code></p>\n"
+other = "spec reading: <code>a b</code>"
+reason = """
+Inside a code span, comrak turns only the LF of a CRLF line ending into a
+space and keeps the CR. A CRLF is one line ending, and line endings in a
+code span become one space each.
+"""
+decision = "match-spec"
+spec = "2.1 Characters and lines; 6.1 Code spans (example 335)"
+gv_html = "<p><code>a b</code></p>\n"
+
+[[divergence]]
+id = "escaped-ampersand-before-entity-in-title-or-info"
+profile = "commonmark"
+input = "``` \\&copy;\n```\n"
+comrak_html = "<pre><code class=\"language-\\©\"></code></pre>\n"
+other = "spec reading: class=\"language-&amp;copy;\" (the escaped `&` starts no entity)"
+reason = """
+In info strings and link titles, comrak decodes entity references before it
+processes backslash escapes, so `\\&copy;` becomes a backslash and `©`.
+Backslash escapes work in both places, and an escaped `&` cannot start an
+entity reference, so the text is `&copy;` literally.
+"""
+decision = "match-spec"
+spec = "2.4 Backslash escapes (examples 14, 22, 24); 2.5 Entity and numeric character references"
+gv_html = "<pre><code class=\"language-&amp;copy;\"></code></pre>\n"
+
+[[divergence]]
+id = "lazy-first-line-keeps-leading-whitespace"
+profile = "commonmark"
+input = "> [f]: /u\n  b\n"
+comrak_html = "<blockquote>\n<p>  b</p>\n</blockquote>\n"
+other = "spec reading: <p>b</p>"
+reason = """
+When a reference definition takes the first lines of a paragraph, the rest of
+the paragraph can start with a lazy continuation line. comrak keeps that
+line's leading whitespace; the spec strips initial spaces and tabs from a
+paragraph's raw content. The HTML normalizer hides the difference, except
+where whitespace is significant (inside raw `<pre>` HTML).
+"""
+decision = "match-spec"
+spec = "4.8 Paragraphs (examples 222, 224); 4.7 Link reference definitions; 5.1 Block quotes, laziness"
+gv_html = "<blockquote>\n<p>b</p>\n</blockquote>\n"
 
 [[divergence]]
 id = "reference-expansion-cap"
@@ -106,6 +213,7 @@ reproduce = "GFM spec example 652 (tagfilter extension)"
 other = "cmark-gfm with the tagfilter extension escapes <title>, <textarea>, <style>, <xmp>, <iframe>, <noembed>, <noframes>, <script> and <plaintext>"
 reason = "comrak 0.59 has no tagfilter option; raw HTML passes through unchanged."
 decision = "match-spec"
+spec = "GFM 0.29, Disallowed Raw HTML (extension), example 652"
 
 # comrak passes all 652 CommonMark 0.31.2 examples.
 #

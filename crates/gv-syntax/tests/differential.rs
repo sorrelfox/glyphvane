@@ -38,6 +38,10 @@ struct Divergence {
     input: Option<String>,
     /// comrak's output for `input`, as recorded.
     comrak_html: Option<String>,
+    /// `undecided`, `match-comrak` or `match-spec`.
+    decision: String,
+    /// gv-syntax's output for `input`, for decided entries.
+    gv_html: Option<String>,
 }
 
 /// A spec example comrak fails.
@@ -63,12 +67,31 @@ fn load_known() -> (Vec<Divergence>, Vec<SpecFailure>) {
         for key in ["id", "profile", "reason", "decision"] {
             assert!(s(t, key).is_some(), "divergence {t:?} lacks `{key}`");
         }
-        divergences.push(Divergence {
+        let d = Divergence {
             id: s(t, "id").unwrap_or_default(),
             profile: s(t, "profile").unwrap_or_default(),
             input: s(t, "input"),
             comrak_html: s(t, "comrak_html"),
-        });
+            decision: s(t, "decision").unwrap_or_default(),
+            gv_html: s(t, "gv_html"),
+        };
+        assert!(
+            ["undecided", "match-comrak", "match-spec"].contains(&d.decision.as_str()),
+            "{}: unknown decision `{}`",
+            d.id,
+            d.decision
+        );
+        if d.decision != "undecided" && d.input.is_some() {
+            assert!(d.gv_html.is_some(), "{}: decided without `gv_html`", d.id);
+        }
+        if d.decision == "match-spec" {
+            assert!(
+                s(t, "spec").is_some(),
+                "{}: `match-spec` without `spec`",
+                d.id
+            );
+        }
+        divergences.push(d);
     }
     let mut failures = Vec::new();
     for t in doc
@@ -223,6 +246,194 @@ fn known_divergences_are_current() {
     }
 }
 
+/// Each decided divergence renders as recorded in `gv_html`; for
+/// `match-spec`, that differs from comrak, and for `match-comrak` it is
+/// comrak's output.
+#[test]
+fn decided_divergences_are_pinned() {
+    let (divergences, _) = load_known();
+    let mut pinned = 0;
+    for d in divergences.iter().filter(|d| d.profile == "commonmark") {
+        let (Some(input), Some(expected)) = (&d.input, &d.gv_html) else {
+            continue;
+        };
+        let ours = render_commonmark_html(input);
+        assert_eq!(&ours, expected, "{}: gv-syntax output changed", d.id);
+        let comrak = d.comrak_html.as_deref().expect("comrak_html");
+        match d.decision.as_str() {
+            "match-spec" => assert_ne!(ours, comrak, "{}: no longer diverges", d.id),
+            "match-comrak" => assert_eq!(ours, comrak, "{}", d.id),
+            _ => {}
+        }
+        pinned += 1;
+    }
+    assert!(
+        pinned >= 7,
+        "only {pinned} decided divergences have an input"
+    );
+}
+
+/// Recognizes a divergence from the input, our output and comrak's output.
+type InlineClass = fn(&str, &str, &str) -> bool;
+
+/// Decided divergences in inline content or in whitespace, which the block
+/// outline does not show, recognized by the shape of the two outputs.
+/// Each is the `id` of a `match-spec` entry of the divergences file.
+const INLINE_CLASSES: &[(&str, InlineClass)] = &[
+    (
+        "lazy-first-line-keeps-leading-whitespace",
+        lazy_first_line_whitespace,
+    ),
+    (
+        "code-span-after-unmatched-longer-run",
+        code_span_after_unmatched_run,
+    ),
+    ("code-span-crlf-keeps-cr", code_span_crlf),
+    (
+        "escaped-ampersand-before-entity-in-title-or-info",
+        escaped_ampersand,
+    ),
+];
+
+/// Whether `md` changed by `rewrite` renders, in both gv-syntax and
+/// comrak, as gv-syntax renders `md`: the rewrite removes exactly what
+/// comrak handles differently, without changing what it means to us.
+fn agrees_after(md: &str, ours: &str, rewrite: impl Fn(&str) -> Option<String>) -> bool {
+    rewrite(md).is_some_and(|md2| {
+        render_commonmark_html(&md2) == ours && comrak_commonmark_html(&md2) == ours
+    })
+}
+
+/// comrak keeps the leading whitespace of a lazy line that starts a
+/// paragraph. Recognized when comrak agrees once one indented line is no
+/// longer lazy: its whitespace removed (our paragraph strips it), or the line
+/// continued with a block quote marker; or when comrak's output is ours with
+/// spaces and tabs at the start of paragraphs.
+fn lazy_first_line_whitespace(md: &str, ours: &str, comrak: &str) -> bool {
+    let mut stripped = String::with_capacity(comrak.len());
+    let mut rest = comrak;
+    while let Some(i) = rest.find("<p>") {
+        stripped.push_str(&rest[..i + 3]);
+        rest = rest[i + 3..].trim_start_matches([' ', '\t']);
+    }
+    stripped.push_str(rest);
+    if stripped == ours {
+        return true;
+    }
+    let lines: Vec<&str> = md.split_inclusive('\n').collect();
+    (1..lines.len()).any(|i| {
+        let line = lines[i];
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        if trimmed.len() == line.len() {
+            return false;
+        }
+        [trimmed.to_owned(), format!(">{line}"), format!("> {line}")]
+            .into_iter()
+            .any(|replacement| {
+                agrees_after(md, ours, |_| {
+                    let mut md2 = lines[..i].concat();
+                    md2.push_str(&replacement);
+                    md2.push_str(&lines[i + 1..].concat());
+                    Some(md2)
+                })
+            })
+    })
+}
+
+/// comrak keeps a CR inside a code span, and normalizing CRLF to LF makes
+/// it agree.
+fn code_span_crlf(md: &str, ours: &str, comrak: &str) -> bool {
+    let cr_in_code = comrak.split("<code").skip(1).any(|rest| {
+        rest.split("</code>")
+            .next()
+            .is_some_and(|code| code.contains('\r'))
+    });
+    cr_in_code && agrees_after(md, ours, |md| Some(md.replace("\r\n", "\n")))
+}
+
+/// Writing an escaped `&` as the entity `&amp;` (which means the same)
+/// makes comrak agree: it decodes entities in link titles and info strings
+/// before backslash escapes.
+fn escaped_ampersand(md: &str, ours: &str, _comrak: &str) -> bool {
+    md.contains("\\&") && agrees_after(md, ours, |md| Some(md.replace("\\&", "&amp;")))
+}
+
+/// The input has a backtick string of length two or more, and comrak's
+/// output equals ours with one or more of our last code spans written back
+/// as backtick-delimited text.
+fn code_span_after_unmatched_run(md: &str, ours: &str, comrak: &str) -> bool {
+    if !md.contains("``") || ours == comrak {
+        return false;
+    }
+    let starts: Vec<usize> = ours.match_indices("<code>").map(|(i, _)| i).collect();
+    let mut html = ours.to_owned();
+    // From the last span backwards: the text after a span already agrees,
+    // so the span's literal form must end comrak's output just before it.
+    for &start in starts.iter().rev() {
+        let Some(len) = html[start..].find("</code>") else {
+            return false;
+        };
+        let end = start + len + "</code>".len();
+        let content = html[start + "<code>".len()..start + len].to_owned();
+        if content.contains(['`', '<', '\n']) {
+            return false;
+        }
+        let literal = (1..=8).map(|n| "`".repeat(n)).find_map(|ticks| {
+            let literal = format!("{ticks}{content}{ticks}");
+            comrak
+                .ends_with(&format!("{literal}{}", &html[end..]))
+                .then_some(literal)
+        });
+        let Some(literal) = literal else {
+            return false;
+        };
+        html.replace_range(start..end, &literal);
+        if html == comrak {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the HTML difference for a minimized input is one of the decided
+/// inline or whitespace divergences in `decided` (ids of `match-spec`
+/// entries).
+fn decided_inline_divergence(md: &str, decided: &[&str]) -> bool {
+    let ours = render_commonmark_html(md);
+    let comrak = comrak_commonmark_html(md);
+    INLINE_CLASSES
+        .iter()
+        .any(|(id, class)| decided.contains(id) && class(md, &ours, &comrak))
+}
+
+/// Each inline class recognizes the recorded input of its entry, and only
+/// that one.
+#[test]
+fn inline_classes_recognize_their_entries() {
+    let (divergences, _) = load_known();
+    for (id, class) in INLINE_CLASSES {
+        let d = divergences
+            .iter()
+            .find(|d| d.id == *id)
+            .unwrap_or_else(|| panic!("{id} is not in the divergences file"));
+        assert_eq!(d.decision, "match-spec", "{id}");
+        for other in &divergences {
+            let Some(input) = &other.input else { continue };
+            if other.profile != "commonmark" {
+                continue;
+            }
+            let ours = render_commonmark_html(input);
+            let comrak = comrak_commonmark_html(input);
+            assert_eq!(
+                class(input, &ours, &comrak),
+                other.id == *id,
+                "{id} on the input of {}",
+                other.id
+            );
+        }
+    }
+}
+
 /// Whether a minimized divergence is one of the decided block-level ones
 /// (see `support::comrak_outline::decided`).
 fn decided_block_divergence(md: &str) -> bool {
@@ -254,6 +465,11 @@ fn differential_vs_comrak() {
         .filter(|d| d.profile == "commonmark")
         .filter_map(|d| d.input.as_deref())
         .collect();
+    let decided: Vec<&str> = divergences
+        .iter()
+        .filter(|d| d.decision == "match-spec")
+        .map(|d| d.id.as_str())
+        .collect();
     let differs = |md: &str| !same_html(&render_commonmark_html(md), &comrak_commonmark_html(md));
 
     let mut rng = Rng::new(seed);
@@ -265,7 +481,10 @@ fn differential_vs_comrak() {
             continue;
         }
         let small = minimize(&doc, differs);
-        if known.contains(&small.as_str()) || decided_block_divergence(&small) {
+        if known.contains(&small.as_str())
+            || decided_block_divergence(&small)
+            || decided_inline_divergence(&small, &decided)
+        {
             known_hits += 1;
         } else {
             *new_failures.entry(small).or_default() += 1;
