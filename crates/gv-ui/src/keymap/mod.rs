@@ -172,7 +172,8 @@ pub fn shortcut(cx: &App, command: &str) -> Option<String> {
 /// Installs the built-in bindings and the handlers of the app-level
 /// commands. Called by [`crate::init`], after the widgets' own keys.
 pub(crate) fn init(cx: &mut App) {
-    cx.on_action(|_: &actions::app::Quit, cx| cx.quit());
+    // Quitting saves what autosave may save and syncs the journals first.
+    cx.on_action(|_: &actions::app::Quit, cx| crate::files::quit(cx));
     cx.on_action(|_: &actions::app::OpenMenu, cx| crate::menu::open_in_last_window(cx));
     cx.on_action(|_: &actions::view::CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &actions::view::Preview, cx| show_mode(ViewMode::Preview, cx));

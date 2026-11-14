@@ -128,10 +128,6 @@ impl WindowVault {
 
     /// Publishes a newer snapshot (from the file watcher, or after a file
     /// operation) and tells the views.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the watcher, coming next")
-    )]
     pub fn publish(&mut self, index: PathIndex, cx: &mut Context<'_, Self>) {
         self.index.store(index);
         cx.notify();
@@ -140,6 +136,11 @@ impl WindowVault {
     #[cfg(test)]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The shared index, for the vault watcher.
+    pub fn shared_index(&self) -> Arc<SharedPathIndex> {
+        self.index.clone()
     }
 
     /// The root folder's name.

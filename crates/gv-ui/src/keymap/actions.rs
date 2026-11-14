@@ -44,6 +44,7 @@ command_actions! {
     file {
         NewNote = "file.new_note",
         Save = "file.save",
+        SaveAs = "file.save_as",
         Open = "file.open",
     }
     tabs {

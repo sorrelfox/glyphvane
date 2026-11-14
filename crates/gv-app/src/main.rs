@@ -158,11 +158,14 @@ fn main() -> ExitCode {
             startup::mark("GPUI application started");
             gv_ui::init(cx, app_settings);
             gv_ui::keymap::install(cx, locations.as_ref());
+            // The crash journal and file watching; safe mode keeps both:
+            // they protect the user's text.
+            gv_ui::files::install(cx, locations.as_ref());
             ui_session::install(cx, session_store);
             if let Some(path) = watched {
                 settings::watch(path, cx);
             }
-            startup::mark("UI set up (theme, keymap, session, settings watcher)");
+            startup::mark("UI set up (theme, keymap, journal, session, settings watcher)");
             let opened = if restores_session(&request) {
                 restore(request, cx)
             } else {
@@ -172,6 +175,9 @@ fn main() -> ExitCode {
                 Ok(window) => {
                     startup::mark("window created");
                     gpu::report_adapter(window, cx);
+                    // Documents with unsaved changes from a crash (or a
+                    // close without saving) reopen with their text.
+                    gv_ui::files::recover_unsaved(cx);
                 }
                 Err(err) => {
                     if gpu::is_gpu_error(&err) {

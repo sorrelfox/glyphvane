@@ -43,6 +43,8 @@ fn the_menus_follow_each_platform() {
             [
                 "tabs.new",
                 "file.open",
+                "file.save",
+                "file.save_as",
                 "tabs.close",
                 "tabs.reopen_closed",
                 "app.quit"
@@ -61,8 +63,12 @@ fn the_menus_follow_each_platform() {
         assert_eq!(
             items(platform, "Edit"),
             [
+                "editor.undo",
+                "editor.redo",
+                "editor.cut",
                 "editor.copy",
                 "editor.copy_as_markdown",
+                "editor.paste",
                 "editor.select_all",
                 "search.find"
             ]
@@ -75,6 +81,7 @@ fn the_menus_follow_each_platform() {
                 "view.split",
                 "workspace.toggle_sidebar",
                 "workspace.toggle_panel",
+                "editor.toggle_whitespace",
                 "view.cycle_theme",
                 "view.zoom_in",
                 "view.zoom_out",
@@ -130,9 +137,15 @@ fn shortcut_labels_follow_the_platform() {
         [
             "Settings… ⌘,",
             "Quit Glyphvane ⌘Q",
+            "Save ⌘S",
+            "Save as… ⇧⌘S",
             "Close tab ⌘W",
             "Reopen closed tab ⇧⌘T",
+            "Undo ⌘Z",
+            "Redo ⇧⌘Z",
+            "Cut ⌘X",
             "Copy ⌘C",
+            "Paste ⌘V",
             "Select all ⌘A",
             "Find ⌘F",
             "Cycle theme ⌘K ⌘T",
@@ -144,10 +157,16 @@ fn shortcut_labels_follow_the_platform() {
         ]
     );
     let others = [
+        "Save Ctrl+S",
+        "Save as… Ctrl+Shift+S",
         "Close tab Ctrl+W",
         "Reopen closed tab Ctrl+Shift+T",
         "Quit Ctrl+Q",
+        "Undo Ctrl+Z",
+        "Redo Ctrl+Shift+Z",
+        "Cut Ctrl+X",
         "Copy Ctrl+C",
+        "Paste Ctrl+V",
         "Select all Ctrl+A",
         "Find Ctrl+F",
         "Cycle theme Ctrl+K Ctrl+T",
@@ -199,12 +218,16 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
     assert_eq!(
         actions(&menus[2]),
         [
+            ("Undo".to_owned(), "editor::Undo", true),
+            ("Redo".to_owned(), "editor::Redo", true),
+            ("Cut".to_owned(), "editor::Cut", true),
             ("Copy".to_owned(), "editor::Copy", true),
             (
                 "Copy as Markdown".to_owned(),
                 "editor::CopyAsMarkdown",
                 false
             ),
+            ("Paste".to_owned(), "editor::Paste", true),
             ("Select all".to_owned(), "editor::SelectAll", true),
             ("Find".to_owned(), "search::Find", false),
         ]
@@ -213,7 +236,19 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         .items()
         .map(|i| i.role)
         .collect();
-    assert_eq!(roles, [Some(Role::Copy), None, Some(Role::SelectAll), None]);
+    assert_eq!(
+        roles,
+        [
+            Some(Role::Undo),
+            Some(Role::Redo),
+            Some(Role::Cut),
+            Some(Role::Copy),
+            None,
+            Some(Role::Paste),
+            Some(Role::SelectAll),
+            None
+        ]
+    );
 }
 
 // --- The popover ----------------------------------------------------------------
@@ -385,7 +420,7 @@ fn the_menu_shows_shortcuts_checks_and_disabled_items(cx: &mut TestAppContext) {
     assert_eq!(close.size.height, px(MENU_ROW));
 
     // A disabled item does nothing and keeps the menu open.
-    f.click("app-menu-item:tabs.new");
+    f.click("app-menu-item:file.save_as");
     assert!(f.is_open());
 
     // View: the current mode is checked; chords are labelled in full.

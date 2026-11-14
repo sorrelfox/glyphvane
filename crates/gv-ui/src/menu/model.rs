@@ -6,8 +6,10 @@
 //! the application has.
 //!
 //! Items name commands of the keymap, so a menu runs exactly what the keys
-//! run and shows their keys. Items whose command nothing handles yet (New
-//! tab, Open file, About, zoom) are shown disabled.
+//! run and shows their keys. Items whose command nothing handles where the
+//! focus is are shown disabled: Open file, Save as (no file dialog yet),
+//! About and zoom always; Undo, Redo, Cut, Paste and Show whitespace
+//! outside the editor.
 
 use gv_settings::keymap::Platform;
 
@@ -78,7 +80,11 @@ pub enum Requirement {
 /// A standard edit item the system recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    Undo,
+    Redo,
+    Cut,
     Copy,
+    Paste,
     SelectAll,
 }
 
@@ -185,9 +191,14 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             ],
         ));
     }
+    // TODO(files): Save as needs a file dialog; until then nothing handles
+    // it and the item stays disabled.
     let mut file = vec![
         item("tabs.new", "New tab"),
         item("file.open", "Open file…"),
+        SEPARATOR,
+        item("file.save", "Save"),
+        item("file.save_as", "Save as…"),
         SEPARATOR,
         item("tabs.close", "Close tab"),
         item("tabs.reopen_closed", "Reopen closed tab"),
@@ -199,8 +210,13 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
     menus.push(Menu::new(
         "Edit",
         [
+            with_role("editor.undo", "Undo", Role::Undo),
+            with_role("editor.redo", "Redo", Role::Redo),
+            SEPARATOR,
+            with_role("editor.cut", "Cut", Role::Cut),
             with_role("editor.copy", "Copy", Role::Copy),
             item("editor.copy_as_markdown", "Copy as Markdown"),
+            with_role("editor.paste", "Paste", Role::Paste),
             with_role("editor.select_all", "Select all", Role::SelectAll),
             SEPARATOR,
             item("search.find", "Find"),
@@ -215,6 +231,8 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             SEPARATOR,
             item("workspace.toggle_sidebar", "Toggle sidebar"),
             item("workspace.toggle_panel", "Toggle right panel"),
+            SEPARATOR,
+            item("editor.toggle_whitespace", "Show whitespace"),
             SEPARATOR,
             item("view.cycle_theme", "Cycle theme"),
             SEPARATOR,

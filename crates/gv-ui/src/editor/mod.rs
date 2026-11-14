@@ -40,13 +40,16 @@
 //!   Alt-drag selects a column (07 § Buffer, selections and undo); the
 //!   wheel scrolls, sideways with Shift.
 //!
-//! # Not saved
+//! # The file
 //!
-//! Saving is not built yet: edits live in memory. When the tab goes back
+//! [`file`] holds the document's file side: the crash journal every
+//! edit goes to, saving (Mod+S and autosave), changes made on disk by other
+//! programs and crash recovery ([`crate::files`]). When the tab goes back
 //! to Preview, the Reading view is rebuilt from the editor's text
-//! ([`EditorView::take_preview_text`]).
+//! ([`EditorView::take_preview_text`]), saved or not.
 
 mod element;
+mod file;
 mod highlight;
 mod input;
 mod layout;
@@ -59,22 +62,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, FocusHandle, Focusable,
-    FontWeight, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Task, Window, div, px,
+    App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, EventEmitter,
+    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Task, Window, div, px,
 };
 use gv_editor::{DeleteUnit, Editor, EditorEvent, Motion};
 use gv_syntax::{ParseOptions, SyntaxTree};
-use gv_text::{Buffer, DecodeStatus, Revision};
+use gv_text::{Buffer, Revision};
 use gv_vault::PathIndex;
+use gv_vault::files::journal::DocumentKey;
 
 use crate::appearance::Appearance;
+use crate::files::watch::WatchHandle;
+use crate::files::worker::{Msg, Worker};
+use crate::files::{self, ExecutorClock};
 use crate::inline::FontFamilies;
 use crate::keymap::actions::editor as commands;
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
 use element::{EditorElement, Press, Scrollbar};
+pub use file::DocEvent;
+use file::{DocState, Loaded};
 use highlight::{HighlightCache, LinkStatuses};
 use rows::{Fonts, RowCache};
 use syntax::{Background, EditQueue, Syntax, UI_BUDGET};
@@ -251,6 +260,8 @@ pub(crate) struct Doc {
     syntax: Syntax,
     highlights: HighlightCache,
     rows: RowCache,
+    /// The file, journal and autosave side.
+    state: DocState,
 }
 
 impl std::fmt::Debug for Doc {
@@ -258,6 +269,7 @@ impl std::fmt::Debug for Doc {
         f.debug_struct("Doc")
             .field("editor", &self.editor)
             .field("syntax", &self.syntax)
+            .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
@@ -271,31 +283,14 @@ pub enum Top {
     Line(usize),
 }
 
-/// A loaded file, before it gets an editor.
-struct Loaded {
-    buffer: Buffer,
-    tree: SyntaxTree,
-    lossy: bool,
-}
-
-fn load(path: &Path, options: ParseOptions) -> Result<Loaded, String> {
-    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
-    let decoded = gv_text::decode(&bytes).map_err(|err| err.to_string())?;
-    drop(bytes);
-    let lossy = matches!(decoded.status, DecodeStatus::Lossy(_));
-    let buffer = Buffer::from_decoded(&decoded);
-    let tree = SyntaxTree::parse_with(buffer.text(), options);
-    Ok(Loaded {
-        buffer,
-        tree,
-        lossy,
-    })
-}
-
 /// The Source view of one tab.
 pub struct EditorView {
     focus: FocusHandle,
     path: Option<PathBuf>,
+    /// The number of an untitled document.
+    untitled: Option<u64>,
+    /// The window's watchers, told about every save.
+    watch: Option<WatchHandle>,
     status: EditorStatus,
     doc: Option<Doc>,
     options: ParseOptions,
@@ -347,6 +342,8 @@ impl EditorView {
         Self {
             focus: cx.focus_handle(),
             path: None,
+            untitled: None,
+            watch: None,
             status: EditorStatus::Loading,
             doc: None,
             options,
@@ -375,32 +372,90 @@ impl EditorView {
         ParseOptions::for_profile(crate::reader::PROFILE.as_str()).unwrap_or_default()
     }
 
-    /// Loads `path` for editing, with link statuses from `index`.
+    /// Tells the view the window's watchers, which hear about its saves.
+    pub(crate) fn set_watch(&mut self, watch: Option<WatchHandle>) {
+        self.watch = watch;
+    }
+
+    /// Loads `path` for editing, with link statuses from `index`. The file
+    /// is read, decoded and parsed off the UI thread, with its crash
+    /// journal (recovering one an earlier session left).
     pub fn open(&mut self, path: PathBuf, index: Option<PathIndex>, cx: &mut Context<'_, Self>) {
+        // The journal and the watcher know a file by its absolute path.
+        let path = std::path::absolute(&path).unwrap_or(path);
         self.links = LinkStatuses::new(Some(&path), index.as_ref());
         self.path = Some(path.clone());
+        self.untitled = None;
         self.status = EditorStatus::Loading;
         self.doc = None;
+        let key = DocumentKey::Path(path.clone());
+        let claim = files::claim(cx, &key);
+        let store = match (&claim, files::store(cx)) {
+            (Some(_), store) => store,
+            (None, Some(_)) => {
+                tracing::warn!(
+                    "{} is edited in another tab, which journals it",
+                    path.display()
+                );
+                None
+            }
+            (None, None) => None,
+        };
         let options = self.options;
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load(&path, options) })
+                .background_spawn(async move { file::load_file(&path, options, store.as_ref()) })
                 .await;
-            this.update(cx, |view, cx| view.finish_load(result, cx))
+            this.update(cx, |view, cx| view.finish_load(key, result, claim, cx))
                 .ok();
         }));
         cx.notify();
     }
 
-    /// Edits `text` (not a file), for tests and scratch documents.
-    pub fn set_text(&mut self, text: &str, cx: &mut Context<'_, Self>) {
-        let buffer = Buffer::new(text);
-        let tree = SyntaxTree::parse_with(buffer.text(), self.options);
-        self.install(buffer, tree);
+    /// Opens untitled document `n`: empty, or the text its journal holds.
+    pub fn open_untitled(&mut self, n: u64, cx: &mut Context<'_, Self>) {
+        self.links = LinkStatuses::new(None, None);
+        self.path = None;
+        self.untitled = Some(n);
+        self.status = EditorStatus::Loading;
+        self.doc = None;
+        let key = DocumentKey::Untitled(n);
+        let claim = files::claim(cx, &key);
+        let store = claim.as_ref().and_then(|_| files::store(cx));
+        let options = self.options;
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move { file::load_untitled(n, options, store.as_ref()) })
+                .await;
+            this.update(cx, |view, cx| view.finish_load(key, Ok(loaded), claim, cx))
+                .ok();
+        }));
         cx.notify();
     }
 
-    fn finish_load(&mut self, result: Result<Loaded, String>, cx: &mut Context<'_, Self>) {
+    /// The number of an untitled document.
+    pub fn untitled(&self) -> Option<u64> {
+        self.untitled
+    }
+
+    /// Edits `text` (not a file), for tests and scratch documents. It is
+    /// never journaled or saved.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let buffer = Buffer::new(text);
+        let tree = SyntaxTree::parse_with(buffer.text(), self.options);
+        let clock = ExecutorClock(cx.background_executor().clone());
+        let state = DocState::new(None, None, None, buffer.snapshot(), clock);
+        self.install(buffer, tree, state);
+        cx.notify();
+    }
+
+    fn finish_load(
+        &mut self,
+        key: DocumentKey,
+        result: Result<Loaded, String>,
+        claim: Option<files::Claim>,
+        cx: &mut Context<'_, Self>,
+    ) {
         self._load = None;
         match result {
             Ok(loaded) => {
@@ -411,7 +466,21 @@ impl EditorView {
                         name.map(|n| n.to_string()).unwrap_or_default()
                     );
                 }
-                self.install(loaded.buffer, loaded.tree);
+                let executor = cx.background_executor().clone();
+                let worker = Worker::spawn(loaded.journal, claim, &executor);
+                let state = DocState::new(
+                    Some(key),
+                    loaded.file,
+                    Some(worker),
+                    loaded.buffer.snapshot(),
+                    ExecutorClock(executor),
+                );
+                self.install(loaded.buffer, loaded.tree, state);
+                if let Some(recovered) = loaded.recovered {
+                    self.apply_recovered(recovered, cx);
+                }
+                self.after_edit(cx);
+                cx.emit(DocEvent::Loaded);
             }
             Err(err) => {
                 tracing::warn!("cannot edit {:?}: {err}", self.path);
@@ -421,14 +490,27 @@ impl EditorView {
         cx.notify();
     }
 
-    fn install(&mut self, buffer: Buffer, tree: SyntaxTree) {
+    fn install(&mut self, buffer: Buffer, tree: SyntaxTree, state: DocState) {
         let mut editor = Editor::new(buffer);
         let queue = EditQueue::default();
         let sink = queue.clone();
+        let journal = state.worker().map(Worker::sender);
+        let pause = state.pause.clone();
+        let edited = state.edited.clone();
         editor.observe(move |event| {
             if let EditorEvent::Edited(edit) = event {
                 sink.borrow_mut()
                     .push_back((edit.text.clone(), edit.summary.clone()));
+                edited.set(true);
+                if let Some(journal) = &journal
+                    && !pause.get()
+                {
+                    // The worker is gone only when the view is.
+                    let _ = journal.unbounded_send(Msg::Record {
+                        summary: edit.summary.clone(),
+                        text: edit.text.clone(),
+                    });
+                }
             }
         });
         let syntax = Syntax::new(tree, editor.snapshot());
@@ -439,6 +521,7 @@ impl EditorView {
             syntax,
             highlights: HighlightCache::default(),
             rows: RowCache::default(),
+            state,
         });
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
@@ -534,6 +617,7 @@ impl EditorView {
     /// (IME spike, Problem 2).
     fn input_changed(&mut self, cx: &mut Context<'_, Self>) {
         self.pump_syntax(cx);
+        self.after_edit(cx);
         self.autoscroll = true;
         cx.notify();
     }
@@ -792,6 +876,8 @@ fn split_for_carets(text: &str, lengths: Option<&[usize]>, count: usize) -> Opti
 
 /// The row height.
 const LINE: f32 = text::EDITOR.line;
+
+impl EventEmitter<DocEvent> for EditorView {}
 
 impl Focusable for EditorView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

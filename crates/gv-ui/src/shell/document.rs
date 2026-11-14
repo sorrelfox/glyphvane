@@ -7,15 +7,16 @@
 //! # Switching modes
 //!
 //! A tab's Source view is made the first time the tab goes to Edit and kept
-//! while the tab shows the same file. The panels are never touched.
+//! while the tab shows the same file (an untitled tab has one from the
+//! start). The panels are never touched.
 //!
 //! - **Preview → Edit:** the editor scrolls so that the source line of the
 //!   block at the top of the Reading view is at its top.
 //! - **Edit → Preview:** the Reading view scrolls to the line at the top of
-//!   the editor. The text is not saved yet, so when it changed since the
-//!   Reading view last got it, the Reading view is rebuilt from the
-//!   editor's text ([`Reader::open_text`](crate::reader::Reader::open_text))
-//!   instead of the file.
+//!   the editor. When the text changed since the Reading view last got it
+//!   (saved or not), the Reading view is rebuilt from the editor's text
+//!   ([`Reader::open_text`](crate::reader::Reader::open_text)) instead of
+//!   the file.
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
@@ -34,8 +35,8 @@ impl Workspace {
     pub(super) fn render_document(&self, theme: &Theme, _cx: &mut Context<'_, Self>) -> AnyElement {
         let area = div()
             .flex_1()
-            .min_w_0()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .overflow_hidden()
             .bg(theme.surface.page);
         let tab = self.active_tab();
@@ -104,6 +105,13 @@ impl Workspace {
         if let Some(editor) = &tab.editor {
             return Some(editor.clone());
         }
+        if let (None, Some(n)) = (&tab.path, tab.untitled) {
+            let editor = cx.new(|cx| EditorView::new(EditorView::profile_options(), cx));
+            self.adopt_editor(&editor, cx);
+            editor.update(cx, |e, cx| e.open_untitled(n, cx));
+            self.tabs[index].editor = Some(editor.clone());
+            return Some(editor);
+        }
         let path = tab.path.clone()?;
         // Where the tab is: a restored anchor, or the line it was opened at.
         let top = match (tab.scroll.clone(), tab.position) {
@@ -114,15 +122,16 @@ impl Workspace {
             _ => None,
         };
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
-        let editor = cx.new(|cx| {
-            let mut editor = EditorView::new(EditorView::profile_options(), cx);
+        let editor = cx.new(|cx| EditorView::new(EditorView::profile_options(), cx));
+        // Watchers first: the view tells them about its saves.
+        self.adopt_editor(&editor, cx);
+        editor.update(cx, |editor, cx| {
             editor.open(path, snapshot, cx);
             match top {
                 Some(Top::Offset(offset)) => editor.scroll_to_offset(offset, cx),
                 Some(Top::Line(line)) => editor.scroll_to_line(line, cx),
                 None => {}
             }
-            editor
         });
         self.tabs[index].editor = Some(editor.clone());
         Some(editor)

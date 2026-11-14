@@ -6,6 +6,7 @@
 pub mod appearance;
 pub mod chrome;
 pub mod editor;
+pub mod files;
 pub mod find;
 pub mod icons;
 pub mod inline;

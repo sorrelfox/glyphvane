@@ -51,7 +51,18 @@ pub mod size {
         pub const PAD_LEFT: f32 = 10.0;
         pub const PAD_RIGHT: f32 = 4.0;
         pub const CLOSE_BUTTON: f32 = 18.0;
+        /// The unsaved dot that replaces the close icon.
+        pub const UNSAVED_DOT: f32 = 7.0;
     }
+
+    /// Infobar buttons: action buttons 22 high, the dismiss button 22 × 22.
+    pub mod infobar {
+        pub const BUTTON_HEIGHT: f32 = 22.0;
+        pub const DISMISS: f32 = 22.0;
+    }
+
+    /// The tooltip: 22 high.
+    pub const TOOLTIP: f32 = 22.0;
 
     pub mod icon_button {
         pub const WIDTH: f32 = 26.0;
@@ -176,6 +187,21 @@ pub mod spacing {
         pub const STATUS_MARKER_GAP: f32 = 4.0;
         /// Link status: space between the ambiguous icon and the count.
         pub const STATUS_COUNT_GAP: f32 = 2.0;
+    }
+
+    /// Infobars: padding `4 6 4 12`, gap 8; action buttons padding `0 9`.
+    pub mod infobar {
+        pub const PAD_TOP: f32 = 4.0;
+        pub const PAD_RIGHT: f32 = 6.0;
+        pub const PAD_BOTTOM: f32 = 4.0;
+        pub const PAD_LEFT: f32 = 12.0;
+        pub const GAP: f32 = 8.0;
+        pub const BUTTON_PAD_X: f32 = 9.0;
+    }
+
+    /// The tooltip: padding `0 8`.
+    pub mod tooltip {
+        pub const PAD_X: f32 = 8.0;
     }
 
     /// The status bar: padding `0 8`, gap 12.
@@ -427,6 +453,8 @@ pub mod text {
     pub const MENU_SHORTCUT_SIZE: f32 = 10.5;
     /// Inline code in the preview (mono).
     pub const INLINE_CODE_SIZE: f32 = 13.0;
+    /// Tooltips.
+    pub const TOOLTIP_SIZE: f32 = 11.5;
 
     /// Letter spacing of H1 and H2, in em.
     pub const H1_TRACKING: f32 = -0.02;

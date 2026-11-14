@@ -524,7 +524,8 @@ fn mod_e_round_trip_shows_the_edited_text_in_preview(cx: &mut TestAppContext) {
         .read_with(&vcx, |r, _| r.plain_text())
         .unwrap_or_default();
     assert!(shown.contains("Added in the editor."), "{shown:?}");
-    // The file is not written.
+    // Not saved yet: autosave waits for a second without edits, and the
+    // test clock stands still.
     let on_disk = std::fs::read_to_string(dir.path().join("note.md")).unwrap();
     assert!(!on_disk.contains("Added"));
 

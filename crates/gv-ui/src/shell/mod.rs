@@ -9,10 +9,12 @@ mod files_panel;
 #[cfg(test)]
 mod files_panel_tests;
 mod history;
+mod infobar;
 #[cfg(test)]
 mod navigation_tests;
 mod outline_panel;
 mod panels;
+mod saving;
 pub mod session;
 mod status_bar;
 #[cfg(test)]
@@ -25,6 +27,8 @@ mod vault;
 pub(crate) use vault::VaultStatus;
 
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
+pub(crate) use saving::prepare_quit;
+use saving::same_file;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -46,6 +50,9 @@ use serde::{Deserialize, Serialize};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::editor::EditorView;
+use crate::files::notice::Notice;
+use crate::files::watch::WatchHandle;
+use crate::keymap::actions::{file as file_commands, tabs as tab_commands};
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
 use crate::reader::{
@@ -126,9 +133,15 @@ pub struct Tab {
     mode: ViewMode,
     /// The Reading view, made when the tab is first shown.
     reader: Option<Entity<Reader>>,
-    /// The Source view, made when the tab first goes to Edit. Its text is
-    /// not saved yet: it lives as long as the tab shows the same file.
+    /// The Source view, made when the tab first goes to Edit. It lives as
+    /// long as the tab shows the same file; when it goes, unsaved text is
+    /// saved or kept in the crash journal ([`crate::files`]).
     editor: Option<Entity<EditorView>>,
+    /// The number of an untitled document (`tabs.new`), which has no path.
+    untitled: Option<u64>,
+    /// The tab's own infobar, for what happens to its file while only the
+    /// Reading view is open (deleted on disk, a sync-conflict copy).
+    notice: Option<Notice>,
     /// Where Back and Forward go.
     history: History,
 }
@@ -147,8 +160,41 @@ impl Tab {
             mode: ViewMode::default(),
             reader: None,
             editor: None,
+            untitled: None,
+            notice: None,
             history: History::default(),
         }
+    }
+
+    /// Untitled document `n`, in Edit mode.
+    fn untitled(n: u64) -> Self {
+        let mut tab = Self::new(None);
+        tab.untitled = Some(n);
+        tab.mode = ViewMode::Edit;
+        if n > 1 {
+            tab.label.name = format!("Untitled {n}").into();
+        }
+        tab
+    }
+
+    /// The empty tab of a window opened without a file.
+    fn is_placeholder(&self) -> bool {
+        self.path.is_none() && self.untitled.is_none()
+    }
+
+    /// The number of an untitled document.
+    pub fn untitled_number(&self) -> Option<u64> {
+        self.untitled
+    }
+
+    /// The tab's own infobar notice.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
+    }
+
+    /// Whether the tab shows the file at `path` (absolute).
+    fn shows(&self, path: &Path) -> bool {
+        self.path.as_deref().is_some_and(|p| same_file(p, path))
     }
 
     pub fn reader(&self) -> Option<&Entity<Reader>> {
@@ -246,6 +292,7 @@ struct ReaderWatch {
 pub struct Workspace {
     focus: FocusHandle,
     chrome: WindowChrome,
+    window_handle: AnyWindowHandle,
     /// Never empty.
     tabs: Vec<Tab>,
     active: usize,
@@ -275,6 +322,16 @@ pub struct Workspace {
     anchor_seen: Rc<RefCell<Option<ScrollTarget>>>,
     /// Closed tabs, for reopening.
     closed: ClosedTabs,
+    /// The vault watcher was asked to start.
+    vault_watch_started: bool,
+    /// The window's file and vault watchers, made with the first document
+    /// (only when [`crate::files::DataSafety`] watches files).
+    watch: Option<WatchHandle>,
+    _watch_events: Option<Task<()>>,
+    /// The Source views' events, by entity.
+    editor_events: HashMap<EntityId, Subscription>,
+    /// The window waits for saves before it closes.
+    closing: bool,
     /// The pointer went down on a drag region of a client-decorated window
     /// and has not moved yet.
     drag_pending: bool,
@@ -338,10 +395,18 @@ impl Workspace {
             workspace: cx.weak_entity(),
         };
         RecentWindows::touch(this.clone(), cx);
-        let activation = cx.observe_window_activation(window, move |_, window, cx| {
+        let activation = cx.observe_window_activation(window, move |ws, window, cx| {
             if window.is_window_active() {
                 RecentWindows::touch(this.clone(), cx);
+            } else {
+                ws.focus_lost(cx);
             }
+        });
+        let closing = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            closing
+                .update(cx, |ws, cx| ws.should_close(window, cx))
+                .unwrap_or(true)
         });
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
             this.bounds = window.window_bounds();
@@ -351,6 +416,7 @@ impl Workspace {
         let mut this = Self {
             focus,
             chrome,
+            window_handle: window.window_handle(),
             tabs: vec![Tab::new(target)],
             active: 0,
             sidebar_open: false,
@@ -366,6 +432,11 @@ impl Workspace {
             bounds: window.window_bounds(),
             anchor_seen: Rc::default(),
             closed: ClosedTabs::default(),
+            vault_watch_started: false,
+            watch: None,
+            _watch_events: None,
+            editor_events: HashMap::new(),
+            closing: false,
             drag_pending: false,
             _appearance: appearance,
             _activation: activation,
@@ -450,19 +521,15 @@ impl Workspace {
     ) {
         let focused = self.reader_focused(window, cx);
         let tab = Tab::new(Some(target));
-        let index = if self.tabs.len() == 1 && self.tabs[0].path.is_none() {
-            self.tabs[0] = tab;
-            self.active = 0;
-            0
-        } else {
-            self.tabs.insert(self.active + 1, tab);
-            self.active + 1
-        };
+        let index = self.place_tab(tab);
         if let Some(scroll) = scroll {
             let reader = self.make_reader(index, Some(scroll), window, cx);
             self.tabs[index].reader = reader;
         }
         if activate || index == self.active {
+            if index != self.active {
+                self.leave_tab(self.active, cx);
+            }
             self.active = index;
             self.tabs_changed(window, cx);
             self.focus_reader_if(focused, window, cx);
@@ -472,9 +539,30 @@ impl Workspace {
         }
     }
 
+    /// Puts `tab` after the active one, or in place of the window's empty
+    /// tab, and returns its index.
+    fn place_tab(&mut self, tab: Tab) -> usize {
+        if self.tabs.len() == 1 && self.tabs[0].is_placeholder() {
+            self.tabs[0] = tab;
+            self.active = 0;
+            0
+        } else {
+            self.tabs.insert(self.active + 1, tab);
+            self.active + 1
+        }
+    }
+
+    /// The user leaves tab `index` for another: its document autosaves.
+    fn leave_tab(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        if let Some(editor) = self.tabs.get(index).and_then(|t| t.editor.clone()) {
+            editor.update(cx, |e, cx| e.tab_switched(cx));
+        }
+    }
+
     fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
         if index < self.tabs.len() && index != self.active {
             let focused = self.reader_focused(window, cx);
+            self.leave_tab(self.active, cx);
             self.active = index;
             self.tabs_changed(window, cx);
             self.focus_reader_if(focused, window, cx);
@@ -586,10 +674,19 @@ impl Workspace {
     }
 
     /// The vault published a new index snapshot: link statuses follow it.
+    /// Once its index is built, the vault gets a watcher.
     fn vault_changed(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(vault) = &self.vault else {
+        let Some(vault) = self.vault.clone() else {
             return;
         };
+        let ready = vault.read(cx).status() == &vault::VaultStatus::Ready;
+        if ready
+            && !self.vault_watch_started
+            && let Some(watch) = self.ensure_watch(cx)
+        {
+            self.vault_watch_started = true;
+            watch.start_vault(vault.read(cx).shared_index());
+        }
         let index = vault.read(cx).snapshot();
         for reader in self.tabs.iter().filter_map(|t| t.reader.clone()) {
             let index = index.clone();
@@ -680,6 +777,10 @@ impl Workspace {
                 _ => (None, None, None),
             }
         };
+        if let (Some(path), Some(_)) = (&loaded, &model) {
+            // A file shown only in Preview is watched too.
+            self.track_file(path, None, cx);
+        }
         let Some(watch) = self.readers.get_mut(&id) else {
             return;
         };
@@ -922,14 +1023,23 @@ impl Workspace {
             return;
         };
         let same = tab.path.as_deref() == Some(path.as_path());
+        let left = if same { None } else { tab.path.clone() };
+        let editor = if same { None } else { tab.editor.take() };
         if !same {
-            // Not saved yet (see `Tab::editor`): the edits go with the file.
-            tab.editor = None;
+            tab.notice = None;
         }
         tab.label = FileLabel::new(Some(&path));
         tab.path = Some(path.clone());
         tab.position = None;
         tab.scroll = None;
+        // The Source view goes with the file it edits (saved or journaled).
+        if let Some(editor) = editor {
+            self.drop_editor(&editor, cx);
+        }
+        if let Some(left) = left {
+            self.untrack_if_unused(&left);
+        }
+        let tab = &mut self.tabs[index];
         match tab.reader.clone() {
             Some(reader) if same => reader.update(cx, |r, cx| {
                 r.scroll_to(scroll.unwrap_or(ScrollTarget::Offset(0)), cx);
@@ -1022,7 +1132,7 @@ impl Workspace {
                 place,
                 history: self.tabs[index].history.clone(),
             });
-        } else if self.tabs.len() == 1 {
+        } else if self.tabs.len() == 1 && self.tabs[index].is_placeholder() {
             // Only the empty tab: nothing to close.
             return;
         }
@@ -1030,6 +1140,12 @@ impl Workspace {
         let tab = self.tabs.remove(index);
         if let Some(reader) = &tab.reader {
             self.readers.remove(&reader.entity_id());
+        }
+        if let Some(editor) = &tab.editor {
+            self.drop_editor(editor, cx);
+        }
+        if let Some(path) = &tab.path {
+            self.untrack_if_unused(path);
         }
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(None));
@@ -1053,7 +1169,7 @@ impl Workspace {
         let mut tab = Tab::new(Some(OpenTarget::new(place.path)));
         tab.mode = place.mode;
         tab.history = closed.history;
-        let index = if self.tabs.len() == 1 && self.tabs[0].path.is_none() {
+        let index = if self.tabs.len() == 1 && self.tabs[0].is_placeholder() {
             self.tabs[0] = tab;
             0
         } else {
@@ -1200,6 +1316,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                 this.reopen_closed_tab(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &tab_commands::New, window, cx| {
+                this.new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &file_commands::Save, _, cx| {
+                this.save_active(cx);
+            }))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1244,7 +1366,18 @@ impl Render for Workspace {
                                     .flex_1()
                                     .min_h_0()
                                     .flex()
-                                    .child(self.render_document(theme, cx))
+                                    .child(
+                                        // The infobar spans the document,
+                                        // not the right panel.
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .flex()
+                                            .flex_col()
+                                            .children(self.render_infobar(theme, cx))
+                                            .child(self.render_document(theme, cx)),
+                                    )
                                     .when(self.panel_open, |row| {
                                         row.child(panels::right_panel(theme, self.outline.clone()))
                                     }),

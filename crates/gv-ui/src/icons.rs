@@ -92,6 +92,11 @@ pub enum Icon {
     MenuCheck,
     /// A menu row that opens a submenu.
     Submenu,
+    /// The infobar's kind icons and its dismiss button.
+    NoticeInformation,
+    NoticeWarning,
+    NoticeError,
+    Dismiss,
 }
 
 impl Icon {
@@ -147,6 +152,10 @@ impl Icon {
             // Not in the design's inventory: Lucide's `check`.
             Self::MenuCheck => IconName::Check,
             Self::Submenu => IconName::ChevronRight,
+            Self::NoticeInformation => IconName::Info,
+            Self::NoticeWarning => IconName::TriangleAlert,
+            Self::NoticeError => IconName::CircleX,
+            Self::Dismiss => IconName::X,
         }
     }
 }
@@ -282,7 +291,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 41] = [
+    const ALL: [Icon; 45] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -324,6 +333,10 @@ mod tests {
         Icon::CloseFind,
         Icon::MenuCheck,
         Icon::Submenu,
+        Icon::NoticeInformation,
+        Icon::NoticeWarning,
+        Icon::NoticeError,
+        Icon::Dismiss,
     ];
 
     #[test]

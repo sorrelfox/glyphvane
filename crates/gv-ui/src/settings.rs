@@ -151,6 +151,11 @@ impl AppSettings {
         self.stack.effective()
     }
 
+    /// The settings in effect (all layers merged).
+    pub fn settings(&self) -> &gv_settings::Settings {
+        self.stack.settings()
+    }
+
     /// The global settings file, if settings are saved.
     pub fn global_file(&self) -> Option<&SettingsFile> {
         self.global_file.as_ref()

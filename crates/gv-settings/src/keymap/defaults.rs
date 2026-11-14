@@ -51,6 +51,7 @@ const BUILTIN: &[Row] = &[
     // File
     ("file.new_note", "New note", Category::File, None, &[("secondary-n", ALL)]),
     ("file.save", "Save", Category::File, None, &[("secondary-s", ALL)]),
+    ("file.save_as", "Save as", Category::File, None, &[("secondary-shift-s", ALL)]),
     ("file.open", "Open file", Category::File, None, &[]),
 
     // Tabs

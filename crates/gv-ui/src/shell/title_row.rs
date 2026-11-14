@@ -69,13 +69,11 @@ impl Workspace {
             .child(self.history_button(Icon::Back, theme, cx))
             .child(self.history_button(Icon::Forward, theme, cx))
             .child(self.tab_strip(theme, cx))
-            .child(icon_button(
-                "new-tab",
-                Icon::NewTab,
-                icon::ROW,
-                square,
-                theme,
-            ))
+            .child(
+                icon_button("new-tab", Icon::NewTab, icon::ROW, square, theme)
+                    .debug_selector(|| "new-tab".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+            )
             .child(
                 self.drag_region("title-drag", window, cx)
                     .flex_1()
@@ -203,7 +201,10 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// The open tabs, in order. Clicking a tab activates it.
+    /// The open tabs, in order. Clicking a tab activates it. A tab with
+    /// unsaved changes shows a 7 px dot in its title's colour instead of
+    /// the close icon; the dot still closes the tab (the text is saved or
+    /// kept in the crash journal).
     fn tab_strip(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
         div()
             .flex()
@@ -216,6 +217,49 @@ impl Workspace {
                 let active = index == self.active;
                 let hover = theme.state.hover;
                 let close = (tab::CLOSE_BUTTON, tab::CLOSE_BUTTON);
+                let unsaved = tab
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.read(cx).is_modified());
+                let title_colour = if active {
+                    theme.text.primary
+                } else {
+                    theme.text.secondary
+                };
+                let trailing = if unsaved {
+                    let press = theme.state.press;
+                    div()
+                        .id(("close-tab", index))
+                        .debug_selector(move || format!("unsaved-dot-{index}"))
+                        .flex_none()
+                        .w(px(close.0))
+                        .h(px(close.1))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(move |style| style.bg(hover))
+                        .active(move |style| style.bg(press))
+                        .child(
+                            div()
+                                .size(px(tab::UNSAVED_DOT))
+                                .rounded_full()
+                                .bg(title_colour),
+                        )
+                } else {
+                    icon_button(
+                        ("close-tab", index),
+                        Icon::CloseTab,
+                        icon::TAB_CLOSE,
+                        close,
+                        theme,
+                    )
+                    .debug_selector(move || format!("close-tab-{index}"))
+                }
+                .rounded(px(radius::SMALL_CONTROL))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close_tab(index, window, cx);
+                }));
                 div()
                     .id(("tab", index))
                     .h(px(tab::HEIGHT))
@@ -245,23 +289,7 @@ impl Workspace {
                         }),
                     )
                     .child(div().min_w_0().truncate().child(tab.label.name.clone()))
-                    .child(
-                        icon_button(
-                            ("close-tab", index),
-                            Icon::CloseTab,
-                            icon::TAB_CLOSE,
-                            close,
-                            theme,
-                        )
-                        .debug_selector(move || format!("close-tab-{index}"))
-                        .rounded(px(radius::SMALL_CONTROL))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(index, window, cx);
-                            },
-                        )),
-                    )
+                    .child(trailing)
             }))
     }
 }

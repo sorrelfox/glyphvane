@@ -112,7 +112,11 @@ fn native_item(entry: &Entry) -> Option<gpui::MenuItem> {
             name: item.title.into(),
             action: action_for(item.command)?,
             os_action: item.role.map(|role| match role {
+                Role::Undo => OsAction::Undo,
+                Role::Redo => OsAction::Redo,
+                Role::Cut => OsAction::Cut,
                 Role::Copy => OsAction::Copy,
+                Role::Paste => OsAction::Paste,
                 Role::SelectAll => OsAction::SelectAll,
             }),
             checked: false,
