@@ -19,6 +19,7 @@ gv-settings = { workspace = true }
 gv-syntax = { workspace = true }
 gv-text = { workspace = true }
 gv-vault = { workspace = true }
+nucleo-matcher = { workspace = true }
 notify-debouncer-full = { workspace = true }
 serde = { workspace = true }
 sum_tree = { workspace = true }

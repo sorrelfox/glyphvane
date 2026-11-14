@@ -92,6 +92,9 @@ pub enum Icon {
     MenuCheck,
     /// A menu row that opens a submenu.
     Submenu,
+    /// The search icon of the quick switcher's and the command palette's
+    /// input row.
+    SwitcherSearch,
     /// The infobar's kind icons and its dismiss button.
     NoticeInformation,
     NoticeWarning,
@@ -152,6 +155,7 @@ impl Icon {
             // Not in the design's inventory: Lucide's `check`.
             Self::MenuCheck => IconName::Check,
             Self::Submenu => IconName::ChevronRight,
+            Self::SwitcherSearch => IconName::Search,
             Self::NoticeInformation => IconName::Info,
             Self::NoticeWarning => IconName::TriangleAlert,
             Self::NoticeError => IconName::CircleX,

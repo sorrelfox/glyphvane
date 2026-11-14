@@ -78,10 +78,17 @@ pub mod size {
         pub const INNER: f32 = 20.0;
     }
 
+    /// The quick switcher, and the command palette drawn like it: 540 wide
+    /// (12 from each side of a narrower window), 84 below the top of the
+    /// window, the input row 40 high. Not designed: the palette shows at
+    /// most `MAX_ROWS` rows before its list scrolls, and stays 12 above the
+    /// bottom of a short window.
     pub mod switcher {
         pub const WIDTH: f32 = 540.0;
         pub const INPUT_ROW: f32 = 40.0;
         pub const TOP: f32 = 84.0;
+        pub const SIDE_MARGIN: f32 = 12.0;
+        pub const MAX_ROWS: usize = 12;
     }
 
     pub mod switch {
@@ -298,6 +305,24 @@ pub mod spacing {
         pub const SUBMENU_GAP: f32 = 2.0;
     }
 
+    /// The quick switcher, and the command palette drawn like it: the input
+    /// row has padding `0 12` and gap 9; the list padding 4; rows padding
+    /// `0 10` and gap 8; the footer padding `6 14 7` and gaps `4 14`. A key
+    /// hint's key and label are a space apart in the design (3 here).
+    pub mod switcher {
+        pub const INPUT_PAD_X: f32 = 12.0;
+        pub const INPUT_GAP: f32 = 9.0;
+        pub const LIST_PAD: f32 = 4.0;
+        pub const ROW_PAD_X: f32 = 10.0;
+        pub const ROW_GAP: f32 = 8.0;
+        pub const FOOTER_PAD_TOP: f32 = 6.0;
+        pub const FOOTER_PAD_BOTTOM: f32 = 7.0;
+        pub const FOOTER_PAD_X: f32 = 14.0;
+        pub const FOOTER_GAP_X: f32 = 14.0;
+        pub const FOOTER_GAP_Y: f32 = 4.0;
+        pub const HINT_KEY_GAP: f32 = 3.0;
+    }
+
     /// Window controls drawn by the application on Linux: 8 apart, 8 from the
     /// right of the title row, 10 after the panel toggle.
     pub mod linux_controls {
@@ -348,6 +373,8 @@ pub mod radius {
     pub const BLOCK: f32 = 6.0;
     pub const POPOVER: f32 = 8.0;
     pub const SWITCHER: f32 = 10.0;
+    /// Rows of the quick switcher and the command palette.
+    pub const SWITCHER_ROW: f32 = 6.0;
     pub const PILL: f32 = 9.0;
     pub const CHIP: f32 = 4.0;
     pub const KEYCAP: f32 = 4.0;
@@ -444,6 +471,11 @@ pub mod text {
     };
     pub const EDITOR_LINE_NUMBER: Scale = Scale {
         size: 11.0,
+        line: 20.0,
+    };
+    /// The quick switcher's and the command palette's query: 14 px.
+    pub const SWITCHER_INPUT: Scale = Scale {
+        size: 14.0,
         line: 20.0,
     };
     pub const KEYCAP_SIZE: f32 = 11.5;

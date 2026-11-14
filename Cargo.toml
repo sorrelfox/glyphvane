@@ -134,6 +134,9 @@ zed-test-util = { path = "third_party/zed/test-shims/util" }
 crc32fast = "1.5.5"
 sha2 = "0.10.9"
 similar = "2.7.0"
+# UI (gv-ui): fuzzy matching for the command palette, from the nucleo
+# project (MPL-2.0).
+nucleo-matcher = "0.3.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

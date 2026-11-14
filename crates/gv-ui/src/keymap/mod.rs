@@ -64,6 +64,7 @@ const COMMAND_BINDING: KeyBindingMetaIndex = KeyBindingMetaIndex(0x676b);
 pub const APP_COMMANDS: &[&str] = &[
     "app.quit",
     "app.open_menu",
+    "workspace.command_palette",
     "view.cycle_theme",
     "view.preview",
     "view.edit",
@@ -175,6 +176,7 @@ pub(crate) fn init(cx: &mut App) {
     // Quitting saves what autosave may save and syncs the journals first.
     cx.on_action(|_: &actions::app::Quit, cx| crate::files::quit(cx));
     cx.on_action(|_: &actions::app::OpenMenu, cx| crate::menu::open_in_last_window(cx));
+    cx.on_action(|_: &actions::workspace::CommandPalette, cx| crate::palette::toggle(cx));
     cx.on_action(|_: &actions::view::CycleTheme, cx| AppSettings::cycle_theme(cx));
     cx.on_action(|_: &actions::view::Preview, cx| show_mode(ViewMode::Preview, cx));
     cx.on_action(|_: &actions::view::Edit, cx| show_mode(ViewMode::Edit, cx));

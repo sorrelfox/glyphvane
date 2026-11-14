@@ -13,6 +13,7 @@ pub mod inline;
 pub mod keymap;
 pub mod menu;
 pub mod metrics;
+pub mod palette;
 pub mod reader;
 pub mod settings;
 pub mod shell;
@@ -61,6 +62,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     menu::init(cx);
+    palette::init(cx);
     keymap::init(cx);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
