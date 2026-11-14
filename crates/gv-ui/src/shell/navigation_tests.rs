@@ -18,6 +18,7 @@ use super::outline_panel::OutlinePanel;
 use super::status_bar;
 use super::{OpenTarget, ViewMode, Workspace};
 use crate::chrome::WindowChrome;
+use crate::reader::follow::{self, Cause};
 use crate::reader::{Disposition, LinkRequest, Reader, ReaderEvent, ScrollTarget};
 use crate::{AppSettings, ThemeChoice, ToggleEditMode, TogglePanel};
 
@@ -282,6 +283,13 @@ fn a_link_to_a_heading_in_another_file_and_back(cx: &mut TestAppContext) {
     assert_eq!(can_travel(&workspace, &mut vcx), (false, true));
 }
 
+/// Each Back or Forward is noted once for the navigation log, and the
+/// Reading view that shows it takes the note.
+fn timed_once(cause: Option<Cause>) {
+    let expected: Vec<Cause> = cause.into_iter().collect();
+    assert_eq!(follow::drain_records(), (expected.clone(), expected));
+}
+
 #[gpui::test]
 fn the_history_buttons_keys_and_mouse_buttons(cx: &mut TestAppContext) {
     let dir = temp(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
@@ -293,18 +301,22 @@ fn the_history_buttons_keys_and_mouse_buttons(cx: &mut TestAppContext) {
     let forward = center(&mut vcx, "history-forward");
     follow(&workspace, &mut vcx, "b.md", Disposition::InPlace);
     assert_eq!(can_travel(&workspace, &mut vcx), (true, false));
+    follow::drain_records();
     vcx.simulate_click(forward, Modifiers::none());
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    timed_once(None);
 
     // Enabled, they go.
     vcx.simulate_click(back, Modifiers::none());
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "a.md");
+    timed_once(Some(Cause::Back));
     assert_eq!(can_travel(&workspace, &mut vcx), (false, true));
     vcx.simulate_click(forward, Modifiers::none());
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    timed_once(Some(Cause::Forward));
 
     // The keys.
     let (back_key, forward_key) = if cfg!(target_os = "macos") {
@@ -315,9 +327,11 @@ fn the_history_buttons_keys_and_mouse_buttons(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes(back_key);
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "a.md");
+    timed_once(Some(Cause::Back));
     vcx.simulate_keystrokes(forward_key);
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    timed_once(Some(Cause::Forward));
 
     // The mouse's back and forward buttons, over the document.
     let doc = point(px(WIDTH / 2.0), px(HEIGHT / 2.0));
@@ -326,10 +340,12 @@ fn the_history_buttons_keys_and_mouse_buttons(cx: &mut TestAppContext) {
     vcx.simulate_mouse_up(doc, nav(NavigationDirection::Back), Modifiers::none());
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "a.md");
+    timed_once(Some(Cause::Back));
     vcx.simulate_mouse_down(doc, nav(NavigationDirection::Forward), Modifiers::none());
     vcx.simulate_mouse_up(doc, nav(NavigationDirection::Forward), Modifiers::none());
     draw(&mut vcx);
     assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    timed_once(Some(Cause::Forward));
 }
 
 #[gpui::test]

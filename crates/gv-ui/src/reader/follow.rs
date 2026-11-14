@@ -17,9 +17,8 @@
 //! logs it at its next frame with content. A note that no view takes at
 //! once (an external or refused link, nothing to go back to) is ignored.
 //!
-//! Noted here: link clicks in a Reading view, and the Back and Forward
-//! commands (keys, menus) and mouse buttons while the pointer or the focus
-//! is in a Reading view. The window's toolbar buttons are not.
+//! Noted: link clicks in a Reading view, and every Back and Forward (keys,
+//! menus, mouse buttons and the toolbar buttons) where the window does it.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -53,8 +52,25 @@ thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static NOTED: RefCell<Vec<Cause>> = const { RefCell::new(Vec::new()) };
+    static TAKEN: RefCell<Vec<Cause>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The navigations noted and those taken by a view since the last call.
+#[cfg(test)]
+pub(crate) fn drain_records() -> (Vec<Cause>, Vec<Cause>) {
+    (
+        NOTED.with_borrow_mut(std::mem::take),
+        TAKEN.with_borrow_mut(std::mem::take),
+    )
+}
+
 /// Notes the input that starts a navigation now.
 pub(crate) fn begin(cause: Cause) {
+    #[cfg(test)]
+    NOTED.with_borrow_mut(|noted| noted.push(cause.clone()));
     PENDING.with_borrow_mut(|pending| {
         *pending = Some(Pending {
             cause,
@@ -69,9 +85,14 @@ const FRESH: Duration = Duration::from_millis(250);
 
 /// The navigation noted, for the view that shows its target.
 pub(crate) fn take() -> Option<Pending> {
-    PENDING
+    let pending = PENDING
         .with_borrow_mut(Option::take)
-        .filter(|p| p.at.elapsed() <= FRESH)
+        .filter(|p| p.at.elapsed() <= FRESH);
+    #[cfg(test)]
+    if let Some(p) = &pending {
+        TAKEN.with_borrow_mut(|taken| taken.push(p.cause.clone()));
+    }
+    pending
 }
 
 /// A navigation that a view took: what to log once its target is painted.

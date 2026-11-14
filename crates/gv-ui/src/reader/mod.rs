@@ -42,7 +42,7 @@ mod bench;
 mod element;
 mod engine;
 mod find;
-mod follow;
+pub(crate) mod follow;
 mod heights;
 mod items;
 mod links;
@@ -61,16 +61,14 @@ use std::time::Instant;
 
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    NavigationDirection, ParentElement as _, Render, SharedString, Styled as _, Task, Window, div,
-    px,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
+    Styled as _, Task, Window, div, px,
 };
 use gv_render_tree::{CopyOptions, RenderOptions, StyleTable};
 use gv_vault::{Fragment, PathIndex, ProfileParams};
 
 use crate::appearance::Appearance;
 use crate::inline::{FontFamilies, InlineText, Palette};
-use crate::keymap::actions::navigation::{Back, Forward};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::spacing::find as find_spacing;
@@ -527,17 +525,6 @@ fn taken_navigation(path: &Path, target: Option<&ScrollTarget>) -> Option<follow
     Some(nav)
 }
 
-/// Notes Back and Forward for the navigation log; the window does them.
-fn note_history_button(event: &MouseDownEvent) {
-    match event.button {
-        MouseButton::Navigate(NavigationDirection::Back) => follow::begin(follow::Cause::Back),
-        MouseButton::Navigate(NavigationDirection::Forward) => {
-            follow::begin(follow::Cause::Forward);
-        }
-        _ => {}
-    }
-}
-
 /// Scrolls `st` to `target` in its loaded document.
 fn jump(st: &mut State, target: &ScrollTarget) {
     let Some(doc) = &st.doc else {
@@ -623,11 +610,6 @@ impl Render for Reader {
             .id("reader")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
-            // Noted for the navigation log on the way down; the window
-            // handles them.
-            .capture_action(|_: &Back, _, _| follow::begin(follow::Cause::Back))
-            .capture_action(|_: &Forward, _, _| follow::begin(follow::Cause::Forward))
-            .capture_any_mouse_down(|event, _, _| note_history_button(event))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::copy_as_markdown))
             .on_action(cx.listener(Self::select_all))

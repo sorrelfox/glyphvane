@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::metrics::text;
+use crate::reader::follow::{self, Cause};
 use crate::reader::{
     Disposition, LinkRequest, LoadStatus, Navigation, Reader, ReaderEvent, ScrollTarget,
 };
@@ -917,13 +918,13 @@ impl Workspace {
     /// Goes back to where the active tab was before it last followed a
     /// link. Returns false when there is nothing to go back to.
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
-        self.travel(History::go_back, window, cx)
+        self.travel(History::go_back, Cause::Back, window, cx)
     }
 
     /// Goes forward again after [`Self::go_back`]. Returns false when there
     /// is nothing to go forward to.
     pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
-        self.travel(History::go_forward, window, cx)
+        self.travel(History::go_forward, Cause::Forward, window, cx)
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -934,9 +935,12 @@ impl Workspace {
         self.active_tab().history.can_go_forward()
     }
 
+    /// Every Back and Forward (keys, menus, mouse buttons, toolbar) comes
+    /// here, so each is noted once for the navigation log.
     fn travel(
         &mut self,
         step: fn(&mut History, HistoryEntry) -> Option<HistoryEntry>,
+        cause: Cause,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
@@ -948,6 +952,10 @@ impl Workspace {
             return false;
         };
         self.tabs[index].mode = to.mode;
+        if to.mode != ViewMode::Edit {
+            // The Reading view that shows the target takes the note.
+            follow::begin(cause);
+        }
         let scroll = to.scroll.or(Some(ScrollTarget::Offset(0)));
         self.show_in_tab(index, to.path, scroll, window, cx);
         true
