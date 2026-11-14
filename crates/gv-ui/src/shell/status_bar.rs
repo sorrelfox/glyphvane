@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The status bar: where the document is at the left (folder, file, the
-//! heading being read), facts about it at the right (words and reading
-//! time, the profile).
+//! heading being read), facts about it at the right: in Preview words and
+//! reading time; in Edit and Split the caret's line and column, words, the
+//! encoding and the line endings ([`EditorFacts`]); the profile.
 
 use gpui::{
     Corners, Div, FontWeight, ParentElement as _, Pixels, SharedString, Styled as _, div, px,
@@ -12,6 +13,7 @@ use gv_vault::ProfileId;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::{DocFacts, Tab, ViewMode};
+use crate::editor::EditorFacts;
 use crate::icons::Icon;
 use crate::metrics::spacing::{profile_chip, status_bar as spacing};
 use crate::metrics::{icon, radius, size, text};
@@ -24,6 +26,7 @@ const WORDS_PER_MINUTE: usize = 200;
 pub(super) fn status_bar(
     tab: &Tab,
     doc: Option<&DocFacts>,
+    editor: Option<&EditorFacts>,
     theme: &Theme,
     radii: Corners<Pixels>,
 ) -> Div {
@@ -60,7 +63,7 @@ pub(super) fn status_bar(
                 .flex()
                 .items_center()
                 .gap(px(spacing::GAP))
-                .children(facts(tab, doc))
+                .children(facts(tab, doc, editor))
                 .child(profile(theme)),
         )
 }
@@ -77,25 +80,50 @@ pub(super) fn breadcrumb_items(tab: &Tab, doc: Option<&DocFacts>) -> Vec<SharedS
 }
 
 /// The texts at the right before the profile chip. Preview: words and
-/// reading time. Edit and Split: the line asked for, and words.
-pub(super) fn facts(tab: &Tab, doc: Option<&DocFacts>) -> Vec<SharedString> {
-    let words = doc.and_then(|d| d.words);
+/// reading time. Edit and Split: "Ln L, Col C" (with the characters
+/// selected), words, encoding and line endings, from the Source view once
+/// it is loaded.
+pub(super) fn facts(
+    tab: &Tab,
+    doc: Option<&DocFacts>,
+    editor: Option<&EditorFacts>,
+) -> Vec<SharedString> {
+    let preview_words = doc.and_then(|d| d.words);
     let mut out = Vec::new();
-    match tab.mode() {
-        ViewMode::Preview => out.extend(words.map(|n| reading_stats(n).into())),
-        ViewMode::Edit | ViewMode::Split => {
-            // The editor will report the caret; until then, where the file
-            // was asked to open.
+    match (tab.mode(), editor) {
+        (ViewMode::Preview, _) => out.extend(preview_words.map(|n| reading_stats(n).into())),
+        (ViewMode::Edit | ViewMode::Split, Some(facts)) => {
+            out.push(caret_place(facts).into());
+            // Until the editor's first count, Preview's count of the file.
+            out.extend(facts.words.or(preview_words).map(|n| word_count(n).into()));
+            out.push(facts.encoding.into());
+            out.push(facts.line_endings.into());
+        }
+        (ViewMode::Edit | ViewMode::Split, None) => {
+            // Until the editor is loaded, where the file was asked to open.
             out.extend(tab.position().map(|p| {
                 SharedString::from(match p.column {
                     Some(column) => format!("Ln {}, Col {column}", p.line),
                     None => format!("Ln {}", p.line),
                 })
             }));
-            out.extend(words.map(|n| word_count(n).into()));
+            out.extend(preview_words.map(|n| word_count(n).into()));
         }
     }
     out
+}
+
+/// "Ln L, Col C", with "(N selected)" while characters are selected.
+fn caret_place(facts: &EditorFacts) -> String {
+    let place = format!(
+        "Ln {}, Col {}",
+        group_digits(facts.line),
+        group_digits(facts.column)
+    );
+    match facts.selected {
+        0 => place,
+        n => format!("{place} ({} selected)", group_digits(n)),
+    }
 }
 
 /// Folder, file and heading separated by chevrons; the last item in
@@ -179,7 +207,7 @@ fn group_digits(n: usize) -> String {
 
 /// Words by UAX #29 word boundaries; Chinese and Japanese text counts one
 /// word per character (it has no spaces between words).
-pub(super) fn count_words(text: &str) -> usize {
+pub(crate) fn count_words(text: &str) -> usize {
     text.unicode_words()
         .map(|word| match word.chars().filter(|&c| is_cjk(c)).count() {
             0 => 1,
@@ -233,6 +261,21 @@ mod tests {
         assert_eq!(group_digits(999), "999");
         assert_eq!(group_digits(1000), "1,000");
         assert_eq!(group_digits(12_345), "12,345");
+    }
+
+    #[test]
+    fn the_caret_place_shows_the_selection() {
+        let mut facts = EditorFacts {
+            line: 12,
+            column: 1_005,
+            selected: 0,
+            words: Some(3),
+            encoding: "UTF-8",
+            line_endings: "LF",
+        };
+        assert_eq!(caret_place(&facts), "Ln 12, Col 1,005");
+        facts.selected = 42;
+        assert_eq!(caret_place(&facts), "Ln 12, Col 1,005 (42 selected)");
     }
 
     #[test]

@@ -26,6 +26,8 @@
 //!   nothing.
 //! - **Insert link** reads the clipboard: an absolute URL there becomes the
 //!   link's destination.
+//! - **Viewer mode** ([`EditorView::set_read_only`]): no command has a
+//!   handler.
 
 use gpui::{Action, Context, Div, InteractiveElement as _, Stateful, Window};
 use gv_editor::{Availability, Editor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef};
@@ -118,7 +120,7 @@ impl EditorView {
         root: Stateful<Div>,
         cx: &mut Context<'_, Self>,
     ) -> Stateful<Div> {
-        let Some(doc) = self.doc.as_ref() else {
+        let Some(doc) = self.doc.as_ref().filter(|_| !self.read_only) else {
             return root;
         };
         self.availabilities.update(&self.commands, doc);
@@ -153,7 +155,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(doc) = self.doc.as_mut() else {
+        let Some(doc) = self.doc.as_mut().filter(|_| !self.read_only) else {
             cx.propagate();
             return;
         };

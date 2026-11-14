@@ -414,8 +414,12 @@ impl EditorView {
         (marks.matches[k] == selected).then_some(selected)
     }
 
-    /// The query, the options and the replacement of the popover.
+    /// The query, the options and the replacement of the popover; `None`
+    /// in viewer mode, where nothing is replaced.
     fn replace_texts(&self, cx: &Context<'_, Self>) -> Option<(String, Replacer)> {
+        if self.read_only {
+            return None;
+        }
         let bar = self.find.bar.as_ref()?.read(cx);
         let query = bar.query(cx);
         let replacer = Replacer::new(&query, bar.options(), &bar.replacement(cx)).ok()?;

@@ -27,6 +27,7 @@ use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
 
 mod find;
+mod paste;
 
 const WIDTH: f32 = 1280.0;
 const HEIGHT: f32 = 800.0;

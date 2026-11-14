@@ -13,7 +13,8 @@
 //!
 //! UTF-16 ranges from the platform go through `gv-editor`'s input-method
 //! API, which clips them to characters and never splits a surrogate pair
-//! or a CRLF.
+//! or a CRLF. In viewer mode text and compositions from the platform are
+//! ignored.
 
 use std::ops::Range;
 
@@ -291,7 +292,7 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(doc) = self.doc.as_mut() {
+        if let Some(doc) = self.doc.as_mut().filter(|_| !self.read_only) {
             doc.editor.replace_text_in_range_utf16(range, text);
             self.input_changed(cx);
         }
@@ -305,7 +306,7 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(doc) = self.doc.as_mut() {
+        if let Some(doc) = self.doc.as_mut().filter(|_| !self.read_only) {
             doc.editor
                 .replace_and_mark_text_in_range_utf16(range, new_text, new_selected_range);
             self.input_changed(cx);

@@ -31,6 +31,7 @@ pub(crate) use controls::ClientDecorationsForTests;
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
 pub(crate) use saving::prepare_quit;
 use saving::same_file;
+pub(crate) use status_bar::count_words;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -54,7 +55,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
-use crate::editor::EditorView;
+use crate::editor::{EditorFacts, EditorView};
 use crate::files::notice::Notice;
 use crate::files::watch::WatchHandle;
 use crate::keymap::actions::view::ToggleSplit;
@@ -66,7 +67,8 @@ use crate::reader::{
 };
 use crate::split::SplitView;
 use crate::{
-    CloseTab, GoBack, GoForward, ReopenClosedTab, ToggleEditMode, TogglePanel, ToggleSidebar,
+    AppSettings, CloseTab, GoBack, GoForward, ReopenClosedTab, ToggleEditMode, TogglePanel,
+    ToggleSidebar,
 };
 use files_panel::{FilesPanel, FilesPanelEvent};
 use history::{ClosedTab, ClosedTabs};
@@ -305,6 +307,9 @@ pub struct Tab {
     history: History,
     /// Told when the tab lets go of its file (`--wait`).
     on_close: Option<CloseHook>,
+    /// The tab was opened for an edit (`--wait`): viewer mode does not
+    /// apply to it.
+    edit_requested: bool,
 }
 
 impl Tab {
@@ -326,6 +331,7 @@ impl Tab {
             notice: None,
             history: History::default(),
             on_close: None,
+            edit_requested: false,
         }
     }
 
@@ -512,6 +518,8 @@ pub struct Workspace {
     _bounds: Subscription,
     /// Calls the close hooks of the tabs that are open when the window goes.
     _release: Subscription,
+    /// Viewer mode follows the settings.
+    _settings: Subscription,
 }
 
 impl fmt::Debug for Workspace {
@@ -602,6 +610,7 @@ impl Workspace {
                 let_go(hook, path, editor, cx);
             }
         });
+        let settings = cx.observe_global::<AppSettings>(|ws, cx| ws.apply_viewer_mode(cx));
         let mut this = Self {
             focus,
             chrome,
@@ -631,6 +640,7 @@ impl Workspace {
             _activation: activation,
             _bounds: bounds,
             _release: release,
+            _settings: settings,
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -724,6 +734,11 @@ impl Workspace {
         if tab.path.is_some() && on_close.is_some() {
             tab.on_close = on_close;
         }
+        // The caller waits for an edit: viewer mode gives way in this tab.
+        tab.edit_requested = true;
+        if let Some(editor) = tab.editor.clone() {
+            editor.update(cx, |e, cx| e.set_read_only(false, cx));
+        }
         self.set_mode(ViewMode::Edit, cx);
         self.focus_document(window, cx);
     }
@@ -791,7 +806,12 @@ impl Workspace {
         }
     }
 
-    fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(crate) fn activate_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if index < self.tabs.len() && index != self.active {
             let focused = self.reader_focused(window, cx);
             self.leave_tab(self.active, cx);
@@ -869,6 +889,7 @@ impl Workspace {
 
     fn tabs_changed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.ensure_reader(self.active, window, cx);
+        self.leave_locked_mode(cx);
         match self.mode() {
             ViewMode::Edit => {
                 self.ensure_editor(self.active, cx);
@@ -1498,9 +1519,62 @@ impl Workspace {
         self.active_tab().mode
     }
 
+    /// Shows the active tab in `mode`; in viewer mode only Preview, unless
+    /// the tab may be edited ([`Self::can_edit`]).
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<'_, Self>) {
+        if !self.mode_available(mode, cx) {
+            return;
+        }
         let from = self.mode();
         self.tabs[self.active].mode = mode;
+        self.mode_changed(from, cx);
+        self.session_changed(cx);
+        cx.notify();
+    }
+
+    /// Whether tab `index` may be edited: viewer mode is off, or the tab
+    /// was opened for an edit (`--wait`), or holds an untitled document
+    /// (there is no file to protect, and it was made to be written).
+    pub(crate) fn can_edit(&self, index: usize, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        tab.edit_requested || tab.untitled.is_some() || !AppSettings::viewer_mode(cx)
+    }
+
+    /// The status bar's facts from the Source view on screen.
+    pub(crate) fn editor_facts(&self, cx: &App) -> Option<EditorFacts> {
+        self.shown_editor()?.read(cx).status_facts()
+    }
+
+    /// Whether the active tab can be shown in `mode` (Edit and Split are
+    /// unavailable in viewer mode).
+    pub fn mode_available(&self, mode: ViewMode, cx: &App) -> bool {
+        mode == ViewMode::Preview || self.can_edit(self.active, cx)
+    }
+
+    /// Viewer mode was switched on or off: each Source view is read-only
+    /// or not, and the active tab leaves Edit or Split if it may not be
+    /// edited. Edits made before stay and are saved as usual.
+    fn apply_viewer_mode(&mut self, cx: &mut Context<'_, Self>) {
+        for index in 0..self.tabs.len() {
+            let read_only = !self.can_edit(index, cx);
+            if let Some(editor) = self.tabs[index].editor.clone() {
+                editor.update(cx, |e, cx| e.set_read_only(read_only, cx));
+            }
+        }
+        self.leave_locked_mode(cx);
+        cx.notify();
+    }
+
+    /// Puts the active tab in Preview if it shows Edit or Split but may
+    /// not be edited (viewer mode; a restored tab, a setting changed).
+    fn leave_locked_mode(&mut self, cx: &mut Context<'_, Self>) {
+        let from = self.mode();
+        if from == ViewMode::Preview || self.can_edit(self.active, cx) {
+            return;
+        }
+        self.tabs[self.active].mode = ViewMode::Preview;
         self.mode_changed(from, cx);
         self.session_changed(cx);
         cx.notify();
@@ -1563,6 +1637,7 @@ impl Render for Workspace {
         self.settle_focus(window, cx);
         let theme = Appearance::theme(cx);
         let radii = window_corner_radii(window, cx);
+        let editor_facts = self.editor_facts(cx);
 
         // The window root (GPUI Component's `Root`) draws the frame of a
         // client-decorated window: shadow, border, rounded corners and resize
@@ -1662,6 +1737,7 @@ impl Render for Workspace {
             .child(status_bar::status_bar(
                 self.active_tab(),
                 self.active_doc(),
+                editor_facts.as_ref(),
                 theme,
                 radii,
             ))

@@ -20,7 +20,7 @@ use crate::chrome::WindowChrome;
 use crate::icons::Icon;
 use crate::metrics::size::{icon_button as button, segment, tab};
 use crate::metrics::spacing::{linux_controls, mode_switch, tab as tab_spacing, title_row};
-use crate::metrics::{HAIRLINE, icon, radius, size, text};
+use crate::metrics::{DISABLED_OPACITY, HAIRLINE, icon, radius, size, text};
 use crate::theme::Theme;
 
 impl Workspace {
@@ -170,9 +170,19 @@ impl Workspace {
                     .enumerate()
                     .map(|(index, (mode, icon, label))| {
                         let active = self.mode() == mode;
+                        // Viewer mode: Edit and Split cannot be chosen.
+                        let available = self.mode_available(mode, cx);
                         let hover = theme.state.hover;
                         div()
                             .id(("mode", index))
+                            .debug_selector(move || {
+                                match mode {
+                                    ViewMode::Preview => "mode-preview",
+                                    ViewMode::Edit => "mode-edit",
+                                    ViewMode::Split => "mode-split",
+                                }
+                                .into()
+                            })
                             .h(px(segment::INNER))
                             .flex()
                             .items_center()
@@ -191,13 +201,21 @@ impl Workspace {
                                         .border_color(theme.border.strong)
                                         .text_color(theme.text.primary)
                                         .font_weight(FontWeight(text::weight::ACTIVE))
-                                } else {
+                                } else if available {
                                     seg.border_color(transparent_black())
                                         .text_color(theme.text.secondary)
                                         .hover(move |style| style.bg(hover))
+                                } else {
+                                    seg.border_color(transparent_black())
+                                        .text_color(theme.text.tertiary)
+                                        .opacity(DISABLED_OPACITY)
                                 }
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
+                            .when(available, |seg| {
+                                seg.on_click(
+                                    cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)),
+                                )
+                            })
                             .child(icon.sized(icon::ROW))
                             .when_some(label, |seg, label| seg.child(label))
                     }),

@@ -52,6 +52,10 @@
 //!   that cannot run (strikethrough in CommonMark, formatting in a code
 //!   block) has no handler, so its menu item is disabled and its key falls
 //!   through.
+//! - Paste is smart paste ([`paste`]): a URL over a selection makes a
+//!   link, clipboard HTML becomes Markdown; Mod+Shift+V pastes the text.
+//! - Viewer mode ([`EditorView::set_read_only`]): the carets move and copy
+//!   works, but nothing changes the text.
 //! - Mouse: click places the caret, drag selects, Shift-click extends,
 //!   double click selects a word and triple click a line (dragging after
 //!   either extends by words or lines), Alt-click adds a caret and
@@ -63,6 +67,12 @@
 //! [`find`]: Mod+F and Ctrl+H (Cmd+Alt+F) open the find popover with the
 //! replace row over the text; matches are highlighted on the rows on
 //! screen, the current one is selected, Replace all is one undo step.
+//!
+//! # The status bar
+//!
+//! [`stats`]: the primary caret's line and column, the characters
+//! selected, the word count (counted as Preview counts, off the UI thread),
+//! the encoding and the line endings ([`EditorView::status_facts`]).
 //!
 //! # The file
 //!
@@ -79,7 +89,9 @@ mod highlight;
 mod input;
 mod layout;
 mod markdown;
+mod paste;
 mod rows;
+mod stats;
 mod syntax;
 #[cfg(test)]
 mod tests;
@@ -116,7 +128,9 @@ use file::{DocState, Loaded};
 pub use find::DEBUG_REPLACE_ENV;
 use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
+pub use paste::{ClipboardHtml, HtmlClipboard, set_html_clipboard};
 use rows::{Fonts, RowCache};
+pub use stats::EditorFacts;
 use syntax::{Background, EditQueue, Syntax, UI_BUDGET};
 pub(crate) use syntax::{SyntaxHandoff, TextStamp};
 use wrap::{RowMap, SoftWrap};
@@ -352,6 +366,12 @@ pub struct EditorView {
     commands: MarkdownCommands,
     /// Which of them can run now.
     availabilities: Availabilities,
+    /// The profile smart paste writes HTML for.
+    paste_profile: gv_html::Profile,
+    /// Viewer mode: the text cannot be changed.
+    read_only: bool,
+    /// The caret's place and the word count, for the status bar.
+    stats: stats::Stats,
     /// Vertical scroll in px from the top of the content (f64: a long
     /// file is millions of px tall).
     scroll_y: f64,
@@ -417,6 +437,9 @@ impl EditorView {
             options,
             commands: MarkdownCommands::for_profile(crate::reader::PROFILE.as_str()),
             availabilities: Availabilities::default(),
+            paste_profile: paste_profile(crate::reader::PROFILE.as_str()),
+            read_only: false,
+            stats: stats::Stats::default(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             wrap: SoftWrap::default(),
@@ -452,6 +475,7 @@ impl EditorView {
     /// document loaded on.
     pub fn set_profile(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         self.commands = MarkdownCommands::for_profile(id);
+        self.paste_profile = paste_profile(id);
         self.options = ParseOptions::for_profile(id).unwrap_or(self.options);
         self.availabilities.reset();
         cx.notify();
@@ -460,6 +484,21 @@ impl EditorView {
     /// The Markdown commands of the view's profile.
     pub fn markdown_commands(&self) -> MarkdownCommands {
         self.commands
+    }
+
+    /// Viewer mode: keys, input methods, the clipboard and the Markdown
+    /// commands cannot change the text (the carets still move, and copy
+    /// still works). Edits made before stay and are saved as usual.
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<'_, Self>) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            cx.notify();
+        }
+    }
+
+    /// Whether the text cannot be changed (viewer mode).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Tells the view the window's watchers, which hear about its saves.
@@ -537,6 +576,7 @@ impl EditorView {
         let state = DocState::new(None, None, None, buffer.snapshot(), clock);
         let limits = wrap::large_file_limits(cx);
         self.install(buffer, tree, state, &limits);
+        self.schedule_word_count(cx);
         cx.notify();
     }
 
@@ -626,6 +666,7 @@ impl EditorView {
             large_file,
         });
         self.availabilities.reset();
+        self.stats.reset();
         self.reset_find();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
@@ -964,26 +1005,43 @@ impl EditorView {
     }
 
     fn cut(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.copy(cx) {
+        if !self.read_only && self.copy(cx) {
             self.with_editor(window, cx, |editor, _| {
                 editor.delete_backward(DeleteUnit::Grapheme);
             });
         }
     }
 
-    /// Pastes the clipboard's text. With several carets and as many pieces
-    /// on the clipboard (the selections of a multi-caret copy, or lines),
-    /// each caret gets one; otherwise every caret gets the whole text.
-    fn paste(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
+    /// Pastes the clipboard ([`paste`]): smart paste with one caret unless
+    /// `plain`; with several carets and as many pieces on the clipboard
+    /// (the selections of a multi-caret copy, or lines) each caret gets
+    /// one, otherwise every caret gets the whole text. One undo step.
+    fn paste(&mut self, plain: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.read_only {
             return;
-        };
-        let Some(text) = item.text() else {
-            return;
-        };
-        let lengths = match item.entries().first() {
+        }
+        let item = cx.read_from_clipboard();
+        let text = item.as_ref().and_then(ClipboardItem::text);
+        let lengths = match item.as_ref().and_then(|i| i.entries().first()) {
             Some(ClipboardEntry::String(s)) => s.metadata_json::<Vec<usize>>(),
             _ => None,
+        };
+        let single = self.editor().is_some_and(|e| e.selections().len() == 1);
+        // Pieces copied from several carets here are pasted as they are.
+        let smart = (!plain && single && lengths.is_none())
+            .then(|| {
+                let selection = self.primary_selected_text().unwrap_or_default();
+                let html = paste::clipboard_html(cx);
+                paste::smart_text(
+                    text.as_deref(),
+                    html.as_ref(),
+                    &selection,
+                    self.paste_profile,
+                )
+            })
+            .flatten();
+        let Some(text) = smart.or(text) else {
+            return;
         };
         self.with_editor(window, cx, |editor, _| {
             let count = editor.selections().len();
@@ -997,6 +1055,13 @@ impl EditorView {
                 }
             }
         });
+    }
+
+    /// The text of the primary selection.
+    fn primary_selected_text(&self) -> Option<String> {
+        let editor = self.editor()?;
+        let range = editor.selections().primary().range();
+        editor.text().text_for_range(range).ok()
     }
 
     fn select_all(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -1046,6 +1111,11 @@ pub(crate) struct Extra {
     page: u32,
     /// Scroll the view by this many px.
     scroll: f64,
+}
+
+/// The paste profile of flavor profile `id`.
+fn paste_profile(id: &str) -> gv_html::Profile {
+    gv_html::Profile::from_id(id).unwrap_or_default()
 }
 
 /// The text for each of `count` carets, if it splits into one piece per
@@ -1210,8 +1280,41 @@ impl Render for EditorView {
                 this.motion(Motion::DocumentEnd, true, w, cx)
             }))
             .on_action(cx.listener(|this, _: &SelectPageUp, w, cx| this.page(false, true, w, cx)))
-            .on_action(cx.listener(|this, _: &SelectPageDown, w, cx| this.page(true, true, w, cx)))
-            .on_action(cx.listener(|this, _: &Backspace, w, cx| {
+            .on_action(cx.listener(|this, _: &SelectPageDown, w, cx| this.page(true, true, w, cx)));
+        let root = root
+            .on_action(cx.listener(|this, _: &AddCursorAbove, w, cx| {
+                this.with_editor(w, cx, |e, _| {
+                    e.add_cursor_above();
+                });
+            }))
+            .on_action(cx.listener(|this, _: &AddCursorBelow, w, cx| {
+                this.with_editor(w, cx, |e, _| {
+                    e.add_cursor_below();
+                });
+            }))
+            .on_action(cx.listener(|this, _: &Cancel, w, cx| this.cancel(w, cx)))
+            .on_action(cx.listener(|this, _: &commands::Copy, _, cx| {
+                this.copy(cx);
+            }))
+            .on_action(cx.listener(|this, _: &commands::CopyAsMarkdown, _, cx| {
+                // The source is Markdown already.
+                this.copy(cx);
+            }))
+            .on_action(cx.listener(|this, _: &commands::SelectAll, w, cx| this.select_all(w, cx)))
+            .on_action(cx.listener(|this, _: &commands::ToggleWhitespace, _, cx| {
+                this.toggle_whitespace(cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &view_commands::ToggleSoftWrap, _, cx| {
+                    this.toggle_soft_wrap(cx);
+                }),
+            );
+        // Viewer mode: nothing that changes the text has a handler, so its
+        // menu items are disabled and its keys do nothing.
+        let root = if self.read_only {
+            root
+        } else {
+            root.on_action(cx.listener(|this, _: &Backspace, w, cx| {
                 this.with_editor(w, cx, |e, _| {
                     e.delete_backward(DeleteUnit::Grapheme);
                 });
@@ -1241,38 +1344,16 @@ impl Render for EditorView {
                     e.delete_forward(DeleteUnit::Line);
                 });
             }))
-            .on_action(cx.listener(|this, _: &AddCursorAbove, w, cx| {
-                this.with_editor(w, cx, |e, _| {
-                    e.add_cursor_above();
-                });
-            }))
-            .on_action(cx.listener(|this, _: &AddCursorBelow, w, cx| {
-                this.with_editor(w, cx, |e, _| {
-                    e.add_cursor_below();
-                });
-            }))
-            .on_action(cx.listener(|this, _: &Cancel, w, cx| this.cancel(w, cx)))
             .on_action(cx.listener(|this, _: &commands::Undo, w, cx| this.undo(w, cx)))
             .on_action(cx.listener(|this, _: &commands::Redo, w, cx| this.redo(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::Copy, _, cx| {
-                this.copy(cx);
-            }))
-            .on_action(cx.listener(|this, _: &commands::CopyAsMarkdown, _, cx| {
-                // The source is Markdown already.
-                this.copy(cx);
-            }))
             .on_action(cx.listener(|this, _: &commands::Cut, w, cx| this.cut(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::Paste, w, cx| this.paste(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::PastePlain, w, cx| this.paste(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::SelectAll, w, cx| this.select_all(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::ToggleWhitespace, _, cx| {
-                this.toggle_whitespace(cx);
+            .on_action(cx.listener(|this, _: &commands::Paste, w, cx| {
+                this.paste(false, w, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &view_commands::ToggleSoftWrap, _, cx| {
-                    this.toggle_soft_wrap(cx);
-                }),
-            );
+            .on_action(cx.listener(|this, _: &commands::PastePlain, w, cx| {
+                this.paste(true, w, cx);
+            }))
+        };
         let root = self
             .markdown_handlers(root, cx)
             .relative()

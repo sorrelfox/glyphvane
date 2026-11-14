@@ -156,6 +156,15 @@ impl AppSettings {
         self.stack.settings()
     }
 
+    /// Whether viewer mode is on (`general.viewer_mode`): documents open
+    /// read-only, and Edit and Split are unavailable, except in a tab
+    /// opened for an edit someone waits for (`--wait`) and in untitled
+    /// documents.
+    pub fn viewer_mode(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|this| this.settings().general.viewer_mode)
+    }
+
     /// The global settings file, if settings are saved.
     pub fn global_file(&self) -> Option<&SettingsFile> {
         self.global_file.as_ref()

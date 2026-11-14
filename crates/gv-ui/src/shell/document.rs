@@ -23,6 +23,15 @@
 //!   view is rebuilt from the editor's text
 //!   ([`Reader::open_text`](crate::reader::Reader::open_text)) instead of
 //!   the file.
+//!
+//! # Viewer mode
+//!
+//! With `general.viewer_mode` on, Edit and Split are unavailable (the mode
+//! switch shows them disabled, Mod+E and the View menu do nothing) and
+//! every Source view is read-only, except in a tab opened for an edit
+//! someone waits for (`--wait`, which overrides viewer mode for that tab
+//! only) and in untitled documents. A tab in Edit or Split when viewer
+//! mode comes on, or restored in one, goes to Preview when it is shown.
 
 use std::path::PathBuf;
 
@@ -227,7 +236,12 @@ impl Workspace {
             _ => None,
         };
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
-        let editor = cx.new(|cx| EditorView::new(EditorView::profile_options(), cx));
+        let read_only = !self.can_edit(index, cx);
+        let editor = cx.new(|cx| {
+            let mut editor = EditorView::new(EditorView::profile_options(), cx);
+            editor.set_read_only(read_only, cx);
+            editor
+        });
         // Watchers first: the view tells them about its saves.
         self.adopt_editor(&editor, cx);
         editor.update(cx, |editor, cx| {

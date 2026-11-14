@@ -103,6 +103,7 @@ impl Workspace {
                 mode: self.mode(),
                 can_go_back: self.can_go_back(),
                 can_go_forward: self.can_go_forward(),
+                edit_locked: !self.can_edit(self.active, cx),
             };
             return Some(MenuButton::new(menu_button(theme), state).into_any_element());
         }

@@ -12,6 +12,7 @@ publish = false
 futures = { workspace = true }
 gpui = { workspace = true }
 gv-editor = { workspace = true }
+gv-html = { workspace = true }
 gv-inline = { workspace = true }
 gv-model = { workspace = true }
 gv-render-tree = { workspace = true }

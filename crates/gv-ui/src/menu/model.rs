@@ -11,7 +11,8 @@
 //! About and zoom always; Undo, Redo, Cut, Paste, Show whitespace, Soft
 //! wrap and the Format menu outside the editor (in Preview); in the editor, the Format items that
 //! cannot run in the tab's profile (strikethrough, highlight and task boxes
-//! in CommonMark) or at the carets (bold in a code block).
+//! in CommonMark) or at the carets (bold in a code block). In viewer mode
+//! Edit and Split are disabled, and so is everything that edits.
 
 use gv_settings::keymap::Platform;
 
@@ -78,6 +79,9 @@ pub struct Item {
 pub enum Requirement {
     CanGoBack,
     CanGoForward,
+    /// The active tab may be edited (viewer mode is off, or does not apply
+    /// to it).
+    CanEdit,
 }
 
 /// A standard edit item the system recognises.
@@ -117,6 +121,8 @@ pub struct MenuState {
     pub mode: ViewMode,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    /// Viewer mode keeps the active tab out of Edit and Split.
+    pub edit_locked: bool,
 }
 
 impl MenuState {
@@ -124,6 +130,7 @@ impl MenuState {
         match requirement {
             Requirement::CanGoBack => self.can_go_back,
             Requirement::CanGoForward => self.can_go_forward,
+            Requirement::CanEdit => !self.edit_locked,
         }
     }
 }
@@ -139,11 +146,15 @@ const fn item(command: &'static str, title: &'static str) -> Entry {
 }
 
 const fn mode_item(command: &'static str, title: &'static str, mode: ViewMode) -> Entry {
+    let requires = match mode {
+        ViewMode::Preview => None,
+        ViewMode::Edit | ViewMode::Split => Some(Requirement::CanEdit),
+    };
     Entry::Command(Item {
         command,
         title,
         mode: Some(mode),
-        requires: None,
+        requires,
         role: None,
     })
 }

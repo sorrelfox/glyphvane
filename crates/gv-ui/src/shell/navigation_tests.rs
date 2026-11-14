@@ -548,16 +548,21 @@ fn the_status_bar_shows_the_place_words_and_profile(cx: &mut TestAppContext) {
         .map(|n| n.to_string_lossy().into_owned())
         .expect("folder name");
     let texts = |vcx: &mut VisualTestContext| {
-        workspace.read_with(vcx, |ws, _| {
+        workspace.read_with(vcx, |ws, cx| {
             let strings = |v: Vec<gpui::SharedString>| {
                 v.into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
             };
+            let editor = ws.editor_facts(cx);
             (
                 strings(status_bar::breadcrumb_items(
                     ws.active_tab(),
                     ws.active_doc(),
                 )),
-                strings(status_bar::facts(ws.active_tab(), ws.active_doc())),
+                strings(status_bar::facts(
+                    ws.active_tab(),
+                    ws.active_doc(),
+                    editor.as_ref(),
+                )),
             )
         })
     };
@@ -571,8 +576,9 @@ fn the_status_bar_shows_the_place_words_and_profile(cx: &mut TestAppContext) {
 
     cx.dispatch_action(window, ToggleEditMode);
     draw(&mut vcx);
+    // The editor counts the words as Preview does.
     let (_, facts) = texts(&mut vcx);
-    assert_eq!(facts, ["10 words"]);
+    assert_eq!(facts, ["Ln 1, Col 1", "10 words", "UTF-8", "LF"]);
 }
 
 #[test]
