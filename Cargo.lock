@@ -3138,11 +3138,13 @@ version = "0.0.0"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
+ "gv-inline",
  "gv-settings",
  "serde",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]

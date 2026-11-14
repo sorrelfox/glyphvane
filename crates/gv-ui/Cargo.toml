@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 gpui = { workspace = true }
+gv-inline = { workspace = true }
 gv-settings = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
@@ -18,6 +19,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 gpui-pre = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [lints]
 workspace = true

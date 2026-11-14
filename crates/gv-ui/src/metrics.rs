@@ -36,6 +36,8 @@ pub mod size {
     pub const CHECKBOX: f32 = 14.0;
     pub const SCROLLBAR_THUMB: f32 = 6.0;
     pub const THEME_CARD_PREVIEW: f32 = 84.0;
+    /// The caret: 2 px wide, `accent.default` (SPEC § Editor).
+    pub const CARET_WIDTH: f32 = 2.0;
 
     pub mod tab {
         pub const HEIGHT: f32 = 28.0;
@@ -120,6 +122,24 @@ pub mod spacing {
     pub mod document {
         pub const HEADING_GAP: f32 = 10.0;
         pub const PARAGRAPH_GAP: f32 = 12.0;
+    }
+
+    /// Inline content of the preview (SPEC § Preview, § Link status).
+    pub mod inline {
+        /// Inline code: padding `1 5` around mono 13, radius `radius::CHIP`.
+        pub const CODE_PAD_X: f32 = 5.0;
+        pub const CODE_PAD_Y: f32 = 1.0;
+        /// Links: a 1 px underline, 3 below the baseline.
+        pub const UNDERLINE_OFFSET: f32 = 3.0;
+        /// Task list: gap between the checkbox and the text.
+        pub const CHECKBOX_GAP: f32 = 9.0;
+        /// Link status: space before a status icon (`triangle-alert`,
+        /// `file-plus`, `log-out`, `lock`).
+        pub const STATUS_ICON_GAP: f32 = 5.0;
+        /// Link status: space before `≈` and before the external-link arrow.
+        pub const STATUS_MARKER_GAP: f32 = 4.0;
+        /// Link status: space between the ambiguous icon and the count.
+        pub const STATUS_COUNT_GAP: f32 = 2.0;
     }
 
     /// The status bar: padding `0 8`, gap 12.
@@ -307,6 +327,8 @@ pub mod text {
         line: 20.0,
     };
     pub const KEYCAP_SIZE: f32 = 11.5;
+    /// Inline code in the preview (mono).
+    pub const INLINE_CODE_SIZE: f32 = 13.0;
 
     /// Letter spacing of H1 and H2, in em.
     pub const H1_TRACKING: f32 = -0.02;
@@ -335,3 +357,7 @@ pub const HAIRLINE: f32 = 1.0;
 
 /// Opacity of disabled controls.
 pub const DISABLED_OPACITY: f32 = 0.5;
+
+/// Opacity of the `selection.text` tint drawn over a selected image, math
+/// formula or checkbox in the preview, as browsers do for replaced content.
+pub const SELECTED_BOX_TINT_OPACITY: f32 = 0.45;

@@ -176,6 +176,22 @@ impl CaptionGlyph {
     }
 }
 
+/// The design's icon for a note that does not exist yet: Lucide's
+/// `file-plus` with its outline drawn dashed, 3 on and 2.6 off (icons.md).
+pub const FILE_PLUS_DASHED: &str = "icons/glyphvane/file-plus-dashed.svg";
+
+/// Draws the first path of an SVG (the outline of a Lucide file icon)
+/// dashed.
+fn dash_outline(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
+    match std::str::from_utf8(&svg) {
+        Ok(text) if text.contains("<path ") => Cow::Owned(
+            text.replacen("<path ", "<path stroke-dasharray=\"3 2.6\" ", 1)
+                .into_bytes(),
+        ),
+        _ => svg,
+    }
+}
+
 /// The application's asset source: GPUI Kit's default component icons plus
 /// the design's extra Lucide icons, every Lucide icon drawn with the design's
 /// stroke width, and the Windows caption glyphs.
@@ -191,6 +207,9 @@ impl AssetSource for Assets {
         if let Some(glyph) = CaptionGlyph::from_path(path) {
             return Ok(Some(Cow::Borrowed(glyph.svg().as_bytes())));
         }
+        if path == FILE_PLUS_DASHED {
+            return Ok(self.load(&IconName::FilePlus.path())?.map(dash_outline));
+        }
         let data = match DesignIcons.load(path)? {
             Some(data) => Some(data),
             None => gpui::assets::Assets.load(path)?,
@@ -205,6 +224,7 @@ impl AssetSource for Assets {
             CaptionGlyph::ALL
                 .map(CaptionGlyph::path)
                 .into_iter()
+                .chain([FILE_PLUS_DASHED])
                 .filter(|glyph| glyph.starts_with(path))
                 .map(SharedString::from),
         );
@@ -283,6 +303,30 @@ mod tests {
                     .any(|p| p == glyph.path())
             );
         }
+    }
+
+    #[test]
+    fn the_dashed_file_icon_dashes_only_its_outline() {
+        let data = Assets
+            .load(FILE_PLUS_DASHED)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let svg = String::from_utf8_lossy(&data);
+        assert_eq!(
+            svg.matches("stroke-dasharray=\"3 2.6\"").count(),
+            1,
+            "{svg}"
+        );
+        assert!(svg.matches("<path ").count() > 1);
+        assert!(svg.contains(DESIGN_STROKE));
+        assert!(
+            Assets
+                .list("icons/glyphvane/")
+                .unwrap_or_default()
+                .iter()
+                .any(|p| p == FILE_PLUS_DASHED)
+        );
     }
 
     #[test]

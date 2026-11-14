@@ -6,6 +6,7 @@
 pub mod appearance;
 pub mod chrome;
 pub mod icons;
+pub mod inline;
 pub mod metrics;
 pub mod settings;
 pub mod shell;
