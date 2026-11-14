@@ -15,7 +15,7 @@
 //! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds (each shown as one [`PLACEHOLDER`]), later inline replacements; every line ending becomes one `\n` |
 //! | Tab | [`tab_map`] | [`TabPoint`] | Expands hard tabs to tab stops |
 //! | Wrap | [`wrap_map`] | [`WrapPoint`] | Soft wrap, measured through [`TextMeasure`], with continuation indents from a [`WrapIndent`] |
-//! | Block | not yet | | Block widgets with pixel heights |
+//! | Block | [`block_map`] | input row, or [`Y`] in 1/64 px | Block widgets above, below or instead of display lines, with heights in pixels; over the wrap layer, or the tab layer while soft wrap is off |
 //!
 //! Display-layer points are a `u32` row and a byte column in that layer's
 //! text ([`Point`]). Every layer converts both ways with its neighbours and
@@ -27,7 +27,9 @@
 //! byte ranges. [`ReplaceMap::sync`] turns it into [`ReplaceEdit`]s and
 //! [`TabMap::sync`] those into [`TabEdit`]s, and [`WrapMap::sync`] those into
 //! [`WrapEdit`]s (whole wrap rows): in each, the old range is in the previous
-//! snapshot of the layer and the new range in the next one.
+//! snapshot of the layer and the new range in the next one. [`BlockMap::sync`]
+//! takes row edits of its input (and the buffer edit, for its anchors) and
+//! lays out again only the display lines they touch.
 //!
 //! ```
 //! use std::num::NonZeroU32;
@@ -47,6 +49,7 @@
 //! assert_eq!(tab_edits[0].new, TabPoint::new(0, 0)..TabPoint::new(0, 4));
 //! ```
 
+pub mod block_map;
 pub mod line_wrapper;
 pub mod primitives;
 pub mod replace_map;
@@ -58,6 +61,11 @@ pub mod wrap_map;
 #[cfg(test)]
 mod test_support;
 
+pub use block_map::{
+    Block, BlockChanges, BlockId, BlockInput, BlockItem, BlockKind, BlockMap, BlockPlacement,
+    BlockProperties, BlockSnapshot, DisplayItem, DisplayItems, Height, Removal, Reveal, RowEdit,
+    SUBPIXELS_PER_PX, WhenDeleted, Y,
+};
 pub use line_wrapper::{Boundary, IndentAdjustment, LineFragment, LineWrapper};
 pub use primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
 pub use replace_map::{

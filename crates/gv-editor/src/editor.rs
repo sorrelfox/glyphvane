@@ -22,9 +22,11 @@ use crate::boundaries::{
 use crate::clock::{Clock, SystemClock};
 use crate::commands::SyntaxRef;
 use crate::display_map::{
-    Fold, FoldId, IndentAdjustment, MonospaceMeasure, ReplaceEdit, ReplaceMap, ReplacePoint,
-    ReplaceSnapshot, RewrapJob, TabEdit, TabMap, TabPoint, TabSnapshot, TextMeasure, WrapEdit,
-    WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
+    Block, BlockChanges, BlockId, BlockInput, BlockItem, BlockKind, BlockMap, BlockProperties,
+    BlockSnapshot, DisplayItem, Fold, FoldId, Height, IndentAdjustment, MonospaceMeasure, Removal,
+    ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot, Reveal, RewrapJob, RowEdit, TabEdit,
+    TabMap, TabPoint, TabSnapshot, TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow,
+    WrapSnapshot, Y,
 };
 use crate::folds::{FoldCandidate, FoldKind, foldable_ranges};
 use crate::history::{
@@ -137,6 +139,16 @@ pub enum EditorEvent<'a> {
         /// What changed, in display rows: wrap rows, or tab rows on the
         /// side where soft wrap is off.
         edits: &'a [WrapEdit],
+    },
+    /// Blocks were inserted, removed (also revealed, or by an edit of their
+    /// anchors' text), resized or displaced: after the event of the change
+    /// that did it, if any. Rows that only moved under the blocks are not
+    /// reported here; the other events cover them.
+    BlocksChanged {
+        /// The block layer after the change.
+        blocks: &'a BlockSnapshot,
+        /// What happened to which blocks.
+        changes: &'a BlockChanges,
     },
 }
 
@@ -274,6 +286,14 @@ impl DisplayLayers {
 
     fn wrap_snapshot(&self) -> Option<&WrapSnapshot> {
         self.wrap.as_ref().map(|wrap| &wrap.snapshot)
+    }
+
+    /// The rows the block layer sits on: the display rows.
+    fn block_input(&self) -> BlockInput {
+        match &self.wrap {
+            Some(wrap) => BlockInput::Wrap(wrap.snapshot.clone()),
+            None => BlockInput::Tab(self.snapshot.clone()),
+        }
     }
 
     fn replace(&self) -> &ReplaceSnapshot {
@@ -480,6 +500,10 @@ impl DisplayLayers {
     }
 }
 
+/// The height of a text row until the view sets one: one pixel, so that
+/// pixels count display rows.
+const DEFAULT_ROW_HEIGHT: Height = Height(crate::display_map::SUBPIXELS_PER_PX);
+
 /// The marked text of an input-method composition: one range per caret.
 #[derive(Clone, Debug)]
 struct Composition {
@@ -525,6 +549,21 @@ struct Composition {
 /// - an edit that changes text inside a fold unfolds it; undoing the edit
 ///   folds it again, and redoing it unfolds it again. Such an edit is an
 ///   undo step of its own.
+///
+/// # Blocks
+///
+/// The display map's block layer ([`BlockMap`]) holds block widgets above,
+/// below or instead of display lines, with heights in pixels
+/// ([`insert_blocks`](Self::insert_blocks), [`blocks`](Self::blocks) for
+/// y-based queries). It follows every change of the text and the display
+/// rows. No selection end is left on a row a replace block hides: motions
+/// skip the rows of a block that is never revealed ([`Reveal::Never`]),
+/// and a selection end put there otherwise (a click, an edit, undo) moves
+/// to the start of the row after the block (or the end of the row before
+/// it at the end of the text). A block revealed on selection
+/// ([`Reveal::OnSelection`]) lets carets onto its rows and is removed when
+/// one gets there. Which blocks are revealed when is the caller's policy:
+/// it picks the rule per block and inserts the block again when it wants.
 pub struct Editor {
     buffer: Buffer,
     selections: Selections,
@@ -540,6 +579,7 @@ pub struct Editor {
     /// The folds the last undo or redo transaction removed, in the text
     /// before it.
     step_unfolded: Vec<Fold>,
+    blocks: BlockMap,
 }
 
 impl fmt::Debug for Editor {
@@ -575,6 +615,7 @@ impl Editor {
     /// `clock`.
     pub fn with_config(buffer: Buffer, config: EditorConfig, clock: Box<dyn Clock>) -> Self {
         let display = DisplayLayers::new(buffer.snapshot(), config.tab_size);
+        let blocks = BlockMap::new(display.block_input(), DEFAULT_ROW_HEIGHT);
         Self {
             buffer,
             selections: Selections::new(),
@@ -587,6 +628,7 @@ impl Editor {
             foldable: Vec::new(),
             fold_restores: VecDeque::new(),
             step_unfolded: Vec::new(),
+            blocks,
         }
     }
 
@@ -636,6 +678,7 @@ impl Editor {
     /// Changes the tab size of the display map.
     pub fn set_tab_size(&mut self, tab_size: NonZeroU32) {
         let (edits, wrap_edits) = self.display.set_tab_size(tab_size);
+        let block_changes = self.sync_blocks(&edits, &wrap_edits, None);
         if !edits.is_empty() {
             let event = EditorEvent::DisplayChanged {
                 display: &self.display.snapshot,
@@ -646,6 +689,7 @@ impl Editor {
         if !wrap_edits.is_empty() {
             self.wrap_changed(&wrap_edits);
         }
+        self.after_blocks_changed(block_changes);
     }
 
     // ----- soft wrap ----------------------------------------------------------
@@ -674,7 +718,9 @@ impl Editor {
     /// [`EditorEvent::WrapChanged`].
     pub fn set_wrap_width(&mut self, width: Option<f32>) {
         if let Some(edits) = self.display.set_wrap_width(width) {
+            let block_changes = self.sync_blocks(&[], &edits, None);
             self.wrap_changed(&edits);
+            self.after_blocks_changed(block_changes);
         }
     }
 
@@ -700,9 +746,13 @@ impl Editor {
     /// [`EditorEvent::WrapChanged`] at once, with the rows unchanged.
     pub fn defer_wrap_width(&mut self, width: Option<f32>) -> Option<RewrapJob> {
         let (job, edits) = self.display.defer_wrap_width(width);
+        // The rows may be the same but interpolated now: the block layer
+        // takes the new snapshot either way.
+        let block_changes = self.sync_blocks(&[], edits.as_deref().unwrap_or(&[]), None);
         if let Some(edits) = edits {
             self.wrap_changed(&edits);
         }
+        self.after_blocks_changed(block_changes);
         job
     }
 
@@ -713,7 +763,9 @@ impl Editor {
     pub fn finish_rewrap(&mut self, job: RewrapJob) -> bool {
         match self.display.finish_rewrap(job) {
             Some(edits) => {
+                let block_changes = self.sync_blocks(&[], &edits, None);
                 self.wrap_changed(&edits);
+                self.after_blocks_changed(block_changes);
                 true
             }
             None => false,
@@ -733,7 +785,9 @@ impl Editor {
     /// or size), re-wrapping at once if soft wrap is on.
     pub fn set_measure(&mut self, measure: Box<dyn TextMeasure>) {
         if let Some(edits) = self.display.set_measure(measure) {
+            let block_changes = self.sync_blocks(&[], &edits, None);
             self.wrap_changed(&edits);
+            self.after_blocks_changed(block_changes);
         }
     }
 
@@ -744,7 +798,9 @@ impl Editor {
     /// wrap is on.
     pub fn set_wrap_indent(&mut self, indent: Arc<dyn WrapIndent>) {
         if let Some(edits) = self.display.set_wrap_indent(indent) {
+            let block_changes = self.sync_blocks(&[], &edits, None);
             self.wrap_changed(&edits);
+            self.after_blocks_changed(block_changes);
         }
     }
 
@@ -803,12 +859,17 @@ impl Editor {
         if summary.is_empty() {
             if self.selections.specs() != selections_before {
                 self.history.seal();
+                let mut block_changes = BlockChanges::default();
+                self.settle_block_selections(&mut block_changes);
+                self.blocks_changed(&block_changes);
                 self.selections_changed();
             }
             return Ok((None, result));
         }
         let (display_edits, wrap_edits, unfolded) =
             self.display.sync(self.buffer.snapshot(), &summary);
+        let mut block_changes = self.sync_blocks(&display_edits, &wrap_edits, Some(&summary));
+        self.settle_block_selections(&mut block_changes);
         self.move_foldable(&summary);
         if let EditCause::Edit(kind) = cause {
             // Replacing text with the same text changes no byte: nothing to
@@ -856,6 +917,7 @@ impl Editor {
             selections: &self.selections,
         });
         emit(&mut self.observers, &event);
+        self.blocks_changed(&block_changes);
         Ok((Some(summary), result))
     }
 
@@ -1148,6 +1210,9 @@ impl Editor {
     fn user_selection_change(&mut self) {
         self.history.seal();
         self.unfold_at_selections();
+        let mut block_changes = BlockChanges::default();
+        self.settle_block_selections(&mut block_changes);
+        self.blocks_changed(&block_changes);
         self.selections_changed();
     }
 
@@ -1234,11 +1299,18 @@ impl Editor {
     /// character (the end of a soft-wrapped row is the same text position
     /// as the start of the next one); pressed again there, they do what
     /// they do without soft wrap, on the buffer line.
+    ///
+    /// Motions skip the rows a block hides unless the block is revealed on
+    /// selection (see [`Reveal`]): out of them, a caret moving down or
+    /// forwards goes to the first row after the block (at its goal column
+    /// for vertical motions), one moving up or backwards to the last row
+    /// before it, and the other way when there is no such row.
     pub fn move_selections(&mut self, motion: Motion, extend: bool) {
         self.end_composition();
         let rows = self.display.rows();
+        let blocks = self.blocks.snapshot();
         self.selections.update(self.buffer.text(), |selection| {
-            move_selection(rows, selection, motion, extend)
+            move_selection(rows, blocks, selection, motion, extend)
         });
         self.user_selection_change();
     }
@@ -1295,6 +1367,18 @@ impl Editor {
         };
         let row = display.row_of(from.head());
         let (to, goal) = display.move_caret(from.head(), from.goal(), motion);
+        let column = match goal {
+            SelectionGoal::Column(column) => Some(column),
+            SelectionGoal::None => None,
+        };
+        let to = out_of_hidden_rows(
+            display,
+            self.blocks.snapshot(),
+            to,
+            motion == Motion::Down,
+            column,
+            false,
+        );
         if display.row_of(to) == row {
             return false;
         }
@@ -1576,6 +1660,7 @@ impl Editor {
         change: impl FnOnce(&mut ReplaceMap) -> (ReplaceSnapshot, Vec<ReplaceEdit>),
     ) -> bool {
         let (edits, wrap_edits) = self.display.change_folds(change);
+        let block_changes = self.sync_blocks(&edits, &wrap_edits, None);
         if !edits.is_empty() {
             let event = EditorEvent::DisplayChanged {
                 display: &self.display.snapshot,
@@ -1586,6 +1671,7 @@ impl Editor {
         if !wrap_edits.is_empty() {
             self.wrap_changed(&wrap_edits);
         }
+        self.after_blocks_changed(block_changes);
         !edits.is_empty()
     }
 
@@ -1610,6 +1696,10 @@ impl Editor {
                 goal: selection.goal(),
             });
         self.history.seal();
+        // A fold's start can be on rows a block hides.
+        let mut block_changes = BlockChanges::default();
+        self.settle_block_selections(&mut block_changes);
+        self.blocks_changed(&block_changes);
         self.selections_changed();
     }
 
@@ -1714,6 +1804,225 @@ impl Editor {
             self.remember_unfolded(from, to, &unfolded);
         }
         self.unfold_at_selections();
+    }
+
+    // ----- blocks ---------------------------------------------------------------
+
+    /// The block layer: display rows and blocks with their heights, for
+    /// painting and hit-testing in pixels ([`BlockSnapshot::items`],
+    /// [`BlockSnapshot::item_at`], [`BlockSnapshot::row_top`]). Its input
+    /// rows are the display rows: wrap rows while soft wrap is on, tab rows
+    /// otherwise.
+    pub fn blocks(&self) -> &BlockSnapshot {
+        self.blocks.snapshot()
+    }
+
+    /// The block layer with its blocks, shown or not.
+    pub fn block_map(&self) -> &BlockMap {
+        &self.blocks
+    }
+
+    /// Block `id`, its anchors in the current text.
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        self.blocks.block(id)
+    }
+
+    /// Where block `id` is shown; `None` if it is not (see
+    /// [`BlockMap::bounds`]).
+    pub fn block_bounds(&self, id: BlockId) -> Option<BlockItem> {
+        self.blocks.bounds(id)
+    }
+
+    /// The height of a text row (one pixel until set).
+    pub fn row_height(&self) -> Height {
+        self.blocks.snapshot().row_height()
+    }
+
+    /// Sets the height of a text row (the line height of the view's font).
+    /// O(1); no event, the caller knows.
+    pub fn set_row_height(&mut self, height: Height) {
+        self.blocks.set_row_height(height);
+    }
+
+    /// Inserts blocks (see [`BlockProperties`]); returns their ids, in
+    /// order. Selection ends on rows a new replace block hides move out of
+    /// them, or reveal it (see [`Reveal`]). Observers get
+    /// [`EditorEvent::BlocksChanged`].
+    pub fn insert_blocks(
+        &mut self,
+        blocks: impl IntoIterator<Item = BlockProperties>,
+    ) -> Vec<BlockId> {
+        let ids = self.blocks.insert(blocks);
+        if !ids.is_empty() {
+            self.after_blocks_changed(BlockChanges {
+                inserted: ids.clone(),
+                ..BlockChanges::default()
+            });
+        }
+        ids
+    }
+
+    /// Removes blocks; returns how many there were.
+    pub fn remove_blocks(&mut self, ids: impl IntoIterator<Item = BlockId>) -> usize {
+        let removed = self.blocks.remove(ids);
+        let count = removed.len();
+        if count > 0 {
+            self.after_blocks_changed(BlockChanges {
+                removed: removed
+                    .into_iter()
+                    .map(|id| (id, Removal::Requested))
+                    .collect(),
+                ..BlockChanges::default()
+            });
+        }
+        count
+    }
+
+    /// Changes the height of block `id` (an image loaded), in place.
+    /// Returns whether it changed.
+    pub fn resize_block(&mut self, id: BlockId, height: Height) -> bool {
+        self.resize_blocks([(id, height)]) > 0
+    }
+
+    /// Changes the height of blocks; returns how many changed.
+    pub fn resize_blocks(&mut self, heights: impl IntoIterator<Item = (BlockId, Height)>) -> usize {
+        let resized = self.blocks.resize(heights);
+        let count = resized.len();
+        if count > 0 {
+            self.blocks_changed(&BlockChanges {
+                resized,
+                ..BlockChanges::default()
+            });
+        }
+        count
+    }
+
+    /// The top of the display row of a caret at `offset` (clipped), or of
+    /// the block that hides the row.
+    pub fn y_for_offset(&self, offset: usize) -> Y {
+        let row = self.display.rows().row_of(offset);
+        self.blocks.snapshot().row_top(row)
+    }
+
+    /// The replace block that hides the display row of a caret at `offset`,
+    /// if any: for a reveal policy of the caller's own.
+    pub fn block_hiding(&self, offset: usize) -> Option<BlockItem> {
+        let row = self.display.rows().row_of(offset);
+        self.blocks.snapshot().replacement_at(row)
+    }
+
+    /// Moves every caret `dy` pixels down (negative: up), as Page Down and
+    /// Page Up do, through the block layer's heights: to the row at the
+    /// caret row's top plus `dy` (clamped to the document), at the goal
+    /// column. A block there is passed (to the row after it moving down,
+    /// before it moving up) unless it hides rows and is revealed on
+    /// selection, which the caret then enters. With `extend`, the heads
+    /// move and the tails stay; without, a selection collapses from its
+    /// end (down) or start (up).
+    pub fn move_selections_by_pixels(&mut self, dy: f32, extend: bool) {
+        self.end_composition();
+        let rows = self.display.rows();
+        let blocks = self.blocks.snapshot();
+        self.selections.update(self.buffer.text(), |selection| {
+            move_selection_by_pixels(rows, blocks, selection, dy, extend)
+        });
+        self.user_selection_change();
+    }
+
+    /// Brings the block layer up to the display layers after they changed:
+    /// `tab_edits` and `wrap_edits` as the layers returned them, `text` the
+    /// buffer edit if the text changed.
+    fn sync_blocks(
+        &mut self,
+        tab_edits: &[TabEdit],
+        wrap_edits: &[WrapEdit],
+        text: Option<&EditSummary>,
+    ) -> BlockChanges {
+        // Wrap edits are in display rows, also when soft wrap was just
+        // turned on or off; without them (soft wrap off) the tab edits are.
+        if wrap_edits.is_empty() && self.display.wrap.is_none() {
+            return self
+                .blocks
+                .sync_tab(self.display.snapshot.clone(), tab_edits, text);
+        }
+        let edits: Vec<RowEdit> = wrap_edits
+            .iter()
+            .map(|edit| RowEdit {
+                old: edit.old.start.0..edit.old.end.0,
+                new: edit.new.start.0..edit.new.end.0,
+            })
+            .collect();
+        self.blocks.sync(self.display.block_input(), &edits, text)
+    }
+
+    /// After a change of the block layer outside an edit: keeps selection
+    /// ends off hidden rows and tells observers.
+    fn after_blocks_changed(&mut self, mut changes: BlockChanges) {
+        let moved = self.settle_block_selections(&mut changes);
+        self.blocks_changed(&changes);
+        if moved {
+            self.history.seal();
+            self.selections_changed();
+        }
+    }
+
+    fn blocks_changed(&mut self, changes: &BlockChanges) {
+        if changes.is_empty() {
+            return;
+        }
+        let event = EditorEvent::BlocksChanged {
+            blocks: self.blocks.snapshot(),
+            changes,
+        };
+        emit(&mut self.observers, &event);
+    }
+
+    /// Keeps selection ends off the rows replace blocks hide: removes the
+    /// blocks revealed on selection that have one, then moves ends out of
+    /// the others (see [`Reveal`]). Returns whether a selection moved; the
+    /// removals go to `changes`. Tells no observer.
+    fn settle_block_selections(&mut self, changes: &mut BlockChanges) -> bool {
+        loop {
+            let blocks = self.blocks.snapshot();
+            if !blocks.has_replaced_rows() {
+                return false;
+            }
+            let display = self.display.rows();
+            let mut revealed: Vec<BlockId> = self
+                .selections
+                .iter()
+                .flat_map(|selection| [selection.tail(), selection.head()])
+                .filter_map(|offset| blocks.replacement_at(display.row_of(offset)))
+                .filter(|item| item.reveal == Reveal::OnSelection)
+                .map(|item| item.id)
+                .collect();
+            if revealed.is_empty() {
+                break;
+            }
+            revealed.sort_unstable();
+            revealed.dedup();
+            // Another block merged into a revealed one may show and hide
+            // the end again: go round.
+            let removed = self.blocks.remove(revealed);
+            changes
+                .removed
+                .extend(removed.into_iter().map(|id| (id, Removal::Revealed)));
+        }
+        let display = self.display.rows();
+        let blocks = self.blocks.snapshot();
+        let out = |offset: usize| out_of_hidden_rows(display, blocks, offset, true, None, true);
+        let moved = self.selections.iter().any(|selection| {
+            out(selection.tail()) != selection.tail() || out(selection.head()) != selection.head()
+        });
+        if moved {
+            self.selections
+                .update(self.buffer.text(), |selection| SelectionSpec {
+                    tail: out(selection.tail()),
+                    head: out(selection.head()),
+                    goal: selection.goal(),
+                });
+        }
+        moved
     }
 
     // ----- input method -----------------------------------------------------------
@@ -1986,6 +2295,7 @@ impl Editor {
 /// Where a selection goes under a motion (see [`Editor::move_selections`]).
 fn move_selection(
     display: DisplayRows<'_>,
+    blocks: &BlockSnapshot,
     selection: &Selection,
     motion: Motion,
     extend: bool,
@@ -2018,11 +2328,142 @@ fn move_selection(
         Some(range) => range.start,
         None => to,
     };
+    // So are the rows a block hides.
+    let forward = match motion {
+        Motion::Up | Motion::UpRows(_) => false,
+        Motion::Down | Motion::DownRows(_) => true,
+        _ => to >= from,
+    };
+    let column = match goal {
+        SelectionGoal::Column(column) if motion.is_vertical() => Some(column),
+        _ => None,
+    };
+    let to = out_of_hidden_rows(display, blocks, to, forward, column, false);
     let tail = if extend { selection.tail() } else { to };
     SelectionSpec {
         tail,
         head: to,
         goal,
+    }
+}
+
+/// The first display row from `row` on (`forward`) or before `row` that no
+/// block hides, passing the blocks that skip carets (every block with
+/// `all`).
+fn visible_row(blocks: &BlockSnapshot, mut row: u32, forward: bool, all: bool) -> Option<u32> {
+    let passes = |item: &BlockItem| all || item.reveal == Reveal::Never;
+    if forward {
+        while row < blocks.row_count() {
+            match blocks.replacement_at(row) {
+                Some(item) if passes(&item) => row = item.rows.end,
+                _ => return Some(row),
+            }
+        }
+        None
+    } else {
+        loop {
+            let previous = row.checked_sub(1)?;
+            match blocks.replacement_at(previous) {
+                Some(item) if passes(&item) => row = item.rows.start,
+                _ => return Some(previous),
+            }
+        }
+    }
+}
+
+/// A caret offset out of the rows a block hides, if it is on one (of a
+/// block that skips carets, or of any block with `all`): `forward`, the
+/// start of the first row after the block, else the end of the last row
+/// before it, or the other one when there is none; at `column` instead,
+/// for vertical motion.
+fn out_of_hidden_rows(
+    display: DisplayRows<'_>,
+    blocks: &BlockSnapshot,
+    offset: usize,
+    forward: bool,
+    column: Option<u32>,
+    all: bool,
+) -> usize {
+    if !blocks.has_replaced_rows() {
+        return offset;
+    }
+    let Some(item) = blocks
+        .replacement_at(display.row_of(offset))
+        .filter(|item| all || item.reveal == Reveal::Never)
+    else {
+        return offset;
+    };
+    let after = || {
+        visible_row(blocks, item.rows.end, true, all)
+            .map(|row| display.offset_at(row, column.unwrap_or(0), false))
+    };
+    let before = || {
+        visible_row(blocks, item.rows.start, false, all)
+            .map(|row| display.offset_at(row, column.unwrap_or(u32::MAX), true))
+    };
+    let target = if forward {
+        after().or_else(before)
+    } else {
+        before().or_else(after)
+    };
+    target.unwrap_or(offset)
+}
+
+/// Where a selection goes when its caret moves `dy` pixels (see
+/// [`Editor::move_selections_by_pixels`]).
+fn move_selection_by_pixels(
+    display: DisplayRows<'_>,
+    blocks: &BlockSnapshot,
+    selection: &Selection,
+    dy: f32,
+    extend: bool,
+) -> SelectionSpec {
+    let down = dy >= 0.0 || dy.is_nan();
+    let from = match (extend || selection.is_empty(), down) {
+        (true, _) => selection.head(),
+        (false, true) => selection.end(),
+        (false, false) => selection.start(),
+    };
+    let (row, column) = display.row_and_column(from);
+    let column = match selection.goal() {
+        SelectionGoal::Column(column) => column,
+        SelectionGoal::None => column,
+    };
+    let distance = Y::from_px(f64::from(dy.abs())).0;
+    let top = blocks.row_top(row).0;
+    let y = if down {
+        top.saturating_add(distance)
+    } else {
+        top.saturating_sub(distance)
+    };
+    let last = blocks.total_height().0.saturating_sub(1);
+    let target = match blocks.item_at(Y(y.min(last))) {
+        Some(DisplayItem::Row { row, .. }) => Some(row),
+        Some(DisplayItem::Block(item))
+            if item.kind == BlockKind::Replace && item.reveal == Reveal::OnSelection =>
+        {
+            Some(if down {
+                item.rows.start
+            } else {
+                item.rows.end - 1
+            })
+        }
+        Some(DisplayItem::Block(item)) => {
+            let after = || visible_row(blocks, item.rows.end, true, false);
+            let before = || visible_row(blocks, item.rows.start, false, false);
+            if down {
+                after().or_else(before)
+            } else {
+                before().or_else(after)
+            }
+        }
+        None => None,
+    };
+    let to = target.map_or(from, |row| display.offset_at(row, column, !down));
+    SelectionSpec {
+        tail: if extend { selection.tail() } else { to },
+        head: to,
+        goal: SelectionGoal::Column(column),
     }
 }
 

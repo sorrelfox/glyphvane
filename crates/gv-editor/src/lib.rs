@@ -25,6 +25,11 @@
 //!   [`Editor::fold_at`] and [`folds`] for the foldable regions); motions
 //!   skip them, a caret placed inside one and an edit inside one unfold it,
 //!   and undo brings back folds an edit removed;
+//! - blocks: widgets above, below or instead of display lines, with heights
+//!   in pixels (see [`Editor::insert_blocks`] and
+//!   [`display_map::block_map`]); the view pages and hit-tests through
+//!   their heights ([`Editor::blocks`]), and no selection end stays on a
+//!   row a block hides;
 //! - input-method state: marked text and the UTF-16 queries and
 //!   replacements a platform text-input handler needs;
 //! - observers, told about every change with its
@@ -57,7 +62,7 @@
 //! - [`commands`]: the Markdown-aware editing commands (list continuation,
 //!   indentation, renumbering, formatting, headings, quotes, links);
 //! - [`display_map`]: the replace layer (folds), the tab layer and the
-//!   wrap layer, ported from Zed;
+//!   wrap layer, ported from Zed, and the block layer;
 //! - [`folds`]: the foldable regions of a Markdown document.
 
 pub mod boundaries;

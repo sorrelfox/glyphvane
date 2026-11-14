@@ -33,5 +33,9 @@ harness = false
 name = "wrap"
 harness = false
 
+[[bench]]
+name = "blocks"
+harness = false
+
 [lints]
 workspace = true
