@@ -7,7 +7,64 @@
 //! and injects what needs a font system (see
 //! [`display_map::TextMeasure`]).
 //!
-//! So far it holds the first [`display_map`] layers: the replace layer
-//! (an identity layer for now) and the tab layer, ported from Zed.
+//! # The editing model
+//!
+//! [`Editor`] owns a [`gv_text::Buffer`] and everything that follows its
+//! edits:
+//!
+//! - [`Selections`]: one or more selections, sorted and merged, each a tail
+//!   and a head [`gv_text::Anchor`] plus a [`SelectionGoal`] for vertical
+//!   movement;
+//! - the undo [`History`]: transactions grouped into steps (see
+//!   [`EditKind`] for the grouping rules), with selections restored, a
+//!   memory bound and save points;
+//! - the [`display_map`] layers (replace and tab), synced on every edit;
+//!   vertical motion runs on display rows;
+//! - input-method state: marked text and the UTF-16 queries and
+//!   replacements a platform text-input handler needs;
+//! - observers, told about every change with its
+//!   [`gv_text::EditSummary`]: the hook for the incremental parser and the
+//!   render model.
+//!
+//! Every edit command is **one transaction** for all cursors: one pass over
+//! the rope, one summary, one undo record.
+//!
+//! ```
+//! use gv_editor::{DeleteUnit, Editor, Motion};
+//! use gv_text::Buffer;
+//!
+//! let mut editor = Editor::new(Buffer::new("one\ntwo\n"));
+//! editor.add_cursor(4);
+//! editor.insert_at_selections("> ");
+//! assert_eq!(editor.text().to_string(), "> one\n> two\n");
+//! editor.move_selections(Motion::LineEnd, false);
+//! editor.delete_backward(DeleteUnit::Word);
+//! assert_eq!(editor.text().to_string(), "> \n> \n");
+//! editor.undo();
+//! editor.undo();
+//! assert_eq!(editor.text().to_string(), "one\ntwo\n");
+//! ```
+//!
+//! # Modules
+//!
+//! - [`boundaries`]: grapheme, word and line boundaries on a snapshot;
+//! - [`movement`]: caret motions;
+//! - [`display_map`]: the replace layer (an identity layer for now) and the
+//!   tab layer, ported from Zed.
 
+pub mod boundaries;
+mod clock;
 pub mod display_map;
+mod editor;
+mod history;
+pub mod movement;
+mod selection;
+
+pub use clock::{Clock, ManualClock, SystemClock};
+pub use editor::{
+    DeleteUnit, EditCause, EditEvent, Editor, EditorConfig, EditorEvent, ObserverId, SavePoint,
+    Utf16Selection,
+};
+pub use history::{EditKind, History, HistoryConfig, StateId, UndoOutcome};
+pub use movement::Motion;
+pub use selection::{Selection, SelectionGoal, SelectionId, SelectionSpec, Selections};
