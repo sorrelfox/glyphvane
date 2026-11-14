@@ -1,0 +1,13 @@
+Third-party notices for Glyphvane
+=================================
+
+Glyphvane is licensed under the GNU General Public License, version 3 or
+later (see LICENSE). It includes code from third-party Rust crates, each
+under its own licence (MIT, Apache-2.0, BSD, MPL-2.0 and others allowed by
+the project's licence policy).
+
+This file is a placeholder. The full list of components, with each licence
+text and copyright notice, will be generated for every release. Until then,
+the CycloneDX software bill of materials attached to each release
+(glyphvane.cdx.json) lists every component and its licence, and the
+licences can be read in the source of each crate on https://crates.io.

@@ -1,0 +1,424 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+
+# Release pipeline: build every target with [profile.dist], package with one
+# pinned tool per format (`cargo xtask package`), sign (Windows: SignPath
+# when configured; macOS: ad-hoc), then checksums, build-provenance
+# attestations, an SBOM, and a draft GitHub Release.
+#
+# Secrets and variables (all optional; without them Windows builds ship
+# unsigned):
+#   secrets.SIGNPATH_API_TOKEN       SignPath API token (environment `release`)
+#   vars.SIGNPATH_ORGANIZATION_ID    SignPath organization id
+# No Apple credentials: macOS builds are ad-hoc signed and not notarized.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# Jobs opt in to what they need.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # Pinned packaging tools (ADR-020). Keep in step with xtask/src/package/.
+  CARGO_DEB_VERSION: "3.8.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.1"
+  CARGO_CYCLONEDX_VERSION: "0.5.10"
+  WIX_VERSION: "6.0.2"
+  APPIMAGE_RUNTIME_RELEASE: "20251108"
+
+# Release builds do not use caches: a cache written by a pull request run must
+# not reach a release artifact.
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Tag matches the workspace version
+        id: version
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 sets the glibc 2.35 floor of the support matrix.
+          - arch: x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime-sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+          - arch: aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      # The full GUI build needs about 8 GB per job at the peak (one rustc
+      # for the diagram engine plus GPUI's large crates); 3 jobs fit 16 GB.
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libssl-dev pkg-config \
+            dpkg-dev squashfs-tools zsync
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Install packaging tools
+        run: |
+          cargo install --locked "cargo-deb@$CARGO_DEB_VERSION"
+          cargo install --locked "cargo-generate-rpm@$CARGO_GENERATE_RPM_VERSION"
+
+      # Data only: xtask checks the SHA-256 and prepends it to the image; it
+      # is never executed while packaging.
+      - name: Download the AppImage runtime
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/runtime" \
+            "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_RELEASE/runtime-${{ matrix.arch }}"
+          echo "${{ matrix.runtime-sha256 }}  $RUNNER_TEMP/runtime" | sha256sum -c -
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+
+      - name: Check the glibc floor (2.35)
+        run: |
+          newest=$(objdump -T target/${{ matrix.target }}/dist/glyphvane | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "Newest glibc symbol version: $newest"
+          [ "$(printf '%s\n' "$newest" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ]
+
+      - name: Package
+        run: >-
+          cargo xtask package --no-build
+          --target ${{ matrix.target }}
+          --format deb,rpm,tar.gz,appimage
+          --appimage-runtime "$RUNNER_TEMP/runtime"
+          --out dist
+
+      - name: AppImage update file (zsync)
+        working-directory: dist
+        run: |
+          for f in *.AppImage; do
+            touch -d "@$SOURCE_DATE_EPOCH" "$f"
+            zsyncmake -u "$f" -o "$f.zsync" "$f"
+          done
+
+      - name: Smoke test (deb, tarball, AppImage, rpm)
+        run: |
+          sudo apt-get install -y ./dist/glyphvane_*.deb
+          glyphvane --version
+          printf '# Smoke test\n' | glyphvane render - | grep -q '<h1>Smoke test</h1>'
+          mkdir -p "$RUNNER_TEMP/tarball"
+          tar -xzf dist/glyphvane-*.tar.gz -C "$RUNNER_TEMP/tarball"
+          "$RUNNER_TEMP"/tarball/glyphvane-*/glyphvane --version
+          APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Glyphvane-*.AppImage --version
+          docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest \
+            sh -c 'dnf install -y /dist/glyphvane-*.rpm >/dev/null && glyphvane --version'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: |
+            dist/*
+            !dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    needs: check
+    # Both architectures build on the arm64 runner. One download per
+    # architecture rather than a universal binary, to stay within the
+    # 50 MB download budget (NFR-SIZE-03).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      # 7 GB runners: keep the GUI build to 2 parallel jobs.
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+
+      # Builds Glyphvane.app (Info.plist template, iconutil), signs it ad hoc
+      # inside-out and verifies it, then wraps it with ditto and hdiutil.
+      - name: Package and sign (ad hoc)
+        run: >-
+          cargo xtask package --no-build
+          --target ${{ matrix.target }}
+          --format app,zip,dmg
+          --out dist
+
+      - name: Smoke test
+        run: |
+          app="target/package-work/${{ matrix.target }}/macos/Glyphvane.app"
+          codesign --verify --strict --verbose=2 "$app"
+          codesign --display --verbose=2 "$app"
+          otool -L "$app/Contents/MacOS/glyphvane"
+          # The x86_64 build runs under Rosetta on the arm64 runner.
+          "$app/Contents/MacOS/glyphvane" --version
+          hdiutil verify dist/Glyphvane-*.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: |
+            dist/*
+            !dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows (${{ matrix.arch }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    # The SignPath token is an environment secret with required reviewers.
+    environment: release
+    permissions:
+      contents: read
+      # SignPath reads the uploaded workflow artifact through the API.
+      actions: read
+    env:
+      CARGO_BUILD_JOBS: 3
+      SIGNPATH_ENABLED: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # WiX v6 is under the Open Source Maintenance Fee EULA (Q-22). If it is
+      # not accepted, NSIS (makensis) is the documented alternative.
+      - name: Install WiX Toolset
+        run: |
+          dotnet tool install --global wix --version "$WIX_VERSION"
+          wix extension add --global "WixToolset.UI.wixext/$WIX_VERSION"
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+
+      # SignPath signs the executables before they are packaged, then the MSI.
+      - name: Upload the executables for signing
+        id: unsigned-exes
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-exes-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/dist/glyphvane*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the executables (SignPath)
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: glyphvane
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: executables
+          github-artifact-id: ${{ steps.unsigned-exes.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: target/${{ matrix.target }}/dist
+
+      - name: Package
+        run: >-
+          cargo xtask package --no-build
+          --target ${{ matrix.target }}
+          --format zip,msi
+          --out dist
+
+      - name: Upload the MSI for signing
+        id: unsigned-msi
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-msi-${{ matrix.arch }}
+          path: dist/*.msi
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the MSI (SignPath)
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: glyphvane
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: msi
+          github-artifact-id: ${{ steps.unsigned-msi.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist
+
+      - name: Smoke test
+        run: |
+          target/${{ matrix.target }}/dist/glyphvane.exe --version
+          printf '# Smoke test\n' | target/${{ matrix.target }}/dist/glyphvane.exe render - | grep -q '<h1>Smoke test</h1>'
+          if [ "$SIGNPATH_ENABLED" = true ]; then
+            powershell -NoProfile -Command "Get-AuthenticodeSignature dist/*.msi, target/${{ matrix.target }}/dist/*.exe | Format-Table -AutoSize"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: |
+            dist/*
+            !dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Checksums, attestations, SBOM, draft release
+    needs: [check, linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # The workspace is needed for the SBOM.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # One SBOM per executable, covering the dependencies of every target
+      # platform. The helper's appears once gv-helper builds its binary.
+      - name: SBOM (CycloneDX)
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          cargo install --locked "cargo-cyclonedx@$CARGO_CYCLONEDX_VERSION"
+          cargo cyclonedx --manifest-path crates/gv-app/Cargo.toml --format json \
+            --describe binaries --target all --spec-version 1.5
+          mv crates/gv-app/glyphvane_bin.cdx.json dist/glyphvane.cdx.json
+          if [ -f crates/gv-helper/glyphvane-helper_bin.cdx.json ]; then
+            mv crates/gv-helper/glyphvane-helper_bin.cdx.json dist/glyphvane-helper.cdx.json
+          fi
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Build-provenance attestations
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Verifying the downloads
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify <file> --repo $GITHUB_REPOSITORY
+          \`\`\`
+
+          The macOS builds are not notarized. On first launch, open
+          **System Settings > Privacy & Security** and click **Open Anyway**
+          (see "First launch.txt" in the disk image).
+
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag \
+            --title "Glyphvane $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes

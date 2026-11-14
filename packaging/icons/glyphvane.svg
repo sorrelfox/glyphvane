@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Placeholder application icon, replaced before 1.0. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="#2f4858"/>
+  <path d="M136 368V144h48l72 96 72-96h48v224h-56V240l-64 84-64-84v128z" fill="#f6f1e7"/>
+</svg>

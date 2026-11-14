@@ -1,0 +1,362 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Glyphvane contributors
+
+//! Linux artifacts: `.deb`, `.rpm`, `.tar.gz` and AppImage.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+use super::archive::Tree;
+use super::{APP_ID, Arch, Ctx, HELPER_BIN, MAIN_BIN, require_tool, run_checked, sha256_file};
+use crate::cargo;
+
+/// Pinned tool versions (ADR-020). Keep in step with the workflows.
+const CARGO_DEB_VERSION: &str = "3.8.0";
+const CARGO_GENERATE_RPM_VERSION: &str = "0.21.1";
+
+/// The AppImage type2-runtime release, and the SHA-256 of each runtime file
+/// (https://github.com/AppImage/type2-runtime/releases/tag/20251108). The
+/// runtime is only concatenated with the image here, never executed.
+const APPIMAGE_RUNTIME_RELEASE: &str = "20251108";
+const APPIMAGE_RUNTIME_SHA256_X86_64: &str =
+    "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d";
+const APPIMAGE_RUNTIME_SHA256_AARCH64: &str =
+    "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444";
+
+/// The desktop integration files, below `prefix` (`share/` or `usr/share/`).
+fn add_desktop_files(ctx: &Ctx, tree: &mut Tree, prefix: &str, metainfo_name: &str) {
+    tree.file(
+        &format!("{prefix}/applications/{APP_ID}.desktop"),
+        &ctx.packaging(&format!("linux/{APP_ID}.desktop")),
+        0o644,
+    );
+    tree.file(
+        &format!("{prefix}/metainfo/{metainfo_name}"),
+        &ctx.packaging(&format!("linux/{APP_ID}.metainfo.xml")),
+        0o644,
+    );
+    tree.file(
+        &format!("{prefix}/icons/hicolor/scalable/apps/{APP_ID}.svg"),
+        &ctx.packaging("icons/glyphvane.svg"),
+        0o644,
+    );
+    for size in [128, 256, 512] {
+        tree.file(
+            &format!("{prefix}/icons/hicolor/{size}x{size}/apps/{APP_ID}.png"),
+            &ctx.packaging(&format!("icons/{size}x{size}.png")),
+            0o644,
+        );
+    }
+}
+
+/// `glyphvane-<version>-<triple>.tar.gz`: both executables at the top, the
+/// licence, notices and desktop files in `share/`.
+pub(super) fn tarball(ctx: &Ctx) -> Result<PathBuf> {
+    let top = format!("glyphvane-{}-{}", ctx.version, ctx.target);
+    let mut tree = Tree::default();
+    tree.file(&format!("{top}/{MAIN_BIN}"), &ctx.main_exe, 0o755);
+    if let Some(helper) = &ctx.helper_exe {
+        tree.file(&format!("{top}/{HELPER_BIN}"), helper, 0o755);
+    }
+    tree.file(&format!("{top}/LICENSE"), &ctx.root.join("LICENSE"), 0o644);
+    tree.file(
+        &format!("{top}/README.md"),
+        &ctx.root.join("README.md"),
+        0o644,
+    );
+    tree.file(
+        &format!("{top}/THIRD-PARTY-NOTICES.txt"),
+        &ctx.packaging("THIRD-PARTY-NOTICES.txt"),
+        0o644,
+    );
+    add_desktop_files(
+        ctx,
+        &mut tree,
+        &format!("{top}/share"),
+        &format!("{APP_ID}.metainfo.xml"),
+    );
+    let out = ctx.out.join(format!("{top}.tar.gz"));
+    tree.write_tar_gz(&out, ctx.epoch)?;
+    Ok(out)
+}
+
+fn warn_if_not_pinned(program: &str, output: &[u8], pinned: &str) {
+    let text = String::from_utf8_lossy(output);
+    if !text.contains(pinned) {
+        eprintln!(
+            "warning: {program} reports `{}`; release artifacts use {pinned}",
+            text.trim()
+        );
+    }
+}
+
+fn tool_version(ctx: &Ctx, sub: &str) -> Result<Vec<u8>> {
+    let output = ctx
+        .command(&cargo())
+        .args([sub, "--version"])
+        .output()
+        .with_context(|| format!("running `cargo {sub} --version`"))?;
+    Ok([output.stdout, output.stderr].concat())
+}
+
+/// `glyphvane_<version>-1_<arch>.deb` through cargo-deb.
+pub(super) fn deb(ctx: &Ctx) -> Result<PathBuf> {
+    let hint =
+        format!("Install the pinned version: cargo install --locked cargo-deb@{CARGO_DEB_VERSION}");
+    require_tool("cargo-deb", "--version", &hint)?;
+    warn_if_not_pinned("cargo-deb", &tool_version(ctx, "deb")?, CARGO_DEB_VERSION);
+    let arch = match ctx.arch {
+        Arch::X86_64 => "amd64",
+        Arch::Aarch64 => "arm64",
+    };
+    // Debian sorts `~` before anything, so `1.0.0~beta.1` < `1.0.0`.
+    let version = ctx.version.replace('-', "~");
+    let out = ctx.out.join(format!("glyphvane_{version}-1_{arch}.deb"));
+    let mut cmd = ctx.command(&cargo());
+    cmd.args([
+        "deb",
+        "-p",
+        "gv-app",
+        "--no-build",
+        "--no-strip",
+        "--profile",
+    ])
+    .arg(&ctx.profile)
+    .args(["--target", &ctx.target, "--deb-version"])
+    .arg(format!("{version}-1"))
+    .arg("-o")
+    .arg(&out);
+    if ctx.helper_exe.is_some() {
+        cmd.args(["--variant", "with-helper"]);
+    }
+    run_checked(&mut cmd, "cargo deb")?;
+    Ok(out)
+}
+
+/// `glyphvane-<version>-1.<arch>.rpm` through cargo-generate-rpm.
+pub(super) fn rpm(ctx: &Ctx) -> Result<PathBuf> {
+    let hint = format!(
+        "Install the pinned version: cargo install --locked cargo-generate-rpm@{CARGO_GENERATE_RPM_VERSION}"
+    );
+    require_tool("cargo-generate-rpm", "--version", &hint)?;
+    warn_if_not_pinned(
+        "cargo-generate-rpm",
+        &tool_version(ctx, "generate-rpm")?,
+        CARGO_GENERATE_RPM_VERSION,
+    );
+    let arch = match ctx.arch {
+        Arch::X86_64 => "x86_64",
+        Arch::Aarch64 => "aarch64",
+    };
+    // RPM versions cannot contain `-`; `~` sorts before the release.
+    let version = ctx.version.replace('-', "~");
+    let out = ctx.out.join(format!("glyphvane-{version}-1.{arch}.rpm"));
+    let mut cmd = ctx.command(&cargo());
+    cmd.args(["generate-rpm", "-p", "crates/gv-app", "--profile"])
+        .arg(&ctx.profile)
+        .args(["--target", &ctx.target, "--arch", arch, "--target-dir"])
+        .arg(&ctx.target_dir)
+        .arg("--set-metadata")
+        .arg(format!("version = \"{version}\""))
+        .arg("-o")
+        .arg(&out);
+    if ctx.helper_exe.is_some() {
+        cmd.args(["--variant", "with-helper"]);
+    }
+    run_checked(&mut cmd, "cargo generate-rpm")?;
+    Ok(out)
+}
+
+/// `Glyphvane-<version>-<arch>.AppImage`: an AppDir in a squashfs image,
+/// behind the pinned type2-runtime. Without a runtime file, only the image
+/// (`….AppImage.squashfs`) is written.
+pub(super) fn appimage(ctx: &Ctx) -> Result<PathBuf> {
+    require_tool(
+        "mksquashfs",
+        "-version",
+        "Install squashfs-tools (apt-get install squashfs-tools, dnf install squashfs-tools).",
+    )?;
+    let (arch, pinned) = match ctx.arch {
+        Arch::X86_64 => ("x86_64", APPIMAGE_RUNTIME_SHA256_X86_64),
+        Arch::Aarch64 => ("aarch64", APPIMAGE_RUNTIME_SHA256_AARCH64),
+    };
+
+    let mut tree = Tree::default();
+    tree.file(&format!("usr/bin/{MAIN_BIN}"), &ctx.main_exe, 0o755);
+    if let Some(helper) = &ctx.helper_exe {
+        tree.file(&format!("usr/bin/{HELPER_BIN}"), helper, 0o755);
+    }
+    add_desktop_files(
+        ctx,
+        &mut tree,
+        "usr/share",
+        &format!("{APP_ID}.appdata.xml"),
+    );
+    tree.file(
+        "usr/share/licenses/glyphvane/LICENSE",
+        &ctx.root.join("LICENSE"),
+        0o644,
+    );
+    tree.file(
+        "usr/share/licenses/glyphvane/THIRD-PARTY-NOTICES.txt",
+        &ctx.packaging("THIRD-PARTY-NOTICES.txt"),
+        0o644,
+    );
+    // The AppDir root: desktop file, icon, .DirIcon and the entry point.
+    tree.symlink(
+        &format!("{APP_ID}.desktop"),
+        &format!("usr/share/applications/{APP_ID}.desktop"),
+    );
+    tree.symlink(
+        &format!("{APP_ID}.png"),
+        &format!("usr/share/icons/hicolor/256x256/apps/{APP_ID}.png"),
+    );
+    tree.symlink(".DirIcon", &format!("{APP_ID}.png"));
+    tree.symlink("AppRun", &format!("usr/bin/{MAIN_BIN}"));
+
+    let appdir = ctx.scratch("AppDir")?;
+    tree.materialize(&appdir, ctx.epoch)?;
+    let image = ctx.work.join("AppDir.squashfs");
+    if image.exists() {
+        fs::remove_file(&image)?;
+    }
+    let epoch = ctx.epoch.to_string();
+    let mut cmd = ctx.command("mksquashfs");
+    // Every timestamp and owner is fixed on the command line; the variable
+    // would conflict with the options in some versions.
+    cmd.env_remove("SOURCE_DATE_EPOCH")
+        .arg(&appdir)
+        .arg(&image)
+        .args(["-noappend", "-all-root", "-no-xattrs", "-no-progress"])
+        .args(["-comp", "zstd", "-Xcompression-level", "19", "-b", "1M"])
+        .args(["-mkfs-time", &epoch, "-all-time", &epoch]);
+    run_checked(&mut cmd, "mksquashfs")?;
+
+    let name = format!("Glyphvane-{}-{arch}.AppImage", ctx.version);
+    let Some(runtime) = &ctx.appimage_runtime else {
+        let out = ctx.out.join(format!("{name}.squashfs"));
+        fs::copy(&image, &out)?;
+        eprintln!(
+            "note: no AppImage runtime given; wrote only the squashfs image. Download \
+             https://github.com/AppImage/type2-runtime/releases/download/{APPIMAGE_RUNTIME_RELEASE}/runtime-{arch} \
+             (sha256 {pinned}) and pass it with --appimage-runtime."
+        );
+        return Ok(out);
+    };
+
+    let digest = sha256_file(runtime)?;
+    if digest != pinned {
+        bail!(
+            "{} is not the pinned type2-runtime {APPIMAGE_RUNTIME_RELEASE} for {arch}: \
+             sha256 {digest}, expected {pinned}",
+            runtime.display()
+        );
+    }
+    let mut bytes = fs::read(runtime)?;
+    // Update information, as `appimagetool -u` writes it.
+    let update =
+        format!("gh-releases-zsync|sorrelfox|glyphvane|latest|Glyphvane-*-{arch}.AppImage.zsync");
+    write_elf_section(&mut bytes, ".upd_info", update.as_bytes())?;
+    bytes.extend_from_slice(&fs::read(&image)?);
+    let out = ctx.out.join(name);
+    fs::write(&out, bytes)?;
+    set_executable(&out)?;
+    Ok(out)
+}
+
+/// Writes `value` (NUL-padded) into the named section of a 64-bit
+/// little-endian ELF file.
+fn write_elf_section(elf: &mut [u8], name: &str, value: &[u8]) -> Result<()> {
+    let (offset, size) = elf_section(elf, name)
+        .with_context(|| format!("no `{name}` section in the AppImage runtime"))?;
+    if value.len() >= size {
+        bail!("`{name}` holds {size} bytes; {} needed", value.len() + 1);
+    }
+    let section = &mut elf[offset..offset + size];
+    section.fill(0);
+    section[..value.len()].copy_from_slice(value);
+    Ok(())
+}
+
+/// The file offset and size of a section in a 64-bit little-endian ELF file.
+fn elf_section(elf: &[u8], name: &str) -> Option<(usize, usize)> {
+    if elf.get(..6)? != b"\x7fELF\x02\x01" {
+        return None;
+    }
+    let u16_at = |o: usize| Some(u16::from_le_bytes(elf.get(o..o + 2)?.try_into().ok()?));
+    let u32_at = |o: usize| Some(u32::from_le_bytes(elf.get(o..o + 4)?.try_into().ok()?));
+    let u64_at = |o: usize| Some(u64::from_le_bytes(elf.get(o..o + 8)?.try_into().ok()?));
+    let shoff = usize::try_from(u64_at(0x28)?).ok()?;
+    let shentsize = usize::from(u16_at(0x3a)?);
+    let shnum = usize::from(u16_at(0x3c)?);
+    let shstrndx = usize::from(u16_at(0x3e)?);
+    let header = |i: usize| shoff + i * shentsize;
+    let strtab = usize::try_from(u64_at(header(shstrndx) + 0x18)?).ok()?;
+    (0..shnum).find_map(|i| {
+        let h = header(i);
+        let name_off = strtab + usize::try_from(u32_at(h)?).ok()?;
+        let rest = elf.get(name_off..)?;
+        let end = rest.iter().position(|&b| b == 0)?;
+        if &rest[..end] != name.as_bytes() {
+            return None;
+        }
+        let offset = usize::try_from(u64_at(h + 0x18)?).ok()?;
+        let size = usize::try_from(u64_at(h + 0x20)?).ok()?;
+        (offset + size <= elf.len()).then_some((offset, size))
+    })
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal ELF64 file: header, `.shstrtab`, `.upd_info`, and three
+    /// section headers (null, `.shstrtab`, `.upd_info`).
+    fn tiny_elf() -> Vec<u8> {
+        let strtab = b"\0.shstrtab\0.upd_info\0";
+        let (strtab_off, upd_off, upd_size) = (0x40usize, 0x60usize, 32usize);
+        let shoff = upd_off + upd_size;
+        let mut elf = vec![0u8; shoff + 3 * 64];
+        elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        elf[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+        elf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        elf[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());
+        elf[0x3e..0x40].copy_from_slice(&1u16.to_le_bytes());
+        elf[strtab_off..strtab_off + strtab.len()].copy_from_slice(strtab);
+        let mut section = |i: usize, name: u32, off: usize, size: usize| {
+            let h = shoff + i * 64;
+            elf[h..h + 4].copy_from_slice(&name.to_le_bytes());
+            elf[h + 0x18..h + 0x20].copy_from_slice(&(off as u64).to_le_bytes());
+            elf[h + 0x20..h + 0x28].copy_from_slice(&(size as u64).to_le_bytes());
+        };
+        section(1, 1, strtab_off, strtab.len());
+        section(2, 11, upd_off, upd_size);
+        elf
+    }
+
+    #[test]
+    fn finds_and_writes_elf_sections() {
+        let mut elf = tiny_elf();
+        assert_eq!(elf_section(&elf, ".upd_info"), Some((0x60, 32)));
+        assert_eq!(elf_section(&elf, ".missing"), None);
+        write_elf_section(&mut elf, ".upd_info", b"gh-releases-zsync|a|b").expect("fits");
+        assert_eq!(&elf[0x60..0x75], b"gh-releases-zsync|a|b");
+        assert_eq!(elf[0x75], 0);
+        assert!(write_elf_section(&mut elf, ".upd_info", &[b'x'; 32]).is_err());
+        assert_eq!(elf_section(b"not an elf", ".upd_info"), None);
+    }
+}

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<!-- Copyright (C) 2026 Glyphvane contributors -->
+<component type="desktop-application">
+  <id>io.github.sorrelfox.Glyphvane</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Glyphvane</name>
+  <summary>Read and edit Markdown notes and vaults</summary>
+  <description>
+    <p>Glyphvane is a native Markdown viewer and editor.</p>
+  </description>
+  <developer id="io.github.sorrelfox">
+    <name>Glyphvane contributors</name>
+  </developer>
+  <url type="homepage">https://github.com/sorrelfox/glyphvane</url>
+  <url type="bugtracker">https://github.com/sorrelfox/glyphvane/issues</url>
+  <launchable type="desktop-id">io.github.sorrelfox.Glyphvane.desktop</launchable>
+  <provides>
+    <binary>glyphvane</binary>
+    <mediatype>text/markdown</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <!-- Add an entry for every release, newest first. -->
+  <releases>
+    <release version="0.0.0" date="2026-11-13"/>
+  </releases>
+</component>

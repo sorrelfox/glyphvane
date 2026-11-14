@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+# Reproducible .tar.gz and .zip artifacts (`cargo xtask package`).
+flate2 = "1.1.11"
 gv-syntax = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

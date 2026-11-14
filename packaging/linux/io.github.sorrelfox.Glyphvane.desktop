@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+[Desktop Entry]
+Type=Application
+Name=Glyphvane
+GenericName=Markdown Editor
+Comment=Read and edit Markdown notes and vaults
+Exec=glyphvane %F
+TryExec=glyphvane
+Icon=io.github.sorrelfox.Glyphvane
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=markdown;notes;editor;viewer;vault;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=true
+StartupWMClass=glyphvane

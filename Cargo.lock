@@ -3047,14 +3047,6 @@ name = "gv-html"
 version = "0.0.0"
 
 [[package]]
-name = "gv-math"
-version = "0.0.0"
-
-[[package]]
-name = "gv-media"
-version = "0.0.0"
-
-[[package]]
 name = "gv-inline"
 version = "0.0.0"
 dependencies = [
@@ -3063,6 +3055,14 @@ dependencies = [
  "unicode-linebreak",
  "unicode-segmentation",
 ]
+
+[[package]]
+name = "gv-math"
+version = "0.0.0"
+
+[[package]]
+name = "gv-media"
+version = "0.0.0"
 
 [[package]]
 name = "gv-model"
@@ -8968,6 +8968,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "gv-syntax",
  "serde",
  "serde_json",

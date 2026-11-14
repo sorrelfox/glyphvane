@@ -65,6 +65,7 @@ crates/   the gv-* library crates and the gv-app binary
 xtask/    project task runner (cargo xtask …)
 tests/    shared test fixtures (spec examples, known divergences)
 fuzz/     cargo-fuzz targets (a separate workspace)
+packaging/  desktop and platform files for the release artifacts
 ```
 
 | Crate | Role |
@@ -161,6 +162,41 @@ Parser test layers:
   linearly (n vs 2n) on cmark's pathological inputs and on deep-nesting
   shapes; `--engine comrak` runs the same suite against comrak.
 - **Fuzzing.** See [fuzz/README.md](fuzz/README.md).
+
+## Packaging
+
+Release artifacts are built by `cargo xtask package` with the `dist` profile
+(fat LTO, stripped), one tool per format. The files it uses live in
+`packaging/` (desktop file, AppStream metainfo, icons, the macOS `Info.plist`
+template and the WiX source). The release workflow
+(`.github/workflows/release.yml`, on a `v*` tag) runs the same commands on
+every platform, then adds `SHA256SUMS`, build-provenance attestations and a
+CycloneDX SBOM to a draft GitHub Release.
+
+```sh
+cargo xtask package --format deb,rpm,tar.gz,appimage   # on Linux
+cargo xtask package --format app,zip,dmg               # on macOS
+cargo xtask package --format zip,msi                   # on Windows
+cargo xtask package --help                             # all options
+```
+
+| Format | Tool (install it yourself; xtask only checks for it) |
+|---|---|
+| `deb` | `cargo install --locked cargo-deb@3.8.0` |
+| `rpm` | `cargo install --locked cargo-generate-rpm@0.21.1` |
+| `tar.gz`, `zip` (Windows) | built in, reproducible |
+| `appimage` | `mksquashfs` (squashfs-tools); pass the pinned type2-runtime with `--appimage-runtime FILE` to get the `.AppImage`, otherwise only its squashfs image is written |
+| `app`, `zip`, `dmg` (macOS) | `iconutil`, `codesign` (ad-hoc), `ditto`, `hdiutil`: part of macOS |
+| `msi` | WiX Toolset v6: `dotnet tool install --global wix --version 6.0.2` and `wix extension add --global WixToolset.UI.wixext/6.0.2` |
+
+`SOURCE_DATE_EPOCH` defaults to the time of the last commit, so the Linux
+artifacts are byte-identical across builds of the same commit. Artifacts go to
+`target/package/<target>/` (or `--out DIR`) with a `SHA256SUMS` file.
+
+`cargo xtask size-report --bin-dir target/dist` compares the executables with
+the size budgets (80 MB for `glyphvane`, 45 MB for `glyphvane-helper`). CI
+fails a pull request that grows either one by more than 3 % unless it carries
+the `binary-size-justified` label and explains the growth.
 
 ## Commits
 

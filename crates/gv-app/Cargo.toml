@@ -1,6 +1,6 @@
 [package]
 name = "gv-app"
-description = "The glyphvane binary: CLI, single instance, platform glue, logging, settings bootstrap."
+description = "Native Markdown editor and viewer with precise link navigation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -39,3 +39,83 @@ tempfile = { workspace = true }
 
 [lints]
 workspace = true
+
+# Linux packages, built by `cargo xtask package --format deb|rpm` (cargo-deb
+# =3.8.0, cargo-generate-rpm =0.21.1). `target/release/` is replaced by the
+# real target directory and profile (`--target`, `--profile dist`). Paths are
+# relative to this crate for cargo-deb and to the workspace root for
+# cargo-generate-rpm. The `with-helper` variants add `glyphvane-helper` in
+# /usr/libexec/glyphvane/; xtask selects them when that binary is built.
+[package.metadata.deb]
+name = "glyphvane"
+# TODO: a real contact address before the first public release.
+maintainer = "Glyphvane contributors <noreply@example.invalid>"
+copyright = "2026 Glyphvane contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Glyphvane is a native Markdown viewer and editor for notes and vaults."""
+section = "editors"
+priority = "optional"
+# $auto runs dpkg-shlibdeps. GPUI loads Wayland, EGL and Vulkan with dlopen(),
+# so those libraries are listed by hand.
+depends = "$auto, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libvulkan1"
+recommends = "libegl1, mesa-vulkan-drivers"
+assets = [
+  ["target/release/glyphvane", "usr/bin/", "755"],
+  ["../../packaging/linux/io.github.sorrelfox.Glyphvane.desktop", "usr/share/applications/", "644"],
+  ["../../packaging/linux/io.github.sorrelfox.Glyphvane.metainfo.xml", "usr/share/metainfo/", "644"],
+  ["../../packaging/icons/glyphvane.svg", "usr/share/icons/hicolor/scalable/apps/io.github.sorrelfox.Glyphvane.svg", "644"],
+  ["../../packaging/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/io.github.sorrelfox.Glyphvane.png", "644"],
+  ["../../packaging/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/io.github.sorrelfox.Glyphvane.png", "644"],
+  ["../../packaging/icons/512x512.png", "usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", "644"],
+  ["../../packaging/THIRD-PARTY-NOTICES.txt", "usr/share/doc/glyphvane/", "644"],
+]
+
+[package.metadata.deb.variants.with-helper]
+name = "glyphvane"
+merge-assets.append = [
+  ["target/release/glyphvane-helper", "usr/libexec/glyphvane/", "755"],
+]
+
+[package.metadata.generate-rpm]
+name = "glyphvane"
+summary = "Native Markdown viewer and editor"
+license = "GPL-3.0-or-later"
+url = "https://github.com/sorrelfox/glyphvane"
+# cargo-generate-rpm 0.21 has no %license flag; the licence is marked %doc.
+assets = [
+  { source = "target/release/glyphvane", dest = "/usr/bin/glyphvane", mode = "755" },
+  { source = "packaging/linux/io.github.sorrelfox.Glyphvane.desktop", dest = "/usr/share/applications/io.github.sorrelfox.Glyphvane.desktop", mode = "644" },
+  { source = "packaging/linux/io.github.sorrelfox.Glyphvane.metainfo.xml", dest = "/usr/share/metainfo/io.github.sorrelfox.Glyphvane.metainfo.xml", mode = "644" },
+  { source = "packaging/icons/glyphvane.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.sorrelfox.Glyphvane.svg", mode = "644" },
+  { source = "packaging/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "packaging/icons/256x256.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "packaging/icons/512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/licenses/glyphvane/LICENSE", mode = "644", doc = true },
+  { source = "packaging/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/doc/glyphvane/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+# Not found by auto-req because GPUI loads them with dlopen().
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libvulkan.so.1()(64bit)" = "*"
+
+[package.metadata.generate-rpm.recommends]
+"libEGL.so.1()(64bit)" = "*"
+
+# A variant replaces the whole asset list, so this repeats the list above plus
+# the helper. Keep the two in sync.
+[package.metadata.generate-rpm.variants.with-helper]
+assets = [
+  { source = "target/release/glyphvane", dest = "/usr/bin/glyphvane", mode = "755" },
+  { source = "target/release/glyphvane-helper", dest = "/usr/libexec/glyphvane/glyphvane-helper", mode = "755" },
+  { source = "packaging/linux/io.github.sorrelfox.Glyphvane.desktop", dest = "/usr/share/applications/io.github.sorrelfox.Glyphvane.desktop", mode = "644" },
+  { source = "packaging/linux/io.github.sorrelfox.Glyphvane.metainfo.xml", dest = "/usr/share/metainfo/io.github.sorrelfox.Glyphvane.metainfo.xml", mode = "644" },
+  { source = "packaging/icons/glyphvane.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.sorrelfox.Glyphvane.svg", mode = "644" },
+  { source = "packaging/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "packaging/icons/256x256.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "packaging/icons/512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/licenses/glyphvane/LICENSE", mode = "644", doc = true },
+  { source = "packaging/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/doc/glyphvane/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
+]

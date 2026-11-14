@@ -106,6 +106,78 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  # NFR-SIZE: both executables in the release profile, against their budgets
+  # and against the last successful run on the base branch. More than 3 %
+  # growth fails unless the pull request carries the `binary-size-justified`
+  # label (re-run the job after adding it).
+  binary-size:
+    name: Binary size
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      # Download the base branch's report and read the pull request's labels.
+      actions: read
+      pull-requests: read
+    env:
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libssl-dev pkg-config
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist
+
+      - name: Build (dist profile)
+        run: cargo build --locked --profile dist -p gv-app
+
+      - name: Fetch the base branch's size report
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --branch "$GITHUB_BASE_REF" --event push --status success --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name binary-size --dir baseline \
+              || echo "No size report in run $run_id"
+          fi
+          labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx binary-size-justified; then
+            echo "ALLOW_GROWTH=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Size report
+        run: |
+          args=(--bin-dir target/dist --json binary-size.json)
+          if [ -f baseline/binary-size.json ]; then args+=(--baseline baseline/binary-size.json); fi
+          if [ -n "${ALLOW_GROWTH:-}" ]; then args+=(--allow-growth); fi
+          cargo xtask size-report "${args[@]}"
+
+      # TODO: add a per-crate breakdown (cargo-bloat) to explain growth.
+
+      - name: Keep the report as the baseline for pull requests
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-size
+          path: binary-size.json
+          retention-days: 90
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

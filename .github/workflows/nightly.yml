@@ -1,0 +1,251 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+
+# Nightly: the long test runs that do not fit a pull request, and packaged
+# builds of `main` as workflow artifacts (no release, no signing beyond the
+# macOS ad-hoc signature).
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # Pinned packaging tools (ADR-020); the same as release.yml.
+  CARGO_DEB_VERSION: "3.8.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.1"
+  WIX_VERSION: "6.0.2"
+  APPIMAGE_RUNTIME_RELEASE: "20251108"
+
+jobs:
+  properties:
+    name: Long property tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # proptest's default case count, for every property that does not set
+      # its own; the `*_heavy` variants run through `--ignored`.
+      PROPTEST_CASES: 10000
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libssl-dev pkg-config
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-release
+
+      - name: Property tests (many cases)
+        run: cargo test --workspace --locked --release
+
+      - name: Heavy property tests
+        run: cargo test -p gv-text --test properties --locked --release -- --ignored
+
+  differential:
+    name: Differential vs comrak
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GV_DIFF_CASES: 200000
+      GV_DIFF_SEED: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-release
+
+      # Divergences that are decided go in
+      # tests/fixtures/differential/known-divergences.toml.
+      - name: gv-syntax against comrak on random documents
+        run: >-
+          cargo test -p gv-syntax --test differential --locked --release
+          -- --ignored --nocapture
+
+  fuzz:
+    name: Fuzz smoke (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_full, incremental_equals_full, roundtrip_lossless]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+          key: nightly-fuzz
+
+      - name: Seed corpus
+        run: cargo xtask fuzz-seed
+
+      # The standalone runner (stable toolchain): replays the corpus, then a
+      # mutation loop. A panicking or slow input is saved to fuzz/artifacts/.
+      - name: Fuzz
+        working-directory: fuzz
+        run: >-
+          cargo run --locked --release --bin ${{ matrix.target }} --
+          --iterations 500000 --seed ${{ github.run_number }} --timeout-ms 2000
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Same steps as release.yml, without SignPath, attestations or a release.
+  package:
+    name: Package (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: deb,rpm,tar.gz,appimage
+            runtime: runtime-x86_64
+            runtime-sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+            jobs: 3
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            formats: deb,rpm,tar.gz,appimage
+            runtime: runtime-aarch64
+            runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+            jobs: 3
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            formats: app,zip,dmg
+            jobs: 2
+          - name: macos-x86_64
+            os: macos-15
+            target: x86_64-apple-darwin
+            formats: app,zip,dmg
+            jobs: 2
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: zip,msi
+            jobs: 3
+          - name: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            formats: zip,msi
+            jobs: 3
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libssl-dev pkg-config \
+            dpkg-dev squashfs-tools zsync
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Install packaging tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo install --locked "cargo-deb@$CARGO_DEB_VERSION"
+          cargo install --locked "cargo-generate-rpm@$CARGO_GENERATE_RPM_VERSION"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/runtime" \
+            "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_RELEASE/${{ matrix.runtime }}"
+          echo "${{ matrix.runtime-sha256 }}  $RUNNER_TEMP/runtime" | sha256sum -c -
+          echo "GLYPHVANE_APPIMAGE_RUNTIME=$RUNNER_TEMP/runtime" >> "$GITHUB_ENV"
+
+      - name: Install WiX Toolset (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dotnet tool install --global wix --version "$WIX_VERSION"
+          wix extension add --global "WixToolset.UI.wixext/$WIX_VERSION"
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build and package
+        run: >-
+          cargo xtask package
+          --target ${{ matrix.target }}
+          --format ${{ matrix.formats }}
+          --out dist
+
+      - name: Smoke test
+        run: |
+          case "${{ runner.os }}" in
+            Linux)
+              mkdir -p "$RUNNER_TEMP/tarball"
+              tar -xzf dist/glyphvane-*.tar.gz -C "$RUNNER_TEMP/tarball"
+              "$RUNNER_TEMP"/tarball/glyphvane-*/glyphvane --version
+              APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Glyphvane-*.AppImage --version ;;
+            macOS)
+              app="target/package-work/${{ matrix.target }}/macos/Glyphvane.app"
+              codesign --verify --strict --verbose=2 "$app"
+              "$app/Contents/MacOS/glyphvane" --version ;;
+            Windows)
+              target/${{ matrix.target }}/dist/glyphvane.exe --version ;;
+          esac
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nightly-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

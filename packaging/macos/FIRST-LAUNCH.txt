@@ -1,0 +1,16 @@
+Opening Glyphvane for the first time
+====================================
+
+1. Drag Glyphvane into the Applications folder.
+2. Open it once. macOS blocks it, because Glyphvane is not notarized by Apple.
+3. Open System Settings > Privacy & Security, scroll down and click
+   "Open Anyway" next to the message about Glyphvane (the button is shown for
+   about an hour after the blocked attempt), then confirm.
+
+Alternatively, run this in Terminal after copying the app:
+
+    xattr -dr com.apple.quarantine /Applications/Glyphvane.app
+
+Glyphvane is free software under the GNU General Public License, version 3 or
+later. The source code and the checksums of every download are published at
+https://github.com/sorrelfox/glyphvane/releases

@@ -8,6 +8,7 @@ mod deps;
 mod fixtures;
 mod fuzz_seed;
 mod headers;
+mod package;
 mod pathological;
 mod spec;
 
@@ -48,6 +49,13 @@ Commands:
                         build); --engine comrak validates the suite itself.
   fuzz-seed             Write the fuzz seed corpora (fuzz/corpus/) from the
                         spec examples.
+  package --format F[,F...] [--target T] [--profile P] [--out DIR] [--no-build]
+                        Build release artifacts (deb, rpm, tar.gz, appimage,
+                        app, zip, dmg, msi) and SHA256SUMS; see
+                        `cargo xtask package --help`.
+  size-report --bin-dir DIR [--baseline FILE] [--json FILE]
+                        Executable sizes against the NFR-SIZE budgets and a
+                        baseline (fails on > 3 % growth).
 ";
 
 fn main() -> ExitCode {
@@ -94,6 +102,8 @@ fn run() -> Result<bool> {
         "fetch-spec" => fixtures::run(&root, rest),
         "pathological" => pathological::run(&root, rest),
         "fuzz-seed" => fuzz_seed::run(&root, rest),
+        "package" => package::run(&root, rest),
+        "size-report" => package::size::run(rest),
         other => {
             eprint!("unknown command `{other}`\n\n{HELP}");
             Ok(false)
