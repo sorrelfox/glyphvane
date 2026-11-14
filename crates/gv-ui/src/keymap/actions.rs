@@ -76,6 +76,7 @@ command_actions! {
         Unfold = "view.unfold",
         FoldAll = "view.fold_all",
         UnfoldAll = "view.unfold_all",
+        ToggleSoftWrap = "view.toggle_soft_wrap",
     }
     navigation {
         Back = "navigation.back",

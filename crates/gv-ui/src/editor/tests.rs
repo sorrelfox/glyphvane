@@ -787,6 +787,155 @@ fn the_top_line_stays_when_the_wrap_width_changes(cx: &mut TestAppContext) {
     assert_eq!(top, 50);
 }
 
+/// `lines` lines of 40 words: over [`super::wrap::SYNC_REWRAP_BYTES`] from
+/// 1100 lines, each three rows in the full column.
+fn long_lines(lines: usize) -> String {
+    let mut text = String::new();
+    for _ in 0..lines {
+        text.push_str(&words(40));
+        text.push('\n');
+    }
+    text
+}
+
+/// What the wrap layer of `view` shows, and the same text wrapped at the
+/// same width at once with the test text system's advance.
+fn wrapped_and_expected(
+    view: &Entity<EditorView>,
+    vcx: &mut VisualTestContext,
+) -> (String, String) {
+    view.read_with(vcx, |v, _| {
+        let editor = v.editor().expect("loaded");
+        let shown = editor.wrap().expect("soft wrap is on").text();
+        let text = editor.text();
+        let mut fresh = gv_editor::Editor::new(gv_text::Buffer::new(
+            &text.text_for_range(0..text.len()).unwrap(),
+        ));
+        fresh.set_measure(Box::new(gv_editor::display_map::MonospaceMeasure::new(
+            CHAR,
+        )));
+        fresh.set_wrap_indent(std::sync::Arc::new(
+            gv_editor::display_map::MarkdownHangingIndent::default(),
+        ));
+        fresh.set_wrap_width(editor.wrap_width());
+        (shown, fresh.wrap().expect("on").text())
+    })
+}
+
+#[gpui::test]
+fn a_large_document_wraps_in_the_background(cx: &mut TestAppContext) {
+    let text = long_lines(1200);
+    assert!(text.len() > super::wrap::SYNC_REWRAP_BYTES);
+    let (view, mut vcx) = editor(cx, &text);
+    draw(&mut vcx);
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 3);
+    let (shown, expected) = wrapped_and_expected(&view, &mut vcx);
+    assert_eq!(shown, expected);
+
+    // Soft wrap turned on: the job starts with the frame and the lines
+    // show unwrapped until it lands; an edit made meanwhile is kept.
+    view.update(&mut vcx, |v, cx| v.set_soft_wrap(false, cx));
+    draw(&mut vcx);
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 1);
+    view.update(&mut vcx, |v, cx| {
+        v.set_soft_wrap(true, cx);
+        v.sync_wrap(COLUMN, cx);
+        let editor = &mut v.doc.as_mut().unwrap().editor;
+        assert!(editor.is_rewrapping());
+        assert_eq!(editor.wrap_width(), Some(COLUMN));
+        assert_eq!(editor.wrap().unwrap().max_point().row().0, 1200);
+        editor.insert_at_selections("new words ");
+        assert!(editor.wrap().unwrap().is_interpolated());
+    });
+    draw(&mut vcx);
+    let rewrapping = view.read_with(&vcx, |v, _| v.editor().unwrap().is_rewrapping());
+    assert!(!rewrapping);
+    assert!(text_of(&view, &mut vcx).starts_with("new words w0000 "));
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 3);
+    let (shown, expected) = wrapped_and_expected(&view, &mut vcx);
+    assert_eq!(shown, expected);
+}
+
+#[gpui::test]
+fn resizing_a_large_document_rewraps_in_the_background_and_keeps_the_top_line(
+    cx: &mut TestAppContext,
+) {
+    let (view, mut vcx) = editor(cx, &long_lines(1200));
+    draw(&mut vcx);
+    view.update(&mut vcx, |v, cx| v.scroll_to_line(600, cx));
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.top_line()), 600);
+    let rows = |vcx: &mut VisualTestContext| rows_of(&probe_of(&view, vcx), 600).len();
+    assert_eq!(rows(&mut vcx), 3);
+
+    // The old wraps stay while the width settles.
+    vcx.simulate_resize(size(px(400.0), px(HEIGHT)));
+    draw(&mut vcx);
+    let width = view.read_with(&vcx, |v, _| v.editor().unwrap().wrap_width());
+    assert_eq!(width, Some(COLUMN));
+    assert_eq!(rows(&mut vcx), 3);
+    // Then the job runs and lands with the top line in place.
+    vcx.executor().advance_clock(super::wrap::REWRAP_DELAY);
+    draw(&mut vcx);
+    let (width, rewrapping, top) = view.read_with(&vcx, |v, _| {
+        let editor = v.editor().unwrap();
+        (editor.wrap_width(), editor.is_rewrapping(), v.top_line())
+    });
+    assert_eq!(width, Some(320.0));
+    assert!(!rewrapping);
+    assert_eq!(top, 600);
+    assert_eq!(rows(&mut vcx), 6);
+    let (shown, expected) = wrapped_and_expected(&view, &mut vcx);
+    assert_eq!(shown, expected);
+
+    // Soft wrap turned off while a new width settles: no re-wrap.
+    vcx.simulate_resize(size(px(WIDTH), px(HEIGHT)));
+    draw(&mut vcx);
+    view.update(&mut vcx, |v, cx| v.toggle_soft_wrap(cx));
+    draw(&mut vcx);
+    vcx.executor().advance_clock(super::wrap::REWRAP_DELAY);
+    draw(&mut vcx);
+    let (width, rewrapping, top) = view.read_with(&vcx, |v, _| {
+        let editor = v.editor().unwrap();
+        (editor.wrap_width(), editor.is_rewrapping(), v.top_line())
+    });
+    assert_eq!(width, None);
+    assert!(!rewrapping);
+    assert_eq!(top, 600);
+    assert_eq!(rows(&mut vcx), 1);
+    // And on again, in the background.
+    view.update(&mut vcx, |v, cx| v.toggle_soft_wrap(cx));
+    draw(&mut vcx);
+    let (width, rewrapping, top) = view.read_with(&vcx, |v, _| {
+        let editor = v.editor().unwrap();
+        (editor.wrap_width(), editor.is_rewrapping(), v.top_line())
+    });
+    assert_eq!(width, Some(COLUMN));
+    assert!(!rewrapping);
+    assert_eq!(top, 600);
+    assert_eq!(rows(&mut vcx), 3);
+}
+
+#[gpui::test]
+fn the_soft_wrap_command_turns_soft_wrap_off_and_on(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, &format!("{}\n", words(40)));
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 3);
+    vcx.dispatch_action(crate::keymap::actions::view::ToggleSoftWrap);
+    draw(&mut vcx);
+    let state = view.read_with(&vcx, |v, _| {
+        (v.soft_wrap(), v.editor().unwrap().wrap_width())
+    });
+    assert_eq!(state, (false, None));
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 1);
+    vcx.dispatch_action(crate::keymap::actions::view::ToggleSoftWrap);
+    draw(&mut vcx);
+    let state = view.read_with(&vcx, |v, _| {
+        (v.soft_wrap(), v.editor().unwrap().wrap_width())
+    });
+    assert_eq!(state, (true, Some(COLUMN)));
+    assert_eq!(rows_of(&probe_of(&view, &mut vcx), 0).len(), 3);
+}
+
 // --- In the window: Mod+E -----------------------------------------------------------
 
 fn temp(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -1233,34 +1382,78 @@ mod timing {
                 draw(&mut vcx);
             }
             if wrap == Some(true) {
-                // Running the test executor draws the notified window.
-                let t = Instant::now();
+                use super::super::wrap::{EditorMeasure, RowMap, run_rewrap};
+                let ms = |d: Duration| d.as_secs_f64() * 1e3;
+                // Soft wrap turned on: the frame that starts the job (UI
+                // thread), the job (on this thread under the test
+                // executor) with its landing, and the next frame.
                 editor.update(&mut vcx, |e, cx| {
                     e.wrap.force = true;
-                    cx.notify();
+                    e.set_soft_wrap(false, cx);
                 });
                 draw(&mut vcx);
-                let first = t.elapsed();
-                // A new width, re-wrapped at once (what a resize costs a
-                // document under the synchronous limit).
                 let t = Instant::now();
-                editor.update(&mut vcx, |e, _| {
-                    let width = e.doc.as_ref().unwrap().editor.wrap_width().unwrap();
-                    e.apply_wrap_width(Some(width - 100.0));
+                editor.update(&mut vcx, |e, cx| e.set_soft_wrap(true, cx));
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                let start_frame = t.elapsed();
+                let t = Instant::now();
+                vcx.run_until_parked();
+                let job_on_executor = t.elapsed();
+                let t = Instant::now();
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                let landed_frame = t.elapsed();
+                // A new width, phase by phase, the job on a real thread
+                // with its own measure.
+                let (defer, job, finish, rows) = editor.update(&mut vcx, |e, cx| {
+                    let measure = EditorMeasure::new(cx.text_system().clone(), e.fonts.regular());
+                    let width = e.doc.as_ref().unwrap().editor.wrap_width().unwrap() - 100.0;
+                    let t = Instant::now();
+                    let pending = e
+                        .keep_top_line(|ed| ed.defer_wrap_width(Some(width)))
+                        .flatten()
+                        .expect("a job");
+                    let defer = t.elapsed();
+                    let t = Instant::now();
+                    let done = std::thread::spawn(move || {
+                        run_rewrap(pending, measure, &std::sync::atomic::AtomicBool::new(false))
+                    })
+                    .join()
+                    .expect("the wrap thread")
+                    .expect("not cancelled");
+                    let job = t.elapsed();
+                    let t = Instant::now();
+                    assert_eq!(e.keep_top_line(|ed| ed.finish_rewrap(done)), Some(true));
+                    let finish = t.elapsed();
+                    let rows = e.row_map().map_or(0, RowMap::row_count);
+                    (defer, job, finish, rows)
                 });
-                let rewrap = t.elapsed();
-                let rows = editor.read_with(&vcx, |e, _| {
-                    e.row_map().map_or(0, super::super::wrap::RowMap::row_count)
-                });
-                editor.update(&mut vcx, |e, cx| {
-                    e.apply_wrap_width(Some(super::COLUMN));
-                    cx.notify();
-                });
+                // Of the frame starting the first job: the unwrapped wrap
+                // layer the editor builds.
+                let mut fresh = gv_editor::Editor::new(gv_text::Buffer::new(&markdown));
+                let t = Instant::now();
+                let first_job = fresh.defer_wrap_width(Some(600.0));
+                let unwrapped_layer = t.elapsed();
+                assert!(first_job.is_some());
+                drop((first_job, fresh));
+                // The same at once, as a document under the synchronous
+                // limit is re-wrapped.
+                let t = Instant::now();
+                editor.update(&mut vcx, |e, _| e.apply_wrap_width(Some(super::COLUMN)));
+                let sync = t.elapsed();
                 draw(&mut vcx);
                 eprintln!(
-                    "{name}: soft wrap turned on (first wrap, frame) {:.1} ms; re-wrap at a new width {:.1} ms ({rows} rows)",
-                    first.as_secs_f64() * 1e3,
-                    rewrap.as_secs_f64() * 1e3,
+                    "{name}: soft wrap turned on: frame starting the job {:.1} ms (of which the unwrapped layer {:.1} ms), job + landing on the test executor {:.1} ms, next frame {:.1} ms",
+                    ms(start_frame),
+                    ms(unwrapped_layer),
+                    ms(job_on_executor),
+                    ms(landed_frame),
+                );
+                eprintln!(
+                    "{name}: new width ({rows} rows): UI thread {:.2} ms to start + {:.2} ms to land; job on a worker thread {:.1} ms; synchronous re-wrap {:.1} ms",
+                    ms(defer),
+                    ms(finish),
+                    ms(job),
+                    ms(sync),
                 );
             }
             // The caret in the middle of the text, in a paragraph.

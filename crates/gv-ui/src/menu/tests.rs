@@ -111,6 +111,7 @@ fn the_menus_follow_each_platform() {
                 "workspace.toggle_sidebar",
                 "workspace.toggle_panel",
                 "editor.toggle_whitespace",
+                "view.toggle_soft_wrap",
                 "view.cycle_theme",
                 "view.zoom_in",
                 "view.zoom_out",
@@ -576,6 +577,41 @@ fn f10_opens_the_menu(cx: &mut TestAppContext) {
     f.keys("f10");
     assert!(!f.is_open());
     assert!(f.reader_focused());
+}
+
+/// View ▸ Soft wrap is disabled in Preview and toggles soft wrap in the
+/// editor.
+#[gpui::test]
+fn the_soft_wrap_item_works_in_the_editor_only(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, WindowChrome::Linux);
+    f.click("app-menu");
+    f.click("app-menu-top:View");
+    f.click("app-menu-item:view.toggle_soft_wrap");
+    assert!(f.is_open(), "disabled in Preview");
+    f.keys("escape");
+
+    f.keys("secondary-e");
+    assert_eq!(f.mode(), ViewMode::Edit);
+    let editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("the tab has an editor");
+    let state = |f: &mut Fixture| {
+        editor.read_with(&f.vcx, |e, _| {
+            (
+                e.soft_wrap(),
+                e.editor().expect("loaded").wrap_width().is_some(),
+            )
+        })
+    };
+    assert_eq!(state(&mut f), (true, true));
+    for on in [false, true] {
+        f.click("app-menu");
+        f.click("app-menu-top:View");
+        f.click("app-menu-item:view.toggle_soft_wrap");
+        assert!(!f.is_open());
+        assert_eq!(state(&mut f), (on, on));
+    }
 }
 
 /// In the editor, the Format menu runs the Markdown commands; those the

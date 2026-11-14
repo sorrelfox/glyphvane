@@ -12,9 +12,16 @@
 //! from the line's [`Break`]s.
 //!
 //! - **Width:** the text column's width. A new width (a resize) re-wraps at
-//!   once for a document up to [`SYNC_REWRAP_BYTES`]; a larger one keeps
-//!   its old rows while the width keeps changing and re-wraps once it
-//!   settles ([`REWRAP_DELAY`]).
+//!   once for a document up to [`SYNC_REWRAP_BYTES`]. A larger document is
+//!   re-wrapped on GPUI's background executor ([`EditorView::start_rewrap`]):
+//!   the editor hands out a [`RewrapJob`] and shows the old wraps (lines
+//!   unwrapped, when soft wrap was just turned on) until the job lands;
+//!   edits made meanwhile are kept. The worker measures with its own
+//!   [`EditorMeasure`]: GPUI's text system is `Send + Sync` (its platform
+//!   text system is behind locks), so the worker shapes characters itself,
+//!   each once per job. While the width keeps changing (a resize drag), a
+//!   large document waits for it to settle ([`REWRAP_DELAY`]) before a job
+//!   starts; a newer job cancels the one running.
 //! - **Large-file mode** (the `editor.large_file_*` settings) keeps wrap
 //!   off: long lines then scroll sideways.
 //! - The scroll position is kept by line: the line at the top stays at
@@ -22,10 +29,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use gpui::{App, Context, Font, FontId, Pixels, TextSystem, px};
-use gv_editor::display_map::{TextMeasure, WrapPoint, WrapRow, WrapSnapshot};
+use gpui::{App, Context, Font, FontId, Pixels, Task, TextSystem, px};
+use gv_editor::Editor;
+use gv_editor::display_map::{
+    LineWrapper, RewrapJob, TextMeasure, WrapPoint, WrapRow, WrapSnapshot,
+};
 use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
 use super::{EditorView, LINE};
@@ -34,12 +45,24 @@ use crate::metrics::text;
 
 /// The largest document re-wrapped on the UI thread as soon as the width
 /// changes. About 3 ms of wrapping (some 11 ms per MB); larger documents
-/// wait for the width to settle.
+/// are re-wrapped in the background.
 pub(crate) const SYNC_REWRAP_BYTES: usize = 256 * 1024;
 
 /// How long the width of a large document must stay the same before it
 /// is re-wrapped.
 pub(crate) const REWRAP_DELAY: Duration = Duration::from_millis(150);
+
+/// Tab rows a background re-wrap wraps between looks at its cancel flag.
+const REWRAP_STEP_ROWS: u32 = 4096;
+
+/// The worker measures with GPUI's text system off the UI thread.
+const _: () = {
+    const fn send_sync<T: Send + Sync>() {}
+    const fn send<T: Send>() {}
+    send_sync::<TextSystem>();
+    send::<EditorMeasure>();
+    send::<RewrapJob>();
+};
 
 /// Advance widths of the editor font through GPUI's text system, one
 /// character at a time (shaped alone, so font fallback picks the face a
@@ -264,7 +287,7 @@ pub(crate) struct SoftWrap {
     pub enabled: bool,
     /// The editor has its measure and indent.
     pub ready: bool,
-    /// A width waiting for a large document's re-wrap.
+    /// A width waiting to settle before a large document's re-wrap.
     pub pending: Option<f32>,
     /// Ignore large-file mode (timing runs).
     #[cfg(test)]
@@ -292,6 +315,9 @@ impl EditorView {
     /// Turns soft wrap on or off.
     pub fn set_soft_wrap(&mut self, on: bool, cx: &mut Context<'_, Self>) {
         self.wrap.enabled = on;
+        // A width waiting to settle is for the old state.
+        self.wrap.pending = None;
+        self._rewrap_wait = None;
         cx.notify();
     }
 
@@ -330,7 +356,9 @@ impl EditorView {
         };
         let have = doc.editor.wrap_width();
         if wanted == have {
+            // In step, or a background re-wrap to this width is running.
             self.wrap.pending = None;
+            self._rewrap_wait = None;
             return;
         }
         if wanted.is_some() && !self.wrap.ready {
@@ -339,34 +367,89 @@ impl EditorView {
             self.wrap.ready = true;
         }
         let large = doc.editor.text().len() > SYNC_REWRAP_BYTES;
-        if have.is_some() && wanted.is_some() && large {
-            if self.wrap.pending != wanted {
-                self.wrap.pending = wanted;
-                self._rewrap = Some(cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(REWRAP_DELAY).await;
-                    this.update(cx, |view, cx| {
-                        if view.wrap.pending == wanted {
-                            view.wrap.pending = None;
-                            view.apply_wrap_width(wanted);
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                }));
+        match (have, wanted) {
+            // A new width: once it settles.
+            (Some(_), Some(width)) if large => {
+                if self.wrap.pending != wanted {
+                    self.wrap.pending = wanted;
+                    self._rewrap_wait = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(REWRAP_DELAY).await;
+                        this.update(cx, |view, cx| {
+                            if view.wrap.pending == wanted {
+                                view.wrap.pending = None;
+                                view.start_rewrap(width, cx);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    }));
+                }
             }
-            return;
+            // Soft wrap turned on (the first frame of a document too).
+            (None, Some(width)) if large => {
+                self.wrap.pending = None;
+                self._rewrap_wait = None;
+                self.start_rewrap(width, cx);
+            }
+            _ => {
+                self.wrap.pending = None;
+                self._rewrap_wait = None;
+                self._rewrap = None;
+                self.apply_wrap_width(wanted);
+            }
         }
-        self.wrap.pending = None;
-        self.apply_wrap_width(wanted);
     }
 
-    /// Sets the editor's wrap width, keeping the line at the top in place.
+    /// Sets the editor's wrap width, re-wrapping at once and keeping the
+    /// line at the top in place.
     pub(crate) fn apply_wrap_width(&mut self, width: Option<f32>) {
-        let pad = f64::from(document::PAD_TOP);
-        let row_px = f64::from(LINE);
-        let Some(doc) = self.doc.as_mut() else {
+        self.keep_top_line(|editor| editor.set_wrap_width(width));
+        if width.is_some() {
+            self.scroll_x = 0.0;
+        }
+    }
+
+    /// Sets the editor's wrap width to `width` and re-wraps on the
+    /// background executor; the job replaces (and cancels) one running.
+    /// The editor shows interpolated rows until the job lands.
+    pub(crate) fn start_rewrap(&mut self, width: f32, cx: &mut Context<'_, Self>) {
+        // Measured on the worker like the editor's own measure.
+        let measure = EditorMeasure::new(cx.text_system().clone(), self.fonts.regular());
+        let job = self
+            .keep_top_line(|editor| editor.defer_wrap_width(Some(width)))
+            .flatten();
+        self.scroll_x = 0.0;
+        let Some(job) = job else {
             return;
         };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&cancel);
+        let task = cx.spawn(async move |this, cx| {
+            let job = cx
+                .background_executor()
+                .spawn(async move { run_rewrap(job, measure, &stop) })
+                .await;
+            let Some(job) = job else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                view.keep_top_line(|editor| editor.finish_rewrap(job));
+                cx.notify();
+            })
+            .ok();
+        });
+        self._rewrap = Some(Rewrap {
+            _task: task,
+            cancel,
+        });
+    }
+
+    /// Runs `change` on the editor, keeping the line at the top in place
+    /// (and the offset into it, within its new rows).
+    pub(super) fn keep_top_line<R>(&mut self, change: impl FnOnce(&mut Editor) -> R) -> Option<R> {
+        let pad = f64::from(document::PAD_TOP);
+        let row_px = f64::from(LINE);
+        let doc = self.doc.as_mut()?;
         let (line, delta) = {
             let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
             let row = ((self.scroll_y - pad) / row_px).floor().max(0.0) as usize;
@@ -374,17 +457,43 @@ impl EditorView {
             let line_top = pad + map.first_row(line) as f64 * row_px;
             (line, self.scroll_y - line_top)
         };
-        doc.editor.set_wrap_width(width);
+        let result = change(&mut doc.editor);
         if self.scroll_y > 0.0 {
             let map = RowMap::new(doc.editor.text(), doc.editor.wrap());
             let rows = map.breaks(line).len() as f64;
             let line_top = pad + map.first_row(line) as f64 * row_px;
             self.scroll_y = (line_top + delta.min(rows * row_px - 1.0)).max(0.0);
         }
-        if width.is_some() {
-            self.scroll_x = 0.0;
+        Some(result)
+    }
+}
+
+/// A re-wrap running on the background executor; dropping it cancels it.
+pub(crate) struct Rewrap {
+    _task: Task<()>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for Rewrap {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Runs `job` to the end with a wrapper around `measure`, in steps, or
+/// gives up once `stop` is set.
+pub(super) fn run_rewrap(
+    mut job: RewrapJob,
+    measure: EditorMeasure,
+    stop: &AtomicBool,
+) -> Option<RewrapJob> {
+    let mut wrapper = LineWrapper::new(Box::new(measure));
+    while !job.run(&mut wrapper, REWRAP_STEP_ROWS) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
         }
     }
+    Some(job)
 }
 
 /// The large-file thresholds in effect.

@@ -18,8 +18,8 @@ use crate::boundaries::{
 };
 use crate::clock::{Clock, SystemClock};
 use crate::display_map::{
-    IndentAdjustment, MonospaceMeasure, ReplaceMap, TabEdit, TabMap, TabPoint, TabSnapshot,
-    TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
+    IndentAdjustment, MonospaceMeasure, ReplaceMap, RewrapJob, TabEdit, TabMap, TabPoint,
+    TabSnapshot, TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow, WrapSnapshot,
 };
 use crate::history::{
     EditKind, History, HistoryConfig, Record, SelectionState, StateId, UndoOutcome, UndoPlan,
@@ -165,7 +165,12 @@ struct DisplayLayers {
     snapshot: TabSnapshot,
     tab_size: NonZeroU32,
     wrap: Option<WrapLayer>,
-    /// The measure while soft wrap is off (the wrap map owns it while on).
+    /// The wrap map while soft wrap is off, once it has been on: synced to
+    /// an empty text, so it costs nothing to keep. Keeping one map for the
+    /// editor's life keeps its re-wrap generations counting up, so a job
+    /// handed out before soft wrap was turned off stays stale.
+    parked: Option<WrapMap>,
+    /// The measure until the wrap map exists (it owns it from then on).
     measure: Option<Box<dyn TextMeasure>>,
     indent: Arc<dyn WrapIndent>,
 }
@@ -183,7 +188,17 @@ impl fmt::Debug for DisplayLayers {
             .field("tab_map", &self.tab_map)
             .field("tab_size", &self.tab_size)
             .field("wrap", &self.wrap)
+            .field("parked", &self.parked)
             .finish_non_exhaustive()
+    }
+}
+
+/// A tab edit from the start of the text to `old_end` and `new_end`.
+fn whole_text_edit(old_end: TabPoint, new_end: TabPoint) -> TabEdit {
+    let zero = TabPoint::new(0, 0);
+    TabEdit {
+        old: zero..old_end,
+        new: zero..new_end,
     }
 }
 
@@ -197,6 +212,7 @@ impl DisplayLayers {
             snapshot,
             tab_size,
             wrap: None,
+            parked: None,
             measure: None,
             indent: Arc::new(IndentAdjustment::SameIndent),
         }
@@ -246,7 +262,6 @@ impl DisplayLayers {
     /// in display rows, or `None` if nothing changed.
     fn set_wrap_width(&mut self, width: Option<f32>) -> Option<Vec<WrapEdit>> {
         let width = width.filter(|width| !width.is_nan());
-        let tab_rows = self.snapshot.max_point().row() + 1;
         match (self.wrap.as_mut(), width) {
             (None, None) => None,
             (Some(wrap), Some(width)) => {
@@ -254,45 +269,123 @@ impl DisplayLayers {
                 wrap.snapshot = snapshot;
                 (!edits.is_empty()).then_some(edits)
             }
-            (Some(_), None) => {
-                let wrap = self.wrap.take()?;
-                let wrap_rows = wrap.snapshot.max_point().row().0 + 1;
-                self.measure = Some(wrap.map.into_measure());
-                Some(vec![WrapEdit {
-                    old: WrapRow(0)..WrapRow(wrap_rows),
-                    new: WrapRow(0)..WrapRow(tab_rows),
-                }])
+            (Some(_), None) => Some(self.wrap_off()),
+            (None, Some(width)) => Some(self.wrap_on(Some(width))),
+        }
+    }
+
+    /// Like [`set_wrap_width`](Self::set_wrap_width), except that a
+    /// re-wrap of the whole text at a new width is handed out as a job
+    /// instead of done: the rows are interpolated until it is finished.
+    /// Turning soft wrap on shows the lines unwrapped meanwhile.
+    fn defer_wrap_width(
+        &mut self,
+        width: Option<f32>,
+    ) -> (Option<RewrapJob>, Option<Vec<WrapEdit>>) {
+        let width = width.filter(|width| !width.is_nan());
+        match (self.wrap.as_mut(), width) {
+            (Some(wrap), Some(width)) => {
+                let job = wrap.map.defer_wrap_width(Some(width));
+                if job.is_some() {
+                    // The same rows, now interpolated.
+                    wrap.snapshot = wrap.map.snapshot();
+                }
+                (job, None)
             }
             (None, Some(width)) => {
+                let edits = self.wrap_on(None);
+                let job = self.wrap.as_mut().and_then(|wrap| {
+                    let job = wrap.map.defer_wrap_width(Some(width));
+                    wrap.snapshot = wrap.map.snapshot();
+                    job
+                });
+                (job, Some(edits))
+            }
+            (_, None) => (None, self.set_wrap_width(None)),
+        }
+    }
+
+    /// Installs a job from [`defer_wrap_width`](Self::defer_wrap_width).
+    /// Returns the edits, or `None` for a stale job or with soft wrap off.
+    fn finish_rewrap(&mut self, job: RewrapJob) -> Option<Vec<WrapEdit>> {
+        let wrap = self.wrap.as_mut()?;
+        let (snapshot, edits) = wrap.map.finish_rewrap(job)?;
+        wrap.snapshot = snapshot;
+        Some(edits)
+    }
+
+    /// Turns soft wrap on, wrapping the text at `width` (`None`: not yet).
+    /// Returns the edit from tab rows to wrap rows.
+    fn wrap_on(&mut self, width: Option<f32>) -> Vec<WrapEdit> {
+        let tab_rows = self.snapshot.max_point().row() + 1;
+        let map = match self.parked.take() {
+            Some(mut map) => {
+                // Parked at an empty text: the width costs nothing to set
+                // there, and the text comes back wrapped at it.
+                map.set_wrap_width(width);
+                let edit = whole_text_edit(TabPoint::new(0, 0), self.snapshot.max_point());
+                map.sync(self.snapshot.clone(), vec![edit]);
+                map
+            }
+            None => {
                 let measure = self
                     .measure
                     .take()
                     .unwrap_or_else(|| Box::new(MonospaceMeasure::new(1.0)));
-                let (map, snapshot) = WrapMap::with_indent(
+                WrapMap::with_indent(
                     self.snapshot.clone(),
                     measure,
                     Arc::clone(&self.indent),
-                    Some(width),
-                );
-                let wrap_rows = snapshot.max_point().row().0 + 1;
-                self.wrap = Some(WrapLayer { map, snapshot });
-                Some(vec![WrapEdit {
-                    old: WrapRow(0)..WrapRow(tab_rows),
-                    new: WrapRow(0)..WrapRow(wrap_rows),
-                }])
+                    width,
+                )
+                .0
             }
-        }
+        };
+        let snapshot = map.snapshot();
+        let wrap_rows = snapshot.max_point().row().0 + 1;
+        self.wrap = Some(WrapLayer { map, snapshot });
+        vec![WrapEdit {
+            old: WrapRow(0)..WrapRow(tab_rows),
+            new: WrapRow(0)..WrapRow(wrap_rows),
+        }]
+    }
+
+    /// Turns soft wrap off, parking the wrap map. Returns the edit from
+    /// wrap rows to tab rows.
+    fn wrap_off(&mut self) -> Vec<WrapEdit> {
+        let tab_rows = self.snapshot.max_point().row() + 1;
+        let Some(WrapLayer { mut map, snapshot }) = self.wrap.take() else {
+            return Vec::new();
+        };
+        let wrap_rows = snapshot.max_point().row().0 + 1;
+        // Down to an empty text (cheap: no row is left to wrap), then a
+        // re-wrap of that text settles a job still out and makes it stale.
+        let (_, replace) = ReplaceMap::new(TextSnapshot::new(""));
+        let (_, empty) = TabMap::new(replace, self.tab_size);
+        let edit = whole_text_edit(snapshot.tab_snapshot().max_point(), TabPoint::new(0, 0));
+        map.sync(empty, vec![edit]);
+        let job = map.begin_rewrap();
+        map.finish_rewrap(job);
+        self.parked = Some(map);
+        vec![WrapEdit {
+            old: WrapRow(0)..WrapRow(wrap_rows),
+            new: WrapRow(0)..WrapRow(tab_rows),
+        }]
     }
 
     /// Returns the wrap edits if soft wrap is on.
     fn set_measure(&mut self, measure: Box<dyn TextMeasure>) -> Option<Vec<WrapEdit>> {
-        match &mut self.wrap {
-            Some(wrap) => {
+        match (&mut self.wrap, &mut self.parked) {
+            (Some(wrap), _) => {
                 let (snapshot, edits) = wrap.map.set_measure(measure);
                 wrap.snapshot = snapshot;
                 Some(edits)
             }
-            None => {
+            (None, Some(parked)) => {
+                parked.set_measure(measure);
+                None
+            }
+            (None, None) => {
                 self.measure = Some(measure);
                 None
             }
@@ -302,6 +395,9 @@ impl DisplayLayers {
     /// Returns the wrap edits if soft wrap is on.
     fn set_wrap_indent(&mut self, indent: Arc<dyn WrapIndent>) -> Option<Vec<WrapEdit>> {
         self.indent = Arc::clone(&indent);
+        if let Some(parked) = &mut self.parked {
+            parked.set_indent(Arc::clone(&indent));
+        }
         let wrap = self.wrap.as_mut()?;
         let (snapshot, edits) = wrap.map.set_indent(indent);
         wrap.snapshot = snapshot;
@@ -475,6 +571,57 @@ impl Editor {
         if let Some(edits) = self.display.set_wrap_width(width) {
             self.wrap_changed(&edits);
         }
+    }
+
+    /// Like [`set_wrap_width`](Self::set_wrap_width), but a re-wrap of the
+    /// whole text is handed out as a [`RewrapJob`] instead of done, for a
+    /// view to run on another thread or in steps: soft wrap turned on, or
+    /// a new width. Returns `None` when there is nothing to wrap (the same
+    /// width, or soft wrap turned off, which is done at once).
+    ///
+    /// Until the job is handed back to
+    /// [`finish_rewrap`](Self::finish_rewrap), the wrap layer keeps the
+    /// old wraps of unchanged text and leaves edited text unwrapped (it
+    /// [is interpolated](WrapSnapshot::is_interpolated)); turning soft
+    /// wrap on shows the lines unwrapped. Edits keep syncing meanwhile.
+    /// [`wrap_width`](Self::wrap_width) is the new width at once.
+    ///
+    /// Run the job with [`RewrapJob::run`] and a
+    /// [`LineWrapper`](crate::display_map::LineWrapper) whose measure
+    /// measures like the editor's ([`set_measure`](Self::set_measure)).
+    /// A later re-wrap of the whole text (another width, measure or
+    /// indent, soft wrap turned off) makes the job stale; edits and a new
+    /// tab size do not. Turning soft wrap on emits
+    /// [`EditorEvent::WrapChanged`] at once, with the rows unchanged.
+    pub fn defer_wrap_width(&mut self, width: Option<f32>) -> Option<RewrapJob> {
+        let (job, edits) = self.display.defer_wrap_width(width);
+        if let Some(edits) = edits {
+            self.wrap_changed(&edits);
+        }
+        job
+    }
+
+    /// Installs a job from [`defer_wrap_width`](Self::defer_wrap_width):
+    /// wraps any rows it has not done, re-applies the edits made since it
+    /// began, and emits [`EditorEvent::WrapChanged`] with one edit over
+    /// the whole text. Returns `false`, changing nothing, for a stale job.
+    pub fn finish_rewrap(&mut self, job: RewrapJob) -> bool {
+        match self.display.finish_rewrap(job) {
+            Some(edits) => {
+                self.wrap_changed(&edits);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a job from [`defer_wrap_width`](Self::defer_wrap_width) is
+    /// out and not stale.
+    pub fn is_rewrapping(&self) -> bool {
+        self.display
+            .wrap
+            .as_ref()
+            .is_some_and(|wrap| wrap.map.is_rewrapping())
     }
 
     /// Measures text for soft wrap with `measure` from now on (a new font
@@ -1614,5 +1761,284 @@ mod tests {
         assert_eq!(utf16_to_byte_in(text, 3, Bias::Left), 5);
         assert_eq!(utf16_to_byte_in(text, 4, Bias::Left), 6);
         assert_eq!(utf16_to_byte_in(text, 99, Bias::Right), 6);
+    }
+
+    // ----- deferred re-wraps --------------------------------------------------
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use proptest::prelude::*;
+
+    use crate::display_map::{LineWrapper, MarkdownHangingIndent};
+
+    /// Lines long enough to wrap at a few columns, with list items for the
+    /// hanging indent.
+    fn sample() -> String {
+        let mut text = String::new();
+        for i in 0..60 {
+            match i % 3 {
+                0 => text.push_str(&format!("line {i} with some words to wrap here\n")),
+                1 => text.push_str(&format!("- item {i} of a list that wraps too\n")),
+                _ => text.push('\n'),
+            }
+        }
+        text
+    }
+
+    fn editor_of(text: &str) -> Editor {
+        let mut editor = Editor::new(Buffer::new(text));
+        editor.set_wrap_indent(Arc::new(MarkdownHangingIndent::default()));
+        editor
+    }
+
+    /// What `editor` shows: the wrap layer's text.
+    fn shown(editor: &Editor) -> String {
+        editor.wrap().map(WrapSnapshot::text).unwrap_or_default()
+    }
+
+    /// Runs `job` on another thread, in steps, with its own wrapper (the
+    /// default measure: one unit a character).
+    fn run_elsewhere(mut job: RewrapJob) -> RewrapJob {
+        std::thread::spawn(move || {
+            let mut wrapper = LineWrapper::new(Box::new(MonospaceMeasure::new(1.0)));
+            while !job.run(&mut wrapper, 7) {}
+            job
+        })
+        .join()
+        .expect("the wrap thread")
+    }
+
+    /// The whole-text wrap edits `editor` emits.
+    fn wrap_events(editor: &mut Editor) -> Rc<RefCell<Vec<Vec<WrapEdit>>>> {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&events);
+        editor.observe(move |event| {
+            if let EditorEvent::WrapChanged { edits, .. } = event {
+                sink.borrow_mut().push(edits.to_vec());
+            }
+        });
+        events
+    }
+
+    #[test]
+    fn a_job_run_on_another_thread_equals_a_synchronous_rewrap() {
+        let text = sample();
+        let mut sync = editor_of(&text);
+        let mut deferred = editor_of(&text);
+        let events = wrap_events(&mut deferred);
+
+        // Soft wrap turned on: the lines show unwrapped until the job lands.
+        sync.set_wrap_width(Some(12.0));
+        let job = deferred.defer_wrap_width(Some(12.0)).expect("a job");
+        assert_eq!(deferred.wrap_width(), Some(12.0));
+        assert!(deferred.is_rewrapping());
+        assert!(deferred.wrap().is_some_and(WrapSnapshot::is_interpolated));
+        assert_eq!(shown(&deferred), text);
+        let unwrapped_rows = deferred.display().max_point().row() + 1;
+        assert_eq!(
+            events.borrow().as_slice(),
+            [vec![WrapEdit {
+                old: WrapRow(0)..WrapRow(unwrapped_rows),
+                new: WrapRow(0)..WrapRow(unwrapped_rows),
+            }]]
+        );
+        assert!(deferred.finish_rewrap(run_elsewhere(job)));
+        assert!(!deferred.is_rewrapping());
+        assert!(!deferred.wrap().is_some_and(WrapSnapshot::is_interpolated));
+        assert_eq!(shown(&deferred), shown(&sync));
+        let wrap_rows = deferred.wrap().unwrap().max_point().row().0 + 1;
+        assert_eq!(
+            events.borrow().last().unwrap(),
+            &[WrapEdit {
+                old: WrapRow(0)..WrapRow(unwrapped_rows),
+                new: WrapRow(0)..WrapRow(wrap_rows),
+            }]
+        );
+
+        // A new width: the old wraps show meanwhile.
+        sync.set_wrap_width(Some(20.0));
+        let before = shown(&deferred);
+        let job = deferred.defer_wrap_width(Some(20.0)).expect("a job");
+        assert_eq!(shown(&deferred), before);
+        assert!(deferred.finish_rewrap(run_elsewhere(job)));
+        assert_eq!(shown(&deferred), shown(&sync));
+
+        // The same width: nothing to do. Off: at once.
+        assert!(deferred.defer_wrap_width(Some(20.0)).is_none());
+        assert!(deferred.defer_wrap_width(None).is_none());
+        assert!(deferred.wrap().is_none());
+
+        // On again, from the parked map.
+        sync.set_wrap_width(None);
+        sync.set_wrap_width(Some(9.0));
+        let job = deferred.defer_wrap_width(Some(9.0)).expect("a job");
+        assert_eq!(shown(&deferred), text);
+        assert!(deferred.finish_rewrap(run_elsewhere(job)));
+        assert_eq!(shown(&deferred), shown(&sync));
+    }
+
+    #[test]
+    fn a_job_finished_part_way_wraps_the_rest_itself() {
+        let text = sample();
+        let mut sync = editor_of(&text);
+        sync.set_wrap_width(Some(10.0));
+        let mut deferred = editor_of(&text);
+        let mut job = deferred.defer_wrap_width(Some(10.0)).expect("a job");
+        let mut wrapper = LineWrapper::new(Box::new(MonospaceMeasure::new(1.0)));
+        assert!(!job.run(&mut wrapper, 5));
+        assert_eq!(job.rows_done(), 5);
+        assert!(deferred.finish_rewrap(job));
+        assert_eq!(shown(&deferred), shown(&sync));
+    }
+
+    #[test]
+    fn edits_made_during_a_job_are_kept() {
+        let text = sample();
+        let edits = [
+            (0..0, "new words at the start "),
+            (40..45, ""),
+            (70..70, "\n- x\n"),
+        ];
+        let mut sync = editor_of(&text);
+        sync.set_wrap_width(Some(15.0));
+        let mut deferred = editor_of(&text);
+        deferred.set_wrap_width(Some(30.0));
+        let job = deferred.defer_wrap_width(Some(15.0)).expect("a job");
+        for (range, insert) in edits.iter().cloned() {
+            sync.edit([(range.clone(), insert)], EditKind::Typing)
+                .unwrap();
+            deferred.edit([(range, insert)], EditKind::Typing).unwrap();
+            assert!(deferred.wrap().is_some_and(WrapSnapshot::is_interpolated));
+            // The interpolated layer shows the edited text.
+            assert_eq!(shown(&deferred).replace(['\n', ' '], ""), {
+                let text = deferred.text();
+                text.text_for_range(0..text.len())
+                    .unwrap()
+                    .replace(['\n', ' '], "")
+            });
+        }
+        // The job wrapped the text from before the edits.
+        assert!(deferred.finish_rewrap(run_elsewhere(job)));
+        assert_eq!(shown(&deferred), shown(&sync));
+        // And later edits wrap at once again.
+        sync.edit([(0..0, "more more more ")], EditKind::Typing)
+            .unwrap();
+        deferred
+            .edit([(0..0, "more more more ")], EditKind::Typing)
+            .unwrap();
+        assert!(!deferred.wrap().is_some_and(WrapSnapshot::is_interpolated));
+        assert_eq!(shown(&deferred), shown(&sync));
+    }
+
+    #[test]
+    fn a_stale_job_is_rejected() {
+        let text = sample();
+        let mut sync = editor_of(&text);
+        sync.set_wrap_width(Some(25.0));
+        let mut editor = editor_of(&text);
+        let events = wrap_events(&mut editor);
+
+        // A newer width.
+        let first = editor.defer_wrap_width(Some(11.0)).expect("a job");
+        let second = editor.defer_wrap_width(Some(25.0)).expect("a job");
+        let count = events.borrow().len();
+        assert!(!editor.finish_rewrap(run_elsewhere(first)));
+        assert_eq!(events.borrow().len(), count);
+        assert!(editor.is_rewrapping());
+        assert!(editor.finish_rewrap(run_elsewhere(second)));
+        assert_eq!(shown(&editor), shown(&sync));
+
+        // A synchronous re-wrap, a new measure or indent.
+        let job = editor.defer_wrap_width(Some(11.0)).expect("a job");
+        editor.set_wrap_width(Some(25.0));
+        assert!(!editor.finish_rewrap(job));
+        assert_eq!(shown(&editor), shown(&sync));
+        let job = editor.defer_wrap_width(Some(11.0)).expect("a job");
+        editor.set_measure(Box::new(MonospaceMeasure::new(1.0)));
+        assert!(!editor.finish_rewrap(job));
+        let job = editor.defer_wrap_width(Some(25.0)).expect("a job");
+        editor.set_wrap_indent(Arc::new(MarkdownHangingIndent::default()));
+        assert!(!editor.finish_rewrap(job));
+        assert_eq!(shown(&editor), shown(&sync));
+
+        // Soft wrap turned off, then on again: the job from before stays
+        // stale, however many re-wraps the new layer has had.
+        let old = editor.defer_wrap_width(Some(11.0)).expect("a job");
+        editor.set_wrap_width(None);
+        assert!(!editor.is_rewrapping());
+        let new = editor.defer_wrap_width(Some(25.0)).expect("a job");
+        let old = run_elsewhere(old);
+        assert!(!editor.finish_rewrap(old));
+        assert!(editor.wrap().is_some_and(WrapSnapshot::is_interpolated));
+        assert!(editor.finish_rewrap(run_elsewhere(new)));
+        assert_eq!(shown(&editor), shown(&sync));
+        // With soft wrap off, every job is stale.
+        let job = editor.defer_wrap_width(Some(11.0)).expect("a job");
+        editor.set_wrap_width(None);
+        assert!(!editor.finish_rewrap(job));
+        assert!(editor.wrap().is_none());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Edits, widths and jobs in any order end where synchronous
+        /// re-wraps do.
+        #[test]
+        fn deferred_rewraps_match_synchronous_ones(
+            text in "[a-c \n-]{0,120}",
+            steps in prop::collection::vec(
+                (0u8..4, 0usize..200, "[a-c \n]{0,6}", 0u8..4, 3u32..20),
+                1..12,
+            ),
+        ) {
+            let mut sync = editor_of(&text);
+            let mut deferred = editor_of(&text);
+            // The newest job, and the jobs it made stale.
+            let mut current: Option<RewrapJob> = None;
+            let mut stale: Vec<RewrapJob> = Vec::new();
+            for (kind, at, insert, len, width) in steps {
+                match kind {
+                    0 => {
+                        let text = sync.text().clone();
+                        let start = text.clip_offset(at.min(text.len()), Bias::Left);
+                        let stop = text
+                            .clip_offset((start + len as usize).min(text.len()), Bias::Right)
+                            .max(start);
+                        sync.edit([(start..stop, insert.as_str())], EditKind::Typing).unwrap();
+                        deferred.edit([(start..stop, insert.as_str())], EditKind::Typing).unwrap();
+                    }
+                    1 => {
+                        sync.set_wrap_width(Some(width as f32));
+                        if let Some(job) = deferred.defer_wrap_width(Some(width as f32)) {
+                            stale.extend(current.replace(job));
+                        }
+                    }
+                    2 => {
+                        sync.set_wrap_width(None);
+                        prop_assert!(deferred.defer_wrap_width(None).is_none());
+                        stale.extend(current.take());
+                    }
+                    _ => {
+                        for job in stale.drain(..) {
+                            prop_assert!(!deferred.finish_rewrap(run_elsewhere(job)));
+                        }
+                        if let Some(job) = current.take() {
+                            prop_assert!(deferred.finish_rewrap(run_elsewhere(job)));
+                        }
+                    }
+                }
+            }
+            for job in stale {
+                prop_assert!(!deferred.finish_rewrap(job));
+            }
+            if let Some(job) = current {
+                prop_assert!(deferred.finish_rewrap(job));
+            }
+            prop_assert!(!deferred.is_rewrapping());
+            prop_assert_eq!(sync.wrap_width(), deferred.wrap_width());
+            prop_assert_eq!(shown(&sync), shown(&deferred));
+        }
     }
 }

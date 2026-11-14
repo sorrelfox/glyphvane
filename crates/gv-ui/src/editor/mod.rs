@@ -89,6 +89,7 @@ use crate::files::worker::{Msg, Worker};
 use crate::files::{self, ExecutorClock};
 use crate::inline::FontFamilies;
 use crate::keymap::actions::editor as commands;
+use crate::keymap::actions::view as view_commands;
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
@@ -342,7 +343,10 @@ pub struct EditorView {
     probe: element::Probe,
     _load: Option<Task<()>>,
     _reparse: Option<Task<()>>,
-    _rewrap: Option<Task<()>>,
+    /// The background re-wrap of a large document.
+    _rewrap: Option<wrap::Rewrap>,
+    /// The wait for a large document's new width to settle.
+    _rewrap_wait: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -388,6 +392,7 @@ impl EditorView {
             _load: None,
             _reparse: None,
             _rewrap: None,
+            _rewrap_wait: None,
         }
     }
 
@@ -582,6 +587,7 @@ impl EditorView {
         self.wrap.ready = false;
         self.wrap.pending = None;
         self._rewrap = None;
+        self._rewrap_wait = None;
     }
 
     pub fn status(&self) -> &EditorStatus {
@@ -1086,7 +1092,12 @@ impl Render for EditorView {
             .on_action(cx.listener(|this, _: &commands::SelectAll, w, cx| this.select_all(w, cx)))
             .on_action(cx.listener(|this, _: &commands::ToggleWhitespace, _, cx| {
                 this.toggle_whitespace(cx);
-            }));
+            }))
+            .on_action(
+                cx.listener(|this, _: &view_commands::ToggleSoftWrap, _, cx| {
+                    this.toggle_soft_wrap(cx);
+                }),
+            );
         let root = self
             .markdown_handlers(root, cx)
             .relative()
