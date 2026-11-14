@@ -22,6 +22,9 @@ const APPLICATION: &str = "Glyphvane";
 /// The name of the settings file in the config dir and in vault overlays.
 pub const SETTINGS_FILE: &str = "settings.toml";
 
+/// The name of the session state file in the data dir.
+const SESSION_FILE: &str = "session.json";
+
 /// The folder inside a vault that holds shared settings.
 pub const IN_VAULT_FOLDER: &str = ".glyphvane";
 
@@ -140,6 +143,11 @@ impl Locations {
         self.config.join("dictionaries")
     }
 
+    /// The session state: open windows and tabs, recent files and folders.
+    pub fn session_file(&self) -> PathBuf {
+        self.data.join(SESSION_FILE)
+    }
+
     /// The per-vault folder in the data dir.
     pub fn vault_data_dir(&self, vault_id: &str) -> Result<PathBuf, InvalidVaultId> {
         check_vault_id(vault_id)?;
@@ -197,6 +205,10 @@ mod tests {
             Ok(PathBuf::from("/tmp/gv-test/data/vaults/a1b2/settings.toml"))
         );
         assert_eq!(loc.log_dir(), Path::new("/tmp/gv-test/logs"));
+        assert_eq!(
+            loc.session_file(),
+            Path::new("/tmp/gv-test/data/session.json")
+        );
     }
 
     #[test]

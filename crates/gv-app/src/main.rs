@@ -9,6 +9,7 @@ mod instance;
 mod no_gpu_dialog;
 mod render;
 mod safe_mode;
+mod session;
 mod settings;
 
 use std::cell::Cell;
@@ -23,6 +24,7 @@ use clap::Parser as _;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{AnyWindowHandle, App};
+use gv_ui::shell::session as ui_session;
 use gv_ui::{AppSettings, OpenTarget, Placement, ThemeChoice};
 use tracing_subscriber::EnvFilter;
 
@@ -108,6 +110,8 @@ fn main() -> ExitCode {
         app_settings = app_settings.with_safe_mode();
     }
     settings::report(&app_settings);
+    // Read before the event loop starts, like the settings.
+    let session_store = session::store(locations.as_ref());
     let failed = Rc::new(Cell::new(false));
     // Set when the user chooses safe mode in the no-GPU message.
     let restart_safe = Rc::new(Cell::new(false));
@@ -136,10 +140,16 @@ fn main() -> ExitCode {
         let restart_safe = Rc::clone(&restart_safe);
         move |cx| {
             gv_ui::init(cx, app_settings);
+            ui_session::install(cx, session_store);
             if let Some(path) = watched {
                 settings::watch(path, cx);
             }
-            match open(request, cx) {
+            let opened = if restores_session(&request) {
+                restore(request, cx)
+            } else {
+                open(request, cx)
+            };
+            match opened {
                 Ok(window) => gpu::report_adapter(window, cx),
                 Err(err) => {
                     if gpu::is_gpu_error(&err) {
@@ -230,14 +240,36 @@ fn report_gpu_failure(
     choice
 }
 
+/// Whether the first request of this run restores the session: a launch
+/// without files does. A launch with files opens only those, with the
+/// panels hidden, and leaves the stored session as it is (FR-VIEW-16).
+fn restores_session(request: &OpenRequest) -> bool {
+    request.files.is_empty()
+}
+
+/// Restores the session for a launch without files; an empty window when
+/// there is nothing to restore.
+fn restore(request: OpenRequest, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
+    note_folders(&request, cx);
+    match ui_session::restore(cx)? {
+        Some(window) => Ok(window),
+        None => gv_ui::open(cx, Vec::new(), Placement::RecentWindow),
+    }
+}
+
+fn note_folders(request: &OpenRequest, cx: &mut App) {
+    for folder in &request.folders {
+        // Vaults come later; the folder is only noted.
+        tracing::info!("folder requested: {}", folder.display());
+        ui_session::note_recent_folder(cx, folder);
+    }
+}
+
 /// Opens what `request` names, by the rules of [`gv_ui::open`]: files as
 /// tabs of the most recently focused window, or of a new window that starts
 /// with its panels hidden.
 fn open(request: OpenRequest, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
-    for folder in &request.folders {
-        // Vaults come later; the folder is only noted.
-        tracing::info!("folder requested: {}", folder.display());
-    }
+    note_folders(&request, cx);
     for file in &request.files {
         match file.position {
             Some(at) => tracing::info!(
@@ -299,6 +331,19 @@ mod tests {
             Some(PathBuf::from("/tmp/gv-root/config/settings.toml"))
         );
         assert_eq!(cli.paths, ["a.md"]);
+    }
+
+    #[test]
+    fn only_a_launch_without_files_restores_the_session() {
+        let cwd = std::env::temp_dir();
+        let request = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).expect("arguments parse");
+            OpenRequest::from_cli(&cli, &cwd)
+        };
+        assert!(restores_session(&request(&["glyphvane"])));
+        assert!(restores_session(&request(&["glyphvane", "--new-window"])));
+        assert!(!restores_session(&request(&["glyphvane", "a.md"])));
+        assert!(!restores_session(&request(&["glyphvane", "a.md:3"])));
     }
 
     #[cfg(unix)]

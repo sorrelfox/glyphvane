@@ -13,6 +13,7 @@ mod history;
 mod navigation_tests;
 mod outline_panel;
 mod panels;
+pub mod session;
 mod status_bar;
 #[cfg(test)]
 mod tests;
@@ -25,9 +26,11 @@ pub(crate) use vault::VaultStatus;
 
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
@@ -35,9 +38,10 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle, Focusable as _,
     Global, InteractiveElement as _, IntoElement, MouseButton, NavigationDirection,
     ParentElement as _, Render, Result, SharedString, Styled as _, Subscription, Task, WeakEntity,
-    Window, canvas, div, px,
+    Window, WindowBounds, canvas, div, px,
 };
 use gv_model::DocModel;
+use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
@@ -65,7 +69,8 @@ pub const DEBUG_SHOW_SIDEBAR_ENV: &str = "GLYPHVANE_DEBUG_SHOW_SIDEBAR";
 pub const DEBUG_SHOW_RIGHT_PANEL_ENV: &str = "GLYPHVANE_DEBUG_SHOW_RIGHT_PANEL";
 
 /// What the document area shows. Each tab has its own mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ViewMode {
     #[default]
     Preview,
@@ -109,6 +114,9 @@ pub struct Tab {
     path: Option<PathBuf>,
     /// Where the Reading view was asked to scroll, from `PATH:LINE[:COL]`.
     position: Option<TextPosition>,
+    /// Where the Reading view goes when it is made: the anchor of a
+    /// restored tab. Kept until the tab shows another place.
+    scroll: Option<ScrollTarget>,
     mode: ViewMode,
     /// The Reading view, made when the tab is first shown.
     reader: Option<Entity<Reader>>,
@@ -126,6 +134,7 @@ impl Tab {
             label: FileLabel::new(path.as_deref()),
             path,
             position,
+            scroll: None,
             mode: ViewMode::default(),
             reader: None,
             history: History::default(),
@@ -242,6 +251,14 @@ pub struct Workspace {
     _outline_events: Option<Subscription>,
     /// The tabs' Reading views, by entity.
     readers: HashMap<EntityId, ReaderWatch>,
+    /// The window is part of the saved session: it was not created for a
+    /// file (FR-VIEW-16).
+    in_session: bool,
+    /// The window's bounds, kept for the session: a closing window no
+    /// longer has them.
+    bounds: WindowBounds,
+    /// The active Reading view's position as last seen, to notice scrolling.
+    anchor_seen: Rc<RefCell<Option<ScrollTarget>>>,
     /// Closed tabs, for reopening.
     closed: ClosedTabs,
     /// The pointer went down on a drag region of a client-decorated window
@@ -249,6 +266,7 @@ pub struct Workspace {
     drag_pending: bool,
     _appearance: Subscription,
     _activation: Subscription,
+    _bounds: Subscription,
 }
 
 impl fmt::Debug for Workspace {
@@ -260,6 +278,7 @@ impl fmt::Debug for Workspace {
             .field("sidebar_open", &self.sidebar_open)
             .field("panel_open", &self.panel_open)
             .field("vault", &self.vault)
+            .field("in_session", &self.in_session)
             .finish_non_exhaustive()
     }
 }
@@ -289,6 +308,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        // A window created for a file stays out of the session (FR-VIEW-16).
+        let for_file = target.is_some();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Appearance::set_os_appearance(cx, window.appearance());
@@ -305,6 +326,11 @@ impl Workspace {
                 RecentWindows::touch(this.clone(), cx);
             }
         });
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.bounds = window.window_bounds();
+            this.session_changed(cx);
+        });
+        let in_session = !for_file && session::track(window.window_handle(), cx.weak_entity(), cx);
         let mut this = Self {
             focus,
             chrome,
@@ -319,16 +345,60 @@ impl Workspace {
             outline: None,
             _outline_events: None,
             readers: HashMap::new(),
+            in_session,
+            bounds: window.window_bounds(),
+            anchor_seen: Rc::default(),
             closed: ClosedTabs::default(),
             drag_pending: false,
             _appearance: appearance,
             _activation: activation,
+            _bounds: bounds,
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
             reader.read(cx).focus_handle(cx).focus(window, cx);
         }
         this
+    }
+
+    /// A session window brought back as it was saved: its tabs with their
+    /// modes, anchors and history, and its panels.
+    fn restored(
+        state: session::WindowState,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let mut this = Self::with_chrome(None, WindowChrome::current(), window, cx);
+        let tabs: Vec<Tab> = state
+            .tabs
+            .into_iter()
+            .map(session::TabState::into_tab)
+            .collect();
+        if !tabs.is_empty() {
+            this.active = state.active_tab.min(tabs.len() - 1);
+            this.tabs = tabs;
+        }
+        this.tabs_changed(window, cx);
+        if state.sidebar_open {
+            this.set_sidebar_open(true, window, cx);
+        }
+        if state.panel_open {
+            this.set_panel_open(true, window, cx);
+        }
+        this.focus_document(window, cx);
+        this
+    }
+
+    /// Whether the window is part of the saved session.
+    pub fn in_session(&self) -> bool {
+        self.in_session
+    }
+
+    /// Schedules a session save, for a session window.
+    fn session_changed(&self, cx: &mut App) {
+        if self.in_session {
+            session::changed(cx);
+        }
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -380,6 +450,7 @@ impl Workspace {
             self.tabs_changed(window, cx);
             self.focus_reader_if(focused, window, cx);
         } else {
+            self.session_changed(cx);
             cx.notify();
         }
     }
@@ -449,6 +520,7 @@ impl Workspace {
             self.refresh_heading(id, cx);
         }
         self.sync_outline(cx);
+        self.session_changed(cx);
         cx.notify();
     }
 
@@ -504,7 +576,10 @@ impl Workspace {
         if let Some(reader) = &tab.reader {
             return Some(reader.clone());
         }
-        let scroll = tab.position.map(|p| ScrollTarget::Line(p.line));
+        let scroll = tab
+            .scroll
+            .clone()
+            .or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
         let reader = self.make_reader(index, scroll, window, cx)?;
         self.tabs[index].reader = Some(reader.clone());
         Some(reader)
@@ -574,6 +649,7 @@ impl Workspace {
         };
         match (loaded, model) {
             (Some(path), Some(model)) => {
+                session::note_recent_file(cx, &path);
                 watch.doc = Some(DocFacts {
                     path,
                     model,
@@ -689,6 +765,31 @@ impl Workspace {
         )
     }
 
+    /// An element drawn after the document that notices when the active
+    /// Reading view scrolled, so that the session is saved with the new
+    /// anchor. Only session windows have one.
+    fn anchor_probe(&self) -> Option<impl IntoElement> {
+        if !self.in_session {
+            return None;
+        }
+        let reader = self.active_tab().reader.clone()?;
+        let seen = self.anchor_seen.clone();
+        Some(
+            canvas(
+                move |_, _, cx| {
+                    let position = reader.read(cx).position();
+                    if *seen.borrow() != position {
+                        seen.replace(position);
+                        cx.defer(session::changed);
+                    }
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .size_0(),
+        )
+    }
+
     /// Follows a link clicked in a tab's Reading view.
     fn follow_link(
         &mut self,
@@ -763,7 +864,9 @@ impl Workspace {
             let shown = reader.status() == &LoadStatus::Ready && reader.path() == Some(&path);
             if shown { reader.position() } else { None }
         });
-        let scroll = scroll.or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
+        let scroll = scroll
+            .or_else(|| tab.scroll.clone())
+            .or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
         Some(HistoryEntry {
             path,
             mode: tab.mode,
@@ -786,6 +889,7 @@ impl Workspace {
         tab.label = FileLabel::new(Some(&path));
         tab.path = Some(path.clone());
         tab.position = None;
+        tab.scroll = None;
         match tab.reader.clone() {
             Some(reader) if same => reader.update(cx, |r, cx| {
                 r.scroll_to(scroll.unwrap_or(ScrollTarget::Offset(0)), cx);
@@ -799,6 +903,7 @@ impl Workspace {
         if index == self.active {
             self.tabs_changed(window, cx);
         } else {
+            self.session_changed(cx);
             cx.notify();
         }
     }
@@ -948,6 +1053,7 @@ impl Workspace {
 
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<'_, Self>) {
         self.tabs[self.active].mode = mode;
+        self.session_changed(cx);
         cx.notify();
     }
 
@@ -968,6 +1074,7 @@ impl Workspace {
         if open {
             self.ensure_files_panel(window, cx);
         }
+        self.session_changed(cx);
         cx.notify();
     }
 
@@ -980,6 +1087,7 @@ impl Workspace {
         if open {
             self.ensure_outline(window, cx);
         }
+        self.session_changed(cx);
         cx.notify();
     }
 
@@ -1091,6 +1199,7 @@ impl Render for Workspace {
                 radii,
             ))
             .children(self.heading_probe(cx))
+            .children(self.anchor_probe())
     }
 }
 
