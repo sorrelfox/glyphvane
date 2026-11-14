@@ -34,6 +34,12 @@
 //! - Caret motion, deletion and the like are the view's own keys
 //!   ([`key_bindings`]); undo, clipboard and select all are keymap
 //!   commands. Bare printable keys are never bound here.
+//! - Enter, Shift+Enter, Tab, Shift+Tab and the formatting commands are
+//!   the Markdown commands of the tab's profile ([`markdown`]): list and
+//!   quote continuation, indentation, emphasis, headings, links. A command
+//!   that cannot run (strikethrough in CommonMark, formatting in a code
+//!   block) has no handler, so its menu item is disabled and its key falls
+//!   through.
 //! - Mouse: click places the caret, drag selects, Shift-click extends,
 //!   double click selects a word and triple click a line (dragging after
 //!   either extends by words or lines), Alt-click adds a caret and
@@ -53,6 +59,7 @@ mod file;
 mod highlight;
 mod input;
 mod layout;
+mod markdown;
 mod rows;
 mod syntax;
 #[cfg(test)]
@@ -66,7 +73,7 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
     ParentElement as _, Pixels, Render, SharedString, Styled as _, Task, Window, div, px,
 };
-use gv_editor::{DeleteUnit, Editor, EditorEvent, Motion};
+use gv_editor::{DeleteUnit, Editor, EditorEvent, MarkdownCommands, Motion};
 use gv_syntax::{ParseOptions, SyntaxTree};
 use gv_text::{Buffer, Revision};
 use gv_vault::PathIndex;
@@ -85,6 +92,7 @@ use element::{EditorElement, Press, Scrollbar};
 pub use file::DocEvent;
 use file::{DocState, Loaded};
 use highlight::{HighlightCache, LinkStatuses};
+use markdown::Availabilities;
 use rows::{Fonts, RowCache};
 use syntax::{Background, EditQueue, Syntax, UI_BUDGET};
 
@@ -152,8 +160,6 @@ gpui::actions!(
         DeleteLineLeft,
         /// Delete to the line end.
         DeleteLineRight,
-        /// Insert a line break at every caret.
-        Newline,
         /// Add a caret one row above the topmost one.
         AddCursorAbove,
         /// Add a caret one row below the bottommost one.
@@ -167,9 +173,9 @@ gpui::actions!(
 /// The key context of the Source view (the keymap's `editor` context).
 pub(crate) const KEY_CONTEXT: &str = "Editor";
 
-/// The Source view's own keys: caret motion, selection, deletion, new
-/// lines, extra carets. Undo, the clipboard and select all are commands of
-/// the keymap.
+/// The Source view's own keys: caret motion, selection, deletion, extra
+/// carets. Undo, the clipboard, select all, Enter, Tab and the Markdown
+/// commands are commands of the keymap ([`markdown`]).
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let context = Some(KEY_CONTEXT);
     let mut keys = vec![
@@ -192,7 +198,6 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("shift-backspace", Backspace, context),
         KeyBinding::new("delete", Delete, context),
-        KeyBinding::new("enter", Newline, context),
         KeyBinding::new("escape", Cancel, context),
     ];
     if cfg!(target_os = "macos") {
@@ -294,6 +299,10 @@ pub struct EditorView {
     status: EditorStatus,
     doc: Option<Doc>,
     options: ParseOptions,
+    /// The Markdown commands of the profile.
+    commands: MarkdownCommands,
+    /// Which of them can run now.
+    availabilities: Availabilities,
     /// Vertical scroll in px from the top of the content (f64: a long
     /// file is millions of px tall).
     scroll_y: f64,
@@ -347,6 +356,8 @@ impl EditorView {
             status: EditorStatus::Loading,
             doc: None,
             options,
+            commands: MarkdownCommands::for_profile(crate::reader::PROFILE.as_str()),
+            availabilities: Availabilities::default(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             pending_top: None,
@@ -370,6 +381,21 @@ impl EditorView {
     /// The parse options of the Reading view's profile.
     pub fn profile_options() -> ParseOptions {
         ParseOptions::for_profile(crate::reader::PROFILE.as_str()).unwrap_or_default()
+    }
+
+    /// Sets the flavor profile (`commonmark`, `gfm-file`, …): the
+    /// Markdown commands follow it at once, the parser from the next
+    /// document loaded on.
+    pub fn set_profile(&mut self, id: &str, cx: &mut Context<'_, Self>) {
+        self.commands = MarkdownCommands::for_profile(id);
+        self.options = ParseOptions::for_profile(id).unwrap_or(self.options);
+        self.availabilities.reset();
+        cx.notify();
+    }
+
+    /// The Markdown commands of the view's profile.
+    pub fn markdown_commands(&self) -> MarkdownCommands {
+        self.commands
     }
 
     /// Tells the view the window's watchers, which hear about its saves.
@@ -523,6 +549,7 @@ impl EditorView {
             rows: RowCache::default(),
             state,
         });
+        self.availabilities.reset();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
@@ -704,17 +731,6 @@ impl EditorView {
                 editor.collapse_to_primary();
             } else {
                 editor.collapse_selections();
-            }
-        });
-    }
-
-    fn newline(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.with_editor(window, cx, |editor, _| {
-            if editor.is_composing() {
-                // The input method did not take Enter: commit as is.
-                editor.unmark_text();
-            } else {
-                editor.newline();
             }
         });
     }
@@ -1015,8 +1031,6 @@ impl Render for EditorView {
                     e.delete_forward(DeleteUnit::Line);
                 });
             }))
-            .on_action(cx.listener(|this, _: &Newline, w, cx| this.newline(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::NewlinePlain, w, cx| this.newline(w, cx)))
             .on_action(cx.listener(|this, _: &AddCursorAbove, w, cx| {
                 this.with_editor(w, cx, |e, _| {
                     e.add_cursor_above();
@@ -1041,15 +1055,11 @@ impl Render for EditorView {
             .on_action(cx.listener(|this, _: &commands::Paste, w, cx| this.paste(w, cx)))
             .on_action(cx.listener(|this, _: &commands::PastePlain, w, cx| this.paste(w, cx)))
             .on_action(cx.listener(|this, _: &commands::SelectAll, w, cx| this.select_all(w, cx)))
-            .on_action(cx.listener(|this, _: &commands::Indent, w, cx| {
-                // Until list indentation exists: a tab at every caret.
-                this.with_editor(w, cx, |e, _| {
-                    e.insert_at_selections("\t");
-                });
-            }))
             .on_action(cx.listener(|this, _: &commands::ToggleWhitespace, _, cx| {
                 this.toggle_whitespace(cx);
-            }))
+            }));
+        let root = self
+            .markdown_handlers(root, cx)
             .relative()
             .size_full()
             .bg(theme.surface.page);

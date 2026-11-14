@@ -8,14 +8,17 @@
 //! Items name commands of the keymap, so a menu runs exactly what the keys
 //! run and shows their keys. Items whose command nothing handles where the
 //! focus is are shown disabled: Open file, Save as (no file dialog yet),
-//! About and zoom always; Undo, Redo, Cut, Paste and Show whitespace
-//! outside the editor.
+//! About and zoom always; Undo, Redo, Cut, Paste, Show whitespace and the
+//! Format menu outside the editor; in the editor, the Format items that
+//! cannot run in the tab's profile (strikethrough, highlight and task boxes
+//! in CommonMark) or at the carets (bold in a code block).
 
 use gv_settings::keymap::Platform;
 
 use crate::shell::ViewMode;
 
-/// A menu: File, Edit, View, Go, Help, and on macOS the application menu.
+/// A menu: File, Edit, Format, View, Go, Help, and on macOS the
+/// application menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
     pub title: &'static str,
@@ -220,6 +223,33 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             with_role("editor.select_all", "Select all", Role::SelectAll),
             SEPARATOR,
             item("search.find", "Find"),
+        ],
+    ));
+    menus.push(Menu::new(
+        "Format",
+        [
+            item("editor.bold", "Bold"),
+            item("editor.italic", "Italic"),
+            item("editor.strikethrough", "Strikethrough"),
+            item("editor.highlight", "Highlight"),
+            item("editor.inline_code", "Inline code"),
+            SEPARATOR,
+            item("editor.insert_link", "Insert link"),
+            SEPARATOR,
+            item("editor.heading_1", "Heading 1"),
+            item("editor.heading_2", "Heading 2"),
+            item("editor.heading_3", "Heading 3"),
+            item("editor.heading_4", "Heading 4"),
+            item("editor.heading_5", "Heading 5"),
+            item("editor.heading_6", "Heading 6"),
+            item("editor.paragraph", "Paragraph"),
+            SEPARATOR,
+            item("editor.quote", "Quote"),
+            item("editor.toggle_task", "Toggle task"),
+            SEPARATOR,
+            item("editor.indent", "Indent"),
+            item("editor.outdent", "Outdent"),
+            item("editor.renumber_list", "Renumber list"),
         ],
     ));
     menus.push(Menu::new(

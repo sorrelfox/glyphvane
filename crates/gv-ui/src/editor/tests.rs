@@ -4,8 +4,8 @@
 //! The Source view in headless GPUI windows (GPUI's no-op text system: 0.6
 //! em per character, so a 12.5 px character is 7.5 px wide): typing, input
 //! method composition through the input handler, undo, several carets, the
-//! mouse, the clipboard, the Mod+E round trip with the Reading view,
-//! highlighting, the current line and the gutter. The timing runs with the
+//! Markdown commands, the mouse, the clipboard, the Mod+E round trip with
+//! the Reading view, highlighting, the current line and the gutter. The timing runs with the
 //! platform's real text system are `#[ignore]`d (`cargo test -p gv-ui
 //! --release editor -- --ignored --nocapture`).
 
@@ -598,6 +598,230 @@ fn a_file_that_cannot_be_read_shows_why(cx: &mut TestAppContext) {
         .expect("editor");
     let status = editor.read_with(&vcx, |e, _| e.status().clone());
     assert!(matches!(status, EditorStatus::Failed(_)), "{status:?}");
+}
+
+// --- Markdown commands -----------------------------------------------------------------
+
+/// A Source view of `text` in profile `profile`, with these selections
+/// (start and end offsets).
+fn editor_in(
+    cx: &mut TestAppContext,
+    profile: &str,
+    text: &str,
+    ranges: &[(usize, usize)],
+) -> (Entity<EditorView>, VisualTestContext) {
+    let text = text.to_owned();
+    let profile = profile.to_owned();
+    let ranges: Vec<_> = ranges.iter().map(|&(start, end)| start..end).collect();
+    let (window, view) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        gpui::open_window(options(), cx, |_, cx| {
+            cx.new(|cx| {
+                let mut v = EditorView::new(ParseOptions::default(), cx);
+                v.set_profile(&profile, cx);
+                v.set_text(&text, cx);
+                let doc = v.doc.as_mut().expect("loaded");
+                doc.editor.select_ranges(ranges);
+                v
+            })
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    vcx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        focus.focus(window, cx);
+    });
+    draw(&mut vcx);
+    (view, vcx)
+}
+
+/// Whether the command `id` has a handler where the editor is, as the
+/// application menu asks.
+fn handled(view: &Entity<EditorView>, vcx: &mut VisualTestContext, id: &str) -> bool {
+    draw(vcx);
+    let action = crate::keymap::action_for(id).expect("an action");
+    vcx.update(|window, cx| {
+        let focus = view.read(cx).focus.clone();
+        window.is_action_available_in(action.as_ref(), &focus)
+    })
+}
+
+#[gpui::test]
+fn enter_continues_a_list_and_renumbers(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "1. one\n2. two\n", &[(6, 6)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n2. \n3. two\n");
+    assert_eq!(selections(&view, &mut vcx), [(10, 10)]);
+    vcx.simulate_input("new");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n2. new\n3. two\n");
+    // Enter on an empty item at the top level ends the list.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "1. one\n2. \n", &[(10, 10)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n\n");
+    // Shift+Enter stays in the item without a marker.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "- one\n", &[(5, 5)]);
+    vcx.simulate_keystrokes("shift-enter");
+    assert_eq!(text_of(&view, &mut vcx), "- one\n  \n");
+}
+
+#[gpui::test]
+fn enter_in_a_quote_continues_it(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "> quoted\n", &[(8, 8)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "> quoted\n> \n");
+    // Outside lists and quotes Enter is a plain line break.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "plain\n", &[(5, 5)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "plain\n\n");
+}
+
+#[gpui::test]
+fn tab_and_shift_tab_nest_and_unnest(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "- a\n- b\n", &[(7, 7)]);
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n  - b\n");
+    vcx.simulate_keystrokes("shift-tab");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n- b\n");
+    // Ordered children take the parent's content offset.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "1. a\n2. b\n3. c\n", &[(9, 9)]);
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(text_of(&view, &mut vcx), "1. a\n   1. b\n2. c\n");
+    // Outside a list Tab inserts a tab.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "text\n", &[(0, 0)]);
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(text_of(&view, &mut vcx), "\ttext\n");
+}
+
+#[gpui::test]
+fn mod_b_toggles_bold_on_a_selection(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "one two\n", &[(4, 7)]);
+    vcx.simulate_keystrokes("secondary-b");
+    assert_eq!(text_of(&view, &mut vcx), "one **two**\n");
+    assert_eq!(selections(&view, &mut vcx), [(6, 9)]);
+    vcx.simulate_keystrokes("secondary-b");
+    assert_eq!(text_of(&view, &mut vcx), "one two\n");
+    vcx.simulate_keystrokes("secondary-i");
+    assert_eq!(text_of(&view, &mut vcx), "one *two*\n");
+    vcx.simulate_keystrokes("secondary-shift-c");
+    assert_eq!(text_of(&view, &mut vcx), "one *`two`*\n");
+}
+
+#[gpui::test]
+fn heading_commands_set_the_level(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "Title\n\ntext\n", &[(2, 2)]);
+    vcx.simulate_keystrokes("secondary-alt-2");
+    assert_eq!(text_of(&view, &mut vcx), "## Title\n\ntext\n");
+    vcx.simulate_keystrokes("secondary-alt-1");
+    assert_eq!(text_of(&view, &mut vcx), "# Title\n\ntext\n");
+    vcx.simulate_keystrokes("secondary-alt-0");
+    assert_eq!(text_of(&view, &mut vcx), "Title\n\ntext\n");
+    vcx.dispatch_action(commands::Quote);
+    assert_eq!(text_of(&view, &mut vcx), "> Title\n\ntext\n");
+}
+
+#[gpui::test]
+fn insert_link_takes_the_url_on_the_clipboard(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "see docs\n", &[(4, 8)]);
+    vcx.write_to_clipboard(ClipboardItem::new_string(
+        "https://example.com/a\n".to_owned(),
+    ));
+    vcx.simulate_keystrokes("secondary-k");
+    assert_eq!(
+        text_of(&view, &mut vcx),
+        "see [docs](https://example.com/a)\n"
+    );
+    // Text that is not a URL is not used.
+    let (view, mut vcx) = editor_in(cx, "commonmark", "see docs\n", &[(4, 8)]);
+    vcx.write_to_clipboard(ClipboardItem::new_string("not a url".to_owned()));
+    vcx.simulate_keystrokes("secondary-k");
+    assert_eq!(text_of(&view, &mut vcx), "see [docs]()\n");
+    assert_eq!(selections(&view, &mut vcx), [(11, 11)]);
+}
+
+#[gpui::test]
+fn commands_missing_from_the_profile_are_disabled(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "one two\n", &[(4, 7)]);
+    for id in [
+        "editor.strikethrough",
+        "editor.highlight",
+        "editor.toggle_task",
+    ] {
+        assert!(!handled(&view, &mut vcx, id), "{id}");
+    }
+    assert!(handled(&view, &mut vcx, "editor.bold"));
+    // The key does nothing.
+    vcx.simulate_keystrokes("secondary-shift-x secondary-l");
+    assert_eq!(text_of(&view, &mut vcx), "one two\n");
+
+    // GFM has strikethrough and task boxes.
+    let (view, mut vcx) = editor_in(cx, "gfm-file", "- one two\n", &[(6, 9)]);
+    assert!(handled(&view, &mut vcx, "editor.strikethrough"));
+    assert!(!handled(&view, &mut vcx, "editor.highlight"));
+    vcx.simulate_keystrokes("secondary-shift-x");
+    assert_eq!(text_of(&view, &mut vcx), "- one ~~two~~\n");
+    vcx.simulate_keystrokes("secondary-l");
+    assert_eq!(text_of(&view, &mut vcx), "- [ ] one ~~two~~\n");
+}
+
+#[gpui::test]
+fn formatting_is_disabled_where_it_cannot_apply(cx: &mut TestAppContext) {
+    let text = "```\ncode\n```\n\n1. a\n";
+    let (view, mut vcx) = editor_in(cx, "commonmark", text, &[(5, 5)]);
+    assert!(!handled(&view, &mut vcx, "editor.bold"));
+    assert!(!handled(&view, &mut vcx, "editor.renumber_list"));
+    vcx.simulate_keystrokes("secondary-b");
+    assert_eq!(text_of(&view, &mut vcx), text);
+    // In the ordered list, renumbering applies.
+    view.update(&mut vcx, |v, cx| {
+        let doc = v.doc.as_mut().expect("loaded");
+        doc.editor.set_cursor(18);
+        cx.notify();
+    });
+    assert!(handled(&view, &mut vcx, "editor.renumber_list"));
+    assert!(handled(&view, &mut vcx, "editor.bold"));
+}
+
+#[gpui::test]
+fn one_undo_reverts_a_command(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "1. one\n2. two\n", &[(6, 6)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n2. \n3. two\n");
+    vcx.simulate_keystrokes("secondary-z");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n2. two\n");
+    assert_eq!(selections(&view, &mut vcx), [(6, 6)]);
+    vcx.simulate_keystrokes("secondary-shift-z");
+    assert_eq!(text_of(&view, &mut vcx), "1. one\n2. \n3. two\n");
+}
+
+#[gpui::test]
+fn enter_at_several_carets(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "- a\n- b\n", &[(3, 3), (7, 7)]);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n- \n- b\n- \n");
+    assert_eq!(selections(&view, &mut vcx), [(6, 6), (13, 13)]);
+    vcx.simulate_input("x");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n- x\n- b\n- x\n");
+    // One undo step for every caret.
+    vcx.simulate_keystrokes("secondary-z secondary-z");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n- b\n");
+}
+
+#[gpui::test]
+fn no_command_runs_while_composing(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "commonmark", "- x\n", &[(3, 3)]);
+    view.update_in(&mut vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, "かな", None, window, cx);
+    });
+    vcx.simulate_keystrokes("secondary-b");
+    assert_eq!(text_of(&view, &mut vcx), "- xかな\n");
+    // Enter commits the composition and does not continue the list.
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "- xかな\n");
+    let composing = view.read_with(&vcx, |v, _| v.editor().unwrap().is_composing());
+    assert!(!composing);
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(text_of(&view, &mut vcx), "- xかな\n- \n");
 }
 
 // --- Timing ------------------------------------------------------------------------------

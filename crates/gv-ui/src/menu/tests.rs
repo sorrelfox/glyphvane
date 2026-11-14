@@ -37,7 +37,10 @@ fn items(platform: Platform, menu: &str) -> Vec<&'static str> {
 #[test]
 fn the_menus_follow_each_platform() {
     for platform in [Platform::Linux, Platform::Windows] {
-        assert_eq!(titles(platform), ["File", "Edit", "View", "Go", "Help"]);
+        assert_eq!(
+            titles(platform),
+            ["File", "Edit", "Format", "View", "Go", "Help"]
+        );
         assert_eq!(
             items(platform, "File"),
             [
@@ -53,7 +56,10 @@ fn the_menus_follow_each_platform() {
         assert_eq!(items(platform, "Help"), ["app.about"]);
     }
     let mac = Platform::MacOs;
-    assert_eq!(titles(mac), ["Glyphvane", "File", "Edit", "View", "Go"]);
+    assert_eq!(
+        titles(mac),
+        ["Glyphvane", "File", "Edit", "Format", "View", "Go"]
+    );
     assert_eq!(
         items(mac, "Glyphvane"),
         ["app.about", "app.settings", "app.quit"]
@@ -71,6 +77,29 @@ fn the_menus_follow_each_platform() {
                 "editor.paste",
                 "editor.select_all",
                 "search.find"
+            ]
+        );
+        assert_eq!(
+            items(platform, "Format"),
+            [
+                "editor.bold",
+                "editor.italic",
+                "editor.strikethrough",
+                "editor.highlight",
+                "editor.inline_code",
+                "editor.insert_link",
+                "editor.heading_1",
+                "editor.heading_2",
+                "editor.heading_3",
+                "editor.heading_4",
+                "editor.heading_5",
+                "editor.heading_6",
+                "editor.paragraph",
+                "editor.quote",
+                "editor.toggle_task",
+                "editor.indent",
+                "editor.outdent",
+                "editor.renumber_list",
             ]
         );
         assert_eq!(
@@ -148,6 +177,23 @@ fn shortcut_labels_follow_the_platform() {
             "Paste ⌘V",
             "Select all ⌘A",
             "Find ⌘F",
+            "Bold ⌘B",
+            "Italic ⌘I",
+            "Strikethrough ⇧⌘X",
+            "Highlight ⇧⌘H",
+            "Inline code ⇧⌘C",
+            "Insert link ⌘K",
+            "Heading 1 ⌥⌘1",
+            "Heading 2 ⌥⌘2",
+            "Heading 3 ⌥⌘3",
+            "Heading 4 ⌥⌘4",
+            "Heading 5 ⌥⌘5",
+            "Heading 6 ⌥⌘6",
+            "Paragraph ⌥⌘0",
+            "Quote ⇧⌘.",
+            "Toggle task ⌘L",
+            "Indent ⇥",
+            "Outdent ⇧⇥",
             "Cycle theme ⌘K ⌘T",
             "Zoom in ⌘=",
             "Zoom out ⌘-",
@@ -169,6 +215,23 @@ fn shortcut_labels_follow_the_platform() {
         "Paste Ctrl+V",
         "Select all Ctrl+A",
         "Find Ctrl+F",
+        "Bold Ctrl+B",
+        "Italic Ctrl+I",
+        "Strikethrough Ctrl+Shift+X",
+        "Highlight Ctrl+Shift+H",
+        "Inline code Ctrl+Shift+C",
+        "Insert link Ctrl+K",
+        "Heading 1 Ctrl+Alt+1",
+        "Heading 2 Ctrl+Alt+2",
+        "Heading 3 Ctrl+Alt+3",
+        "Heading 4 Ctrl+Alt+4",
+        "Heading 5 Ctrl+Alt+5",
+        "Heading 6 Ctrl+Alt+6",
+        "Paragraph Ctrl+Alt+0",
+        "Quote Ctrl+Shift+.",
+        "Toggle task Ctrl+L",
+        "Indent Tab",
+        "Outdent Shift+Tab",
         "Cycle theme Ctrl+K Ctrl+T",
         "Zoom in Ctrl+=",
         "Zoom out Ctrl+-",
@@ -184,7 +247,7 @@ fn shortcut_labels_follow_the_platform() {
 fn the_macos_menu_bar_carries_the_commands_actions() {
     let menus = native_menus(Platform::MacOs);
     let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-    assert_eq!(names, ["Glyphvane", "File", "Edit", "View", "Go"]);
+    assert_eq!(names, ["Glyphvane", "File", "Edit", "Format", "View", "Go"]);
     let app = &menus[0];
     assert!(app.items.iter().any(|i| matches!(
         i,
@@ -448,8 +511,8 @@ fn the_menu_shows_shortcuts_checks_and_disabled_items(cx: &mut TestAppContext) {
 fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     let mut f = fixture(cx, WindowChrome::Linux);
     f.click("app-menu");
-    // File, Edit, View: open View; its first item is highlighted.
-    f.keys("down down right");
+    // File, Edit, Format, View: open View; its first item is highlighted.
+    f.keys("down down down right");
     assert!(f.bounds("app-menu-item:view.preview").is_some());
     // Preview, Edit, Split, Toggle sidebar.
     f.keys("down down down enter");
@@ -472,6 +535,9 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     f.click("app-menu");
     f.keys("right left down right");
     assert!(f.bounds("app-menu-item:editor.copy").is_some());
+    // Format, with nothing to format in Preview, then View.
+    f.keys("right");
+    assert!(f.bounds("app-menu-item:editor.bold").is_some());
     f.keys("right");
     assert!(f.bounds("app-menu-item:view.cycle_theme").is_some());
     // Up wraps to the last enabled item, Cycle theme (zoom is disabled).
@@ -510,4 +576,38 @@ fn f10_opens_the_menu(cx: &mut TestAppContext) {
     f.keys("f10");
     assert!(!f.is_open());
     assert!(f.reader_focused());
+}
+
+/// In the editor, the Format menu runs the Markdown commands; those the
+/// tab's profile lacks (strikethrough in CommonMark) are disabled.
+#[gpui::test]
+fn the_format_menu_follows_the_profile(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, WindowChrome::Linux);
+    // Preview: nothing to format.
+    f.click("app-menu");
+    f.click("app-menu-top:Format");
+    f.click("app-menu-item:editor.bold");
+    assert!(f.is_open(), "disabled in Preview");
+    f.keys("escape");
+
+    f.keys("secondary-e");
+    assert_eq!(f.mode(), ViewMode::Edit);
+    let editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("the tab has an editor");
+    let text = |f: &mut Fixture| {
+        editor.read_with(&f.vcx, |e, _| {
+            let text = e.editor().expect("loaded").text();
+            text.text_for_range(0..text.len()).unwrap_or_default()
+        })
+    };
+    assert_eq!(text(&mut f), "# A\n\nSome text.\n");
+    f.click("app-menu");
+    f.click("app-menu-top:Format");
+    f.click("app-menu-item:editor.strikethrough");
+    assert!(f.is_open(), "CommonMark has no strikethrough");
+    f.click("app-menu-item:editor.heading_2");
+    assert!(!f.is_open());
+    assert_eq!(text(&mut f), "## A\n\nSome text.\n");
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The application menu: File, Edit, View, Go and Help ([`model`]).
+//! The application menu: File, Edit, Format, View, Go and Help ([`model`]).
 //!
 //! - **macOS:** the system menu bar, set with [`gpui::App::set_menus`]. The
 //!   system shows each item's shortcut from the key bindings (a chord such
