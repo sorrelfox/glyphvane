@@ -1,0 +1,220 @@
+=== example 1: "\tfoo\tbaz\t\tbim\n"
+item 0 #1.0 code 0/1 lines 0..1 0..14 gap=0 opens=0 closes=0 h600=64 h200=64
+  indented info="" lang="" lines=1
+    line 0: "foo\tbaz\t\tbim"
+copy: "foo\tbaz\t\tbim"
+=== example 12: "\\!\\\"\\#\\$\\%\\&\\'\\(\\)\\*\\+\\,\\-\\.\\/\\:\\;\\<\\=\\>\\?\\@\\[\\\\\\]\\^\\_\\`\\{\\|\\}\\~\n"
+item 0 #1.0 paragraph 0..65 gap=0 opens=0 closes=0 h600=24 h200=48
+    text 0..64 "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~" body text.primary
+copy: "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+=== example 25: "&nbsp; &amp; &copy; &AElig; &Dcaron;\n&frac34; &HilbertSpace; &DifferentialD;\n&ClockwiseContourIntegral; &ngE;\n"
+item 0 #1.0 paragraph 0..110 gap=0 opens=0 closes=0 h600=24 h200=24
+    text 0..109 "\u{a0} & © Æ Ď ¾ ℋ ⅆ ∲ ≧\u{338}" body text.primary
+copy: "\u{a0} & © Æ Ď ¾ ℋ ⅆ ∲ ≧\u{338}"
+=== example 43: "***\n---\n___\n"
+item 0 #1.0 thematic-break 0..4 gap=0 opens=0 closes=0 h600=1 h200=1
+item 1 #2.0 thematic-break 4..8 gap=12 opens=0 closes=0 h600=1 h200=1
+item 2 #3.0 thematic-break 8..12 gap=12 opens=0 closes=0 h600=1 h200=1
+copy: ""
+=== example 62: "# foo\n## foo\n### foo\n#### foo\n##### foo\n###### foo\n"
+item 0 #1.0 heading h1 0..6 gap=0 opens=0 closes=0 h600=32 h200=32
+  h1 anchor="foo"
+    text 2..5 "foo" h1 text.primary
+item 1 #2.0 heading h2 6..13 gap=6 opens=0 closes=0 h600=24 h200=24
+  h2 anchor="foo-1"
+    text 3..6 "foo" h2 text.primary
+item 2 #3.0 heading h3 13..21 gap=8 opens=0 closes=0 h600=24 h200=24
+  h3 anchor="foo-2"
+    text 4..7 "foo" h3 text.primary
+item 3 #4.0 heading h4 21..30 gap=8 opens=0 closes=0 h600=24 h200=24
+  h4 anchor="foo-3"
+    text 5..8 "foo" h4 text.primary
+item 4 #5.0 heading h5 30..40 gap=8 opens=0 closes=0 h600=22 h200=22
+  h5 anchor="foo-4"
+    text 6..9 "foo" h5 text.primary
+item 5 #6.0 heading h6 40..51 gap=8 opens=0 closes=0 h600=20 h200=20
+  h6 anchor="foo-5"
+    text 7..10 "foo" h6 text.primary
+copy: "foo\n\nfoo\n\nfoo\n\nfoo\n\nfoo\n\nfoo"
+=== example 80: "Foo *bar*\n=========\n\nFoo *bar*\n---------\n"
+item 0 #1.0 heading h1 0..20 gap=0 opens=0 closes=0 h600=32 h200=32
+  h1 setext anchor="foo-bar"
+    text 0..4 "Foo " h1 text.primary
+    text 5..8 "bar" h1+i text.primary
+item 1 #2.0 heading h2 21..41 gap=6 opens=0 closes=0 h600=24 h200=24
+  h2 setext anchor="foo-bar-1"
+    text 0..4 "Foo " h2 text.primary
+    text 5..8 "bar" h2+i text.primary
+copy: "Foo bar\n\nFoo bar"
+=== example 107: "    a simple\n      indented code block\n"
+item 0 #1.0 code 0/1 lines 0..2 0..39 gap=0 opens=0 closes=0 h600=84 h200=84
+  indented info="" lang="" lines=2
+    line 0: "a simple"
+    line 1: "  indented code block"
+copy: "a simple\n  indented code block"
+=== example 119: "```\n<\n >\n```\n"
+item 0 #1.0 code 0/1 lines 0..2 0..13 gap=0 opens=0 closes=0 h600=84 h200=84
+  fenced info="" lang="" lines=2
+    line 0: "<"
+    line 1: " >"
+copy: "<\n >"
+=== example 142: "```ruby\ndef foo(x)\n  return 3\nend\n```\n"
+item 0 #1.0 code 0/1 lines 0..3 0..38 gap=0 opens=0 closes=0 h600=104 h200=104
+  fenced info="ruby" lang="ruby" lines=3
+    line 0: "def foo(x)"
+    line 1: "  return 3"
+    line 2: "end"
+copy: "def foo(x)\n  return 3\nend"
+=== example 148: "<table><tr><td>\n<pre>\n**Hello**,\n\n_world_.\n</pre>\n</td></tr></table>\n"
+item 0 #1.0 html 0/1 lines 0..3 0..33 gap=0 opens=0 closes=0 h600=104 h200=104
+  html kind=6 raw_html_pending=true lines=3
+    line 0: "<table><tr><td>"
+    line 1: "<pre>"
+    line 2: "**Hello**,"
+item 1 #2.0 paragraph 34..50 gap=12 opens=0 closes=0 h600=24 h200=24
+  raw_html_pending
+    text 1..6 "world" body+i text.primary
+    text 7..8 ". " body text.primary
+    raw-html 9..15 "</pre>" body text.tertiary
+item 2 #3.0 html 0/1 lines 0..1 50..69 gap=12 opens=0 closes=0 h600=64 h200=64
+  html kind=6 raw_html_pending=true lines=1
+    line 0: "</td></tr></table>"
+copy: "<table><tr><td>\n<pre>\n**Hello**,\n\nworld. </pre>\n\n</td></tr></table>"
+=== example 192: "[foo]: /url \"title\"\n\n[foo]\n"
+item 0 #2.0 paragraph 21..27 gap=0 opens=0 closes=0 h600=24 h200=24
+    text link[0] 1..4 "foo" body accent.default underline=solid/accent.line
+  link[0] Shortcut "/url" pending 0..5
+copy: "foo"
+=== example 219: "aaa\n\nbbb\n"
+item 0 #1.0 paragraph 0..4 gap=0 opens=0 closes=0 h600=24 h200=24
+    text 0..3 "aaa" body text.primary
+item 1 #2.0 paragraph 5..9 gap=12 opens=0 closes=0 h600=24 h200=24
+    text 0..3 "bbb" body text.primary
+copy: "aaa\n\nbbb"
+=== example 228: "> # Foo\n> bar\n> baz\n"
+item 0 #2.0 heading h1 2..8 gap=0 opens=1 closes=0 h600=32 h200=32
+  ctx quote#1
+  h1 anchor="foo"
+    text 2..5 "Foo" h1 text.primary
+item 1 #3.0 paragraph 10..20 gap=6 opens=0 closes=1 h600=24 h200=24
+  ctx quote#1
+    text 0..9 "bar baz" body text.primary
+copy: "Foo\n\nbar baz"
+=== example 254: "1.  A paragraph\n    with two lines.\n\n        indented code\n\n    > A block quote.\n"
+item 0 #3.0 paragraph 4..36 gap=0 opens=2 closes=0 h600=24 h200=48
+  ctx ol#1(loose start=1) > item#2(1.)
+    text 0..31 "A paragraph with two lines." body text.primary
+item 1 #4.0 code 0/1 lines 0..1 41..60 gap=12 opens=0 closes=0 h600=64 h200=64
+  ctx ol#1(loose start=1) > item#2(1.)
+  indented info="" lang="" lines=1
+    line 0: "indented code"
+item 2 #6.0 paragraph 66..81 gap=12 opens=1 closes=3 h600=24 h200=24
+  ctx ol#1(loose start=1) > item#2(1.) > quote#5
+    text 0..14 "A block quote." body text.primary
+copy: "1. A paragraph with two lines.\n\n  indented code\n\n  A block quote."
+=== example 264: "- Foo\n\n      bar\n\n\n      baz\n"
+item 0 #3.0 paragraph 2..6 gap=0 opens=2 closes=0 h600=24 h200=24
+  ctx ul#1(loose) > item#2(•)
+    text 0..3 "Foo" body text.primary
+item 1 #4.0 code 0/1 lines 0..4 9..29 gap=12 opens=0 closes=2 h600=124 h200=124
+  ctx ul#1(loose) > item#2(•)
+  indented info="" lang="" lines=4
+    line 0: "bar"
+    line 1: ""
+    line 2: ""
+    line 3: "baz"
+copy: "- Foo\n\n  bar\n\n\nbaz"
+=== example 301: "- foo\n- bar\n+ baz\n"
+item 0 #3.0 paragraph 2..6 gap=0 opens=2 closes=1 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•)
+    text 0..3 "foo" body text.primary
+item 1 #5.0 paragraph 8..12 gap=0 opens=1 closes=2 h600=24 h200=24
+  ctx ul#1(tight) > item#4(•)
+    text 0..3 "bar" body text.primary
+item 2 #8.0 paragraph 14..18 gap=12 opens=2 closes=2 h600=24 h200=24
+  ctx ul#6(tight) > item#7(•)
+    text 0..3 "baz" body text.primary
+copy: "- foo\n- bar\n\n- baz"
+=== example 304: "The number of windows in my house is\n14.  The number of doors is 6.\n"
+item 0 #1.0 paragraph 0..68 gap=0 opens=0 closes=0 h600=24 h200=72
+    text 0..67 "The number of windows in my house is 14.  The number of doors is 6." body text.primary
+copy: "The number of windows in my house is 14.  The number of doors is 6."
+=== example 306: "- foo\n\n- bar\n\n\n- baz\n"
+item 0 #3.0 paragraph 2..6 gap=0 opens=2 closes=1 h600=24 h200=24
+  ctx ul#1(loose) > item#2(•)
+    text 0..3 "foo" body text.primary
+item 1 #5.0 paragraph 9..13 gap=12 opens=1 closes=1 h600=24 h200=24
+  ctx ul#1(loose) > item#4(•)
+    text 0..3 "bar" body text.primary
+item 2 #7.0 paragraph 17..21 gap=12 opens=1 closes=2 h600=24 h200=24
+  ctx ul#1(loose) > item#6(•)
+    text 0..3 "baz" body text.primary
+copy: "- foo\n\n- bar\n\n- baz"
+=== example 307: "- foo\n  - bar\n    - baz\n\n\n      bim\n"
+item 0 #3.0 paragraph 2..6 gap=0 opens=2 closes=0 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•)
+    text 0..3 "foo" body text.primary
+item 1 #6.0 paragraph 10..14 gap=0 opens=2 closes=0 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•) > ul#4(tight depth=1) > item#5(◦)
+    text 0..3 "bar" body text.primary
+item 2 #9.0 paragraph 20..24 gap=0 opens=2 closes=0 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•) > ul#4(tight depth=1) > item#5(◦) > ul#7(loose depth=2) > item#8(▪)
+    text 0..3 "baz" body text.primary
+item 3 #10.0 paragraph 32..36 gap=12 opens=0 closes=6 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•) > ul#4(tight depth=1) > item#5(◦) > ul#7(loose depth=2) > item#8(▪)
+    text 0..3 "bim" body text.primary
+copy: "- foo\n  - bar\n    - baz\n\n      bim"
+=== example 312: "- a\n - b\n  - c\n   - d\n    - e\n"
+item 0 #3.0 paragraph 2..4 gap=0 opens=2 closes=1 h600=24 h200=24
+  ctx ul#1(tight) > item#2(•)
+    text 0..1 "a" body text.primary
+item 1 #5.0 paragraph 7..9 gap=0 opens=1 closes=1 h600=24 h200=24
+  ctx ul#1(tight) > item#4(•)
+    text 0..1 "b" body text.primary
+item 2 #7.0 paragraph 13..15 gap=0 opens=1 closes=1 h600=24 h200=24
+  ctx ul#1(tight) > item#6(•)
+    text 0..1 "c" body text.primary
+item 3 #9.0 paragraph 20..30 gap=0 opens=1 closes=2 h600=24 h200=24
+  ctx ul#1(tight) > item#8(•)
+    text 0..9 "d - e" body text.primary
+copy: "- a\n- b\n- c\n- d - e"
+=== example 328: "`foo`\n"
+item 0 #1.0 paragraph 0..6 gap=0 opens=0 closes=0 h600=24 h200=24
+    code 1..4 "foo" body+mono text.primary chip
+copy: "foo"
+=== example 350: "*foo bar*\n"
+item 0 #1.0 paragraph 0..10 gap=0 opens=0 closes=0 h600=24 h200=24
+    text 1..8 "foo bar" body+i text.primary
+copy: "foo bar"
+=== example 482: "[link](/uri \"title\")\n"
+item 0 #1.0 paragraph 0..21 gap=0 opens=0 closes=0 h600=24 h200=24
+    text link[0] 1..5 "link" body accent.default underline=solid/accent.line
+  link[0] Inline "/uri" pending 0..20
+copy: "link"
+=== example 571: "[foo][bar][baz]\n\n[baz]: /url1\n[foo]: /url2\n"
+item 0 #1.0 paragraph 0..16 gap=0 opens=0 closes=0 h600=24 h200=24
+    text 0..5 "[foo]" body text.primary
+    text link[0] 6..9 "bar" body accent.default underline=solid/accent.line
+  link[0] Full "/url1" pending 5..15
+copy: "[foo]bar"
+=== example 572: "![foo](/url \"title\")\n"
+item 0 #1.0 paragraph 0..21 gap=0 opens=0 closes=0 h600=24 h200=24
+    alt[0] 2..5 "foo" body text.secondary
+  image[0] "/url" alt="foo" Pending 0..20
+copy: "foo"
+=== example 594: "<http://foo.bar.baz>\n"
+item 0 #1.0 paragraph 0..21 gap=0 opens=0 closes=0 h600=24 h200=24
+    text link[0] 1..19 "http://foo.bar.baz" body accent.default underline=solid/accent.line
+  link[0] UriAutolink "http://foo.bar.baz" pending 0..20
+copy: "http://foo.bar.baz"
+=== example 613: "<a><bab><c2c>\n"
+item 0 #1.0 paragraph 0..14 gap=0 opens=0 closes=0 h600=24 h200=24
+  raw_html_pending
+    raw-html 0..13 "<a><bab><c2c>" body text.tertiary
+copy: "<a><bab><c2c>"
+=== example 633: "foo  \nbaz\n"
+item 0 #1.0 paragraph 0..10 gap=0 opens=0 closes=0 h600=48 h200=48
+    text 0..3 "foo" body text.primary
+    break 3..5 hard-break
+    text 6..9 "baz" body text.primary
+copy: "foo\nbaz"

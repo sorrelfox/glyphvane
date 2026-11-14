@@ -3081,6 +3081,14 @@ dependencies = [
 [[package]]
 name = "gv-render-tree"
 version = "0.0.0"
+dependencies = [
+ "gv-inline",
+ "gv-model",
+ "gv-syntax",
+ "gv-text",
+ "proptest",
+ "serde_json",
+]
 
 [[package]]
 name = "gv-search"

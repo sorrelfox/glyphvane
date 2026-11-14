@@ -9,6 +9,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gv-inline.workspace = true
+gv-model.workspace = true
+gv-syntax.workspace = true
+gv-text.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

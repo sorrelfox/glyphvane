@@ -1,0 +1,243 @@
+=== statuses: "[Exact](exact.md) [Case](case.md) [Loose](loose.md) [Ambiguous](ambiguous.md) [Pending](notes.md) [Missing](missing.md) [Out](../up.md) [Web](https://example.org) [Bad](javascript:x) <https://example.org/auto> <me@example.org> [*em* `code`](exact.md)\n"
+item 0 #1.0 paragraph 0..251 gap=0 opens=0 closes=0 h600=48 h200=120
+    text link[0] 1..6 "Exact" body accent.default underline=solid/accent.line
+    text 17..18 " " body text.primary
+    text link[1] 19..23 "Case" body accent.default underline=solid/accent.line
+    suffix link[1] 33..33 "\u{a0}≈" body text.secondary
+    text 33..34 " " body text.primary
+    text link[2] 35..40 "Loose" body accent.default underline=solid/accent.line
+    suffix link[2] 51..51 "\u{a0}≈" body text.secondary
+    text 51..52 " " body text.primary
+    text link[3] 53..62 "Ambiguous" body accent.default underline=solid/accent.line
+    suffix link[3] 77..77 box Other id=3 21.09x13
+    text 77..78 " " body text.primary
+    text link[4] 79..86 "Pending" body accent.default underline=solid/accent.line
+    text 97..98 " " body text.primary
+    text link[5] 99..106 "Missing" body accent.default underline=dashed/accent.default
+    suffix link[5] 119..119 box Other id=5 13x13
+    text 119..120 " " body text.primary
+    text link[6] 121..124 "Out" body accent.default underline=solid/accent.line
+    suffix link[6] 135..135 box Other id=6 13x13
+    text 135..136 " " body text.primary
+    text link[7] 137..140 "Web" body accent.default underline=solid/accent.line
+    suffix link[7] 162..162 box Other id=7 12x12
+    text 162..163 " " body text.primary
+    text link[8] 164..167 "Bad" body text.secondary strike
+    suffix link[8] 182..182 box Other id=8 13x13
+    text 182..183 " " body text.primary
+    text link[9] 184..208 "https://example.org/auto" body accent.default underline=solid/accent.line
+    suffix link[9] 209..209 box Other id=9 12x12
+    text 209..210 " " body text.primary
+    text link[10] 211..225 "me@example.org" body accent.default underline=solid/accent.line
+    text 226..227 " " body text.primary
+    text link[11] 229..231 "em" body+i accent.default underline=solid/accent.line
+    text link[11] 232..233 " " body accent.default underline=solid/accent.line
+    code link[11] 234..238 "code" body+mono accent.default underline=solid/accent.line chip
+  link[0] Inline "exact.md" exact 0..17
+  link[1] Inline "case.md" case-fold 18..33
+  link[2] Inline "loose.md" loose 34..51
+  link[3] Inline "ambiguous.md" ambiguous(2) 52..77
+  link[4] Inline "notes.md" pending 78..97
+  link[5] Inline "missing.md" unresolved 98..119
+  link[6] Inline "../up.md" outside-root 120..135
+  link[7] Inline "https://example.org" external 136..162
+  link[8] Inline "javascript:x" blocked 163..182
+  link[9] UriAutolink "https://example.org/auto" external 183..209
+  link[10] EmailAutolink "mailto:me@example.org" pending 210..226
+  link[11] Inline "exact.md" exact 227..250
+copy: "Exact Case Loose Ambiguous Pending Missing Out Web Bad https://example.org/auto me@example.org em code"
+=== images: "![Small](small.png) ![Wide](wide.png \"title\") ![Broken *alt*](broken.png) ![Loading](later.png) [![Linked](small.png)](exact.md)\n"
+item 0 #1.0 paragraph 0..129 gap=0 opens=0 closes=0 h600=324 h200=396
+    image[0] 0..19 box Image id=0 32x16
+    text 19..20 " " body text.primary
+    image[1] 20..45 box Image id=1 600x300
+    text 45..46 " " body text.primary
+    alt[2] 48..55 "Broken " body text.secondary
+    alt[2] 56..59 "alt" body+i text.secondary
+    text 73..74 " " body text.primary
+    alt[3] 76..83 "Loading" body text.secondary
+    text 95..96 " " body text.primary
+    image[4] link[0] 97..117 box Image id=4 32x16
+  link[0] Inline "exact.md" exact 96..128
+  image[0] "small.png" alt="Small" Known { width: 32.0, height: 16.0 } 0..19
+  image[1] "wide.png" alt="Wide" Known { width: 1200.0, height: 600.0 } 20..45
+  image[2] "broken.png" alt="Broken alt" Failed 46..73
+  image[3] "later.png" alt="Loading" Pending 74..95
+  image[4] "small.png" alt="Linked" Known { width: 32.0, height: 16.0 } 97..117
+copy: "  Broken alt Loading "
+=== long code: "```text\nline 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nline 75\nline 76\nline 77\nline 78\nline 79\nline 80\nline 81\nline 82\nline 83\nline 84\nline 85\nline 86\nline 87\nline 88\nline 89\nline 90\nline 91\nline 92\nline 93\nline 94\nline 95\nline 96\nline 97\nline 98\nline 99\nline 100\nline 101\nline 102\nline 103\nline 104\nline 105\nline 106\nline 107\nline 108\nline 109\nline 110\nline 111\nline 112\nline 113\nline 114\nline 115\nline 116\nline 117\nline 118\nline 119\n```\n"
+item 0 #1.0 code 0/3 lines 0..50 0..398 gap=0 opens=0 closes=0 h600=1035 h200=1035
+  fenced info="text" lang="text" lines=120
+    line 0: "line 0"
+    line 1: "line 1"
+    line 2: "line 2"
+    line 3: "line 3"
+    line 4: "line 4"
+    line 5: "line 5"
+    line 6: "line 6"
+    line 7: "line 7"
+    line 8: "line 8"
+    line 9: "line 9"
+    line 10: "line 10"
+    line 11: "line 11"
+    line 12: "line 12"
+    line 13: "line 13"
+    line 14: "line 14"
+    line 15: "line 15"
+    line 16: "line 16"
+    line 17: "line 17"
+    line 18: "line 18"
+    line 19: "line 19"
+    line 20: "line 20"
+    line 21: "line 21"
+    line 22: "line 22"
+    line 23: "line 23"
+    line 24: "line 24"
+    line 25: "line 25"
+    line 26: "line 26"
+    line 27: "line 27"
+    line 28: "line 28"
+    line 29: "line 29"
+    line 30: "line 30"
+    line 31: "line 31"
+    line 32: "line 32"
+    line 33: "line 33"
+    line 34: "line 34"
+    line 35: "line 35"
+    line 36: "line 36"
+    line 37: "line 37"
+    line 38: "line 38"
+    line 39: "line 39"
+    line 40: "line 40"
+    line 41: "line 41"
+    line 42: "line 42"
+    line 43: "line 43"
+    line 44: "line 44"
+    line 45: "line 45"
+    line 46: "line 46"
+    line 47: "line 47"
+    line 48: "line 48"
+    line 49: "line 49"
+item 1 #1.1 code 1/3 lines 50..100 398..798 gap=0 opens=0 closes=0 h600=1000 h200=1000
+    line 50: "line 50"
+    line 51: "line 51"
+    line 52: "line 52"
+    line 53: "line 53"
+    line 54: "line 54"
+    line 55: "line 55"
+    line 56: "line 56"
+    line 57: "line 57"
+    line 58: "line 58"
+    line 59: "line 59"
+    line 60: "line 60"
+    line 61: "line 61"
+    line 62: "line 62"
+    line 63: "line 63"
+    line 64: "line 64"
+    line 65: "line 65"
+    line 66: "line 66"
+    line 67: "line 67"
+    line 68: "line 68"
+    line 69: "line 69"
+    line 70: "line 70"
+    line 71: "line 71"
+    line 72: "line 72"
+    line 73: "line 73"
+    line 74: "line 74"
+    line 75: "line 75"
+    line 76: "line 76"
+    line 77: "line 77"
+    line 78: "line 78"
+    line 79: "line 79"
+    line 80: "line 80"
+    line 81: "line 81"
+    line 82: "line 82"
+    line 83: "line 83"
+    line 84: "line 84"
+    line 85: "line 85"
+    line 86: "line 86"
+    line 87: "line 87"
+    line 88: "line 88"
+    line 89: "line 89"
+    line 90: "line 90"
+    line 91: "line 91"
+    line 92: "line 92"
+    line 93: "line 93"
+    line 94: "line 94"
+    line 95: "line 95"
+    line 96: "line 96"
+    line 97: "line 97"
+    line 98: "line 98"
+    line 99: "line 99"
+item 2 #1.2 code 2/3 lines 100..120 798..982 gap=0 opens=0 closes=0 h600=409 h200=409
+    line 100: "line 100"
+    line 101: "line 101"
+    line 102: "line 102"
+    line 103: "line 103"
+    line 104: "line 104"
+    line 105: "line 105"
+    line 106: "line 106"
+    line 107: "line 107"
+    line 108: "line 108"
+    line 109: "line 109"
+    line 110: "line 110"
+    line 111: "line 111"
+    line 112: "line 112"
+    line 113: "line 113"
+    line 114: "line 114"
+    line 115: "line 115"
+    line 116: "line 116"
+    line 117: "line 117"
+    line 118: "line 118"
+    line 119: "line 119"
+copy: "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50\nline 51\nline 52\nline 53\nline 54\nline 55\nline 56\nline 57\nline 58\nline 59\nline 60\nline 61\nline 62\nline 63\nline 64\nline 65\nline 66\nline 67\nline 68\nline 69\nline 70\nline 71\nline 72\nline 73\nline 74\nline 75\nline 76\nline 77\nline 78\nline 79\nline 80\nline 81\nline 82\nline 83\nline 84\nline 85\nline 86\nline 87\nline 88\nline 89\nline 90\nline 91\nline 92\nline 93\nline 94\nline 95\nline 96\nline 97\nline 98\nline 99\nline 100\nline 101\nline 102\nline 103\nline 104\nline 105\nline 106\nline 107\nline 108\nline 109\nline 110\nline 111\nline 112\nline 113\nline 114\nline 115\nline 116\nline 117\nline 118\nline 119"
+=== nested containers: "> - a\n>   > b\n>   >\n>   > c\n> 1. one\n> 2. two\n>\n>    two b\n\n10) ten\n11) eleven\n"
+item 0 #4.0 paragraph 4..6 gap=0 opens=3 closes=0 h600=24 h200=24
+  ctx quote#1 > ul#2(tight) > item#3(•)
+    text 0..1 "a" body text.primary
+item 1 #6.0 paragraph 12..14 gap=0 opens=1 closes=0 h600=24 h200=24
+  ctx quote#1 > ul#2(tight) > item#3(•) > quote#5(depth=1)
+    text 0..1 "b" body text.primary
+item 2 #7.0 paragraph 26..28 gap=12 opens=0 closes=3 h600=24 h200=24
+  ctx quote#1 > ul#2(tight) > item#3(•) > quote#5(depth=1)
+    text 0..1 "c" body text.primary
+item 3 #10.0 paragraph 33..37 gap=12 opens=2 closes=1 h600=24 h200=24
+  ctx quote#1 > ol#8(loose start=1) > item#9(1.)
+    text 0..3 "one" body text.primary
+item 4 #12.0 paragraph 42..46 gap=12 opens=1 closes=0 h600=24 h200=24
+  ctx quote#1 > ol#8(loose start=1) > item#11(2.)
+    text 0..3 "two" body text.primary
+item 5 #13.0 paragraph 53..59 gap=12 opens=0 closes=3 h600=24 h200=24
+  ctx quote#1 > ol#8(loose start=1) > item#11(2.)
+    text 0..5 "two b" body text.primary
+item 6 #16.0 paragraph 64..68 gap=12 opens=2 closes=1 h600=24 h200=24
+  ctx ol#14(tight start=10) > item#15(10))
+    text 0..3 "ten" body text.primary
+item 7 #18.0 paragraph 72..79 gap=0 opens=1 closes=2 h600=24 h200=24
+  ctx ol#14(tight start=10) > item#17(11))
+    text 0..6 "eleven" body text.primary
+copy: "- a\n  b\n\n  c\n\n1. one\n\n2. two\n\n  two b\n\n10) ten\n11) eleven"
+=== headings: "# Dup\n\n## Dup\n\nSetext *x*\n---\n\n#\n"
+item 0 #1.0 heading h1 0..6 gap=0 opens=0 closes=0 h600=32 h200=32
+  h1 anchor="dup"
+    text 2..5 "Dup" h1 text.primary
+item 1 #2.0 heading h2 7..14 gap=6 opens=0 closes=0 h600=24 h200=24
+  h2 anchor="dup-1"
+    text 3..6 "Dup" h2 text.primary
+item 2 #3.0 heading h2 15..30 gap=8 opens=0 closes=0 h600=24 h200=24
+  h2 setext anchor="setext-x"
+    text 0..7 "Setext " h2 text.primary
+    text 8..9 "x" h2+i text.primary
+item 3 #4.0 heading h1 31..33 gap=8 opens=0 closes=0 h600=32 h200=32
+  h1 anchor=""
+copy: "Dup\n\nDup\n\nSetext x\n\n"
+=== front matter Properties: "---\ntitle: A\ntags: [x, y]\n---\nBody\n"
+item 0 #1.0 properties 0/1 lines 0..2 0..30 gap=0 opens=0 closes=0 h600=44 h200=44
+  front matter Yaml lines=2
+    line 0: "title: A"
+    line 1: "tags: [x, y]"
+item 1 #2.0 paragraph 30..35 gap=12 opens=0 closes=0 h600=24 h200=24
+    text 0..4 "Body" body text.primary
+=== front matter Hidden: "---\ntitle: A\ntags: [x, y]\n---\nBody\n"
+item 0 #2.0 paragraph 30..35 gap=0 opens=0 closes=0 h600=24 h200=24
+    text 0..4 "Body" body text.primary
