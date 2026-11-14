@@ -503,9 +503,11 @@ fn an_untitled_document_moves_from_the_journal_to_its_file() {
     let edit = Transaction::new().insert(0, "draft\n");
     buffer.apply(&edit).expect("edit");
     journal.record(&edit, buffer.text()).expect("record");
-    let listed = store.recoverable().expect("list");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].key, Some(DocumentKey::Untitled(7)));
+    // Open here, so in use rather than recoverable.
+    let scan = store.scan().expect("scan");
+    assert!(scan.recoverable.is_empty());
+    assert_eq!(scan.in_use.len(), 1);
+    assert_eq!(scan.in_use[0].key, Some(DocumentKey::Untitled(7)));
 
     let path = dir.path().join("Draft.md");
     let mut file = DocumentFile::new_file(&path, TextFormat::default());
@@ -521,7 +523,7 @@ fn an_untitled_document_moves_from_the_journal_to_its_file() {
             file.baseline().expect("saved").hash,
         )
         .expect("retarget");
-    assert!(store.recoverable().expect("list").is_empty());
+    assert_eq!(store.scan().expect("scan"), Default::default());
     assert_eq!(fs::read_to_string(&path).expect("read"), "draft\n");
 }
 

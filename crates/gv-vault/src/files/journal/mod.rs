@@ -12,7 +12,9 @@
 //!
 //! - `<file-id>`: the journal, an append-only log (format in [`format`]);
 //! - `<file-id>.backup`: the original bytes while a hardlinked file is
-//!   overwritten in place.
+//!   overwritten in place;
+//! - `.<file-id>.lock`: an empty, hidden file that carries the journal's
+//!   lock (see [Several processes](#several-processes)).
 //!
 //! The file id is 32 hexadecimal digits of the SHA-256 of the document's
 //! path, or `untitled-<n>` for a document that was never saved (untitled
@@ -34,6 +36,31 @@
 //!    document with unsaved edits. [`JournalStore::recoverable`] lists them;
 //!    [`JournalStore::recover`] rebuilds the text (Restore, Compare);
 //!    [`JournalStore::discard`] drops it.
+//!
+//! # Several processes
+//!
+//! Two app processes can share a data dir: a safe-mode instance beside a
+//! normal one, or two instances with different config dirs. Each journal
+//! therefore has an exclusive OS advisory lock, held by its
+//! [`DocumentJournal`] for as long as it exists:
+//!
+//! - [`JournalStore::begin`] (and [`DocumentJournal::saved_as`] onto
+//!   another document) fails with [`JournalError::Busy`] while another
+//!   handle holds the document's lock, in another process or in this one;
+//! - [`JournalStore::scan`] reports such journals as in use rather than
+//!   recoverable, and [`JournalStore::recoverable`] leaves them out: they
+//!   belong to a running editor, not to a crash;
+//! - [`JournalStore::recover`], [`JournalStore::discard`] and
+//!   [`JournalStore::restore_backup`] take the lock for their duration and
+//!   fail with [`JournalError::Busy`] on a journal in use;
+//! - [`JournalStore::remove_stale_temp_files`] keeps the temporary files of
+//!   journals in use (another process may be writing them).
+//!
+//! The OS releases the lock when its file handle closes, which happens
+//! however the process ends (exit, panic, `kill -9`, a crash). A journal
+//! left by a dead process is therefore never locked, and there are no stale
+//! locks to detect or break. The lock is advisory: it binds only processes
+//! that take it. The journal's format is not affected.
 //!
 //! # Durability
 //!
@@ -61,6 +88,7 @@
 //! ([`merge3`](crate::files::merge3)).
 
 pub mod format;
+mod lock;
 
 use std::fs;
 use std::io::{self, Write};
@@ -73,6 +101,7 @@ use gv_text::{Buffer, TextFormat, TextSnapshot, Transaction};
 
 pub use self::format::{DocumentKey, JournalTail};
 use self::format::{Header, Record};
+use self::lock::JournalLock;
 use super::clock::{Clock, SystemClock};
 use super::hash::ContentHash;
 use super::write::{Backup, sync_dir};
@@ -170,6 +199,25 @@ pub enum JournalError {
     /// base text and the file on disk no longer matches it.
     #[error("{0}: the text the journaled edits apply to is no longer available")]
     BaseUnavailable(JournalId),
+    /// The journal is in use: another open [`DocumentJournal`] (in another
+    /// process, or in this one) holds its lock. It is not a crashed journal
+    /// and must not be written, recovered or discarded from here.
+    #[error("{}: the journal is in use by another window or process", path.display())]
+    Busy {
+        /// The journal file (which may not exist yet).
+        path: PathBuf,
+    },
+}
+
+/// The journals of a store, as [`JournalStore::scan`] found them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JournalScan {
+    /// Journals left from an earlier session (no live process holds them),
+    /// by id.
+    pub recoverable: Vec<RecoverableDocument>,
+    /// Journals a live process (or this one) has open, by id: not crashed,
+    /// so not offered for recovery.
+    pub in_use: Vec<RecoverableDocument>,
 }
 
 /// A document with a journal left from an earlier session.
@@ -270,13 +318,20 @@ impl JournalStore {
         self.dir.join(format!("{id}.backup"))
     }
 
+    fn lock(&self, id: &JournalId) -> Result<JournalLock, JournalError> {
+        lock_journal(&self.dir, id)
+    }
+
     /// Starts journaling a document whose current text is `base` (as
     /// loaded or last saved; empty for a new untitled document) in
     /// `format`, with `base_hash` the hash of its bytes on disk (`None` if
     /// it has no file). Nothing is written until the first edit.
     ///
-    /// Fails with [`JournalError::PendingRecovery`] while a journal from an
-    /// earlier session exists for the same document.
+    /// Takes the document's lock, held until the returned journal is
+    /// dropped. Fails with [`JournalError::Busy`] while another journal
+    /// handle (in any process) has the same document open, and with
+    /// [`JournalError::PendingRecovery`] while a journal from an earlier
+    /// session exists for it.
     pub fn begin<C: Clock>(
         &self,
         key: DocumentKey,
@@ -287,12 +342,14 @@ impl JournalStore {
         clock: C,
     ) -> Result<DocumentJournal<C>, JournalError> {
         let id = JournalId::of(&key);
+        let lock = self.lock(&id)?;
         if exists(&self.journal_path(&id))? || exists(&self.backup_path(&id))? {
             return Err(JournalError::PendingRecovery(id));
         }
         Ok(DocumentJournal {
             dir: self.dir.clone(),
             id,
+            _lock: lock,
             key,
             base,
             base_format: format,
@@ -326,8 +383,17 @@ impl JournalStore {
         )
     }
 
-    /// The documents with a journal or backup in this store, by id.
+    /// The documents with a journal or backup left from an earlier session,
+    /// by id: [`JournalScan::recoverable`] of [`JournalStore::scan`].
+    /// Journals in use by a live process are left out.
     pub fn recoverable(&self) -> io::Result<Vec<RecoverableDocument>> {
+        Ok(self.scan()?.recoverable)
+    }
+
+    /// The documents with a journal or backup in this store, split into
+    /// those left from an earlier session and those a live process holds
+    /// open (see [Several processes](self#several-processes)).
+    pub fn scan(&self) -> io::Result<JournalScan> {
         let mut found: std::collections::BTreeMap<JournalId, RecoverableDocument> =
             std::collections::BTreeMap::new();
         for entry in fs::read_dir(&self.dir)? {
@@ -359,7 +425,10 @@ impl JournalStore {
                 doc.has_journal = true;
             }
         }
-        for doc in found.values_mut() {
+        let mut scan = JournalScan::default();
+        for mut doc in found.into_values() {
+            // Held while the header is read.
+            let lock = JournalLock::try_acquire(self.lock_path(&doc.id))?;
             doc.key = if doc.has_journal {
                 fs::read(self.journal_path(&doc.id))
                     .ok()
@@ -372,8 +441,16 @@ impl JournalStore {
                     .flatten()
                     .map(|(path, _)| DocumentKey::Path(path))
             };
+            match lock {
+                Some(_) => scan.recoverable.push(doc),
+                None => scan.in_use.push(doc),
+            }
         }
-        Ok(found.into_values().collect())
+        Ok(scan)
+    }
+
+    fn lock_path(&self, id: &JournalId) -> PathBuf {
+        lock_path(&self.dir, id)
     }
 
     /// Rebuilds the document of journal `id`.
@@ -382,7 +459,10 @@ impl JournalStore {
     /// backup, else from the file on disk; the last two only when their
     /// hash matches the journal's. Edits are replayed until the first
     /// record that is cut short or does not apply ([`Recovery::tail`]).
+    ///
+    /// Fails with [`JournalError::Busy`] while the journal is in use.
     pub fn recover(&self, id: &JournalId) -> Result<Recovery, JournalError> {
+        let _lock = self.lock(id)?;
         let backup = self.read_backup(id)?;
         let bytes = match fs::read(self.journal_path(id)) {
             Ok(bytes) => Some(bytes),
@@ -504,7 +584,10 @@ impl JournalStore {
 
     /// Deletes journal `id` and its backup (the user chose Discard, or the
     /// recovered text was taken over into a new journal).
-    pub fn discard(&self, id: &JournalId) -> io::Result<()> {
+    ///
+    /// Fails with [`JournalError::Busy`] while the journal is in use.
+    pub fn discard(&self, id: &JournalId) -> Result<(), JournalError> {
+        let _lock = self.lock(id)?;
         remove_if_exists(&self.journal_path(id))?;
         remove_if_exists(&self.backup_path(id))?;
         sync_dir(&self.dir);
@@ -514,7 +597,10 @@ impl JournalStore {
     /// Writes the original bytes of an interrupted in-place write back into
     /// the file (in place, so hard links stay joined), then deletes the
     /// backup. Returns the file's path.
+    ///
+    /// Fails with [`JournalError::Busy`] while the journal is in use.
     pub fn restore_backup(&self, id: &JournalId) -> Result<PathBuf, JournalError> {
+        let _lock = self.lock(id)?;
         let Some((path, original)) = self.read_backup(id)? else {
             return Err(JournalError::NotFound(id.clone()));
         };
@@ -532,17 +618,31 @@ impl JournalStore {
 
     /// Removes temporary files left by a crash during an atomic write in
     /// this store (`.<name>.gv-tmp-*`). Call once at start-up, before any
-    /// journal is opened. Returns how many were removed.
+    /// journal is opened. The files of journals in use (by another process)
+    /// are kept. Returns how many were removed.
     pub fn remove_stale_temp_files(&self) -> io::Result<usize> {
         let mut removed = 0;
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with('.') && name.contains(".gv-tmp-") {
-                remove_if_exists(&entry.path())?;
-                removed += 1;
-            }
+            let Some(target) = name
+                .strip_prefix('.')
+                .and_then(|rest| rest.split_once(".gv-tmp-"))
+                .map(|(target, _)| target)
+            else {
+                continue;
+            };
+            let id = JournalId::parse(target.strip_suffix(".backup").unwrap_or(target));
+            let _lock = match id {
+                Some(id) => match JournalLock::try_acquire(self.lock_path(&id))? {
+                    Some(lock) => Some(lock),
+                    None => continue,
+                },
+                None => None,
+            };
+            remove_if_exists(&entry.path())?;
+            removed += 1;
         }
         Ok(removed)
     }
@@ -574,6 +674,8 @@ impl JournalStore {
 pub struct DocumentJournal<C: Clock = SystemClock> {
     dir: PathBuf,
     id: JournalId,
+    /// The lock on `id`, held for the journal's lifetime.
+    _lock: JournalLock,
     key: DocumentKey,
     base: TextSnapshot,
     base_format: TextFormat,
@@ -738,7 +840,9 @@ impl<C: Clock> DocumentJournal<C> {
     }
 
     /// Like [`DocumentJournal::saved`], when the document now lives under
-    /// another key (an untitled document's first save, "Save As").
+    /// another key (an untitled document's first save, "Save As"). Takes
+    /// the new key's lock and releases the old one; fails with
+    /// [`JournalError::Busy`] while another handle has the new key open.
     pub fn saved_as(
         &mut self,
         key: DocumentKey,
@@ -747,13 +851,22 @@ impl<C: Clock> DocumentJournal<C> {
         base_hash: ContentHash,
     ) -> Result<(), JournalError> {
         let id = JournalId::of(&key);
-        if id != self.id
-            && (exists(&self.dir.join(id.as_str()))?
-                || exists(&self.dir.join(format!("{id}.backup")))?)
-        {
-            return Err(JournalError::PendingRecovery(id));
-        }
+        let lock = if id == self.id {
+            None
+        } else {
+            let lock = lock_journal(&self.dir, &id)?;
+            if exists(&self.dir.join(id.as_str()))?
+                || exists(&self.dir.join(format!("{id}.backup")))?
+            {
+                return Err(JournalError::PendingRecovery(id));
+            }
+            Some(lock)
+        };
         self.saved(base, format, base_hash)?;
+        if let Some(lock) = lock {
+            // The old key's lock is released here.
+            self._lock = lock;
+        }
         self.id = id;
         self.key = key;
         Ok(())
@@ -869,6 +982,18 @@ impl<C: Clock> Backup for DocumentJournal<C> {
     fn clear(&mut self, _target: &Path) -> io::Result<()> {
         remove_if_exists(&self.backup_path())
     }
+}
+
+fn lock_path(dir: &Path, id: &JournalId) -> PathBuf {
+    dir.join(format!(".{id}.lock"))
+}
+
+/// Takes the lock of journal `id` in `dir`, or fails with
+/// [`JournalError::Busy`].
+fn lock_journal(dir: &Path, id: &JournalId) -> Result<JournalLock, JournalError> {
+    JournalLock::try_acquire(lock_path(dir, id))?.ok_or_else(|| JournalError::Busy {
+        path: dir.join(id.as_str()),
+    })
 }
 
 fn compare_disk(path: &Path, base_hash: Option<ContentHash>) -> DiskComparison {

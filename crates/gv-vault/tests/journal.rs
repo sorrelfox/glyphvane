@@ -277,15 +277,21 @@ fn sync_runs_at_most_once_per_interval_and_on_demand() {
     clock.advance(Duration::from_millis(1500));
     assert!(journal.sync_if_due().expect("sync"));
     assert_eq!(journal.next_sync_deadline(), None);
-    // Recorded data is readable before any sync (the OS has it).
+    // Recorded data is readable before any sync (the OS has it) once the
+    // handle is gone; while it is open, the journal is locked.
     clock.advance(Duration::from_millis(100));
     let t = Transaction::new().insert(0, "c");
     buffer.apply(&t).expect("edit");
     journal.record(&t, buffer.text()).expect("record");
-    let recovery = store.recover(journal.id()).expect("recover");
+    assert!(matches!(
+        store.recover(journal.id()),
+        Err(JournalError::Busy { .. })
+    ));
+    let id = journal.id().clone();
+    drop(journal);
+    let recovery = store.recover(&id).expect("recover");
     assert_eq!(recovery.text, "cbax\n");
-    journal.sync().expect("sync");
-    journal.discard().expect("discard");
+    store.discard(&id).expect("discard");
     assert!(store.recoverable().expect("list").is_empty());
 }
 
