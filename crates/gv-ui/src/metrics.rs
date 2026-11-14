@@ -216,6 +216,15 @@ pub mod spacing {
         pub const GAP: f32 = 4.0;
     }
 
+    /// Outline rows: margin `0 6` (`size::LIST_ROW_INSET`), padding right 8,
+    /// padding left 10 plus `size::OUTLINE_INDENT` per level; 8 below the
+    /// last row of a section.
+    pub mod outline_row {
+        pub const PAD_LEFT: f32 = 10.0;
+        pub const PAD_RIGHT: f32 = 8.0;
+        pub const SECTION_PAD_BOTTOM: f32 = 8.0;
+    }
+
     /// Window controls drawn by the application on Linux: 8 apart, 8 from the
     /// right of the title row, 10 after the panel toggle.
     pub mod linux_controls {

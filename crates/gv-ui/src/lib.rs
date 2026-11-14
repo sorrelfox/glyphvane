@@ -43,6 +43,14 @@ gpui::actions!(
         ToggleSidebar,
         /// Show or hide the right panel.
         TogglePanel,
+        /// Go back to where the active tab was.
+        GoBack,
+        /// Go forward again after going back.
+        GoForward,
+        /// Close the active tab.
+        CloseTab,
+        /// Reopen the tab closed last, with its history.
+        ReopenClosedTab,
         /// Quit the application.
         Quit,
     ]
@@ -50,17 +58,29 @@ gpui::actions!(
 
 /// Default key bindings. Mod is Cmd on macOS and Ctrl elsewhere. Themes cycle
 /// on the chord Mod+K Mod+T: Ctrl+Alt+T opens a terminal on most Linux desktops.
+/// History is Alt+Left and Alt+Right outside macOS, where Alt+Left moves by
+/// word; there it is Cmd+[ and Cmd+] or Cmd+Alt+Left and Cmd+Alt+Right.
+// TODO: bind through the keymap model (`gv_settings::keymap`) once it is
+// wired into the window; these are its defaults.
 #[cfg(target_os = "macos")]
 mod keys {
     pub const CYCLE_THEME: &str = "cmd-k cmd-t";
     pub const TOGGLE_EDIT_MODE: &str = "cmd-e";
     pub const QUIT: &str = "cmd-q";
+    pub const GO_BACK: &[&str] = &["cmd-[", "cmd-alt-left"];
+    pub const GO_FORWARD: &[&str] = &["cmd-]", "cmd-alt-right"];
+    pub const CLOSE_TAB: &str = "cmd-w";
+    pub const REOPEN_CLOSED_TAB: &str = "cmd-shift-t";
 }
 #[cfg(not(target_os = "macos"))]
 mod keys {
     pub const CYCLE_THEME: &str = "ctrl-k ctrl-t";
     pub const TOGGLE_EDIT_MODE: &str = "ctrl-e";
     pub const QUIT: &str = "ctrl-q";
+    pub const GO_BACK: &[&str] = &["alt-left"];
+    pub const GO_FORWARD: &[&str] = &["alt-right"];
+    pub const CLOSE_TAB: &str = "ctrl-w";
+    pub const REOPEN_CLOSED_TAB: &str = "ctrl-shift-t";
 }
 
 /// Initialises GPUI Component, the settings, the theme and the key bindings.
@@ -75,7 +95,19 @@ pub fn init(cx: &mut App, settings: AppSettings) {
         KeyBinding::new(keys::CYCLE_THEME, CycleTheme, None),
         KeyBinding::new(keys::TOGGLE_EDIT_MODE, ToggleEditMode, None),
         KeyBinding::new(keys::QUIT, Quit, None),
+        KeyBinding::new(keys::CLOSE_TAB, CloseTab, None),
+        KeyBinding::new(keys::REOPEN_CLOSED_TAB, ReopenClosedTab, None),
     ]);
+    cx.bind_keys(
+        keys::GO_BACK
+            .iter()
+            .map(|k| KeyBinding::new(k, GoBack, None)),
+    );
+    cx.bind_keys(
+        keys::GO_FORWARD
+            .iter()
+            .map(|k| KeyBinding::new(k, GoForward, None)),
+    );
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
     cx.on_action(|_: &CycleTheme, cx| AppSettings::cycle_theme(cx));

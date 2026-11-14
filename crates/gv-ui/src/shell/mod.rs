@@ -8,6 +8,10 @@ mod document;
 mod files_panel;
 #[cfg(test)]
 mod files_panel_tests;
+mod history;
+#[cfg(test)]
+mod navigation_tests;
+mod outline_panel;
 mod panels;
 mod status_bar;
 #[cfg(test)]
@@ -21,29 +25,44 @@ pub(crate) use vault::VaultStatus;
 
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use gpui::component::window_corner_radii;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Result, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, px,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle, Focusable as _,
+    Global, InteractiveElement as _, IntoElement, MouseButton, NavigationDirection,
+    ParentElement as _, Render, Result, SharedString, Styled as _, Subscription, Task, WeakEntity,
+    Window, canvas, div, px,
 };
+use gv_model::DocModel;
 
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::metrics::text;
-use crate::reader::{Disposition, LinkRequest, Navigation, Reader, ReaderEvent, ScrollTarget};
-use crate::{ToggleEditMode, TogglePanel, ToggleSidebar};
+use crate::reader::{
+    Disposition, LinkRequest, LoadStatus, Navigation, Reader, ReaderEvent, ScrollTarget,
+};
+use crate::{
+    CloseTab, GoBack, GoForward, ReopenClosedTab, ToggleEditMode, TogglePanel, ToggleSidebar,
+};
 use files_panel::{FilesPanel, FilesPanelEvent};
+use history::{ClosedTab, ClosedTabs};
+use outline_panel::{OutlinePanel, OutlinePanelEvent};
 use vault::WindowVault;
+
+pub use history::{History, HistoryEntry};
 
 /// Set to `1` to open main windows with the sidebar shown, for screenshots
 /// and manual checks. Windows opened for a file otherwise start with both
 /// side panels hidden.
 pub const DEBUG_SHOW_SIDEBAR_ENV: &str = "GLYPHVANE_DEBUG_SHOW_SIDEBAR";
+
+/// Set to `1` to open main windows with the right panel (Outline) shown,
+/// for screenshots and manual checks.
+pub const DEBUG_SHOW_RIGHT_PANEL_ENV: &str = "GLYPHVANE_DEBUG_SHOW_RIGHT_PANEL";
 
 /// What the document area shows. Each tab has its own mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,17 +101,6 @@ impl OpenTarget {
     }
 }
 
-/// Most entries a tab's back stack keeps.
-const HISTORY_LIMIT: usize = 100;
-
-/// A place a tab was at before it followed a link.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryEntry {
-    pub path: PathBuf,
-    /// Where the Reading view was scrolled.
-    pub scroll: Option<ScrollTarget>,
-}
-
 /// One open document in a window.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -104,9 +112,8 @@ pub struct Tab {
     mode: ViewMode,
     /// The Reading view, made when the tab is first shown.
     reader: Option<Entity<Reader>>,
-    /// Where following links came from, most recent last (no interface
-    /// yet; see [`Workspace::go_back`]).
-    back: Vec<HistoryEntry>,
+    /// Where Back and Forward go.
+    history: History,
 }
 
 impl Tab {
@@ -121,7 +128,7 @@ impl Tab {
             position,
             mode: ViewMode::default(),
             reader: None,
-            back: Vec::new(),
+            history: History::default(),
         }
     }
 
@@ -129,8 +136,14 @@ impl Tab {
         self.reader.as_ref()
     }
 
+    /// Where Back goes, oldest first.
     pub fn history(&self) -> &[HistoryEntry] {
-        &self.back
+        self.history.back()
+    }
+
+    /// The tab's back and forward stacks.
+    pub fn navigation(&self) -> &History {
+        &self.history
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -178,6 +191,34 @@ impl FileLabel {
     }
 }
 
+/// What the window knows about the document a Reading view shows, for the
+/// outline and the status bar.
+#[derive(Debug, Clone)]
+pub(super) struct DocFacts {
+    path: PathBuf,
+    model: DocModel,
+    /// Counted off the UI thread; `None` until then.
+    words: Option<usize>,
+    /// The heading whose section is at the top of the view.
+    heading: Option<usize>,
+}
+
+impl DocFacts {
+    fn heading_text(&self) -> Option<SharedString> {
+        let heading = self.model.headings().get(self.heading?)?;
+        Some(heading.text.to_string().into())
+    }
+}
+
+/// A Reading view the window listens to.
+struct ReaderWatch {
+    /// The loaded document; `None` while one loads.
+    doc: Option<DocFacts>,
+    _count: Option<Task<()>>,
+    _events: Subscription,
+    _changes: Subscription,
+}
+
 /// A main window's content.
 pub struct Workspace {
     focus: FocusHandle,
@@ -196,7 +237,13 @@ pub struct Workspace {
     files: Option<Entity<FilesPanel>>,
     _files_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
-    _reader_events: Vec<Subscription>,
+    /// The Outline, created with the right panel.
+    outline: Option<Entity<OutlinePanel>>,
+    _outline_events: Option<Subscription>,
+    /// The tabs' Reading views, by entity.
+    readers: HashMap<EntityId, ReaderWatch>,
+    /// Closed tabs, for reopening.
+    closed: ClosedTabs,
     /// The pointer went down on a drag region of a client-decorated window
     /// and has not moved yet.
     drag_pending: bool,
@@ -227,6 +274,9 @@ impl Workspace {
         let mut this = Self::with_chrome(target, WindowChrome::current(), window, cx);
         if std::env::var_os(DEBUG_SHOW_SIDEBAR_ENV).is_some_and(|v| v == "1") {
             this.set_sidebar_open(true, window, cx);
+        }
+        if std::env::var_os(DEBUG_SHOW_RIGHT_PANEL_ENV).is_some_and(|v| v == "1") {
+            this.set_panel_open(true, window, cx);
         }
         this
     }
@@ -266,7 +316,10 @@ impl Workspace {
             files: None,
             _files_events: None,
             _vault_changed: None,
-            _reader_events: Vec::new(),
+            outline: None,
+            _outline_events: None,
+            readers: HashMap::new(),
+            closed: ClosedTabs::default(),
             drag_pending: false,
             _appearance: appearance,
             _activation: activation,
@@ -392,6 +445,10 @@ impl Workspace {
             let active = self.active_tab().path.clone();
             files.update(cx, |files, cx| files.set_active(active, cx));
         }
+        if let Some(id) = self.active_tab().reader.as_ref().map(Entity::entity_id) {
+            self.refresh_heading(id, cx);
+        }
+        self.sync_outline(cx);
         cx.notify();
     }
 
@@ -468,7 +525,7 @@ impl Workspace {
             reader.open(path, scroll, cx);
             reader
         });
-        self._reader_events.push(cx.subscribe_in(
+        let events = cx.subscribe_in(
             &reader,
             window,
             |this, reader, event: &ReaderEvent, window, cx| match event {
@@ -476,8 +533,160 @@ impl Workspace {
                     this.follow_link(reader.clone(), request.clone(), window, cx);
                 }
             },
-        ));
+        );
+        let changes = cx.observe(&reader, |this, reader, cx| this.reader_changed(&reader, cx));
+        self.readers.insert(
+            reader.entity_id(),
+            ReaderWatch {
+                doc: None,
+                _count: None,
+                _events: events,
+                _changes: changes,
+            },
+        );
         Some(reader)
+    }
+
+    /// A Reading view changed: a document started or finished loading, or
+    /// the view moved.
+    fn reader_changed(&mut self, reader: &Entity<Reader>, cx: &mut Context<'_, Self>) {
+        let id = reader.entity_id();
+        let (loaded, model, text) = {
+            let r = reader.read(cx);
+            match (r.status(), r.path()) {
+                (LoadStatus::Ready, Some(path)) => {
+                    let known = self
+                        .readers
+                        .get(&id)
+                        .and_then(|w| w.doc.as_ref())
+                        .is_some_and(|d| d.path == path);
+                    if known {
+                        self.refresh_heading(id, cx);
+                        return;
+                    }
+                    (Some(path.to_path_buf()), r.model(), r.plain_text())
+                }
+                _ => (None, None, None),
+            }
+        };
+        let Some(watch) = self.readers.get_mut(&id) else {
+            return;
+        };
+        match (loaded, model) {
+            (Some(path), Some(model)) => {
+                watch.doc = Some(DocFacts {
+                    path,
+                    model,
+                    words: None,
+                    heading: None,
+                });
+                watch._count = text.map(|text| {
+                    cx.spawn(async move |this, cx| {
+                        let words = cx
+                            .background_spawn(async move { status_bar::count_words(&text) })
+                            .await;
+                        this.update(cx, |this, cx| this.words_counted(id, words, cx))
+                            .ok();
+                    })
+                });
+            }
+            _ if watch.doc.is_none() => return,
+            _ => {
+                watch.doc = None;
+                watch._count = None;
+            }
+        }
+        self.refresh_heading(id, cx);
+        if self.is_active_reader(id) {
+            self.sync_outline(cx);
+        }
+        cx.notify();
+    }
+
+    fn words_counted(&mut self, id: EntityId, words: usize, cx: &mut Context<'_, Self>) {
+        if let Some(doc) = self.readers.get_mut(&id).and_then(|w| w.doc.as_mut()) {
+            doc.words = Some(words);
+            cx.notify();
+        }
+    }
+
+    fn is_active_reader(&self, id: EntityId) -> bool {
+        self.active_tab()
+            .reader
+            .as_ref()
+            .is_some_and(|r| r.entity_id() == id)
+    }
+
+    /// What the window knows about the active tab's document.
+    fn active_doc(&self) -> Option<&DocFacts> {
+        let reader = self.active_tab().reader.as_ref()?;
+        self.readers.get(&reader.entity_id())?.doc.as_ref()
+    }
+
+    /// Finds the section at the top of Reading view `id`, and tells the
+    /// outline and the status bar when it changed.
+    fn refresh_heading(&mut self, id: EntityId, cx: &mut Context<'_, Self>) {
+        let Some(reader) = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.reader.as_ref())
+            .find(|r| r.entity_id() == id)
+        else {
+            return;
+        };
+        let position = reader.read(cx).position();
+        let Some(doc) = self.readers.get_mut(&id).and_then(|w| w.doc.as_mut()) else {
+            return;
+        };
+        let heading = section_at(&doc.model, position.as_ref());
+        if heading == doc.heading {
+            return;
+        }
+        doc.heading = heading;
+        if self.is_active_reader(id)
+            && let Some(outline) = &self.outline
+        {
+            outline.update(cx, |o, cx| o.set_current(heading, cx));
+        }
+        cx.notify();
+    }
+
+    /// Shows the active document in the Outline.
+    fn sync_outline(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(outline) = self.outline.clone() else {
+            return;
+        };
+        let (model, heading) = match self.active_doc() {
+            Some(doc) => (Some(doc.model.clone()), doc.heading),
+            None => (None, None),
+        };
+        outline.update(cx, |o, cx| o.set_document(model, heading, cx));
+    }
+
+    /// An element drawn after the document that looks where the Reading
+    /// view settled in this frame (a jump or a scroll lands while the view
+    /// is laid out) and updates the current section when it moved.
+    fn heading_probe(&self, cx: &mut Context<'_, Self>) -> Option<impl IntoElement> {
+        let reader = self.shown_reader()?.clone();
+        let id = reader.entity_id();
+        let doc = self.readers.get(&id)?.doc.as_ref()?;
+        let (model, known) = (doc.model.clone(), doc.heading);
+        let this = cx.weak_entity();
+        Some(
+            canvas(
+                move |_, _, cx| {
+                    let position = reader.read(cx).position();
+                    if section_at(&model, position.as_ref()) != known {
+                        cx.defer(move |cx| {
+                            this.update(cx, |ws, cx| ws.refresh_heading(id, cx)).ok();
+                        });
+                    }
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .size_0(),
+        )
     }
 
     /// Follows a link clicked in a tab's Reading view.
@@ -538,20 +747,28 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(index) else {
-            return;
-        };
-        if let Some(previous) = tab.path.clone() {
-            let position = tab.reader.as_ref().and_then(|r| r.read(cx).position());
-            if tab.back.len() >= HISTORY_LIMIT {
-                tab.back.remove(0);
-            }
-            tab.back.push(HistoryEntry {
-                path: previous,
-                scroll: position,
-            });
+        if let Some(left) = self.place(index, cx) {
+            self.tabs[index].history.push(left);
         }
         self.show_in_tab(index, path, scroll, window, cx);
+    }
+
+    /// Where tab `index` is now, as a history entry. The scroll position
+    /// is known once its document has loaded.
+    fn place(&self, index: usize, cx: &App) -> Option<HistoryEntry> {
+        let tab = self.tabs.get(index)?;
+        let path = tab.path.clone()?;
+        let scroll = tab.reader.as_ref().and_then(|reader| {
+            let reader = reader.read(cx);
+            let shown = reader.status() == &LoadStatus::Ready && reader.path() == Some(&path);
+            if shown { reader.position() } else { None }
+        });
+        let scroll = scroll.or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
+        Some(HistoryEntry {
+            path,
+            mode: tab.mode,
+            scroll,
+        })
     }
 
     fn show_in_tab(
@@ -595,12 +812,115 @@ impl Workspace {
     /// Goes back to where the active tab was before it last followed a
     /// link. Returns false when there is nothing to go back to.
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.travel(History::go_back, window, cx)
+    }
+
+    /// Goes forward again after [`Self::go_back`]. Returns false when there
+    /// is nothing to go forward to.
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.travel(History::go_forward, window, cx)
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.active_tab().history.can_go_back()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.active_tab().history.can_go_forward()
+    }
+
+    fn travel(
+        &mut self,
+        step: fn(&mut History, HistoryEntry) -> Option<HistoryEntry>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         let index = self.active;
-        let Some(entry) = self.tabs[index].back.pop() else {
+        let Some(current) = self.place(index, cx) else {
             return false;
         };
-        self.show_in_tab(index, entry.path, entry.scroll, window, cx);
+        let Some(to) = step(&mut self.tabs[index].history, current) else {
+            return false;
+        };
+        self.tabs[index].mode = to.mode;
+        let scroll = to.scroll.or(Some(ScrollTarget::Offset(0)));
+        self.show_in_tab(index, to.path, scroll, window, cx);
         true
+    }
+
+    /// Closes tab `index`; it can be reopened with its history. Closing
+    /// the last tab leaves an empty one.
+    pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if let Some(place) = self.place(index, cx) {
+            self.closed.push(ClosedTab {
+                index,
+                place,
+                history: self.tabs[index].history.clone(),
+            });
+        } else if self.tabs.len() == 1 {
+            // Only the empty tab: nothing to close.
+            return;
+        }
+        let was_active = index == self.active;
+        let tab = self.tabs.remove(index);
+        if let Some(reader) = &tab.reader {
+            self.readers.remove(&reader.entity_id());
+        }
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::new(None));
+        }
+        if index < self.active || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.tabs_changed(window, cx);
+        if was_active {
+            self.focus_document(window, cx);
+        }
+    }
+
+    /// Reopens the tab closed last where it was, with its history.
+    /// Returns false when no closed tab is left.
+    pub fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        let Some(closed) = self.closed.pop() else {
+            return false;
+        };
+        let place = closed.place;
+        let mut tab = Tab::new(Some(OpenTarget::new(place.path)));
+        tab.mode = place.mode;
+        tab.history = closed.history;
+        let index = if self.tabs.len() == 1 && self.tabs[0].path.is_none() {
+            self.tabs[0] = tab;
+            0
+        } else {
+            let index = closed.index.min(self.tabs.len());
+            self.tabs.insert(index, tab);
+            index
+        };
+        let scroll = place.scroll.or(Some(ScrollTarget::Offset(0)));
+        let reader = self.make_reader(index, scroll, window, cx);
+        self.tabs[index].reader = reader;
+        self.active = index;
+        self.tabs_changed(window, cx);
+        self.focus_document(window, cx);
+        true
+    }
+
+    /// Scrolls the active document to heading `heading` (from the
+    /// Outline). The jump is history, like a followed link.
+    fn jump_to_heading(&mut self, heading: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let index = self.active;
+        let Some(doc) = self.active_doc() else {
+            return;
+        };
+        let Some(start) = doc.model.headings().get(heading).map(|h| h.range.start) else {
+            return;
+        };
+        let path = doc.path.clone();
+        self.navigate(index, path, Some(ScrollTarget::Offset(start)), window, cx);
+        self.focus_document(window, cx);
     }
 
     /// Creates the Files panel, and with it the vault, the first time the
@@ -651,9 +971,33 @@ impl Workspace {
         cx.notify();
     }
 
-    fn toggle_panel(&mut self, cx: &mut Context<'_, Self>) {
-        self.panel_open = !self.panel_open;
+    fn toggle_panel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.set_panel_open(!self.panel_open, window, cx);
+    }
+
+    fn set_panel_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.panel_open = open;
+        if open {
+            self.ensure_outline(window, cx);
+        }
         cx.notify();
+    }
+
+    /// Creates the Outline the first time the right panel is shown.
+    fn ensure_outline(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.outline.is_some() {
+            return;
+        }
+        let outline = cx.new(|_| OutlinePanel::new());
+        self._outline_events = Some(cx.subscribe_in(
+            &outline,
+            window,
+            |this, _, event: &OutlinePanelEvent, window, cx| match *event {
+                OutlinePanelEvent::Jump(heading) => this.jump_to_heading(heading, window, cx),
+            },
+        ));
+        self.outline = Some(outline);
+        self.sync_outline(cx);
     }
 }
 
@@ -674,7 +1018,34 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.toggle_sidebar(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &TogglePanel, _, cx| this.toggle_panel(cx)))
+            .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
+                this.toggle_panel(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| {
+                this.go_back(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| {
+                this.go_forward(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                this.close_tab(this.active, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                this.reopen_closed_tab(window, cx);
+            }))
+            // The mouse's back and forward buttons.
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| {
+                    this.go_back(window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, window, cx| {
+                    this.go_forward(window, cx);
+                }),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -708,12 +1079,26 @@ impl Render for Workspace {
                                     .flex()
                                     .child(self.render_document(theme, cx))
                                     .when(self.panel_open, |row| {
-                                        row.child(panels::right_panel(theme))
+                                        row.child(panels::right_panel(theme, self.outline.clone()))
                                     }),
                             ),
                     ),
             )
-            .child(status_bar::status_bar(self.active_tab(), theme, radii))
+            .child(status_bar::status_bar(
+                self.active_tab(),
+                self.active_doc(),
+                theme,
+                radii,
+            ))
+            .children(self.heading_probe(cx))
+    }
+}
+
+/// The heading whose section holds the top of the view at `position`.
+fn section_at(model: &DocModel, position: Option<&ScrollTarget>) -> Option<usize> {
+    match position? {
+        ScrollTarget::Offset(offset) => model.heading_at(*offset),
+        ScrollTarget::Fragment(_) | ScrollTarget::Line(_) => None,
     }
 }
 

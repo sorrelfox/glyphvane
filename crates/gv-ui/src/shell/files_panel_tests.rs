@@ -345,7 +345,7 @@ fn a_window_without_a_file_has_no_vault(cx: &mut TestAppContext) {
 /// Ways a size or colour can bypass the metrics and the theme: GPUI's
 /// fixed-step helpers (`.px_2()`, `.h_8()`, `.text_sm()`, `.rounded_md()`),
 /// colour constructors and literals, and `px(` around a number.
-fn untokened(code: &str) -> Vec<String> {
+pub(super) fn untokened(code: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (i, _) in code.match_indices('.') {
         let call: String = code[i + 1..]

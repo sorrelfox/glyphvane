@@ -5,9 +5,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Corners, Decorations, Div, FontWeight, InteractiveElement as _, ParentElement as _,
-    Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    transparent_black,
+    AnyElement, Context, Corners, Decorations, Div, FontWeight, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px, transparent_black,
 };
 
 use super::controls::{
@@ -66,18 +66,8 @@ impl Workspace {
                 .debug_selector(|| "toggle-sidebar".into())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
-            .child(disabled_icon_button(
-                Icon::Back,
-                icon::TOOLBAR,
-                square,
-                theme,
-            ))
-            .child(disabled_icon_button(
-                Icon::Forward,
-                icon::TOOLBAR,
-                square,
-                theme,
-            ))
+            .child(self.history_button(Icon::Back, theme, cx))
+            .child(self.history_button(Icon::Forward, theme, cx))
             .child(self.tab_strip(theme, cx))
             .child(icon_button(
                 "new-tab",
@@ -111,7 +101,7 @@ impl Workspace {
                     theme,
                 )
                 .debug_selector(|| "toggle-panel".into())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
             )
             .when(caption_buttons, |row| {
                 row.child(windows_caption_buttons(window, theme))
@@ -122,6 +112,30 @@ impl Workspace {
                         .mr(px(linux_controls::INSET_RIGHT - title_row::PAD_X)),
                 )
             })
+    }
+
+    /// Back or Forward: disabled while the active tab has nowhere to go.
+    fn history_button(&self, icon: Icon, theme: &Theme, cx: &mut Context<'_, Self>) -> AnyElement {
+        let square = (button::SQUARE, button::SQUARE);
+        let (id, enabled) = match icon {
+            Icon::Forward => ("history-forward", self.can_go_forward()),
+            _ => ("history-back", self.can_go_back()),
+        };
+        if !enabled {
+            return disabled_icon_button(icon, icon::TOOLBAR, square, theme)
+                .debug_selector(move || id.into())
+                .into_any_element();
+        }
+        icon_button(id, icon, icon::TOOLBAR, square, theme)
+            .debug_selector(move || id.into())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if icon == Icon::Forward {
+                    this.go_forward(window, cx);
+                } else {
+                    this.go_back(window, cx);
+                }
+            }))
+            .into_any_element()
     }
 
     /// Preview, Edit and Split as a segmented control.
@@ -233,7 +247,14 @@ impl Workspace {
                             close,
                             theme,
                         )
-                        .rounded(px(radius::SMALL_CONTROL)),
+                        .debug_selector(move || format!("close-tab-{index}"))
+                        .rounded(px(radius::SMALL_CONTROL))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(index, window, cx);
+                            },
+                        )),
                     )
             }))
     }

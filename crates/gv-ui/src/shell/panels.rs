@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The side panels. The sidebar holds the Files panel; the right panel has
-//! only its frame and section heads so far.
+//! The side panels. The sidebar holds the Files panel; the right panel
+//! holds the Outline and the head of Backlinks.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Corners, Div, FontWeight, InteractiveElement as _, ParentElement as _, Pixels,
-    Stateful, Styled as _, Window, div, px,
+    Context, Corners, Div, ElementId, Entity, FontWeight, InteractiveElement as _,
+    ParentElement as _, Pixels, Stateful, Styled as _, Window, div, px,
 };
 
 use super::Workspace;
 use super::controls::{RowStart, icon_button};
+use super::outline_panel::OutlinePanel;
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::icon_button as button;
@@ -75,29 +76,48 @@ fn panel_switcher(theme: &Theme) -> Div {
         }))
 }
 
-/// The right panel: collapsible sections stacked from the top.
-pub(super) fn right_panel(theme: &Theme) -> Div {
+/// The right panel: collapsible sections stacked from the top. The Outline
+/// comes first; Backlinks has only its head so far.
+pub(super) fn right_panel(theme: &Theme, outline: Option<Entity<OutlinePanel>>) -> Div {
     div()
         .w(px(size::PANEL_WIDTH))
         .flex_none()
         .h_full()
+        .min_h_0()
         .flex()
         .flex_col()
         .bg(theme.surface.panel)
         .border_l_1()
         .border_color(theme.border.default)
-        .child(section(theme, "Outline", false))
-        .child(section(theme, "Backlinks", true))
+        .when_some(outline, |panel, outline| panel.child(outline))
+        .child(
+            section_head("backlinks-head", "Backlinks", None, true, true, theme)
+                .debug_selector(|| "backlinks-head".into()),
+        )
 }
 
-fn section(theme: &Theme, title: &'static str, separated: bool) -> Div {
-    // A separating line sits inside the head, which grows by its width.
+/// A section head: chevron, title and, at the right, a count. A
+/// separating line above it sits inside the head, which grows by its width.
+pub(super) fn section_head(
+    id: impl Into<ElementId>,
+    title: &'static str,
+    count: Option<usize>,
+    open: bool,
+    separated: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
     let height = if separated {
         size::PANEL_HEADER + HAIRLINE
     } else {
         size::PANEL_HEADER
     };
+    let chevron = if open {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
     div()
+        .id(id)
         .h(px(height))
         .flex_none()
         .flex()
@@ -111,6 +131,14 @@ fn section(theme: &Theme, title: &'static str, separated: bool) -> Div {
         .line_height(px(text::UI_SECTION.line))
         .font_weight(FontWeight(text::weight::STRONG))
         .text_color(theme.text.secondary)
-        .child(Icon::ChevronDown.sized(icon::CHEVRON))
-        .child(title)
+        .child(chevron.sized(icon::CHEVRON))
+        .child(div().flex_1().min_w_0().truncate().child(title))
+        .when_some(count, |head, count| {
+            head.child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight(text::weight::ACTIVE))
+                    .child(count.to_string()),
+            )
+        })
 }
