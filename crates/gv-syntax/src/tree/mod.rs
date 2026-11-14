@@ -12,6 +12,8 @@
 
 pub(crate) mod chunk;
 pub mod event;
+pub mod index;
+pub(crate) mod range;
 pub mod walk;
 
 use std::collections::HashMap;
@@ -23,12 +25,13 @@ use gv_text::TextSource;
 use sum_tree::{Bias, SumTree};
 
 use crate::block::BlockParser;
+use crate::block::front_matter;
 use crate::block::state::{Interner, Kind, RefMode, StateId};
-use crate::inline::api::{
-    InlineInput, InlineTree, RefDef, RefLookup, parse_inlines, parse_ref_def,
-};
+use crate::inline::api::{InlineInput, InlineTree, RefDef, RefLookup, parse_inlines};
+use crate::options::ParseOptions;
 use chunk::{Chunk, ChunkBuilder, ChunkData, Lines};
 use event::{BlockId, BlockKind, Ev, Event, TokenKind};
+use index::BlockIndex;
 
 /// The link reference definitions of a document: normalized label to
 /// definition, first definition wins.
@@ -62,7 +65,9 @@ pub(crate) struct TreeData {
     pub len: usize,
     /// Set on the interim trees of paused reparses.
     pub interim: bool,
+    pub options: ParseOptions,
     pub ref_map: OnceLock<Arc<RefMap>>,
+    pub block_index: OnceLock<Arc<BlockIndex>>,
     pub inlines: Mutex<HashMap<BlockId, Arc<InlineTree>>>,
 }
 
@@ -78,6 +83,7 @@ impl fmt::Debug for SyntaxTree {
             .field("lines", &self.line_count())
             .field("states", &self.0.interner.len())
             .field("interim", &self.0.interim)
+            .field("options", &self.0.options)
             .finish_non_exhaustive()
     }
 }
@@ -120,19 +126,22 @@ pub struct BlockSpan {
 
 impl TreeData {
     pub(crate) fn new(
-        chunks: Vec<Chunk>,
+        chunks: SumTree<Chunk>,
         interner: Interner,
         next_id: u64,
         len: usize,
         interim: bool,
+        options: ParseOptions,
     ) -> Self {
         TreeData {
-            chunks: SumTree::from_iter(chunks, ()),
+            chunks,
             interner,
             next_id,
             len,
             interim,
+            options,
             ref_map: OnceLock::new(),
+            block_index: OnceLock::new(),
             inlines: Mutex::new(HashMap::new()),
         }
     }
@@ -255,23 +264,34 @@ impl TreeData {
 }
 
 impl SyntaxTree {
-    /// Parses `text` completely (block structure; inlines are parsed
-    /// lazily, see [`SyntaxTree::inlines`]).
+    /// Parses `text` completely with the CommonMark options (block
+    /// structure; inlines are parsed lazily, see [`SyntaxTree::inlines`]).
     pub fn parse<S: TextSource + ?Sized>(text: &S) -> SyntaxTree {
+        Self::parse_with(text, ParseOptions::default())
+    }
+
+    /// Parses `text` completely with `options`. Incremental reparses of the
+    /// result keep the options.
+    pub fn parse_with<S: TextSource + ?Sized>(text: &S, options: ParseOptions) -> SyntaxTree {
         let mut interner = Interner::new();
         let mut p = BlockParser::new();
-        let mut cb = ChunkBuilder::new(1);
+        let mut cb = ChunkBuilder::new(1, 0);
         let mut scratch = Vec::new();
         let n = text.len();
         let mut pos = 0;
         while pos < n {
             let state = p.checkpoint(&mut interner);
+            let fm = if pos == 0 {
+                front_matter::detect(text, options.front_matter)
+            } else {
+                None
+            };
             let line = text.line(pos, &mut scratch);
             let len = line.len();
             if len == 0 {
                 break;
             }
-            p.process_line(line, pos == 0, &mut interner, &mut cb.sink);
+            p.process_line(line, pos == 0, fm, &mut interner, &mut cb.sink);
             cb.end_line(len, state);
             pos += len;
         }
@@ -280,8 +300,18 @@ impl SyntaxTree {
         cb.end_line(0, state);
         let (chunks, next_id) = cb.finish();
         SyntaxTree(Arc::new(TreeData::new(
-            chunks, interner, next_id, pos, false,
+            SumTree::from_iter(chunks, ()),
+            interner,
+            next_id,
+            pos,
+            false,
+            options,
         )))
+    }
+
+    /// The options the tree was parsed with.
+    pub fn options(&self) -> ParseOptions {
+        self.0.options
     }
 
     /// Length of the parsed text in bytes.
@@ -413,22 +443,14 @@ impl SyntaxTree {
         if self.0.chunks.summary().refdefs == 0 {
             return map;
         }
-        let mut buf = Vec::new();
         walk::walk(
             self,
             &mut walk::LeafFn(|leaf: &walk::Leaf<'_>| {
                 if leaf.kind != walk::LeafKind::LinkRefDef {
                     return;
                 }
-                buf.clear();
-                for line in leaf.lines {
-                    text.copy_range(line.content.clone(), &mut buf);
-                    buf.push(b'\n');
-                }
-                if let Ok(s) = std::str::from_utf8(&buf)
-                    && let Some((_, label, def)) = parse_ref_def(s)
-                {
-                    map.map.entry(label).or_insert(def);
+                if let Some(d) = leaf.link_ref_def(text) {
+                    map.map.entry(d.label).or_insert(d.def);
                 }
             }),
         );
@@ -478,6 +500,7 @@ impl SyntaxTree {
         let mut total = 0;
         let mut ids = std::collections::HashSet::new();
         let line_count = t.line_count();
+        let mut running_depth = 0u32;
         for ch in t.chunks.iter() {
             let c: &ChunkData = &ch.0;
             if c.lines.is_empty() {
@@ -486,9 +509,13 @@ impl SyntaxTree {
             if c.bytes != c.lines.iter().map(|l| l.len as usize).sum::<usize>() {
                 return Err(String::from("chunk byte count out of sync"));
             }
-            if c.refdefs != c.events.iter().filter(|e| e.is_refdef()).count() {
-                return Err(String::from("chunk refdef count out of sync"));
+            if c.start_depth != running_depth {
+                return Err(format!(
+                    "chunk start depth {} but the events before it end at depth {running_depth}",
+                    c.start_depth
+                ));
             }
+            running_depth = c.check()?;
         }
         t.for_each_line(|l| {
             if err.is_some() {
@@ -560,7 +587,7 @@ impl SyntaxTree {
                         TokenKind::ListMarker => s
                             .iter()
                             .any(|c| matches!(c, b'-' | b'+' | b'*' | b'.' | b')')),
-                        TokenKind::Marker => s.iter().all(|c| b"#=-*_`~ \t".contains(c)),
+                        TokenKind::Marker => s.iter().all(|c| b"#=-*_`~+. \t".contains(c)),
                         TokenKind::InfoString | TokenKind::Content => {
                             !s.contains(&b'\n') && !s.contains(&b'\r')
                         }
@@ -615,6 +642,12 @@ impl SyntaxTree {
     /// so trees with different interners compare), same events. For tests.
     pub fn same_structure(&self, other: &SyntaxTree) -> Result<(), String> {
         let (a, b) = (&self.0, &other.0);
+        if a.options != b.options {
+            return Err(format!(
+                "options differ: {:?} vs {:?}",
+                a.options, b.options
+            ));
+        }
         if a.len != b.len || a.line_count() != b.line_count() {
             return Err(format!(
                 "size differs: len {} vs {}, lines {} vs {}",

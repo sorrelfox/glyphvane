@@ -9,6 +9,7 @@
 
 pub mod comrak_outline;
 pub mod edits;
+pub mod views;
 
 use std::path::PathBuf;
 

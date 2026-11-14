@@ -113,6 +113,33 @@ impl InlineKind {
     }
 }
 
+/// A plain-text projection of inline content: what heading slug
+/// algorithms and text search start from.
+///
+/// Both keep text with backslash escapes and entity references decoded,
+/// code span content as it renders (line endings as spaces, one space
+/// stripped from each end), link text and autolink addresses, and drop
+/// markup: emphasis and link syntax, destinations, titles and raw HTML
+/// tags (the text between tags stays). U+0000 becomes U+FFFD, as in the
+/// rendered HTML. They differ in images and line breaks.
+///
+/// | Slug algorithm (gv-model) | Projection |
+/// |---|---|
+/// | GitHub (github-slugger), Python-Markdown `toc` | [`TextContent`](Self::TextContent) |
+/// | GitLab (comrak's anchorizer), Pandoc | [`CollectText`](Self::CollectText) |
+/// | kramdown, Hugo | the Markdown source, not a projection |
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextProjection {
+    /// The `textContent` of the rendered HTML: images contribute nothing
+    /// (their description is an attribute), and soft and hard line breaks
+    /// are the `\n` the HTML holds.
+    TextContent,
+    /// The text of the syntax tree, as comrak's `collect_text` and
+    /// pandoc's `stringify` gather it: image descriptions are included, and
+    /// line breaks are spaces.
+    CollectText,
+}
+
 /// How a link or image got its destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LinkKind {
@@ -670,6 +697,28 @@ impl InlineTree {
     pub fn plain_text(&self, out: &mut String) {
         html::plain_text(self, 0, self.nodes.len(), out, false);
     }
+
+    /// Appends a text projection of the whole tree (see
+    /// [`TextProjection`]).
+    pub fn push_text(&self, projection: TextProjection, out: &mut String) {
+        html::project(self, 0, self.nodes.len(), projection, out);
+    }
+
+    /// The `textContent` of the rendered tree
+    /// ([`TextProjection::TextContent`]).
+    pub fn text_content(&self) -> String {
+        let mut out = String::new();
+        self.push_text(TextProjection::TextContent, &mut out);
+        out
+    }
+
+    /// The tree's text with image descriptions
+    /// ([`TextProjection::CollectText`]).
+    pub fn collect_text(&self) -> String {
+        let mut out = String::new();
+        self.push_text(TextProjection::CollectText, &mut out);
+        out
+    }
 }
 
 /// A node or token of an [`InlineTree`].
@@ -716,6 +765,25 @@ impl<'a> InlineNode<'a> {
     /// The link, image or autolink data of this node.
     pub fn link(&self) -> Option<LinkRef<'a>> {
         self.tree.link_ref(self.node())
+    }
+
+    /// Appends a text projection of this node and its descendants (see
+    /// [`TextProjection`]; the projection of an image's own description
+    /// with [`TextProjection::TextContent`] is empty).
+    pub fn push_text(&self, projection: TextProjection, out: &mut String) {
+        let n = self.node();
+        let end = if n.kind.is_token() {
+            self.index + 1
+        } else {
+            n.next
+        };
+        html::project(
+            self.tree,
+            self.index as usize,
+            end as usize,
+            projection,
+            out,
+        );
     }
 }
 

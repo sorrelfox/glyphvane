@@ -19,7 +19,8 @@
 //! [`render_inlines_html`] writes cmark-exact HTML, [`cst_dump_inlines`]
 //! the S-expression dump, and the accessors on [`InlineTree`] (`links`,
 //! `code_spans`, `emphasis`, `tokens`, `nodes`, `plain_text`,
-//! `label_lookups`) serve later consumers.
+//! `label_lookups`) serve later consumers, as do the text projections
+//! (`text_content`, `collect_text`; see [`TextProjection`]).
 //!
 //! # Conformance notes
 //!
@@ -59,4 +60,6 @@ mod unicode;
 mod unicode_tables;
 
 pub use api::*;
-pub use tree::{Children, CodeSpanRef, EmphasisRef, InlineKind, InlineNode, LinkKind, LinkRef};
+pub use tree::{
+    Children, CodeSpanRef, EmphasisRef, InlineKind, InlineNode, LinkKind, LinkRef, TextProjection,
+};

@@ -113,9 +113,39 @@ pub fn normalize_label(raw: &str) -> String {
 ///
 /// `text` must start with the `[` of the label (indentation already
 /// stripped). The destination is trimmed and, like the title, unescaped
-/// and entity-decoded.
+/// and entity-decoded. [`parse_ref_def_spans`] also reports where the
+/// parts are.
 pub fn parse_ref_def(text: &str) -> Option<(usize, String, RefDef)> {
     scan::ref_def(text)
+}
+
+/// A link reference definition with the source ranges of its parts.
+///
+/// From [`parse_ref_def_spans`] the ranges are offsets into its input;
+/// from [`Leaf::link_ref_def`](crate::Leaf::link_ref_def) they are
+/// document offsets (a part that spans lines then also covers the
+/// container prefixes between them).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RefDefSpans {
+    /// The normalized label (see [`normalize_label`]).
+    pub label: String,
+    /// The destination and title, decoded.
+    pub def: RefDef,
+    /// The whole definition, from the `[` to the end of its last line's
+    /// content (trailing spaces included, line ending excluded).
+    pub range: Range<usize>,
+    /// The label as written, between the brackets.
+    pub label_range: Range<usize>,
+    /// The destination as written, with its `<` and `>` if it has them.
+    pub destination_range: Range<usize>,
+    /// The title as written, with its delimiters.
+    pub title_range: Option<Range<usize>>,
+}
+
+/// [`parse_ref_def`] with the ranges of the label, destination and title
+/// in `text`: returns the bytes consumed and the located definition.
+pub fn parse_ref_def_spans(text: &str) -> Option<(usize, RefDefSpans)> {
+    scan::ref_def_spans(text)
 }
 
 /// Decodes backslash escapes and entity and numeric character references

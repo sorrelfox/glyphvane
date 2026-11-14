@@ -244,7 +244,9 @@ pub fn gv_outline<S: TextSource + ?Sized>(
                     }
                     format!("html_block @{} {lit:?}", leaf.open_line + 1)
                 }
-                LeafKind::LinkRefDef => return,
+                // Not part of comrak's outline (front matter is off in the
+                // CommonMark profile).
+                LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => return,
             };
             self.push(s);
         }

@@ -36,11 +36,12 @@
 //! the checkpoint stacks restored on every reparse, and the work of
 //! consumers that walk ancestors.
 
+pub(crate) mod front_matter;
 pub(crate) mod scan;
 pub(crate) mod state;
 
 use crate::inline::api::parse_ref_def;
-use crate::tree::event::{BlockKind, Ev, Sink, TokenKind};
+use crate::tree::event::{BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
 use state::{Closed, Entry, Interner, Kind, ROOT, RefMode, StateId};
 
 /// Maximum number of simultaneously open blocks, the document included.
@@ -539,7 +540,8 @@ impl BlockParser {
                 && list > self.backup
             {
                 if e.last.is_some_and(Closed::ebl) {
-                    sink.push(Ev::LOOSEN);
+                    // The item is the innermost open block.
+                    sink.push(Ev::loosen(1));
                 }
             } else if let Kind::Item { .. } = self.stack[p].kind {
                 self.stack[p].has_child = e.has_child;
@@ -611,7 +613,7 @@ impl BlockParser {
                     // The previous child gets a next sibling: its
                     // `ends_with_blank_line` counts.
                     self.flush(sink);
-                    sink.push(Ev::LOOSEN);
+                    sink.push(Ev::loosen(1));
                 }
                 if !self.stack[p].has_child {
                     self.stack[p].has_child = true;
@@ -628,7 +630,7 @@ impl BlockParser {
                 // last child's `ends_with_blank_line` count.
                 if self.stack[p].last.is_some_and(|s| s.lb || s.ebl_tail) {
                     self.flush(sink);
-                    sink.push(Ev::LOOSEN);
+                    sink.push(Ev::loosen(0));
                 }
                 self.stack[p].last = None;
                 self.touch(p);
@@ -646,8 +648,10 @@ impl BlockParser {
     fn resolve_deferred(&mut self, idx: usize, sink: &mut Sink) {
         if idx > 0 && matches!(self.stack[idx - 1].kind, Kind::Item { .. }) {
             if self.stack[idx].last.is_some_and(Closed::ebl) {
+                // The text block is the innermost open block.
+                debug_assert_eq!(idx + 1, self.stack.len());
                 self.flush(sink);
-                sink.push(Ev::LOOSEN);
+                sink.push(Ev::loosen(2));
             }
             if self.stack[idx].has_child || self.stack[idx].last.is_some() {
                 self.stack[idx].has_child = false;
@@ -787,12 +791,25 @@ impl BlockParser {
         true
     }
 
+    /// Whether front matter is open (at a line start: the line is inside
+    /// it).
+    pub(crate) fn in_front_matter(&self) -> bool {
+        matches!(
+            self.stack.last().map(|e| e.kind),
+            Some(Kind::FrontMatter { .. })
+        )
+    }
+
     /// Processes one line (`b` includes its terminator). `first_line` is
-    /// true for the line at offset 0 (BOM handling).
+    /// true for the line at offset 0 (BOM handling). `front_matter` is
+    /// `Some` only on the first line, when it opens front matter (the
+    /// caller decides with [`front_matter::detect`], which looks ahead for
+    /// the closing delimiter).
     pub(crate) fn process_line(
         &mut self,
         b: &[u8],
         first_line: bool,
+        front_matter: Option<FrontMatterKind>,
         interner: &mut Interner,
         sink: &mut Sink,
     ) {
@@ -806,6 +823,26 @@ impl BlockParser {
             self.pre.push((TokenKind::Bom, 3));
         }
         self.first_new = self.stack.len();
+        if let Some(kind) = front_matter.filter(|_| first_line && self.stack.len() == 1) {
+            self.last_matched = 0;
+            self.all_closed = true;
+            self.add_child(
+                Kind::FrontMatter { kind },
+                BlockKind::FrontMatter { kind },
+                sink,
+            );
+            let start = cur.tp;
+            self.tok(
+                &mut cur,
+                sink,
+                TokenKind::Marker,
+                start + front_matter::DELIMITER_LEN,
+            );
+            let end = cur.content_end.max(cur.tp);
+            self.tok(&mut cur, sink, TokenKind::Whitespace, end);
+            self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+            return;
+        }
 
         // 1. Continuation of open blocks.
         let mut i = 1;
@@ -896,6 +933,24 @@ impl BlockParser {
                         false
                     }
                 }
+                Kind::FrontMatter { kind } => {
+                    if front_matter::is_closer(b, kind) {
+                        // The closing delimiter ends the front matter; it
+                        // starts at column 0.
+                        self.tok(
+                            &mut cur,
+                            sink,
+                            TokenKind::Marker,
+                            front_matter::DELIMITER_LEN,
+                        );
+                        let end = cur.content_end.max(cur.tp);
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, end);
+                        self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                        self.close_top(sink);
+                        return;
+                    }
+                    true
+                }
                 Kind::Html { ty } => !(ty >= 6 && cur.blank),
                 Kind::Paragraph { .. } => !cur.blank,
                 Kind::Heading => false,
@@ -923,7 +978,10 @@ impl BlockParser {
             let ck = self.stack[container].kind;
             if matches!(
                 ck,
-                Kind::FencedCode { .. } | Kind::IndentedCode | Kind::Html { .. }
+                Kind::FencedCode { .. }
+                    | Kind::IndentedCode
+                    | Kind::Html { .. }
+                    | Kind::FrontMatter { .. }
             ) {
                 break;
             }
@@ -1120,7 +1178,8 @@ impl BlockParser {
                 Kind::BlockQuote
                 | Kind::Heading
                 | Kind::ThematicBreak
-                | Kind::FencedCode { .. } => false,
+                | Kind::FencedCode { .. }
+                | Kind::FrontMatter { .. } => false,
                 Kind::Item { .. } => e.has_child || ci < self.first_new,
                 _ => true,
             };
@@ -1156,7 +1215,9 @@ impl BlockParser {
                 self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
                 self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
             }
-            Kind::FencedCode { .. } | Kind::IndentedCode => self.literal_line(&mut cur, sink),
+            Kind::FencedCode { .. } | Kind::IndentedCode | Kind::FrontMatter { .. } => {
+                self.literal_line(&mut cur, sink)
+            }
             Kind::Html { ty } => {
                 self.literal_line(&mut cur, sink);
                 if ty <= 5 && scan::html_block_end(ty, &b[cur.fns.min(b.len())..]) {

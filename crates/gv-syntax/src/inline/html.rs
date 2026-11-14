@@ -3,11 +3,12 @@
 
 //! CommonMark-exact HTML for inline trees (cmark's output: XHTML-style
 //! `<br />` and `<img … />`, `& < > "` escaped in text, cmark-style URL
-//! percent-encoding) and the plain-text projection used for image `alt`.
+//! percent-encoding), the plain-text projection used for image `alt`, and
+//! the text projections ([`TextProjection`]).
 
 use super::api::InlineTree;
 use super::scan;
-use super::tree::{InlineKind as K, LinkKind, Node};
+use super::tree::{InlineKind as K, LinkKind, Node, TextProjection};
 
 /// Renders `tree` as HTML into `out`.
 pub(super) fn render(tree: &InlineTree, out: &mut String) {
@@ -153,6 +154,56 @@ pub(super) fn plain_text(
                 }
                 next = n.next as usize;
             }
+            K::Emphasis
+            | K::Strong
+            | K::Link
+            | K::Image
+            | K::Whitespace
+            | K::Marker
+            | K::CodeText
+            | K::HtmlText
+            | K::AutolinkText
+            | K::LinkDestination
+            | K::LinkTitle
+            | K::LinkLabel => {}
+        }
+        i = next;
+    }
+}
+
+/// Appends the text projection of the nodes `from..to` (see
+/// [`TextProjection`]).
+pub(super) fn project(
+    tree: &InlineTree,
+    from: usize,
+    to: usize,
+    projection: TextProjection,
+    out: &mut String,
+) {
+    let with_alt = projection == TextProjection::CollectText;
+    let mut i = from;
+    while i < to.min(tree.nodes.len()) {
+        let n = tree.nodes[i];
+        let mut next = i + 1;
+        match n.kind {
+            K::Text => push_raw(out, tree.slice(n.start, n.end)),
+            K::Escape => push_raw(out, tree.slice(n.start + 1, n.end)),
+            K::Entity => scan::push_entity(n.data, out),
+            K::SoftBreak | K::HardBreak => out.push(if with_alt { ' ' } else { '\n' }),
+            K::CodeSpan => {
+                code_content(tree, &n, out, false);
+                next = n.next as usize;
+            }
+            K::Autolink => {
+                if let Some(l) = tree.links.get(n.data as usize) {
+                    push_raw(out, tree.str(l.dest));
+                }
+                next = n.next as usize;
+            }
+            K::Image if !with_alt => next = n.next as usize,
+            K::RawHtml => next = n.next as usize,
+            // Containers: their text children follow; syntax tokens render
+            // nothing.
             K::Emphasis
             | K::Strong
             | K::Link

@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
+use crate::tree::event::FrontMatterKind;
+
 /// Interned parser state.
 pub(crate) type StateId = u32;
 
@@ -78,6 +80,11 @@ pub(crate) enum Kind {
     /// Like cmark, a thematic break stays open until the next line closes
     /// it.
     ThematicBreak,
+    /// Front matter, opened on line 0 only when a closing delimiter line
+    /// follows (decided by a lookahead, see [`crate::block::front_matter`]).
+    FrontMatter {
+        kind: FrontMatterKind,
+    },
 }
 
 impl Kind {
@@ -96,6 +103,7 @@ impl Kind {
                 | Kind::FencedCode { .. }
                 | Kind::IndentedCode
                 | Kind::Html { .. }
+                | Kind::FrontMatter { .. }
         )
     }
 

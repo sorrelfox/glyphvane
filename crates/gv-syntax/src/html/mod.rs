@@ -238,7 +238,8 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                 self.out.push_str(&lit);
                 self.cr();
             }
-            LeafKind::LinkRefDef => {}
+            // Front matter is metadata; this emitter renders nothing for it.
+            LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => {}
         }
     }
 }

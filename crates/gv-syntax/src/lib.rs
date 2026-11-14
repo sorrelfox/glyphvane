@@ -27,8 +27,14 @@
 //!   depth, kind), then in order between those anchors; blocks outside the
 //!   window keep their ids.
 //! - **Views.** [`tree::walk`] gives the nested block structure with the
-//!   markers resolved; [`to_commonmark_html`] is the CommonMark-exact HTML
-//!   emitter; [`cst_dump`] the S-expression dump.
+//!   markers resolved, [`walk_range`] the same for the blocks of a byte
+//!   range without walking the document, [`SyntaxTree::block_index`] a
+//!   cached index of the raw blocks; [`to_commonmark_html`] is the
+//!   CommonMark-exact HTML emitter; [`cst_dump`] the S-expression dump.
+//! - **Options.** [`ParseOptions`] holds the profile switches the block
+//!   pass reads (front matter); the default is CommonMark exactly.
+//! - **Changes.** A reparse reports the replaced window ([`Changes`]);
+//!   reports of consecutive reparses compose ([`Changes::compose`]).
 //!
 //! # Limits
 //!
@@ -46,16 +52,26 @@ pub mod harness;
 pub mod html;
 pub mod incremental;
 pub mod inline;
+pub mod options;
 pub mod tree;
 
 pub use block::MAX_NESTING;
 pub use html::to_commonmark_html;
 pub use incremental::{Budget, Change, Changes, Reparse, ReparseTask};
-pub use tree::event::{BlockId, BlockKind, Event, Token, TokenKind};
-pub use tree::walk::{Container, ContainerKind, Leaf, LeafKind, LeafLine, Visitor, walk};
+pub use options::{FrontMatterOptions, ParseOptions};
+pub use tree::event::{BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};
+pub use tree::index::BlockIndex;
+pub use tree::walk::{
+    Container, ContainerKind, Leaf, LeafKind, LeafLine, Visitor, walk, walk_range,
+};
 pub use tree::{BlockSpan, RefMap, SyntaxTree};
 
-/// Parses `text` (see [`SyntaxTree::parse`]).
+/// Parses `text` with the CommonMark options (see [`SyntaxTree::parse`]).
 pub fn parse<S: gv_text::TextSource + ?Sized>(text: &S) -> SyntaxTree {
     SyntaxTree::parse(text)
+}
+
+/// Parses `text` with `options` (see [`SyntaxTree::parse_with`]).
+pub fn parse_with<S: gv_text::TextSource + ?Sized>(text: &S, options: ParseOptions) -> SyntaxTree {
+    SyntaxTree::parse_with(text, options)
 }

@@ -9,6 +9,10 @@
 //!   middle of the document, then delete it; time per reparse.
 //! - `fence_at_top/*`: open a fence at the top (the reparse runs to the
 //!   end), then close it again; time per reparse.
+//! - `walk/*`: block views. `range_keystroke` walks the blocks of a 40-byte
+//!   range at a text line in the middle (what a keystroke there touches),
+//!   `range_screen` those of 4 KB from there (about a screenful), `full`
+//!   the whole document; `block_index` builds the per-revision index.
 //! - After the criterion groups, a latency report times single edits one
 //!   by one (p50/p95/p99/max) and the fence-at-top case in 1 ms slices.
 //!
@@ -250,6 +254,77 @@ fn fence_at_top(c: &mut Criterion, docs: &[(&'static str, String)]) {
     g.finish();
 }
 
+/// Counts what it visits, so the walk cannot be optimized away.
+#[derive(Default)]
+struct Count(usize);
+
+impl gv_syntax::Visitor for Count {
+    fn enter(&mut self, c: &gv_syntax::Container) {
+        self.0 += c.line;
+    }
+    fn leaf(&mut self, l: &gv_syntax::Leaf<'_>) {
+        self.0 += l.lines.len();
+    }
+}
+
+fn walks(c: &mut Criterion, docs: &[(&'static str, String)]) {
+    let mut g = c.benchmark_group("walk");
+    g.sample_size(30)
+        .measurement_time(Duration::from_secs(2))
+        .warm_up_time(Duration::from_millis(500));
+    for (name, text) in docs {
+        let tree = SyntaxTree::parse(text.as_str());
+        let at = text_line_end(text, text.len() / 2);
+        g.bench_function(BenchmarkId::new("range_keystroke", name), |b| {
+            b.iter(|| {
+                let mut v = Count::default();
+                tree.walk_range(at - 40..at, &mut v);
+                black_box(v.0)
+            });
+        });
+        g.bench_function(BenchmarkId::new("range_screen", name), |b| {
+            b.iter(|| {
+                let mut v = Count::default();
+                tree.walk_range(at..(at + 4096).min(text.len()), &mut v);
+                black_box(v.0)
+            });
+        });
+    }
+    g.sample_size(10).measurement_time(Duration::from_secs(4));
+    for (name, text) in docs {
+        let tree = SyntaxTree::parse(text.as_str());
+        g.bench_function(BenchmarkId::new("full", name), |b| {
+            b.iter(|| {
+                let mut v = Count::default();
+                tree.walk(&mut v);
+                black_box(v.0)
+            });
+        });
+        g.bench_function(BenchmarkId::new("block_index", name), |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // A fresh revision each time: the index is cached per
+                    // tree. Only building the index is timed.
+                    let fresh = tree.clone().reparse_full(
+                        text.as_str(),
+                        Change {
+                            start: 0,
+                            old_end: 0,
+                            new_len: 0,
+                        },
+                    );
+                    let t = Instant::now();
+                    black_box(fresh.0.block_index().len());
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+    }
+    g.finish();
+}
+
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     let i = ((sorted.len() as f64 - 1.0) * p).round() as usize;
     sorted[i.min(sorted.len() - 1)]
@@ -383,6 +458,7 @@ fn main() {
     full_parse(&mut c, &docs);
     keystroke(&mut c, &docs);
     fence_at_top(&mut c, &docs);
+    walks(&mut c, &docs);
     c.final_summary();
     if std::env::args().all(|a| a != "--list") {
         latency_report(&docs);

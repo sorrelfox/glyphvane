@@ -13,11 +13,25 @@
 //!   list).
 //!
 //! Both passes iterate the line records once: O(document).
+//!
+//! [`walk_range`] visits only the blocks that intersect a byte range, in
+//! the same order and with the same data as [`walk`] (property-tested). It
+//! starts from the checkpoint of the range's first line: the blocks open
+//! there and their `Open` events are found through the depth summaries of
+//! the line sum tree, list tightness and the ends of blocks that outlast
+//! the range likewise. Its cost is the lines of the
+//! range and of the leaves that intersect it (a leaf is always visited
+//! whole), plus O(log n) summary steps and the events of a few chunks per
+//! open block, independent of the document's size.
 
 use std::ops::Range;
 
-use crate::tree::SyntaxTree;
-use crate::tree::event::{BlockId, BlockKind, TokenKind};
+use gv_text::TextSource;
+
+use crate::inline::api::{RefDefSpans, parse_ref_def_spans};
+use crate::tree::event::{BlockId, BlockKind, Event, FrontMatterKind, TokenKind};
+use crate::tree::range::{self, OpenAt};
+use crate::tree::{LineView, SyntaxTree, TreeData};
 
 /// A container block as seen by a [`Visitor`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +97,11 @@ pub enum LeafKind {
     },
     /// A link reference definition.
     LinkRefDef,
+    /// Front matter; its lines are the content between the delimiters.
+    FrontMatter {
+        /// Its syntax.
+        kind: FrontMatterKind,
+    },
 }
 
 /// One line of a leaf block.
@@ -112,7 +131,7 @@ pub struct Leaf<'a> {
     pub kind: LeafKind,
     /// Its content lines: text lines for paragraphs, headings and
     /// definitions; code lines (without fences) for code blocks; all lines
-    /// for HTML blocks.
+    /// for HTML blocks; the lines between the delimiters for front matter.
     pub lines: &'a [LeafLine],
     /// The info string of a fenced code block.
     pub info: Option<Range<usize>>,
@@ -135,6 +154,40 @@ impl Leaf<'_> {
             .filter(|l| l.has_content)
             .map(|l| l.content.clone())
             .collect()
+    }
+
+    /// For a [`LeafKind::LinkRefDef`] leaf, the definition with the
+    /// document ranges of its parts (see [`RefDefSpans`]; a part that
+    /// spans lines covers the container prefixes between them). `None` for
+    /// other leaves. `text` is the text the tree was parsed from.
+    pub fn link_ref_def<S: TextSource + ?Sized>(&self, text: &S) -> Option<RefDefSpans> {
+        if self.kind != LeafKind::LinkRefDef {
+            return None;
+        }
+        let mut buf = Vec::new();
+        // Per line: offset in `buf`, document range of its content.
+        let mut starts: Vec<(usize, Range<usize>)> = Vec::with_capacity(self.lines.len());
+        for l in self.lines {
+            starts.push((buf.len(), l.content.clone()));
+            text.copy_range(l.content.clone(), &mut buf);
+            buf.push(b'\n');
+        }
+        let s = std::str::from_utf8(&buf).ok()?;
+        let (_, d) = parse_ref_def_spans(s)?;
+        let map = |o: usize| {
+            let k = starts.partition_point(|(g, _)| *g <= o);
+            starts
+                .get(k.wrapping_sub(1))
+                .map_or(0, |(g, r)| (r.start + (o - g)).min(r.end))
+        };
+        let map_range = |r: Range<usize>| map(r.start)..map(r.end);
+        Some(RefDefSpans {
+            range: map_range(d.range),
+            label_range: map_range(d.label_range),
+            destination_range: map_range(d.destination_range),
+            title_range: d.title_range.map(map_range),
+            ..d
+        })
     }
 }
 
@@ -170,7 +223,13 @@ struct CFrame {
     bk: BlockKind,
     start: usize,
     line: usize,
-    tight: bool,
+    /// Index of its `Open` among the line's events.
+    event: usize,
+    depth: u32,
+    /// Lists: tightness, once known.
+    tight: Option<bool>,
+    /// Whether [`Visitor::enter`] was called for it.
+    entered: bool,
 }
 
 /// The open leaf block (at most one is open at a time: the innermost).
@@ -211,7 +270,7 @@ fn list_tightness(tree: &SyntaxTree) -> Vec<bool> {
                 });
             } else if e.is_close() {
                 stack.pop();
-            } else if *e == crate::tree::event::Ev::LOOSEN {
+            } else if e.loosen_up().is_some() {
                 // Emitted with the list, one of its items, or a text block in
                 // one of its items on top.
                 let n = stack.len();
@@ -240,39 +299,111 @@ fn list_tightness(tree: &SyntaxTree) -> Vec<bool> {
     tight
 }
 
-/// Visits the blocks of `tree` in document order.
-pub fn walk(tree: &SyntaxTree, v: &mut impl Visitor) {
-    let tight = list_tightness(tree);
-    let mut lists = 0usize;
-    let mut containers: Vec<CFrame> = Vec::new();
-    let mut leaf: Option<Frame> = None;
-    let mut scratch: Vec<LeafLine> = Vec::new();
-    // Reused line buffers of closed leaves.
-    let mut spare: Vec<LeafLine> = Vec::new();
-    tree.0.for_each_line(|l| {
-        let mut off = l.start;
-        let mut ids = l.ids.iter();
-        for e in l.events {
+/// Where list tightness comes from.
+enum Tightness<'t> {
+    /// A full walk: precomputed, by list ordinal.
+    Precomputed { tight: Vec<bool>, next: usize },
+    /// A range walk: queried per list.
+    Query(&'t TreeData),
+}
+
+/// Replays the event stream into visitor calls.
+struct Replay<'t> {
+    containers: Vec<CFrame>,
+    leaf: Option<Frame>,
+    scratch: Vec<LeafLine>,
+    /// Reused line buffers of closed leaves.
+    spare: Vec<LeafLine>,
+    /// Range walks: report only blocks that intersect this (non-empty)
+    /// range. Containers that start before it are entered lazily, once
+    /// something inside them is reported or they turn out to reach into
+    /// the range.
+    filter: Option<Range<usize>>,
+    tightness: Tightness<'t>,
+}
+
+impl Replay<'_> {
+    /// Enters the containers not entered yet (outermost first).
+    fn enter_pending(&mut self, v: &mut impl Visitor) {
+        let first = self.containers.partition_point(|f| f.entered);
+        for i in first..self.containers.len() {
+            let f = &self.containers[i];
+            let tight = if !f.bk.is_list() {
+                true
+            } else if let Some(t) = f.tight {
+                t
+            } else if let Tightness::Query(t) = self.tightness {
+                range::list_is_tight(
+                    t,
+                    &OpenAt {
+                        depth: f.depth,
+                        line: f.line,
+                        line_start: 0,
+                        event: f.event,
+                        id_index: 0,
+                        offset: f.start,
+                        kind: f.bk,
+                        id: f.id,
+                    },
+                )
+            } else {
+                true
+            };
+            let f = &mut self.containers[i];
+            f.tight = Some(tight);
+            f.entered = true;
+            v.enter(&container(f, f.start));
+        }
+    }
+
+    /// Processes the events of line `l` from event `from` (at byte `off`,
+    /// with `id_index` ids already used). In a range walk, returns the
+    /// point where the walk stops: an `Open` at or past the end of the
+    /// range (no leaf is open then).
+    fn line(
+        &mut self,
+        l: &LineView<'_>,
+        from: usize,
+        mut off: usize,
+        id_index: usize,
+        v: &mut impl Visitor,
+    ) -> Option<(usize, usize)> {
+        let mut ids = l.ids.iter().skip(id_index);
+        for (k, e) in l.events.iter().enumerate().skip(from) {
             if let Some(bk) = e.open_kind() {
+                if let Some(f) = &self.filter
+                    && off >= f.end
+                {
+                    return Some((k, off));
+                }
                 let id = ids.next().copied().unwrap_or(BlockId(0));
                 if bk.is_container() {
-                    let mut f = CFrame {
+                    let tight = match &mut self.tightness {
+                        Tightness::Precomputed { tight, next } if bk.is_list() => {
+                            let t = tight.get(*next).copied().unwrap_or(true);
+                            *next += 1;
+                            Some(t)
+                        }
+                        _ => None,
+                    };
+                    let depth = u32::try_from(self.containers.len()).unwrap_or(u32::MAX);
+                    self.containers.push(CFrame {
                         id,
                         bk,
                         start: off,
                         line: l.index,
-                        tight: true,
-                    };
-                    if bk.is_list() {
-                        f.tight = tight.get(lists).copied().unwrap_or(true);
-                        lists += 1;
+                        event: k,
+                        depth,
+                        tight,
+                        entered: false,
+                    });
+                    if self.filter.as_ref().is_none_or(|f| off >= f.start) {
+                        self.enter_pending(v);
                     }
-                    v.enter(&container(&f, off));
-                    containers.push(f);
                 } else {
-                    let mut lines = std::mem::take(&mut spare);
+                    let mut lines = std::mem::take(&mut self.spare);
                     lines.clear();
-                    leaf = Some(Frame {
+                    self.leaf = Some(Frame {
                         id,
                         bk,
                         start: off,
@@ -284,15 +415,33 @@ pub fn walk(tree: &SyntaxTree, v: &mut impl Visitor) {
                     });
                 }
             } else if e.is_close() {
-                if let Some(f) = leaf.take() {
-                    spare = emit_leaf(f, off, v, &mut scratch);
-                } else if let Some(f) = containers.pop() {
-                    v.exit(&container(&f, off));
+                if let Some(f) = self.leaf.take() {
+                    let report = self
+                        .filter
+                        .as_ref()
+                        .is_none_or(|r| f.start < r.end && off > r.start);
+                    if report {
+                        self.enter_pending(v);
+                        self.spare = emit_leaf(f, off, v, &mut self.scratch);
+                    } else {
+                        self.spare = f.lines;
+                    }
+                } else if let Some(top) = self.containers.last() {
+                    if !top.entered && self.filter.as_ref().is_some_and(|r| off > r.start) {
+                        self.enter_pending(v);
+                    }
+                    if let Some(f) = self.containers.pop()
+                        && f.entered
+                    {
+                        v.exit(&container(&f, off));
+                    }
                 }
             } else if let Some(t) = e.token() {
                 let r = off..off + t.len as usize;
                 off = r.end;
-                let Some(f) = leaf.as_mut() else { continue };
+                let Some(f) = self.leaf.as_mut() else {
+                    continue;
+                };
                 if f.lines.last().is_none_or(|x| x.line != l.index) {
                     f.lines.push(LeafLine {
                         line: l.index,
@@ -323,30 +472,133 @@ pub fn walk(tree: &SyntaxTree, v: &mut impl Visitor) {
                         }
                     }
                 }
-            } else if let Some(f) = leaf.as_mut() {
+            } else if let Some(f) = self.leaf.as_mut() {
                 match e.to_event(BlockId(0)) {
-                    crate::tree::event::Event::RefDef { lines } => f.defs.push(lines),
-                    crate::tree::event::Event::Setext { level } => {
-                        f.setext = Some((level, l.index))
-                    }
+                    Event::RefDef { lines } => f.defs.push(lines),
+                    Event::Setext { level } => f.setext = Some((level, l.index)),
                     _ => {}
                 }
             }
         }
+        None
+    }
+}
+
+/// Visits the blocks of `tree` in document order.
+pub fn walk(tree: &SyntaxTree, v: &mut impl Visitor) {
+    let mut r = Replay {
+        containers: Vec::new(),
+        leaf: None,
+        scratch: Vec::new(),
+        spare: Vec::new(),
+        filter: None,
+        tightness: Tightness::Precomputed {
+            tight: list_tightness(tree),
+            next: 0,
+        },
+    };
+    tree.0.for_each_line(|l| {
+        r.line(&l, 0, l.start, 0, v);
     });
 }
 
+/// Visits the blocks of `tree` that intersect `range`, in document order,
+/// exactly as [`walk`] visits them (same data, list tightness and ranges;
+/// containers get both `enter` and `exit`).
+///
+/// A block intersects the range if it shares a byte with it; an empty
+/// range at `p` stands for the byte at `p` (at the end of the text: the
+/// position after the last byte, which no block covers). Leaves are always
+/// visited whole, so the walk reads the lines of the range and of the
+/// leaves that intersect it, plus a few chunks of line records per block
+/// open at its start or end. See the module documentation.
+pub fn walk_range(tree: &SyntaxTree, range: Range<usize>, v: &mut impl Visitor) {
+    let t: &TreeData = &tree.0;
+    let start = range.start.min(t.len);
+    let end = range.end.max(start + 1);
+    let l0 = t.cursor_at_byte(start);
+    let opens = range::open_blocks_at_line(t, l0.global);
+    let mut r = Replay {
+        containers: Vec::with_capacity(opens.len()),
+        leaf: None,
+        scratch: Vec::new(),
+        spare: Vec::new(),
+        filter: Some(start..end),
+        tightness: Tightness::Query(t),
+    };
+    let mut leaf_open = None;
+    for o in &opens {
+        if o.kind.is_container() {
+            r.containers.push(CFrame {
+                id: o.id,
+                bk: o.kind,
+                start: o.offset,
+                line: o.line,
+                event: o.event,
+                depth: o.depth,
+                tight: None,
+                entered: false,
+            });
+        } else {
+            // A leaf open at the line start: replay from its `Open`.
+            leaf_open = Some(*o);
+        }
+    }
+    let (mut cur, mut from, mut off, mut id_index) = match leaf_open {
+        Some(o) => (t.cursor_at_line(o.line), o.event, o.offset, o.id_index),
+        None => (l0.clone(), 0, l0.start, 0),
+    };
+    let mut stop = None;
+    while let Some(l) = t.line(&cur) {
+        if from == 0 && l.start >= end && r.leaf.is_none() {
+            stop = Some((l.index, 0, l.start));
+            break;
+        }
+        if let Some((k, at)) = r.line(&l, from, off, id_index, v) {
+            stop = Some((l.index, k, at));
+            break;
+        }
+        if !t.advance(&mut cur) {
+            break;
+        }
+        (from, id_index) = (0, 0);
+        off = cur.start;
+    }
+    if r.containers.is_empty() {
+        return;
+    }
+    // Containers still open: they reach past the range.
+    let (line, event, at) = stop.unwrap_or((t.line_count() - 1, usize::MAX, t.len));
+    let depth = u32::try_from(r.containers.len()).unwrap_or(u32::MAX);
+    let ends = range::closes_from(t, line, event, at, depth);
+    r.enter_pending(v);
+    while let Some(f) = r.containers.pop() {
+        let end = ends.get(r.containers.len()).copied().unwrap_or(t.len);
+        v.exit(&container(&f, end));
+    }
+}
+
+impl SyntaxTree {
+    /// [`walk`] over the whole tree.
+    pub fn walk(&self, v: &mut impl Visitor) {
+        walk(self, v);
+    }
+
+    /// [`walk_range`]: the blocks that intersect `range`.
+    pub fn walk_range(&self, range: Range<usize>, v: &mut impl Visitor) {
+        walk_range(self, range, v);
+    }
+}
+
 fn container(f: &CFrame, end: usize) -> Container {
+    let tight = f.tight.unwrap_or(true);
     let kind = match f.bk {
         BlockKind::BlockQuote => ContainerKind::BlockQuote,
-        BlockKind::BulletList { marker } => ContainerKind::BulletList {
-            marker,
-            tight: f.tight,
-        },
+        BlockKind::BulletList { marker } => ContainerKind::BulletList { marker, tight },
         BlockKind::OrderedList { start, delimiter } => ContainerKind::OrderedList {
             start,
             delimiter,
-            tight: f.tight,
+            tight,
         },
         _ => ContainerKind::Item,
     };
@@ -420,6 +672,15 @@ fn emit_leaf(
             }
         }
         _ => {
+            // The body of a fenced block: without the opening line, and
+            // without the closing line if there is one.
+            let body = || {
+                let mut body = f.lines.get(1..).unwrap_or(&[]);
+                if body.last().is_some_and(|l| l.marker) {
+                    body = &body[..body.len() - 1];
+                }
+                body
+            };
             let (kind, lines): (LeafKind, &[LeafLine]) = match f.bk {
                 BlockKind::AtxHeading { level } => (
                     LeafKind::Heading {
@@ -429,29 +690,21 @@ fn emit_leaf(
                     &f.lines[..],
                 ),
                 BlockKind::ThematicBreak => (LeafKind::ThematicBreak, &f.lines[..]),
-                BlockKind::FencedCode => {
-                    let mut body = f.lines.get(1..).unwrap_or(&[]);
-                    if body.last().is_some_and(|l| l.marker) {
-                        body = &body[..body.len() - 1];
-                    }
-                    (LeafKind::FencedCode, body)
-                }
+                BlockKind::FencedCode => (LeafKind::FencedCode, body()),
+                BlockKind::FrontMatter { kind } => (LeafKind::FrontMatter { kind }, body()),
                 BlockKind::IndentedCode => (LeafKind::IndentedCode, &f.lines[..]),
                 BlockKind::Html { kind } => (LeafKind::Html { kind }, &f.lines[..]),
                 _ => (LeafKind::Paragraph, &f.lines[..]),
             };
             let (kind, start_line, end_line, info) = mk(kind, lines, f.info.clone());
+            let fenced = matches!(kind, LeafKind::FencedCode | LeafKind::FrontMatter { .. });
             v.leaf(&Leaf {
                 id: f.id,
                 kind,
                 lines,
                 info,
                 open_line: f.line,
-                start_line: if matches!(kind, LeafKind::FencedCode) {
-                    f.line
-                } else {
-                    start_line
-                },
+                start_line: if fenced { f.line } else { start_line },
                 end_line,
                 range,
             });

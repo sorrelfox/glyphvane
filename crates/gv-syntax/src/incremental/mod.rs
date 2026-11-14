@@ -22,18 +22,41 @@
 //! The pass can run in deadline slices ([`Budget`]); while it is paused,
 //! [`ReparseTask::interim`] gives a tree for display: the new parse up to
 //! where it stopped, then the old structure shifted into place.
+//!
+//! # Front matter
+//!
+//! Whether line 0 opens front matter depends on a closing line further
+//! down (see [`crate::FrontMatterOptions`]), so with front matter enabled
+//! ([`crate::ParseOptions`]) the reparse restarts at line 0 when an edit
+//! can change that decision without touching line 0:
+//!
+//! - the restart line is inside front matter and no closing line follows
+//!   in the new text (the edit removed the closing line);
+//! - line 0 is an opening line that has no closing line (it parsed as
+//!   Markdown) and the reparse meets a line that would close it.
+//!
+//! As a safety net, reaching the end of the text with front matter still
+//! open also restarts at line 0. Line 0 is never a convergence point, and
+//! the front matter's mode is part of every checkpoint inside it, so
+//! convergence elsewhere stays exact.
+//!
+//! # Composing changes
+//!
+//! [`Changes::compose`] merges the reports of consecutive reparses into
+//! one, for consumers that skip revisions.
 
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gv_text::{EditSummary, TextSource};
 use sum_tree::Bias;
 
 use crate::block::BlockParser;
+use crate::block::front_matter;
 use crate::block::state::{Interner, Kind, RefMode, StateId};
-use crate::tree::chunk::{CHUNK_LINES, ChunkBuilder, LineRec, Lines};
-use crate::tree::event::{BlockId, BlockKind, Ev, Sink, TokenKind};
+use crate::tree::chunk::{Bytes, CHUNK_LINES, ChunkBuilder, LineRec, Lines};
+use crate::tree::event::{BlockId, BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
 use crate::tree::{LineCursor, SyntaxTree, TreeData};
 
 /// One replacement, in the coordinates of the old text: bytes
@@ -85,6 +108,14 @@ impl Budget {
 }
 
 /// What a reparse changed, and what it cost.
+///
+/// Outside the window, the two trees are the same: old lines before
+/// `restart_line` are the new lines before it (same bytes, events and
+/// BlockIds), and old lines from `old_end_line` on are the new lines from
+/// `new_end_line` on, shifted by the byte and line differences.
+///
+/// `Changes::default()` (an empty window, see [`Changes::is_empty`])
+/// means nothing changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Changes {
     /// First reparsed line (the same index in the old and the new tree).
@@ -93,6 +124,9 @@ pub struct Changes {
     pub old_end_line: usize,
     /// ...by new lines `restart_line..new_end_line`.
     pub new_end_line: usize,
+    /// Byte range of the replaced lines in the old text. It starts where
+    /// `new_range` starts.
+    pub old_range: Range<usize>,
     /// Byte range of the new lines in the new text.
     pub new_range: Range<usize>,
     /// Whether the block pass stopped on a checkpoint match (false: it ran
@@ -106,6 +140,58 @@ pub struct Changes {
     pub ids_kept: usize,
     /// Blocks opened in the window that got a new BlockId.
     pub ids_new: usize,
+}
+
+impl Changes {
+    /// Whether no line was replaced (the report of a reparse without
+    /// edits).
+    pub fn is_empty(&self) -> bool {
+        self.old_end_line == self.restart_line && self.new_end_line == self.restart_line
+    }
+
+    /// The changes of this reparse followed by `next`, the reparse of the
+    /// tree this one produced, as one report from this reparse's old tree
+    /// to `next`'s new tree. The window is the smallest one that covers
+    /// both (lines between two disjoint windows count as replaced). The
+    /// statistics are summed; `converged` holds if both converged.
+    ///
+    /// Composition is associative, and an empty report is its identity.
+    #[must_use]
+    pub fn compose(&self, next: &Changes) -> Changes {
+        if self.is_empty() {
+            return next.clone();
+        }
+        if next.is_empty() {
+            return self.clone();
+        }
+        let (a, b) = (self, next);
+        // The covering window in the middle tree, mapped back through `a`
+        // and forward through `b`; both of its ends lie outside the other
+        // reparse's window or at its edge.
+        let mid_end_line = a.new_end_line.max(b.old_end_line);
+        let mid_end = a.new_range.end.max(b.old_range.end);
+        let start = a.new_range.start.min(b.old_range.start);
+        Changes {
+            restart_line: a.restart_line.min(b.restart_line),
+            old_end_line: mid_end_line - a.new_end_line + a.old_end_line,
+            new_end_line: mid_end_line - b.old_end_line + b.new_end_line,
+            old_range: start..mid_end - a.new_range.end + a.old_range.end,
+            new_range: start..mid_end - b.old_range.end + b.new_range.end,
+            converged: a.converged && b.converged,
+            lines_parsed: a.lines_parsed + b.lines_parsed,
+            bytes_parsed: a.bytes_parsed + b.bytes_parsed,
+            ids_kept: a.ids_kept + b.ids_kept,
+            ids_new: a.ids_new + b.ids_new,
+        }
+    }
+
+    /// [`Changes::compose`] over a sequence of consecutive reports, in
+    /// order. Empty for an empty sequence.
+    pub fn compose_all<'a>(changes: impl IntoIterator<Item = &'a Changes>) -> Changes {
+        changes
+            .into_iter()
+            .fold(Changes::default(), |acc, c| acc.compose(c))
+    }
 }
 
 /// The result of [`SyntaxTree::reparse`].
@@ -152,6 +238,11 @@ pub struct ReparseTask {
     /// (window lines before it, the old line, the new state there). The
     /// interim tree switches from the new parse to the old lines here.
     seam: Option<(usize, LineCursor, StateId)>,
+    /// Line 0 would open front matter of this kind but has no closing line:
+    /// a closing line met in the window restarts the pass at line 0.
+    watch: Option<FrontMatterKind>,
+    /// The pass was restarted at line 0 for front matter.
+    restarted: bool,
     scratch: Vec<u8>,
     changes: Changes,
 }
@@ -229,11 +320,37 @@ impl SyntaxTree {
         } else {
             change
         };
-        let restart = if change.start == 0 {
+        let mut restart = if change.start == 0 {
             base.cursor_at_line(0)
         } else {
             base.cursor_at_byte(change.start - 1)
         };
+        let mut watch = None;
+        let fm = base.options.front_matter;
+        if fm.any() && restart.global > 0 {
+            let mut scratch = Vec::new();
+            let state = base
+                .line(&restart)
+                .map_or(crate::block::state::ROOT, |l| l.state);
+            if let Kind::FrontMatter { kind } = base.interner.top(state).kind {
+                // Inside front matter: it survives only if a closing line
+                // still follows.
+                if !front_matter::closer_from(text, restart.start, kind, &mut scratch) {
+                    restart = base.cursor_at_line(0);
+                }
+            } else {
+                // Line 0 is unchanged. If it would open front matter that has
+                // no closing line, watch for one.
+                let opens = base.line(&base.cursor_at_line(0)).is_some_and(|l| {
+                    l.events
+                        .iter()
+                        .any(|e| matches!(e.open_kind(), Some(BlockKind::FrontMatter { .. })))
+                });
+                if !opens {
+                    watch = front_matter::opener_at_start(text, fm, &mut scratch);
+                }
+            }
+        }
         let state = base
             .line(&restart)
             .map_or(crate::block::state::ROOT, |l| l.state);
@@ -261,6 +378,8 @@ impl SyntaxTree {
             old_valid: true,
             done: None,
             seam: None,
+            watch,
+            restarted: false,
             scratch: Vec::new(),
             changes: Changes {
                 restart_line: restart.global,
@@ -339,6 +458,25 @@ impl ReparseTask {
         &self.changes
     }
 
+    /// Restarts the block pass at line 0 (front matter, see the module
+    /// documentation).
+    fn restart_at_zero(&mut self) {
+        let base = &self.base.0;
+        self.restart = base.cursor_at_line(0);
+        self.parser = BlockParser::new();
+        self.lines.clear();
+        self.sink.events.clear();
+        self.sink.ids.clear();
+        self.sink.next_id = base.next_id;
+        self.pos = 0;
+        self.old = self.restart.clone();
+        self.old_valid = true;
+        self.seam = None;
+        self.watch = None;
+        self.restarted = true;
+        self.changes.restart_line = 0;
+    }
+
     /// Runs the block pass until it converges, reaches the end of the text,
     /// or the budget runs out. Returns true when done. `text` must be the
     /// same new text on every call.
@@ -387,6 +525,12 @@ impl ReparseTask {
                 }
             }
             if self.pos >= n {
+                if self.parser.in_front_matter() && !self.restarted {
+                    // Front matter without a closing line is no front
+                    // matter: line 0 must be parsed again.
+                    self.restart_at_zero();
+                    continue;
+                }
                 self.parser.finish(&mut self.sink);
                 self.end_line(0, state);
                 self.done = Some(base.line_count());
@@ -415,8 +559,22 @@ impl ReparseTask {
                 self.done = Some(base.line_count());
                 return true;
             }
+            if self.pos > 0
+                && self
+                    .watch
+                    .is_some_and(|kind| front_matter::is_closer(line, kind))
+            {
+                // Line 0 opens front matter after all.
+                self.restart_at_zero();
+                continue;
+            }
+            let fm = if self.pos == 0 {
+                front_matter::detect(text, base.options.front_matter)
+            } else {
+                None
+            };
             self.parser
-                .process_line(line, self.pos == 0, &mut self.interner, &mut self.sink);
+                .process_line(line, self.pos == 0, fm, &mut self.interner, &mut self.sink);
             self.end_line(len, state);
             self.pos += len;
             self.changes.lines_parsed += 1;
@@ -619,7 +777,10 @@ impl ReparseTask {
         let restart = self.restart.global;
         let mut cursor = base.chunks.cursor::<Lines>(());
         let mut tree = cursor.slice(&Lines(restart), Bias::Right);
-        let mut cb = ChunkBuilder::new(self.sink.next_id);
+        let mut cb = ChunkBuilder::new(
+            self.sink.next_id,
+            cursor.item().map_or(0, |c| c.0.start_depth),
+        );
         if let Some(first) = cursor.item() {
             let first_line = cursor.start().0;
             for i in 0..restart - first_line {
@@ -658,15 +819,25 @@ impl ReparseTask {
         tree.append(rest, ());
 
         let new_len = (base.len as isize + self.delta) as usize;
-        let data = TreeData {
-            chunks: tree,
-            interner: self.interner,
-            next_id,
-            len: new_len,
-            interim: false,
-            ref_map: OnceLock::new(),
-            inlines: std::sync::Mutex::new(std::collections::HashMap::new()),
+        let old_end_byte = if self.old_valid && self.old.global == old_end {
+            // Converged: the old cursor is at the old line where the window
+            // ends.
+            self.old.start
+        } else if old_end < base.line_count() {
+            let mut c = base.chunks.cursor::<sum_tree::Dimensions<Lines, Bytes>>(());
+            c.seek(&Lines(old_end), Bias::Right);
+            let start = *c.start();
+            start.1.0
+                + c.item().map_or(0, |ch| {
+                    ch.0.lines[..old_end - start.0.0]
+                        .iter()
+                        .map(|l| l.len as usize)
+                        .sum::<usize>()
+                })
+        } else {
+            base.len
         };
+        let data = TreeData::new(tree, self.interner, next_id, new_len, false, base.options);
         if !old_refdefs
             && !new_refdefs
             && let Some(m) = base.ref_map.get()
@@ -675,6 +846,7 @@ impl ReparseTask {
         }
         self.changes.old_end_line = old_end;
         self.changes.new_end_line = restart + self.lines.len();
+        self.changes.old_range = self.restart.start..old_end_byte;
         self.changes.new_range = self.restart.start..self.pos;
         (SyntaxTree(Arc::new(data)), self.changes)
     }
@@ -717,6 +889,8 @@ impl ReparseTask {
                 old_valid: self.old_valid,
                 done: self.done,
                 seam: None,
+                watch: self.watch,
+                restarted: self.restarted,
                 scratch: Vec::new(),
                 changes: self.changes.clone(),
             };
@@ -756,7 +930,8 @@ impl ReparseTask {
             ) => o1 == o2 && c1 == c2,
             (Kind::Item { .. }, Kind::Item { .. })
             | (Kind::Paragraph { .. }, Kind::Paragraph { .. })
-            | (Kind::FencedCode { .. }, Kind::FencedCode { .. }) => true,
+            | (Kind::FencedCode { .. }, Kind::FencedCode { .. })
+            | (Kind::FrontMatter { .. }, Kind::FrontMatter { .. }) => true,
             (a, b) => a == b,
         };
         let mut common = 1;
@@ -778,7 +953,10 @@ impl ReparseTask {
         let restart = self.restart.global;
         let mut cursor = base.chunks.cursor::<Lines>(());
         let mut tree = cursor.slice(&Lines(restart), Bias::Right);
-        let mut cb = ChunkBuilder::new(self.sink.next_id);
+        let mut cb = ChunkBuilder::new(
+            self.sink.next_id,
+            cursor.item().map_or(0, |c| c.0.start_depth),
+        );
         if let Some(first) = cursor.item() {
             let first_line = cursor.start().0;
             for i in 0..restart - first_line {
@@ -813,15 +991,14 @@ impl ReparseTask {
         tree.extend(chunks, ());
         tree.append(rest, ());
         let new_len = (base.len as isize + self.delta) as usize;
-        SyntaxTree(Arc::new(TreeData {
-            chunks: tree,
-            interner: self.interner.clone(),
+        SyntaxTree(Arc::new(TreeData::new(
+            tree,
+            self.interner.clone(),
             next_id,
-            len: new_len,
-            interim: true,
-            ref_map: OnceLock::new(),
-            inlines: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }))
+            new_len,
+            true,
+            base.options,
+        )))
     }
 }
 
@@ -840,6 +1017,7 @@ fn phantom_kind(k: Kind) -> BlockKind {
         Kind::Html { ty } => BlockKind::Html { kind: ty },
         Kind::Heading => BlockKind::AtxHeading { level: 1 },
         Kind::ThematicBreak => BlockKind::ThematicBreak,
+        Kind::FrontMatter { kind } => BlockKind::FrontMatter { kind },
         Kind::Paragraph { .. } | Kind::Document => BlockKind::Text,
     }
 }

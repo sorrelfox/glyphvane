@@ -15,7 +15,7 @@
 //! parsing; this parser keeps the byte and replaces it when rendering), so
 //! it is never an ASCII control character here.
 
-use super::api::RefDef;
+use super::api::{RefDef, RefDefSpans};
 use super::entities::ENTITIES;
 use super::tree::ENTITY_NAMED;
 use super::unicode;
@@ -647,9 +647,15 @@ fn open_tag(b: &[u8], i: usize, end: usize, skip: &mut u8) -> Option<usize> {
 // ---------------------------------------------------------------------------
 // Link reference definitions
 
-/// Parses one link reference definition at the start of `text`. See
-/// [`parse_ref_def`](super::api::parse_ref_def).
+/// Parses one link reference definition at the start of `text` (see
+/// [`super::api::parse_ref_def`]).
 pub(super) fn ref_def(text: &str) -> Option<(usize, String, RefDef)> {
+    ref_def_spans(text).map(|(n, d)| (n, d.label, d.def))
+}
+
+/// [`ref_def`] with the ranges of the parts in `text` (see
+/// [`super::api::parse_ref_def_spans`]).
+pub(super) fn ref_def_spans(text: &str) -> Option<(usize, RefDefSpans)> {
     let b = text.as_bytes();
     let end = b.len();
     let (label_start, label_end, mut i) = link_label(text, 0, end)?;
@@ -691,12 +697,25 @@ pub(super) fn ref_def(text: &str) -> Option<(usize, String, RefDef)> {
     let raw_dest = &text[ds..de];
     let mut destination = String::with_capacity(raw_dest.len());
     decode_into(raw_dest, &mut destination);
-    let title = title.map(|(s, e)| {
+    let title_text = title.map(|(s, e)| {
         let mut t = String::with_capacity(e - s);
         decode_into(&text[s + 1..e - 1], &mut t);
         t
     });
-    Some((consumed, label, RefDef { destination, title }))
+    Some((
+        consumed,
+        RefDefSpans {
+            label,
+            def: RefDef {
+                destination,
+                title: title_text,
+            },
+            range: 0..i,
+            label_range: label_start..label_end,
+            destination_range: dest_start..dest_end,
+            title_range: title.map(|(s, e)| s..e),
+        },
+    ))
 }
 
 #[cfg(test)]

@@ -157,7 +157,7 @@ pub fn check_edit(
             }
         }
     };
-    let full = SyntaxTree::parse(new_text);
+    let full = SyntaxTree::parse_with(new_text, tree.options());
     new.same_structure(&full)
         .map_err(|e| ctx(format!("incremental != full: {e}\nchanges: {changes:?}")))?;
     new.validate(new_text)

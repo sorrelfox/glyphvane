@@ -47,7 +47,7 @@ pub enum TokenKind {
     /// line, or the fence's indentation removed from a fenced code line).
     CodeIndent = 5,
     /// Structural punctuation: `#` runs, setext underlines, thematic breaks,
-    /// code fences.
+    /// code fences, front matter delimiters.
     Marker = 6,
     /// The info string of a fenced code block.
     InfoString = 7,
@@ -102,6 +102,26 @@ pub struct Token {
     pub len: u32,
 }
 
+/// The syntax of a front matter block (see
+/// [`ParseOptions`](crate::ParseOptions)).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum FrontMatterKind {
+    /// YAML: `---` ... `---` or `...`.
+    Yaml,
+    /// TOML: `+++` ... `+++`.
+    Toml,
+}
+
+impl FrontMatterKind {
+    /// The kind's name in the CST dump.
+    pub fn name(self) -> &'static str {
+        match self {
+            FrontMatterKind::Yaml => "yaml",
+            FrontMatterKind::Toml => "toml",
+        }
+    }
+}
+
 /// Block kinds as known when the block opens.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum BlockKind {
@@ -141,6 +161,12 @@ pub enum BlockKind {
         /// The start condition that matched.
         kind: u8,
     },
+    /// Front matter at the start of the document (only with
+    /// [`ParseOptions::front_matter`](crate::ParseOptions::front_matter)).
+    FrontMatter {
+        /// Its syntax.
+        kind: FrontMatterKind,
+    },
 }
 
 impl BlockKind {
@@ -157,6 +183,7 @@ impl BlockKind {
             BlockKind::FencedCode => 6,
             BlockKind::IndentedCode => 7,
             BlockKind::Html { .. } => 8,
+            BlockKind::FrontMatter { .. } => 9,
         }
     }
 
@@ -227,6 +254,7 @@ const K_BREAK: u8 = 6;
 const K_FENCED: u8 = 7;
 const K_INDENTED: u8 = 8;
 const K_HTML: u8 = 9;
+const K_FRONT: u8 = 10;
 
 /// A packed event: 8 bytes. The BlockId of an `Open` lives in a parallel
 /// array.
@@ -246,12 +274,20 @@ impl Ev {
         n: 0,
     };
 
-    pub(crate) const LOOSEN: Ev = Ev {
-        tag: T_LOOSEN,
-        a: 0,
-        b: 0,
-        n: 0,
-    };
+    /// A `Loosen` marker. `up` says which list it loosens: 0 when the list
+    /// is the innermost open block, 1 when one of its items is, 2 when a
+    /// text block in one of its items is. The public [`Event::Loosen`]
+    /// leaves it out; range queries use it to find the list's depth
+    /// without resolving the open blocks.
+    #[inline]
+    pub(crate) fn loosen(up: u8) -> Ev {
+        Ev {
+            tag: T_LOOSEN,
+            a: up,
+            b: 0,
+            n: 0,
+        }
+    }
 
     #[inline]
     pub(crate) fn open(kind: BlockKind) -> Ev {
@@ -266,6 +302,7 @@ impl Ev {
             BlockKind::FencedCode => (K_FENCED, 0, 0),
             BlockKind::IndentedCode => (K_INDENTED, 0, 0),
             BlockKind::Html { kind } => (K_HTML, u16::from(kind), 0),
+            BlockKind::FrontMatter { kind } => (K_FRONT, kind as u16, 0),
         };
         Ev {
             tag: T_OPEN,
@@ -320,6 +357,19 @@ impl Ev {
         self.tag == T_REFDEF
     }
 
+    /// Whether this is a token (the most common event).
+    #[inline]
+    pub(crate) fn is_token(self) -> bool {
+        self.tag == T_TOK
+    }
+
+    /// For a `Loosen` marker, how far below the innermost open block the
+    /// loosened list is (see [`Ev::loosen`]).
+    #[inline]
+    pub(crate) fn loosen_up(self) -> Option<u32> {
+        (self.tag == T_LOOSEN).then_some(u32::from(self.a))
+    }
+
     /// Length in bytes if this is a token, else 0.
     #[inline]
     pub(crate) fn tok_len(self) -> usize {
@@ -363,6 +413,13 @@ impl Ev {
             K_BREAK => BlockKind::ThematicBreak,
             K_FENCED => BlockKind::FencedCode,
             K_INDENTED => BlockKind::IndentedCode,
+            K_FRONT => BlockKind::FrontMatter {
+                kind: if self.b == FrontMatterKind::Toml as u16 {
+                    FrontMatterKind::Toml
+                } else {
+                    FrontMatterKind::Yaml
+                },
+            },
             _ => BlockKind::Html { kind: self.b as u8 },
         })
     }
@@ -431,6 +488,12 @@ mod tests {
             BlockKind::FencedCode,
             BlockKind::IndentedCode,
             BlockKind::Html { kind: 7 },
+            BlockKind::FrontMatter {
+                kind: FrontMatterKind::Yaml,
+            },
+            BlockKind::FrontMatter {
+                kind: FrontMatterKind::Toml,
+            },
         ];
         for k in kinds {
             assert_eq!(Ev::open(k).open_kind(), Some(k));
@@ -438,6 +501,10 @@ mod tests {
         for k in TokenKind::ALL {
             let t = Ev::tok(k, 3, 77).token().expect("token");
             assert_eq!((t.kind, t.virtual_spaces, t.len), (k, 3, 77));
+        }
+        for up in 0..3 {
+            assert_eq!(Ev::loosen(up).loosen_up(), Some(u32::from(up)));
+            assert_eq!(Ev::loosen(up).to_event(BlockId(0)), Event::Loosen);
         }
     }
 }

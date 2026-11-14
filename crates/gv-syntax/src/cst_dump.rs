@@ -32,7 +32,7 @@
 //!   the text block resolves to (`paragraph`, `heading N`, or `empty` when
 //!   it holds only link reference definitions); `atx-heading N`;
 //!   `thematic-break`; `fenced-code`; `indented-code`; `html N` (the start
-//!   condition).
+//!   condition); `front-matter yaml|toml`.
 //! - **Tokens** are `(kind start..end "bytes")`, with `+N` before the bytes
 //!   when the token has N virtual spaces (a partially consumed tab). Kinds:
 //!   `bom`, `ws`, `prefix` (container prefixes of the line), `quote-marker`,
@@ -143,6 +143,7 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
                     BlockKind::FencedCode => String::from("fenced-code"),
                     BlockKind::IndentedCode => String::from("indented-code"),
                     BlockKind::Html { kind } => format!("html {kind}"),
+                    BlockKind::FrontMatter { kind } => format!("front-matter {}", kind.name()),
                 };
                 let _ = writeln!(out, "{indent}({head} {off}..{}", ends[i]);
                 stack.push(id);
