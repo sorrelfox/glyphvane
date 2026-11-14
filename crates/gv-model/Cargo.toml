@@ -9,6 +9,17 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gv-syntax.workspace = true
+gv-text.workspace = true
+memchr.workspace = true
+unicode-normalization.workspace = true
+unicode-properties.workspace = true
+
+[dev-dependencies]
+# comrak's anchorizer is the reference for the GitLab algorithm (tests only).
+comrak = { workspace = true }
+proptest.workspace = true
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
