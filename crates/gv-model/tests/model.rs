@@ -378,3 +378,67 @@ fn empty_and_tiny_documents() {
         }
     }
 }
+
+fn model_with(profile: &str, src: &str) -> DocModel {
+    let options = gv_syntax::ParseOptions::for_profile(profile).expect("built-in profile");
+    DocModel::build(&gv_syntax::parse_with(src, options), src)
+}
+
+#[test]
+fn front_matter() {
+    let src = "---\ntitle: \"# x\"\nlink: \"[a](b.md)\"\n---\n# Heading\n\n[c](d.md)\n";
+    let m = model_with("gfm-file", src);
+    let fm = m.front_matter().expect("front matter");
+    assert_eq!(fm.kind, gv_model::FrontMatterKind::Yaml);
+    assert_eq!(
+        &src[fm.range.clone()],
+        "---\ntitle: \"# x\"\nlink: \"[a](b.md)\"\n---\n"
+    );
+    assert_eq!(
+        &src[fm.content_range.clone()],
+        "title: \"# x\"\nlink: \"[a](b.md)\"\n"
+    );
+    // Nothing from inside it: one heading, one link, after it.
+    assert_eq!(m.headings().len(), 1);
+    assert_eq!(
+        (&*m.headings()[0].text, m.headings()[0].line),
+        ("Heading", 4)
+    );
+    assert_eq!(m.links().len(), 1);
+    assert_eq!(&*m.links()[0].destination, "d.md");
+
+    // CommonMark has none: a thematic break, then a setext heading.
+    let cm = model(src);
+    assert!(cm.front_matter().is_none());
+    assert_eq!(
+        &*cm.headings()[0].source,
+        "title: \"# x\"\nlink: \"[a](b.md)\""
+    );
+
+    // TOML in the extended profile only; `...` closes YAML; empty content.
+    let toml = "+++\na = 1\n+++\ntext\n";
+    let fm = model_with("extended", toml).front_matter().expect("toml");
+    assert_eq!(fm.kind, gv_model::FrontMatterKind::Toml);
+    assert_eq!(&toml[fm.content_range.clone()], "a = 1\n");
+    assert!(model_with("obsidian", toml).front_matter().is_none());
+    let dots = "---\na: b\n...\n";
+    let fm = model_with("obsidian", dots).front_matter().expect("dots");
+    assert_eq!(fm.range, 0..dots.len());
+    let empty = "---\n---\n# H\n";
+    let fm = model_with("gfm-file", empty).front_matter().expect("empty");
+    assert_eq!((fm.range.clone(), fm.content_range.clone()), (0..8, 4..4));
+    assert_eq!(model_with("gfm-file", empty).headings().len(), 1);
+
+    // Unclosed front matter is not front matter: a thematic break here,
+    // and its links count.
+    let open = "---\ntitle: [x](y)\n";
+    let m = model_with("gfm-file", open);
+    assert!(m.front_matter().is_none());
+    assert_eq!(&*m.links()[0].destination, "y");
+}
+
+#[test]
+fn nul_in_heading_text_is_replaced() {
+    let m = model("# a\0b &#0;\n");
+    assert_eq!(&*m.headings()[0].text, "a\u{fffd}b \u{fffd}");
+}

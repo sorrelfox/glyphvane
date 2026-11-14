@@ -174,6 +174,12 @@ mod tests {
         DocModel::build(&gv_syntax::parse(text), text)
     }
 
+    /// A note parsed with the options of `profile` (front matter).
+    fn model_for(profile: ProfileId, text: &str) -> DocModel {
+        let options = gv_syntax::ParseOptions::for_profile(profile.as_str()).unwrap();
+        DocModel::build(&gv_syntax::parse_with(text, options), text)
+    }
+
     fn src() -> VaultPath {
         VaultPath::new("dir/Source.md").unwrap()
     }
@@ -275,6 +281,22 @@ mod tests {
         // Markdown-link fragments are percent-decoded first.
         let md = frag_md("Part%202#Detail", &p);
         assert_eq!(fragment_in_model(&m, &md, &p), heading("Detail", 3, false));
+    }
+
+    #[test]
+    fn front_matter_is_not_a_heading() {
+        let text = "---\ntitle: Part 2\nlink: \"[x](Other.md)\"\n---\n# Part 2\n[y](Note.md)\n";
+        let m = model_for(ProfileId::Obsidian, text);
+        assert!(m.front_matter().is_some());
+        let p = ProfileParams::for_profile(ProfileId::Obsidian);
+        let w = |s: &str| fragment_in_model(&m, &Fragment::from_wikilink(s), &p);
+        assert_eq!(w("Part 2"), heading("Part 2", 4, false));
+        assert_eq!(w("title: Part 2"), FragmentTarget::Missing);
+        let raw: Vec<String> = links_from_model(&m, &src(), ProfileId::Obsidian)
+            .into_iter()
+            .map(|l| l.raw_destination)
+            .collect();
+        assert_eq!(raw, ["Note.md"]);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use gv_syntax::inline::RefDef;
-use gv_syntax::{BlockId, RefMap};
+use gv_syntax::{BlockId, FrontMatterKind, RefMap};
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::outline::OutlineEntry;
@@ -161,12 +161,31 @@ pub struct BlockAnchor {
     pub block: BlockId,
 }
 
+/// Front matter: the metadata block at the start of the document (YAML or
+/// TOML, as the parse options of the tree allow; see
+/// [`gv_syntax::ParseOptions`]). Its content is not Markdown: no headings,
+/// links or definitions come from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FrontMatter {
+    /// The whole block, both delimiter lines included.
+    pub range: Range<usize>,
+    /// The content between the delimiter lines, line endings included
+    /// (empty, at the closing delimiter, when there is none).
+    pub content_range: Range<usize>,
+    /// Its syntax.
+    pub kind: FrontMatterKind,
+}
+
 /// What a build or update did, for tests and profiling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BuildStats {
-    /// Leaf blocks visited.
+    /// Leaf blocks visited (an update walks only the reparsed window and
+    /// the blocks it rebuilds).
     pub leaves: usize,
-    /// Leaf blocks whose records were taken over from the previous model.
+    /// Blocks whose records were taken over from the previous model
+    /// (blocks with records: headings, links, definitions, or parsed
+    /// inlines).
     pub reused: usize,
     /// Inline parses run.
     pub inline_parses: usize,
@@ -205,6 +224,7 @@ pub(crate) struct ModelData {
     pub links: Vec<Link>,
     pub definitions: Vec<Definition>,
     pub block_anchors: Vec<BlockAnchor>,
+    pub front_matter: Option<FrontMatter>,
     pub blocks: Vec<BlockFacts>,
     pub ref_map: Option<Arc<RefMap>>,
     pub stats: BuildStats,
@@ -323,6 +343,12 @@ impl DocModel {
     /// profile).
     pub fn block_anchors(&self) -> &[BlockAnchor] {
         &self.0.block_anchors
+    }
+
+    /// The front matter, if the document starts with one (only trees
+    /// parsed with front matter enabled have it).
+    pub fn front_matter(&self) -> Option<FrontMatter> {
+        self.0.front_matter.clone()
     }
 
     /// What the build or update that made this model did.

@@ -15,11 +15,14 @@
 //!
 //! Markdown links, images and autolinks come from the document model
 //! ([`links_from_model`]); heading fragments are matched by
-//! [`ModelFragments`]. The parser has no Obsidian syntax yet, so three
-//! small stand-ins remain here, each covering only what the fixtures use:
+//! [`ModelFragments`]. Notes are parsed with the Obsidian profile's
+//! options, so YAML front matter is front matter, not Markdown. The parser
+//! and the model have no other Obsidian syntax yet, so three small
+//! stand-ins remain here, each covering only what the fixtures use:
 //!
-//! - front matter is cut off before parsing, and its values are parsed as
-//!   Markdown on their own (`frontmatter` links);
+//! - the front matter's content (where the model puts it) is parsed as
+//!   Markdown on its own for its links (`frontmatter` links), until the
+//!   model parses properties;
 //! - wikilinks, embeds, `%%` comments and bare URLs are found by a text scan
 //!   of the paragraph and heading lines the parser reports, outside code
 //!   spans, raw HTML and Markdown links;
@@ -34,7 +37,7 @@ use std::process::Command;
 
 use gv_model::DocModel;
 use gv_syntax::inline::InlineKind;
-use gv_syntax::{Leaf, LeafKind, SyntaxTree, Visitor};
+use gv_syntax::{Leaf, LeafKind, ParseOptions, SyntaxTree, Visitor};
 use gv_vault::expect::{
     EXPECT_SCHEMA, ExpectFile, ExpectKind, ExpectLink, ExpectProbe, is_valid_status,
 };
@@ -48,16 +51,6 @@ use serde_json::{Value, json};
 // ---------------------------------------------------------------------------
 // Parsing.
 // ---------------------------------------------------------------------------
-
-/// A leading YAML front matter block: the range of its content (between
-/// the fences) and of the whole block (closing fence line included).
-fn front_matter(text: &str) -> Option<(Range<usize>, Range<usize>)> {
-    let body = text.strip_prefix("---\n")?;
-    let end = body.find("\n---")? + 4;
-    let close = end + 1 + 3;
-    let after = text[close..].find('\n').map_or(text.len(), |n| close + n);
-    Some((4..end, 0..after))
-}
 
 /// `text` with the bytes in `ranges` (line endings excepted) replaced by
 /// spaces: byte offsets and line numbers stay the same.
@@ -73,19 +66,11 @@ fn blank(text: &str, ranges: &[Range<usize>]) -> String {
     String::from_utf8(bytes).expect("ASCII replacements of whole ranges")
 }
 
-/// The text the parser sees: front matter blanked.
-// TODO(gv-syntax front matter): parse the front matter block instead, once
-// the parser has one. Until then a leading `---…---` block would read as a
-// thematic break and a setext heading.
-fn parsed_text(text: &str) -> String {
-    match front_matter(text) {
-        Some((_, block)) => blank(text, &[block]),
-        None => text.to_owned(),
-    }
-}
-
+/// Parses a note as Obsidian does: with YAML front matter.
 fn parse(text: &str) -> (SyntaxTree, DocModel) {
-    let tree = gv_syntax::parse(text);
+    let options =
+        ParseOptions::for_profile(ProfileId::Obsidian.as_str()).expect("built-in profile");
+    let tree = gv_syntax::parse_with(text, options);
     let model = DocModel::build(&tree, text);
     (tree, model)
 }
@@ -207,18 +192,22 @@ fn scan_line(
 }
 
 /// Every link of a parsed `text`, in document order.
-fn extract_parsed(text: &str, kind: ExpectKind, source: &VaultPath) -> Vec<Extracted> {
-    let (tree, model) = parse(text);
+fn extract_parsed(
+    text: &str,
+    (tree, model): &(SyntaxTree, DocModel),
+    kind: ExpectKind,
+    source: &VaultPath,
+) -> Vec<Extracted> {
     let mut v = TextLines {
-        tree: &tree,
+        tree,
         text,
         lines: Vec::new(),
         masked: Vec::new(),
     };
-    gv_syntax::walk(&tree, &mut v);
+    gv_syntax::walk(tree, &mut v);
     let hidden = comments(text, &v.lines, &v.masked);
     let mut out = Vec::new();
-    let refs = links_from_model(&model, source, ProfileId::Obsidian);
+    let refs = links_from_model(model, source, ProfileId::Obsidian);
     for (l, link) in model.links().iter().zip(refs) {
         if inside(&hidden, l.range.start) {
             continue;
@@ -243,16 +232,15 @@ fn extract_parsed(text: &str, kind: ExpectKind, source: &VaultPath) -> Vec<Extra
 /// Every link of a note: front matter values first, then the body.
 // TODO(gv-model properties): front matter links from the model.
 fn extract(text: &str, source: &VaultPath) -> Vec<Extracted> {
-    let Some((content, block)) = front_matter(text) else {
-        return extract_parsed(text, ExpectKind::Link, source);
+    let parsed = parse(text);
+    let body = extract_parsed(text, &parsed, ExpectKind::Link, source);
+    let Some(fm) = parsed.1.front_matter() else {
+        return body;
     };
+    let content = fm.content_range;
     let values = blank(text, &[0..content.start, content.end..text.len()]);
-    let mut out = extract_parsed(&values, ExpectKind::Frontmatter, source);
-    out.extend(extract_parsed(
-        &blank(text, &[block]),
-        ExpectKind::Link,
-        source,
-    ));
+    let mut out = extract_parsed(&values, &parse(&values), ExpectKind::Frontmatter, source);
+    out.extend(body);
     out
 }
 
@@ -306,7 +294,7 @@ impl Notes {
             .borrow_mut()
             .entry(path.clone())
             .or_insert_with(|| {
-                let text = parsed_text(&fs::read_to_string(path.to_fs_path(&self.root)).ok()?);
+                let text = fs::read_to_string(path.to_fs_path(&self.root)).ok()?;
                 let (_, model) = parse(&text);
                 Some((text, model))
             })
@@ -667,17 +655,17 @@ fn extractor_skips_code_and_comments() {
 }
 
 #[test]
-fn front_matter_is_blanked_for_the_parser() {
-    let text = "---\ntitle: x\n---\n# Heading\n";
-    let parsed = parsed_text(text);
-    assert_eq!(parsed.len(), text.len());
-    let (_, model) = parse(&parsed);
+fn front_matter_is_not_markdown() {
+    let text = "---\ntitle: x\nrel: \"[[A]]\"\n---\n# Heading\n";
+    let (_, model) = parse(text);
+    let fm = model.front_matter().expect("front matter");
+    assert_eq!(&text[fm.content_range], "title: x\nrel: \"[[A]]\"\n");
     let h = &model.headings()[0];
-    assert_eq!((&*h.source, h.line, h.level), ("Heading", 3, 1));
+    assert_eq!((&*h.source, h.line, h.level), ("Heading", 4, 1));
     assert_eq!(model.headings().len(), 1);
-    // Without blanking it is a thematic break and a setext heading.
-    let (_, raw) = parse(text);
-    assert_eq!(&*raw.headings()[0].source, "title: x");
+    // CommonMark reads it as a thematic break and a setext heading.
+    let raw = DocModel::build(&gv_syntax::parse(text), text);
+    assert_eq!(&*raw.headings()[0].source, "title: x\nrel: \"[[A]]\"");
 }
 
 #[test]

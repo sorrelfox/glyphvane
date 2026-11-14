@@ -7,7 +7,10 @@
 //!   the tool itself repeats ids: kramdown's counter);
 //! - the outline is consistent with heading order and levels;
 //! - [`DocModel::update`] after an edit equals [`DocModel::build`] of the
-//!   same tree, on `str` and on a rope snapshot;
+//!   same tree, on `str` and on a rope snapshot, with front matter off
+//!   (CommonMark) and on (YAML and TOML), and after skipping revisions
+//!   (their changes composed);
+//! - nothing is recorded inside front matter;
 //! - the GitLab slugs of random headings equal comrak's anchorizer over
 //!   comrak's heading text.
 //!
@@ -17,7 +20,7 @@ use std::collections::HashSet;
 
 use comrak::nodes::{AstNode, NodeValue};
 use gv_model::{DocModel, SlugAlgorithm, Slugger};
-use gv_syntax::{Change, SyntaxTree};
+use gv_syntax::{Change, Changes, ParseOptions, SyntaxTree};
 use gv_text::{TextSnapshot, TextSource};
 use proptest::prelude::*;
 
@@ -60,6 +63,24 @@ fn heading_text() -> impl Strategy<Value = String> {
         "[a-zA-Z0-9 !?:()_-]{0,6}",
     ];
     prop::collection::vec(piece, 0..8).prop_map(|v| v.concat())
+}
+
+/// A random document that may start with front matter (closed or not).
+fn document_with_front_matter() -> impl Strategy<Value = String> {
+    let head = prop_oneof![
+        Just(""),
+        Just("---\ntitle: x\n---\n"),
+        Just("---\n# not a heading [x](y)\n[ref]: /fm\n...\n"),
+        Just("---\n---\n"),
+        Just("+++\na = \"[x](y)\"\n+++\n"),
+        Just("---\nunclosed: [x](y)\n"),
+    ];
+    (head, document()).prop_map(|(h, d)| format!("{h}{d}"))
+}
+
+/// The options of the `extended` profile: YAML and TOML front matter.
+fn front_matter_on() -> ParseOptions {
+    ParseOptions::for_profile("extended").expect("built-in profile")
 }
 
 /// A random Markdown document: blocks from a small grammar.
@@ -105,6 +126,9 @@ const SNIPPETS: &[&str] = &[
     "![i](p)",
     "é",
     "Dup",
+    "---\n",
+    "+++\n",
+    "...\n",
 ];
 
 #[derive(Debug, Clone)]
@@ -148,11 +172,12 @@ fn apply(text: &mut String, e: &EditSpec) -> Change {
 /// Everything a model holds, as comparable values.
 fn snapshot(m: &DocModel) -> String {
     let mut s = format!(
-        "{:?}\n{:?}\n{:?}\n{:?}\n",
+        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n",
         m.headings(),
         m.outline(),
         m.links(),
-        m.definitions()
+        m.definitions(),
+        m.front_matter()
     );
     for alg in SlugAlgorithm::ALL {
         s.push_str(&format!("{:?}\n", m.slugs(alg)));
@@ -206,14 +231,35 @@ fn comrak_walk<'a>(n: &'a AstNode<'a>, f: &mut impl FnMut(&'a AstNode<'a>)) {
     }
 }
 
+/// Nothing is recorded inside the front matter.
+fn check_front_matter(m: &DocModel) -> Result<(), TestCaseError> {
+    let Some(fm) = m.front_matter() else {
+        return Ok(());
+    };
+    prop_assert_eq!(fm.range.start, 0);
+    prop_assert!(fm.range.start < fm.content_range.start);
+    prop_assert!(fm.content_range.end < fm.range.end);
+    let after = |r: &std::ops::Range<usize>| r.start >= fm.range.end;
+    prop_assert!(m.headings().iter().all(|h| after(&h.range)));
+    prop_assert!(m.links().iter().all(|l| after(&l.range)));
+    prop_assert!(m.definitions().iter().all(|d| after(&d.range)));
+    Ok(())
+}
+
+/// Applies `edits` one by one, updating the model after each reparse and
+/// comparing it with a full build; then checks one update over all the
+/// revisions (the changes composed). Returns the blocks reused.
 fn run_edits<S: TextSource>(
     mut text: String,
     edits: &[EditSpec],
+    options: ParseOptions,
     source: impl Fn(&str) -> S,
 ) -> Result<usize, TestCaseError> {
     let src = source(&text);
-    let mut tree = SyntaxTree::parse(&src);
+    let mut tree = SyntaxTree::parse_with(&src, options);
     let mut model = DocModel::build(&tree, &src);
+    let first = model.clone();
+    let mut all = Vec::new();
     let mut reused = 0;
     for e in edits {
         let change = apply(&mut text, e);
@@ -228,10 +274,21 @@ fn run_edits<S: TextSource>(
             e,
             text
         );
+        check_front_matter(&full)?;
         reused += updated.stats().reused;
+        all.push(changes);
         tree = next;
         model = updated;
     }
+    let src = source(&text);
+    let skipped = first.update(&tree, &src, &Changes::compose_all(&all));
+    prop_assert_eq!(
+        snapshot(&skipped),
+        snapshot(&model),
+        "composed {:?} on {:?}",
+        all,
+        text
+    );
     Ok(reused)
 }
 
@@ -276,12 +333,28 @@ proptest! {
 
     #[test]
     fn update_equals_build(doc in document(), edits in edits()) {
-        run_edits(doc, &edits, |s| s.to_owned())?;
+        run_edits(doc, &edits, ParseOptions::default(), |s| s.to_owned())?;
     }
 
     #[test]
     fn update_equals_build_on_a_rope(doc in document(), edits in edits()) {
-        run_edits(doc, &edits, TextSnapshot::new)?;
+        run_edits(doc, &edits, ParseOptions::default(), TextSnapshot::new)?;
+    }
+
+    #[test]
+    fn update_equals_build_with_front_matter(
+        doc in document_with_front_matter(),
+        edits in edits(),
+    ) {
+        run_edits(doc, &edits, front_matter_on(), |s| s.to_owned())?;
+    }
+
+    #[test]
+    fn update_equals_build_with_front_matter_on_a_rope(
+        doc in document_with_front_matter(),
+        edits in edits(),
+    ) {
+        run_edits(doc, &edits, front_matter_on(), TextSnapshot::new)?;
     }
 
     #[test]
@@ -330,6 +403,8 @@ fn update_reuses_untouched_blocks() {
     let stats = updated.stats();
     assert!(stats.reused >= 398, "{stats:?}");
     assert!(stats.inline_parses <= 2, "{stats:?}");
+    // Only the reparsed window is walked.
+    assert!(stats.leaves <= 4, "{stats:?}");
     assert_eq!(
         snapshot(&updated),
         snapshot(&DocModel::build(&next, text.as_str()))
@@ -364,4 +439,46 @@ fn update_reuses_untouched_blocks() {
             .filter(|l| l.kind.is_reference())
             .all(|l| &*l.destination == "/first")
     );
+}
+
+/// Cases that once broke [`DocModel::update`].
+#[test]
+fn update_regressions() {
+    let e = |at: f64, del: usize, insert: &[usize]| EditSpec {
+        at,
+        del,
+        insert: insert.to_vec(),
+    };
+    let cases: [(&str, Vec<EditSpec>); 4] = [
+        // A text block before the window now ends where the window starts.
+        (
+            "Para  [link](a.md#Dup) and [ref].\n```\n# not a heading [x](y)\n```\n```\n# not a heading [x](y)\n```\n[Ref]:\n  <other target>\n[ref]: /target \"title\"\n### </b>e\u{301}Θ<b><b><https://x.y/z>\n",
+            vec![
+                e(0.747_342_500_312_087_2, 3, &[]),
+                e(0.604_410_981_722_262_6, 0, &[1]),
+            ],
+        ),
+        (
+            "- item\n  ## **strong**`code`Dup²[link](url)\\*\n- [a][ref]\nPara [ref][link](url)*em*Θ*em* [link](a.md#Dup) and [ref].\n[Ref]:\n  <other target>\nplain text line\n> # <b>&amp;wordCafé😄e\u{301}\n> text [x](y)\nPara &amp;[ref] [link](a.md#Dup) and [ref].\n<div>\n# html\n</div>\nxe\u{301}e\u{301}e\u{301}<b>\n---\nx\n===\n[ref]: /target \"title\"\n```\n# not a heading [x](y)\n```\n",
+            vec![
+                e(0.878_367_883_042_208_4, 9, &[]),
+                e(0.379_930_013_097_309_8, 0, &[0]),
+            ],
+        ),
+        // Front matter, and an edit that changes nothing.
+        (
+            "---\ntitle: x\n---\n# 😄Caféwordwordword\nplain text line\n# ![alt *x*](i.png)&amp;&amp;word\n[Ref]:\n  <other target>\n",
+            vec![e(0.0, 0, &[]), e(0.872_847_363_420_378_5, 0, &[1])],
+        ),
+        (
+            "+++\na = \"[x](y)\"\n+++\n[Ref]:\n  <other target>\n<div>\n# html\n</div>\n[ref]: /target \"title\"\n[ref]: /target \"title\"\nx&amp;</b>word\n---\n# *em***strong**\n<div>\n# html\n</div>\n",
+            vec![e(0.174_321_687_825_168, 0, &[0])],
+        ),
+    ];
+    for (doc, edits) in cases {
+        for options in [ParseOptions::default(), front_matter_on()] {
+            run_edits(doc.to_owned(), &edits, options, |s| s.to_owned()).expect("update == build");
+            run_edits(doc.to_owned(), &edits, options, TextSnapshot::new).expect("on a rope");
+        }
+    }
 }

@@ -121,7 +121,7 @@ fn report(name: &str, text: &str) {
     let s = updated.stats();
     println!(
         "{name:<14} {:>6.2} MB  parse {:>8.2?}  walk {:>8.2?}  build {:>8.2?}  github slugs {:>8.2?}  \
-         keystroke {:>8.2?} (update {:>8.2?}; reused {}/{} leaves, {} inline parses)  \
+         keystroke {:>8.2?} (update {:>8.2?}; {} blocks kept, {} leaves walked, {} inline parses)  \
          {} headings, {} links",
         text.len() as f64 / 1e6,
         parse,
