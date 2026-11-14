@@ -120,6 +120,7 @@ command_actions! {
         ExpandSelection = "editor.expand_selection",
         ShrinkSelection = "editor.shrink_selection",
         ToggleComment = "editor.toggle_comment",
+        ToggleWhitespace = "editor.toggle_whitespace",
         Bold = "editor.bold",
         Italic = "editor.italic",
         Strikethrough = "editor.strikethrough",

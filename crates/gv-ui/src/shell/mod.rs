@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
+use crate::editor::EditorView;
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
 use crate::reader::{
@@ -68,6 +69,10 @@ pub const DEBUG_SHOW_SIDEBAR_ENV: &str = "GLYPHVANE_DEBUG_SHOW_SIDEBAR";
 /// Set to `1` to open main windows with the right panel (Outline) shown,
 /// for screenshots and manual checks.
 pub const DEBUG_SHOW_RIGHT_PANEL_ENV: &str = "GLYPHVANE_DEBUG_SHOW_RIGHT_PANEL";
+
+/// Set to `1` to open main windows in Edit mode, for screenshots and
+/// manual checks.
+pub const DEBUG_EDIT_ENV: &str = "GLYPHVANE_DEBUG_EDIT";
 
 /// What the document area shows. Each tab has its own mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +126,9 @@ pub struct Tab {
     mode: ViewMode,
     /// The Reading view, made when the tab is first shown.
     reader: Option<Entity<Reader>>,
+    /// The Source view, made when the tab first goes to Edit. Its text is
+    /// not saved yet: it lives as long as the tab shows the same file.
+    editor: Option<Entity<EditorView>>,
     /// Where Back and Forward go.
     history: History,
 }
@@ -138,12 +146,17 @@ impl Tab {
             scroll: None,
             mode: ViewMode::default(),
             reader: None,
+            editor: None,
             history: History::default(),
         }
     }
 
     pub fn reader(&self) -> Option<&Entity<Reader>> {
         self.reader.as_ref()
+    }
+
+    pub fn editor(&self) -> Option<&Entity<EditorView>> {
+        self.editor.as_ref()
     }
 
     /// Where Back goes, oldest first.
@@ -297,6 +310,9 @@ impl Workspace {
         }
         if std::env::var_os(DEBUG_SHOW_RIGHT_PANEL_ENV).is_some_and(|v| v == "1") {
             this.set_panel_open(true, window, cx);
+        }
+        if std::env::var_os(DEBUG_EDIT_ENV).is_some_and(|v| v == "1") {
+            this.set_mode(ViewMode::Edit, cx);
         }
         this
     }
@@ -465,12 +481,17 @@ impl Workspace {
         }
     }
 
-    /// Whether the active tab's Reading view has the keyboard.
+    /// Whether the active tab's Reading view or Source view has the
+    /// keyboard.
     fn reader_focused(&self, window: &Window, cx: &App) -> bool {
-        self.active_tab()
-            .reader
+        let tab = self.active_tab();
+        tab.reader
             .as_ref()
             .is_some_and(|r| r.read(cx).focus_handle(cx).contains_focused(window, cx))
+            || tab
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
     fn focus_reader_if(&self, focused: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -490,20 +511,27 @@ impl Workspace {
     /// Gives the keyboard to the document on screen, or to the window when
     /// it shows none.
     fn focus_document(&self, window: &mut Window, cx: &mut App) {
-        match self.shown_reader() {
-            Some(reader) => reader.read(cx).focus_handle(cx).focus(window, cx),
-            None => self.focus.focus(window, cx),
+        match (self.shown_reader(), self.shown_editor()) {
+            (Some(reader), _) => reader.read(cx).focus_handle(cx).focus(window, cx),
+            (None, Some(editor)) => editor.read(cx).focus_handle(cx).focus(window, cx),
+            (None, None) => self.focus.focus(window, cx),
         }
     }
 
-    /// Keeps the keyboard on something that is drawn: a Reading view that
-    /// leaves the screen (a mode switch) hands it to the window, and the
-    /// window hands it to the Reading view that comes back.
+    /// Keeps the keyboard on something that is drawn: a Reading or Source
+    /// view that leaves the screen (a mode switch) hands it to the window,
+    /// and the window hands it to the view that comes back.
     fn settle_focus(&self, window: &mut Window, cx: &mut App) {
-        let shown = self.shown_reader().map(Entity::entity_id);
-        let hidden_focused = self.tabs.iter().filter_map(|t| t.reader.as_ref()).any(|r| {
-            Some(r.entity_id()) != shown && r.read(cx).focus_handle(cx).contains_focused(window, cx)
-        });
+        let shown = self
+            .shown_reader()
+            .map(Entity::entity_id)
+            .or_else(|| self.shown_editor().map(Entity::entity_id));
+        let readers = self.tabs.iter().filter_map(|t| t.reader.as_ref());
+        let editors = self.tabs.iter().filter_map(|t| t.editor.as_ref());
+        let hidden_focused = readers
+            .map(|r| (r.entity_id(), r.read(cx).focus_handle(cx)))
+            .chain(editors.map(|e| (e.entity_id(), e.read(cx).focus_handle(cx))))
+            .any(|(id, focus)| Some(id) != shown && focus.contains_focused(window, cx));
         if hidden_focused || (shown.is_some() && self.focus.is_focused(window)) {
             self.focus_document(window, cx);
         }
@@ -511,6 +539,9 @@ impl Workspace {
 
     fn tabs_changed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.ensure_reader(self.active, window, cx);
+        if self.mode() == ViewMode::Edit {
+            self.ensure_editor(self.active, cx);
+        }
         window.set_window_title(&self.active_tab().label.window_title());
         if let Some(files) = self.files.clone() {
             self.ensure_vault(cx);
@@ -563,6 +594,10 @@ impl Workspace {
         for reader in self.tabs.iter().filter_map(|t| t.reader.clone()) {
             let index = index.clone();
             reader.update(cx, |r, cx| r.set_index(Some(index), cx));
+        }
+        for editor in self.tabs.iter().filter_map(|t| t.editor.clone()) {
+            let index = index.clone();
+            editor.update(cx, |e, cx| e.set_index(Some(index), cx));
         }
     }
 
@@ -887,6 +922,10 @@ impl Workspace {
             return;
         };
         let same = tab.path.as_deref() == Some(path.as_path());
+        if !same {
+            // Not saved yet (see `Tab::editor`): the edits go with the file.
+            tab.editor = None;
+        }
         tab.label = FileLabel::new(Some(&path));
         tab.path = Some(path.clone());
         tab.position = None;
@@ -907,6 +946,12 @@ impl Workspace {
             self.session_changed(cx);
             cx.notify();
         }
+    }
+
+    /// Whether the sidebar and the right panel are shown.
+    #[cfg(test)]
+    pub(crate) fn panels_open(&self) -> (bool, bool) {
+        (self.sidebar_open, self.panel_open)
     }
 
     /// The state of the window's vault, once it exists.
@@ -951,7 +996,11 @@ impl Workspace {
         let Some(to) = step(&mut self.tabs[index].history, current) else {
             return false;
         };
+        let from = self.tabs[index].mode;
         self.tabs[index].mode = to.mode;
+        if self.tabs[index].path.as_deref() == Some(to.path.as_path()) {
+            self.mode_changed(from, cx);
+        }
         if to.mode != ViewMode::Edit {
             // The Reading view that shows the target takes the note.
             follow::begin(cause);
@@ -1060,7 +1109,9 @@ impl Workspace {
     }
 
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<'_, Self>) {
+        let from = self.mode();
         self.tabs[self.active].mode = mode;
+        self.mode_changed(from, cx);
         self.session_changed(cx);
         cx.notify();
     }

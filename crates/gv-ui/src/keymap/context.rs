@@ -20,7 +20,7 @@ use gv_settings::keymap::ContextExpr;
 
 /// The GPUI key context of each model context name.
 pub const KEY_CONTEXTS: &[(&str, &str)] = &[
-    ("editor", "Editor"),
+    ("editor", crate::editor::KEY_CONTEXT),
     ("reader", crate::reader::KEY_CONTEXT),
     ("tree", "FileTree"),
     ("outline", "Outline"),

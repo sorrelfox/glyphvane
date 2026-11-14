@@ -1,0 +1,959 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Glyphvane contributors
+
+//! The Source view's element: one element for the whole view.
+//!
+//! - **Prepaint** asks the view for a [`Frame`]: it brings the caret into
+//!   view when asked to, clamps the scroll, highlights and shapes the
+//!   visible rows, and records what to draw: the code fill and the current
+//!   line under everything, selections, the rows, link underlines, the
+//!   composition underline and the carets inside the text column, the line
+//!   numbers in the gutter and the scrollbar thumb.
+//! - **Paint** draws the frame, registers the input handler for the focused
+//!   view and the pointer handlers (presses, drags, the wheel and the
+//!   scrollbar thumb).
+
+use std::ops::Range;
+use std::panic;
+
+use gpui::{
+    App, Bounds, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollEvent, ShapedLine, SharedString, Style,
+    TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
+};
+use gv_editor::SelectionSpec;
+use gv_text::TextSnapshot;
+use unicode_segmentation::UnicodeSegmentation as _;
+
+use super::highlight::Underline;
+use super::input::Columns;
+use super::rows::RowEnv;
+use super::{EditorView, LINE, Top};
+use crate::appearance::Appearance;
+use crate::inline::{Palette, Token};
+use crate::metrics::size::{
+    CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, document, editor as editor_size,
+};
+use crate::metrics::spacing::{inline, scrollbar};
+use crate::metrics::{HAIRLINE, radius, text};
+
+/// Pointer travel (px) after which an Alt-press selects a column instead of
+/// adding a caret.
+const DRAG_THRESHOLD: f32 = 3.0;
+
+/// What the left button is doing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum Press {
+    #[default]
+    None,
+    /// Selecting: `tail` is what the press selected (a caret, a word or a
+    /// line), which a drag extends by `unit`.
+    Select { tail: Range<usize>, unit: Unit },
+    /// Alt-press: a caret on release, a column selection when dragged.
+    Column {
+        tail: usize,
+        origin: Point<Pixels>,
+        moved: bool,
+    },
+    /// Dragging the scrollbar thumb, held `grab` px below its top.
+    Thumb { grab: f32 },
+}
+
+/// What a selecting drag extends by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Char,
+    Word,
+    Line,
+}
+
+/// The scrollbar of the last frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Scrollbar {
+    pub thumb: Bounds<Pixels>,
+    /// Where presses go to the scrollbar.
+    pub track: Bounds<Pixels>,
+}
+
+/// An underline of a link target or of the composition.
+#[derive(Debug, Clone)]
+pub(crate) enum Line {
+    /// A wavy or solid line.
+    Plain {
+        origin: Point<Pixels>,
+        width: Pixels,
+        color: Hsla,
+        wavy: bool,
+    },
+    /// Dashes or dots: pieces `on` thicknesses long, `off` apart.
+    Broken {
+        bounds: Bounds<Pixels>,
+        on: f32,
+        off: f32,
+        color: Hsla,
+    },
+}
+
+/// What the last frame drew, for tests.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Probe {
+    /// The lines laid out.
+    pub lines: Range<usize>,
+    /// Lines with the current-line fill.
+    pub current: Vec<usize>,
+    /// Lines with the code fill.
+    pub code: Vec<usize>,
+    /// Each line number and its colour.
+    pub numbers: Vec<(usize, Token)>,
+    pub carets: Vec<Bounds<Pixels>>,
+    pub selections: Vec<Bounds<Pixels>>,
+    /// Composition underlines: start, width.
+    pub marked: Vec<(Point<Pixels>, Pixels)>,
+    pub columns: Option<Columns>,
+}
+
+/// Everything one paint draws.
+pub(crate) struct Frame {
+    focus: FocusHandle,
+    /// Code fill and current line, under everything.
+    under: Vec<PaintQuad>,
+    /// Inside the text column.
+    selections: Vec<PaintQuad>,
+    rows: Vec<(ShapedLine, Point<Pixels>)>,
+    lines: Vec<Line>,
+    carets: Vec<PaintQuad>,
+    /// The text column, where rows are clipped.
+    text_clip: Option<Bounds<Pixels>>,
+    numbers: Vec<(ShapedLine, Point<Pixels>)>,
+    thumb: Option<PaintQuad>,
+    /// Where the pointer is an I-beam.
+    text_area: Option<Bounds<Pixels>>,
+}
+
+impl Frame {
+    fn new(focus: FocusHandle) -> Self {
+        Self {
+            focus,
+            under: Vec::new(),
+            selections: Vec::new(),
+            rows: Vec::new(),
+            lines: Vec::new(),
+            carets: Vec::new(),
+            text_clip: None,
+            numbers: Vec::new(),
+            thumb: None,
+            text_area: None,
+        }
+    }
+}
+
+fn bounds_of(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+    Bounds::new(point(px(x), px(y)), size(px(w.max(0.0)), px(h.max(0.0))))
+}
+
+/// The baseline of a row whose top is `top`, as `ShapedLine::paint`
+/// centres it.
+fn baseline(line: &ShapedLine, top: f32) -> f32 {
+    let (ascent, descent) = (f32::from(line.ascent), f32::from(line.descent));
+    top + (LINE - ascent - descent) / 2.0 + ascent
+}
+
+/// The total height of the content: the rows between the column's top
+/// padding and as much again below.
+fn content_height(lines: usize) -> f64 {
+    2.0 * f64::from(document::PAD_TOP) + lines as f64 * f64::from(LINE)
+}
+
+impl EditorView {
+    /// Lays out one frame in `bounds`.
+    pub(crate) fn frame(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Frame {
+        self.bounds = Some(bounds);
+        let mut frame = Frame::new(self.focus.clone());
+        let theme = Appearance::current_id(cx);
+        let palette = Palette::of(theme);
+        let focused = self.focus.is_focused(window);
+        let (_, space) = self.advances(window);
+        let Some(columns) = self.columns(Some(bounds), window) else {
+            return frame;
+        };
+        let Some(lines) = self.doc.as_ref().map(|d| d.editor.text().line_count()) else {
+            return frame;
+        };
+        let viewport = f32::from(bounds.size.height);
+
+        // Scrolling: a line asked for at the top, the caret into view, then
+        // the limits.
+        if let Some(top) = self.pending_top.take()
+            && let Some(doc) = &self.doc
+        {
+            let text = doc.editor.text();
+            let line = match top {
+                Top::Offset(offset) => text.line_of_offset(offset.min(text.len())).unwrap_or(0),
+                Top::Line(line) => line.min(text.line_count().saturating_sub(1)),
+            };
+            // The row's top at the top edge (the column's top padding
+            // scrolls away).
+            self.scroll_y = if line == 0 {
+                0.0
+            } else {
+                f64::from(document::PAD_TOP) + line as f64 * f64::from(LINE)
+            };
+        }
+        if std::mem::take(&mut self.autoscroll) {
+            self.scroll_into_view(&columns, viewport, space, window, cx);
+        }
+        let max_y = (content_height(lines) - f64::from(viewport)).max(0.0);
+        self.scroll_y = self.scroll_y.clamp(0.0, max_y);
+        let max_x = (self.widest + CARET_WIDTH + 4.0 * space - columns.text_w).max(0.0);
+        self.scroll_x = self.scroll_x.clamp(0.0, max_x);
+
+        let scroll_y = self.scroll_y;
+        let pad = f64::from(document::PAD_TOP);
+        let first = ((scroll_y - pad) / f64::from(LINE)).floor().max(0.0) as usize;
+        let last = ((((scroll_y - pad + f64::from(viewport)) / f64::from(LINE)).ceil()).max(0.0)
+            as usize
+            + 1)
+        .min(lines);
+        let origin_x = self.text_origin_x(&columns);
+        let whitespace = self.show_whitespace;
+        let fonts = self.fonts.clone();
+        let Self { doc, links, .. } = self;
+        let Some(doc) = doc.as_mut() else {
+            return frame;
+        };
+        doc.highlights.ensure(&doc.syntax, links, first..last);
+
+        let text = doc.editor.text().clone();
+        let visible = text.line_start(first).unwrap_or(0)
+            ..text
+                .line_range(last.saturating_sub(1).max(first))
+                .map_or(text.len(), |r| r.end);
+        let selections: Vec<(Range<usize>, usize)> = {
+            let all = doc.editor.selections().as_slice();
+            let from = all.partition_point(|s| s.end() < visible.start);
+            all[from..]
+                .iter()
+                .take_while(|s| s.start() <= visible.end)
+                .map(|s| (s.range(), s.head()))
+                .collect()
+        };
+        let marked = doc.editor.marked_ranges();
+        let env = RowEnv {
+            text: &text,
+            fonts: &fonts,
+            palette: &palette,
+            theme,
+            whitespace,
+            tab_size: doc.editor.display().tab_size().get(),
+        };
+        let color = |t: Token| palette.color(t);
+        let number_font = fonts.regular().clone();
+        let mut widest = 0.0f32;
+        #[cfg(test)]
+        let mut probe = Probe {
+            lines: first..last,
+            columns: Some(columns),
+            ..Probe::default()
+        };
+
+        for line in first..last {
+            let top = columns.top + (line as f64 * f64::from(LINE) - scroll_y) as f32;
+            let Ok(range) = text.line_range(line) else {
+                continue;
+            };
+            let has_terminator = text.line_terminator(line).ok().flatten().is_some();
+            let Some(row) = doc.rows.row(line, doc.highlights.get(line), env, window) else {
+                continue;
+            };
+            widest = widest.max(row.content_width());
+            let local = |offset: usize| offset.saturating_sub(range.start).min(range.len());
+            let on_line = |offset: usize| range.start <= offset && offset <= range.end;
+
+            if row.code {
+                #[cfg(test)]
+                probe.code.push(line);
+                frame.under.push(fill(
+                    bounds_of(columns.text_x, top, columns.text_w, LINE),
+                    color(Token::SurfaceSunken),
+                ));
+            }
+            let current = selections
+                .iter()
+                .any(|(r, head)| r.is_empty() && on_line(*head));
+            if current {
+                #[cfg(test)]
+                probe.current.push(line);
+                frame.under.push(fill(
+                    bounds_of(
+                        columns.gutter_left(),
+                        top,
+                        columns.text_right() - columns.gutter_left(),
+                        LINE,
+                    ),
+                    color(Token::StateHover),
+                ));
+            }
+
+            // Selections, past the line end when they hold its terminator.
+            let mut selected: Vec<Range<usize>> = Vec::new();
+            for (r, _) in selections.iter().filter(|(r, _)| !r.is_empty()) {
+                if r.end < range.start || r.start > range.end {
+                    continue;
+                }
+                let (a, b) = (local(r.start.max(range.start)), local(r.end.min(range.end)));
+                let past_end = r.end > range.end && has_terminator;
+                if a == b && !past_end {
+                    continue;
+                }
+                let x0 = row.x(a);
+                let x1 = row.x(b) + if past_end { space } else { 0.0 };
+                let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                #[cfg(test)]
+                probe.selections.push(rect);
+                frame.selections.push(fill(rect, color(Token::Selection)));
+                if a < b {
+                    selected.push(a..b);
+                }
+            }
+            let shaped = if selected.is_empty() {
+                row.shaped.clone()
+            } else {
+                row.with_selection(&selected, &fonts, &palette, window)
+            };
+            let base = baseline(&shaped, top);
+
+            // Link underlines.
+            for d in &row.decorations {
+                let x0 = f32::from(shaped.x_for_index(d.range.start));
+                let x1 = f32::from(shaped.x_for_index(d.range.end));
+                let y = base + inline::UNDERLINE_OFFSET;
+                let c = color(d.color);
+                frame.lines.push(match d.kind {
+                    Underline::Wavy => Line::Plain {
+                        origin: point(px(origin_x + x0), px(y)),
+                        width: px(x1 - x0),
+                        color: c,
+                        wavy: true,
+                    },
+                    Underline::Dashed => Line::Broken {
+                        bounds: bounds_of(origin_x + x0, y, x1 - x0, HAIRLINE),
+                        on: 3.0,
+                        off: 2.0,
+                        color: c,
+                    },
+                    Underline::Dotted => Line::Broken {
+                        bounds: bounds_of(origin_x + x0, y, x1 - x0, HAIRLINE),
+                        on: 1.0,
+                        off: 1.0,
+                        color: c,
+                    },
+                });
+            }
+            // The composition: a thin underline.
+            for m in marked
+                .iter()
+                .filter(|m| m.start <= range.end && m.end >= range.start)
+            {
+                let (a, b) = (local(m.start), local(m.end));
+                let (x0, x1) = (row.x(a), row.x(b));
+                let origin = point(px(origin_x + x0), px(base + inline::UNDERLINE_OFFSET));
+                let width = px((x1 - x0).max(CARET_WIDTH));
+                #[cfg(test)]
+                probe.marked.push((origin, width));
+                frame.lines.push(Line::Plain {
+                    origin,
+                    width,
+                    color: color(Token::TextPrimary),
+                    wavy: false,
+                });
+            }
+            // Carets.
+            let mut has_caret = false;
+            for (_, head) in selections.iter().filter(|(_, h)| on_line(*h)) {
+                has_caret = true;
+                if !focused {
+                    continue;
+                }
+                let x = origin_x + row.x(local(*head));
+                let y = top + (LINE - editor_size::CARET_HEIGHT) / 2.0;
+                let rect = bounds_of(x, y, CARET_WIDTH, editor_size::CARET_HEIGHT);
+                #[cfg(test)]
+                probe.carets.push(rect);
+                frame.carets.push(fill(rect, color(Token::AccentDefault)));
+            }
+            frame.rows.push((shaped, point(px(origin_x), px(top))));
+
+            // The line number.
+            let number_token = if has_caret {
+                Token::TextPrimary
+            } else {
+                Token::TextTertiary
+            };
+            #[cfg(test)]
+            probe.numbers.push((line, number_token));
+            let number_color = color(number_token);
+            let label = (line + 1).to_string();
+            let run = TextRun {
+                len: label.len(),
+                font: number_font.clone(),
+                color: number_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let number = window.text_system().shape_line(
+                SharedString::from(label),
+                px(text::EDITOR_LINE_NUMBER.size),
+                &[run],
+                None,
+            );
+            let x = columns.numbers_right - f32::from(number.width);
+            frame.numbers.push((number, point(px(x), px(top))));
+        }
+        doc.rows.end_frame();
+        self.widest = self.widest.max(widest);
+        #[cfg(test)]
+        {
+            self.probe = probe;
+        }
+
+        frame.text_clip = Some(bounds_of(
+            columns.text_x,
+            f32::from(bounds.top()),
+            columns.text_w + CARET_WIDTH,
+            viewport,
+        ));
+        let zone = 2.0 * scrollbar::INSET_X + SCROLLBAR_THUMB;
+        frame.text_area = Some(bounds_of(
+            columns.gutter_left(),
+            f32::from(bounds.top()),
+            f32::from(bounds.right()) - zone - columns.gutter_left(),
+            viewport,
+        ));
+
+        // The scrollbar: a thumb, no track.
+        self.scrollbar = None;
+        let content = content_height(lines);
+        if content > f64::from(viewport) {
+            let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
+            let track_h = viewport - 2.0 * scrollbar::INSET_Y;
+            let thumb_h = (track_h * viewport / content as f32)
+                .max(SCROLLBAR_MIN_THUMB)
+                .min(track_h);
+            let ratio = if max_y > 0.0 {
+                (self.scroll_y / max_y) as f32
+            } else {
+                0.0
+            };
+            let right = f32::from(bounds.right());
+            let thumb = bounds_of(
+                right - scrollbar::INSET_X - SCROLLBAR_THUMB,
+                track_top + (track_h - thumb_h) * ratio,
+                SCROLLBAR_THUMB,
+                thumb_h,
+            );
+            frame.thumb = Some(
+                fill(thumb, palette.color(Token::BorderStrong)).corner_radii(px(radius::SCROLLBAR)),
+            );
+            self.scrollbar = Some(Scrollbar {
+                thumb,
+                track: bounds_of(right - zone, track_top, zone, track_h),
+            });
+        }
+        frame
+    }
+
+    /// Scrolls so that the primary caret is in view, with a row above and
+    /// below it and a few characters beside it.
+    fn scroll_into_view(
+        &mut self,
+        columns: &Columns,
+        viewport: f32,
+        space: f32,
+        window: &Window,
+        cx: &App,
+    ) {
+        let Some((line, column, lines)) = self.doc.as_ref().and_then(|doc| {
+            let text = doc.editor.text();
+            let head = doc.editor.selections().primary().head();
+            let line = text.line_of_offset(head).ok()?;
+            Some((line, head - text.line_start(line).ok()?, text.line_count()))
+        }) else {
+            return;
+        };
+        let pad = f64::from(document::PAD_TOP);
+        let row = f64::from(LINE);
+        let top = pad + line as f64 * row;
+        let wanted_top = if line == 0 { 0.0 } else { top - row };
+        let wanted_bottom = if line + 1 >= lines {
+            content_height(lines)
+        } else {
+            top + 2.0 * row
+        };
+        if wanted_top < self.scroll_y {
+            self.scroll_y = wanted_top;
+        } else if wanted_bottom > self.scroll_y + f64::from(viewport) {
+            self.scroll_y = wanted_bottom - f64::from(viewport);
+        }
+        let Some(row) = self.row(line, window, cx) else {
+            return;
+        };
+        let x = row.x(column);
+        let margin = 4.0 * space;
+        if x - margin < self.scroll_x {
+            self.scroll_x = (x - margin).max(0.0);
+        } else if x + CARET_WIDTH + margin > self.scroll_x + columns.text_w {
+            self.scroll_x = x + CARET_WIDTH + margin - columns.text_w;
+        }
+        self.widest = self.widest.max(x);
+    }
+
+    // ----- the pointer -----------------------------------------------------------
+
+    fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.focus.focus(window, cx);
+        if let Some(bar) = self.scrollbar
+            && bar.track.contains(&e.position)
+        {
+            let grab = if bar.thumb.contains(&e.position) {
+                f32::from(e.position.y - bar.thumb.top())
+            } else {
+                f32::from(bar.thumb.size.height) / 2.0
+            };
+            self.press = Press::Thumb { grab };
+            self.drag_thumb(e.position);
+            cx.notify();
+            return;
+        }
+        let Some(offset) = self.offset_at(e.position, window, cx) else {
+            return;
+        };
+        let in_gutter = self
+            .columns(None, window)
+            .is_some_and(|c| f32::from(e.position.x) < c.text_x - editor_size::GUTTER_GAP / 2.0);
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let editor = &mut doc.editor;
+        if e.modifiers.alt && !e.modifiers.shift {
+            editor.unmark_text();
+            self.press = Press::Column {
+                tail: offset,
+                origin: e.position,
+                moved: false,
+            };
+            cx.notify();
+            return;
+        }
+        let clicks = if in_gutter { 3 } else { e.click_count };
+        let text = editor.text().clone();
+        self.press = match clicks {
+            0 | 1 if e.modifiers.shift => {
+                let tail = editor.selections().primary().tail();
+                editor.set_selections(&[SelectionSpec::new(tail, offset)], 0);
+                Press::Select {
+                    tail: tail..tail,
+                    unit: Unit::Char,
+                }
+            }
+            0 | 1 => {
+                editor.set_cursor(offset);
+                Press::Select {
+                    tail: offset..offset,
+                    unit: Unit::Char,
+                }
+            }
+            2 => {
+                let word = word_at(&text, offset);
+                editor.select_ranges([word.clone()]);
+                Press::Select {
+                    tail: word,
+                    unit: Unit::Word,
+                }
+            }
+            _ => {
+                let line = line_at(&text, offset);
+                editor.select_ranges([line.clone()]);
+                Press::Select {
+                    tail: line,
+                    unit: Unit::Line,
+                }
+            }
+        };
+        self.changed(window, cx);
+    }
+
+    fn mouse_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if !e.dragging() {
+            return;
+        }
+        match self.press.clone() {
+            Press::None => {}
+            Press::Thumb { .. } => {
+                self.drag_thumb(e.position);
+                cx.notify();
+            }
+            Press::Select { tail, unit } => {
+                let Some(offset) = self.offset_at(e.position, window, cx) else {
+                    return;
+                };
+                let Some(doc) = self.doc.as_mut() else {
+                    return;
+                };
+                let text = doc.editor.text().clone();
+                let (from, to) = match unit {
+                    Unit::Char => (tail.start, offset),
+                    Unit::Word => {
+                        let word = word_at(&text, offset);
+                        if offset < tail.start {
+                            (tail.end, word.start)
+                        } else {
+                            (tail.start, word.end.max(tail.end))
+                        }
+                    }
+                    Unit::Line => {
+                        let line = line_at(&text, offset);
+                        if offset < tail.start {
+                            (tail.end, line.start)
+                        } else {
+                            (tail.start, line.end.max(tail.end))
+                        }
+                    }
+                };
+                doc.editor
+                    .set_selections(&[SelectionSpec::new(from, to)], 0);
+                self.changed(window, cx);
+            }
+            Press::Column {
+                tail,
+                origin,
+                moved,
+            } => {
+                let far = (e.position.x - origin.x).abs() > px(DRAG_THRESHOLD)
+                    || (e.position.y - origin.y).abs() > px(DRAG_THRESHOLD);
+                if !(moved || far) {
+                    return;
+                }
+                self.press = Press::Column {
+                    tail,
+                    origin,
+                    moved: true,
+                };
+                let Some(offset) = self.offset_at(e.position, window, cx) else {
+                    return;
+                };
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.editor.select_columns(tail, offset);
+                }
+                self.changed(window, cx);
+            }
+        }
+    }
+
+    fn mouse_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        match std::mem::take(&mut self.press) {
+            Press::Column {
+                tail, moved: false, ..
+            } => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.editor.add_cursor(tail);
+                }
+                self.changed(window, cx);
+            }
+            Press::None => {}
+            _ => cx.notify(),
+        }
+    }
+
+    fn scroll_wheel(&mut self, e: &ScrollEvent, cx: &mut Context<'_, Self>) {
+        let delta = e.delta.pixel_delta(px(LINE));
+        let (mut dx, mut dy) = (f32::from(delta.x), f32::from(delta.y));
+        if e.modifiers.shift && dx == 0.0 {
+            (dx, dy) = (dy, 0.0);
+        }
+        self.scroll_y -= f64::from(dy);
+        self.scroll_x -= dx;
+        cx.notify();
+    }
+
+    /// Moves the thumb so that the point it is held at is under `position`.
+    fn drag_thumb(&mut self, position: Point<Pixels>) {
+        let (Some(bar), Some(bounds), Some(lines)) = (
+            self.scrollbar,
+            self.bounds,
+            self.doc.as_ref().map(|d| d.editor.text().line_count()),
+        ) else {
+            return;
+        };
+        let Press::Thumb { grab } = self.press else {
+            return;
+        };
+        let room = f32::from(bar.track.size.height - bar.thumb.size.height);
+        if room <= 0.0 {
+            return;
+        }
+        let top = f32::from(position.y - bar.track.top()) - grab;
+        let ratio = f64::from((top / room).clamp(0.0, 1.0));
+        let max_y = (content_height(lines) - f64::from(f32::from(bounds.size.height))).max(0.0);
+        self.scroll_y = ratio * max_y;
+    }
+}
+
+/// The word, run of punctuation or run of spaces at `offset` (UAX #29
+/// word boundaries within the line); at the end of a line, the segment
+/// before it.
+pub(crate) fn word_at(text: &TextSnapshot, offset: usize) -> Range<usize> {
+    let Ok(line) = text.line_of_offset(offset) else {
+        return offset..offset;
+    };
+    let Ok(range) = text.line_range(line) else {
+        return offset..offset;
+    };
+    let content = text.text_for_range(range.clone()).unwrap_or_default();
+    let column = offset.saturating_sub(range.start);
+    let mut last = None;
+    for (at, segment) in content.split_word_bound_indices() {
+        let end = at + segment.len();
+        if at <= column && column < end {
+            return range.start + at..range.start + end;
+        }
+        last = Some(at..end);
+    }
+    match last {
+        Some(r) if column >= content.len() => range.start + r.start..range.start + r.end,
+        _ => offset..offset,
+    }
+}
+
+/// The line at `offset` with its terminator.
+pub(crate) fn line_at(text: &TextSnapshot, offset: usize) -> Range<usize> {
+    text.line_of_offset(offset)
+        .ok()
+        .and_then(|line| text.line_range_with_terminator(line).ok())
+        .unwrap_or(offset..offset)
+}
+
+/// Paints a broken line across `bounds` (see [`Line::Broken`]).
+fn paint_broken(window: &mut Window, bounds: Bounds<Pixels>, on: f32, off: f32, color: Hsla) {
+    let thickness = f32::from(bounds.size.height).max(HAIRLINE);
+    let (on, step) = (on * thickness, (on + off) * thickness);
+    let width = f32::from(bounds.size.width);
+    let mut x = 0.0;
+    while x + thickness <= width + 0.01 {
+        let len = on.min(width - x).max(thickness);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x + px(x), bounds.origin.y),
+                size(px(len), px(thickness)),
+            ),
+            color,
+        ));
+        x += step;
+    }
+}
+
+/// The element of an [`EditorView`].
+pub(crate) struct EditorElement {
+    view: Entity<EditorView>,
+}
+
+impl EditorElement {
+    pub fn new(view: Entity<EditorView>) -> Self {
+        Self { view }
+    }
+}
+
+impl IntoElement for EditorElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+pub(crate) struct Prepaint {
+    hitbox: Hitbox,
+    text_hitbox: Option<Hitbox>,
+    frame: Frame,
+}
+
+impl Element for EditorElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Prepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepaint {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let frame = self
+            .view
+            .update(cx, |view, cx| view.frame(bounds, window, cx));
+        let text_hitbox = frame
+            .text_area
+            .map(|area| window.insert_hitbox(area, HitboxBehavior::Normal));
+        Prepaint {
+            hitbox,
+            text_hitbox,
+            frame,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        pre: &mut Prepaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let frame = &mut pre.frame;
+        window.handle_input(
+            &frame.focus,
+            ElementInputHandler::new(bounds, self.view.clone()),
+            cx,
+        );
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for quad in frame.under.drain(..) {
+                window.paint_quad(quad);
+            }
+            let clip = frame.text_clip.unwrap_or(bounds);
+            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                for quad in frame.selections.drain(..) {
+                    window.paint_quad(quad);
+                }
+                for (line, origin) in &frame.rows {
+                    // A line that cannot be painted (a full atlas) is skipped.
+                    let _ = line.paint(*origin, px(LINE), TextAlign::Left, None, window, cx);
+                }
+                for line in frame.lines.drain(..) {
+                    match line {
+                        Line::Plain {
+                            origin,
+                            width,
+                            color,
+                            wavy,
+                        } => window.paint_underline(
+                            origin,
+                            width,
+                            &UnderlineStyle {
+                                thickness: px(HAIRLINE),
+                                color: Some(color),
+                                wavy,
+                            },
+                        ),
+                        Line::Broken {
+                            bounds,
+                            on,
+                            off,
+                            color,
+                        } => paint_broken(window, bounds, on, off, color),
+                    }
+                }
+                for quad in frame.carets.drain(..) {
+                    window.paint_quad(quad);
+                }
+            });
+            for (number, origin) in &frame.numbers {
+                let _ = number.paint(*origin, px(LINE), TextAlign::Left, None, window, cx);
+            }
+            if let Some(thumb) = frame.thumb.take() {
+                window.paint_quad(thumb);
+            }
+        });
+        if let Some(text_hitbox) = &pre.text_hitbox {
+            window.set_cursor_style(CursorStyle::IBeam, text_hitbox);
+        }
+        self.register_handlers(&pre.hitbox, window);
+    }
+}
+
+impl EditorElement {
+    fn register_handlers(&self, hitbox: &Hitbox, window: &mut Window) {
+        {
+            let view = self.view.clone();
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || e.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                view.update(cx, |view, cx| view.mouse_down(e, window, cx));
+                cx.stop_propagation();
+            });
+        }
+        {
+            let view = self.view.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let pressed = view.read(cx).press != Press::None;
+                if pressed {
+                    view.update(cx, |view, cx| view.mouse_move(e, window, cx));
+                }
+            });
+        }
+        {
+            let view = self.view.clone();
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
+                    return;
+                }
+                let pressed = view.read(cx).press != Press::None;
+                if pressed {
+                    view.update(cx, |view, cx| view.mouse_up(e, window, cx));
+                }
+            });
+        }
+        {
+            let view = self.view.clone();
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
+                    return;
+                }
+                view.update(cx, |view, cx| view.scroll_wheel(e, cx));
+                cx.stop_propagation();
+            });
+        }
+    }
+}

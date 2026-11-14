@@ -142,6 +142,7 @@ const BUILTIN: &[Row] = &[
     ("editor.shrink_selection", "Shrink selection", Category::Editing, Some(EDITOR),
         &[("shift-alt-left", NOT_MAC), ("ctrl-shift-cmd-left", MAC)]),
     ("editor.toggle_comment", "Toggle comment", Category::Editing, Some(EDITOR), &[("secondary-/", ALL)]),
+    ("editor.toggle_whitespace", "Show whitespace", Category::Editing, Some(EDITOR), &[]),
 
     // Formatting
     ("editor.bold", "Bold", Category::Formatting, Some(EDITOR), &[("secondary-b", ALL)]),

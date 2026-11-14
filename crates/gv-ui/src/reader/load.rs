@@ -86,17 +86,53 @@ pub(crate) fn load(
     let text: Arc<str> = Arc::from(decoded.text);
     timings.decode = t.elapsed();
     mark(trace.as_deref(), format_args!("decoded"));
+    Ok(build(
+        path,
+        text,
+        lossy,
+        timings,
+        trace.as_deref(),
+        links,
+        options,
+    ))
+}
 
+/// Builds the document at `path` from text that is already decoded: the
+/// editor's text, handed to the Reading view when the tab returns to
+/// Preview before the text is saved.
+pub(crate) fn load_text(
+    path: &Path,
+    text: Arc<str>,
+    links: &Resolver,
+    options: RenderOptions,
+) -> Loaded {
+    let timings = Timings {
+        bytes: text.len(),
+        ..Timings::default()
+    };
+    build(path, text, None, timings, None, links, options)
+}
+
+/// Parses `text` and builds its model and render tree.
+fn build(
+    path: &Path,
+    text: Arc<str>,
+    lossy: Option<String>,
+    mut timings: Timings,
+    trace: Option<&str>,
+    links: &Resolver,
+    options: RenderOptions,
+) -> Loaded {
     let t = Instant::now();
     let parse_options = ParseOptions::for_profile(PROFILE.as_str()).unwrap_or_default();
     let syntax = gv_syntax::parse_with(&*text, parse_options);
     timings.parse = t.elapsed();
-    mark(trace.as_deref(), format_args!("parsed"));
+    mark(trace, format_args!("parsed"));
 
     let t = Instant::now();
     let model = DocModel::build(&syntax, &*text);
     timings.model = t.elapsed();
-    mark(trace.as_deref(), format_args!("modelled"));
+    mark(trace, format_args!("modelled"));
 
     let t = Instant::now();
     let sources = Sources {
@@ -105,9 +141,9 @@ pub(crate) fn load(
     };
     let tree = RenderTree::build(&syntax, &model, &*text, options, sources);
     timings.tree = t.elapsed();
-    mark(trace.as_deref(), format_args!("render tree built"));
+    mark(trace, format_args!("render tree built"));
 
-    Ok(Loaded {
+    Loaded {
         path: path.to_path_buf(),
         text,
         syntax,
@@ -115,7 +151,7 @@ pub(crate) fn load(
         tree: Arc::new(tree),
         lossy,
         timings,
-    })
+    }
 }
 
 /// A start-up trace milestone of loading the document `name`.

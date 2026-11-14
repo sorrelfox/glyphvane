@@ -3160,6 +3160,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-sum-tree",
+ "gv-editor",
  "gv-inline",
  "gv-model",
  "gv-render-tree",

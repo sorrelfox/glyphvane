@@ -76,13 +76,12 @@ use crate::metrics::text;
 use crate::theme::Theme;
 use bench::Bench;
 use element::ReaderElement;
-use links::Resolver;
 use load::Loaded;
 use state::{Selection, State};
 
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
-pub(crate) use links::{Navigation, PROFILE, navigation};
+pub(crate) use links::{Navigation, PROFILE, Resolver, navigation};
 
 /// Copy the selection as plain text (`editor.copy`) or as Markdown
 /// (`editor.copy_as_markdown`), and select the whole document
@@ -280,6 +279,43 @@ impl Reader {
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { load::load(&path, &resolver, options) })
+                .await;
+            this.update(cx, |reader, cx| reader.finish_load(revision, result, cx))
+                .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Shows `text` as the document at `path`, scrolled to `target`: the
+    /// editor's text when the tab comes back to Preview before it is saved.
+    /// It is built like a loaded file, off the UI thread.
+    pub fn open_text(
+        &mut self,
+        path: PathBuf,
+        text: Arc<str>,
+        target: Option<ScrollTarget>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let revision = {
+            let mut st = self.state.borrow_mut();
+            st.revision += 1;
+            st.timing.opened = Some(Instant::now());
+            st.timing.first_content = None;
+            st.timing.navigation = None;
+            st.revision
+        };
+        self.path = Some(path.clone());
+        self.status = LoadStatus::Loading;
+        self.target = target;
+        self._refresh = None;
+        let resolver = Resolver::statuses(&path, self.index.as_ref());
+        self.statuses_from = index_key(self.index.as_ref());
+        let options = RenderOptions::commonmark();
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { Ok(load::load_text(&path, text, &resolver, options)) },
+                )
                 .await;
             this.update(cx, |reader, cx| reader.finish_load(revision, result, cx))
                 .ok();

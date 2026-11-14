@@ -1,0 +1,1025 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Glyphvane contributors
+
+//! Highlighting of the Source view from the syntax tree.
+//!
+//! Lines are highlighted on demand, a window around the rows on screen at a
+//! time, in three layers that each paint over the one before:
+//!
+//! 1. **Block tokens** ([`SyntaxTree::tokens`]): container prefixes, list
+//!    and quote markers, `#` runs, fences, setext underlines and thematic
+//!    breaks are markers; a fence's info string is a tag.
+//! 2. **Leaves** ([`walk_range`]): heading text is bold; fenced code lines
+//!    get the code fill, and shell code a small highlighter of its own;
+//!    HTML blocks and comments, link reference definitions, front matter
+//!    (YAML and TOML keys and values), callout markers on a quote's first
+//!    line, and pipe tables inside paragraphs (rows whose second line is a
+//!    delimiter row) are recognised here.
+//! 3. **Inlines** ([`SyntaxTree::inlines`]): emphasis, code spans, links,
+//!    images, autolinks and raw HTML. Link targets take the style of their
+//!    resolution status (SPEC § Link status, editor column).
+//!
+//! The colours are design tokens ([`Token`]); the table in SPEC § Editor
+//! decides which.
+
+use std::collections::HashMap;
+use std::ops::Range;
+use std::path::Path;
+use std::rc::Rc;
+
+use gv_render_tree::{LinkStatus, LinkStatusSource, LinkTarget};
+use gv_syntax::inline::{InlineKind, InlineNode, LinkKind as SyntaxLinkKind, LinkRef};
+use gv_syntax::{
+    BlockId, Container, ContainerKind, FrontMatterKind, Leaf, LeafKind, SyntaxTree, TokenKind,
+    Visitor, walk_range,
+};
+use gv_text::TextSnapshot;
+use gv_vault::PathIndex;
+
+use super::syntax::Syntax;
+use crate::inline::Token;
+use crate::reader::Resolver;
+
+/// How a link target is underlined (SPEC § Link status). Dotted and dashed
+/// lines take the text's colour, the wavy line `status.warning`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Underline {
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+/// The look of a run of text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Style {
+    pub color: Token,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: Option<Underline>,
+    pub strike: bool,
+}
+
+impl Style {
+    /// Body text.
+    pub const PLAIN: Style = Style {
+        color: Token::TextPrimary,
+        bold: false,
+        italic: false,
+        underline: None,
+        strike: false,
+    };
+
+    /// Markdown markers: `#`, `**`, `>`, `-`, pipes, backticks, brackets,
+    /// fences.
+    pub const MARKER: Style = Style::of(Token::TextTertiary);
+
+    /// Comments.
+    pub const COMMENT: Style = Style {
+        italic: true,
+        ..Style::of(Token::TextSecondary)
+    };
+
+    pub const fn of(color: Token) -> Style {
+        Style {
+            color,
+            ..Style::PLAIN
+        }
+    }
+}
+
+/// The highlighting of one line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LineStyle {
+    /// Runs over the line's content, in line-relative bytes, in order and
+    /// without gaps. Empty for an empty line.
+    pub runs: Vec<(Range<usize>, Style)>,
+    /// A fenced code line: drawn on the code fill.
+    pub code: bool,
+}
+
+impl LineStyle {
+    /// The style at line-relative byte `at`.
+    #[cfg(test)]
+    pub fn style_at(&self, at: usize) -> Style {
+        self.runs
+            .iter()
+            .find(|(r, _)| r.contains(&at))
+            .map_or(Style::PLAIN, |(_, s)| *s)
+    }
+
+    /// The runs clamped to a line of `len` bytes (when the text moved on
+    /// since the line was highlighted), extended plain to the end.
+    pub fn clamped(&self, len: usize) -> Vec<(Range<usize>, Style)> {
+        let mut out: Vec<(Range<usize>, Style)> = self
+            .runs
+            .iter()
+            .filter(|(r, _)| r.start < len)
+            .map(|(r, s)| (r.start..r.end.min(len), *s))
+            .collect();
+        let end = out.last().map_or(0, |(r, _)| r.end);
+        if end < len {
+            out.push((end..len, Style::PLAIN));
+        }
+        out
+    }
+}
+
+/// The resolution statuses of link targets, asked once per destination.
+pub(crate) struct LinkStatuses {
+    resolver: Option<Resolver>,
+    cache: HashMap<(gv_model::LinkKind, bool, String), LinkStatus>,
+    /// Bumped when the statuses may have changed (a new index).
+    generation: u64,
+}
+
+impl std::fmt::Debug for LinkStatuses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkStatuses")
+            .field("resolver", &self.resolver)
+            .field("cached", &self.cache.len())
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+impl LinkStatuses {
+    /// The statuses of the links of `file`, through the window's `index`
+    /// when there is one (see [`Resolver::statuses`]). Without a file every
+    /// link is pending.
+    pub fn new(file: Option<&Path>, index: Option<&PathIndex>) -> Self {
+        Self {
+            resolver: file.map(|f| Resolver::statuses(f, index)),
+            cache: HashMap::new(),
+            generation: 0,
+        }
+    }
+
+    /// Resolves again with a new index.
+    pub fn reset(&mut self, file: Option<&Path>, index: Option<&PathIndex>) {
+        self.resolver = file.map(|f| Resolver::statuses(f, index));
+        self.cache.clear();
+        self.generation += 1;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn status(&mut self, kind: gv_model::LinkKind, image: bool, destination: &str) -> LinkStatus {
+        let Some(resolver) = &self.resolver else {
+            return LinkStatus::Pending;
+        };
+        if let Some(status) = self.cache.get(&(kind, image, destination.to_owned())) {
+            return *status;
+        }
+        let status = resolver.status(&LinkTarget {
+            kind,
+            image,
+            destination,
+            title: None,
+            range: 0..0,
+            block: BlockId(0),
+        });
+        if self.cache.len() > 4096 {
+            self.cache.clear();
+        }
+        self.cache
+            .insert((kind, image, destination.to_owned()), status);
+        status
+    }
+}
+
+/// The style of a link target with `status` (SPEC § Link status, editor
+/// column).
+pub(crate) fn link_style(status: LinkStatus) -> Style {
+    let accent = Style::of(Token::AccentDefault);
+    match status {
+        LinkStatus::Exact | LinkStatus::Pending => accent,
+        LinkStatus::CaseFold | LinkStatus::Loose | LinkStatus::OutsideRoot => Style {
+            underline: Some(Underline::Dotted),
+            ..accent
+        },
+        LinkStatus::Ambiguous(_) => Style {
+            underline: Some(Underline::Wavy),
+            ..accent
+        },
+        LinkStatus::Unresolved => Style {
+            underline: Some(Underline::Dashed),
+            ..accent
+        },
+        LinkStatus::External => Style::of(Token::SyntaxUrl),
+        LinkStatus::Blocked => Style {
+            strike: true,
+            ..Style::of(Token::TextSecondary)
+        },
+    }
+}
+
+fn model_kind(kind: SyntaxLinkKind) -> gv_model::LinkKind {
+    match kind {
+        SyntaxLinkKind::Inline => gv_model::LinkKind::Inline,
+        SyntaxLinkKind::Full => gv_model::LinkKind::Full,
+        SyntaxLinkKind::Collapsed => gv_model::LinkKind::Collapsed,
+        SyntaxLinkKind::Shortcut => gv_model::LinkKind::Shortcut,
+        SyntaxLinkKind::UriAutolink => gv_model::LinkKind::UriAutolink,
+        SyntaxLinkKind::EmailAutolink => gv_model::LinkKind::EmailAutolink,
+    }
+}
+
+/// Highlighted lines, for one shown tree and one set of link statuses.
+#[derive(Debug, Default)]
+pub(crate) struct HighlightCache {
+    key: Option<(u64, u64)>,
+    lines: HashMap<usize, Rc<LineStyle>>,
+}
+
+/// Lines highlighted around the ones asked for, so that scrolling a few
+/// rows does not walk the tree again.
+const MARGIN: usize = 32;
+/// Cached lines kept at most.
+const MAX_LINES: usize = 20_000;
+
+impl HighlightCache {
+    /// Makes sure `lines` are highlighted with the shown tree of `syntax`.
+    pub fn ensure(&mut self, syntax: &Syntax, links: &mut LinkStatuses, lines: Range<usize>) {
+        let key = (syntax.generation(), links.generation());
+        if self.key != Some(key) || self.lines.len() > MAX_LINES {
+            self.key = Some(key);
+            self.lines.clear();
+        }
+        let missing: Vec<usize> = lines
+            .clone()
+            .filter(|l| !self.lines.contains_key(l))
+            .collect();
+        let (Some(&first), Some(&last)) = (missing.first(), missing.last()) else {
+            return;
+        };
+        let (tree, text) = syntax.shown();
+        let count = text.line_count();
+        let window = first.saturating_sub(MARGIN)..(last + 1 + MARGIN).min(count);
+        if window.is_empty() {
+            return;
+        }
+        for (line, style) in highlight(tree, text, window, links) {
+            self.lines.entry(line).or_insert_with(|| Rc::new(style));
+        }
+    }
+
+    /// The highlighting of `line`, once [`Self::ensure`]d.
+    pub fn get(&self, line: usize) -> Option<&Rc<LineStyle>> {
+        self.lines.get(&line)
+    }
+}
+
+/// Per-byte styles of a window of lines, painted layer by layer.
+struct Painter<'t> {
+    text: &'t TextSnapshot,
+    first: usize,
+    lines: Vec<LineBuf>,
+}
+
+struct LineBuf {
+    start: usize,
+    styles: Vec<Style>,
+    code: bool,
+}
+
+impl<'t> Painter<'t> {
+    fn new(text: &'t TextSnapshot, lines: Range<usize>) -> Self {
+        let bufs = lines
+            .clone()
+            .map(|line| {
+                let range = text.line_range(line).unwrap_or(0..0);
+                LineBuf {
+                    start: range.start,
+                    styles: vec![Style::PLAIN; range.len()],
+                    code: false,
+                }
+            })
+            .collect();
+        Self {
+            text,
+            first: lines.start,
+            lines: bufs,
+        }
+    }
+
+    /// The document bytes the window covers.
+    fn range(&self) -> Range<usize> {
+        match (self.lines.first(), self.lines.last()) {
+            (Some(a), Some(b)) => a.start..b.start + b.styles.len(),
+            _ => 0..0,
+        }
+    }
+
+    /// Applies `f` to the style of every byte of `range` in the window.
+    fn paint(&mut self, range: Range<usize>, f: impl Fn(&mut Style)) {
+        let window = self.range();
+        let start = range.start.max(window.start);
+        let end = range.end.min(window.end);
+        if start >= end {
+            return;
+        }
+        let Ok(mut line) = self.text.line_of_offset(start) else {
+            return;
+        };
+        while let Some(buf) = line
+            .checked_sub(self.first)
+            .and_then(|i| self.lines.get_mut(i))
+        {
+            if buf.start >= end {
+                break;
+            }
+            let a = start.saturating_sub(buf.start).min(buf.styles.len());
+            let b = (end - buf.start).min(buf.styles.len());
+            for style in &mut buf.styles[a..b] {
+                f(style);
+            }
+            line += 1;
+        }
+    }
+
+    fn set(&mut self, range: Range<usize>, style: Style) {
+        self.paint(range, |s| *s = style);
+    }
+
+    /// Marks the lines holding bytes `range` as fenced code.
+    fn code(&mut self, range: Range<usize>) {
+        let (Ok(first), Ok(last)) = (
+            self.text.line_of_offset(range.start),
+            self.text
+                .line_of_offset(range.end.saturating_sub(1).max(range.start)),
+        ) else {
+            return;
+        };
+        for line in first..=last {
+            if let Some(buf) = line
+                .checked_sub(self.first)
+                .and_then(|i| self.lines.get_mut(i))
+            {
+                buf.code = true;
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<(usize, LineStyle)> {
+        let first = self.first;
+        self.lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, buf)| {
+                let mut runs: Vec<(Range<usize>, Style)> = Vec::new();
+                for (at, style) in buf.styles.iter().enumerate() {
+                    match runs.last_mut() {
+                        Some((r, s)) if s == style => r.end = at + 1,
+                        _ => runs.push((at..at + 1, *style)),
+                    }
+                }
+                (
+                    first + i,
+                    LineStyle {
+                        runs,
+                        code: buf.code,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+/// Highlights `lines` of `text` with `tree` (the tree of `text`).
+pub(crate) fn highlight(
+    tree: &SyntaxTree,
+    text: &TextSnapshot,
+    lines: Range<usize>,
+    links: &mut LinkStatuses,
+) -> Vec<(usize, LineStyle)> {
+    let mut painter = Painter::new(text, lines);
+    let range = painter.range();
+    if tree.len() != text.len() {
+        return painter.finish();
+    }
+    // 1. Block tokens.
+    for (r, token) in tree.tokens(range.clone()) {
+        match token.kind {
+            TokenKind::ContainerPrefix
+            | TokenKind::QuoteMarker
+            | TokenKind::ListMarker
+            | TokenKind::Marker => painter.set(r, Style::MARKER),
+            TokenKind::InfoString => painter.set(r, Style::of(Token::SyntaxTag)),
+            TokenKind::Bom
+            | TokenKind::Whitespace
+            | TokenKind::CodeIndent
+            | TokenKind::Content
+            | TokenKind::LineEnding => {}
+        }
+    }
+    // 2 and 3. Leaves and their inlines.
+    let mut leaves = Leaves {
+        tree,
+        text,
+        painter: &mut painter,
+        links,
+        containers: Vec::new(),
+    };
+    walk_range(tree, range, &mut leaves);
+    painter.finish()
+}
+
+struct Leaves<'a, 't> {
+    tree: &'a SyntaxTree,
+    text: &'t TextSnapshot,
+    painter: &'a mut Painter<'t>,
+    links: &'a mut LinkStatuses,
+    containers: Vec<Container>,
+}
+
+impl Visitor for Leaves<'_, '_> {
+    fn enter(&mut self, container: &Container) {
+        self.containers.push(container.clone());
+    }
+
+    fn exit(&mut self, _: &Container) {
+        self.containers.pop();
+    }
+
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        match leaf.kind {
+            LeafKind::Heading { .. } => {
+                for line in leaf.lines {
+                    self.painter.paint(line.content.clone(), |s| s.bold = true);
+                }
+                self.inlines(leaf);
+            }
+            LeafKind::Paragraph => {
+                self.inlines(leaf);
+                self.table(leaf);
+                self.callout(leaf);
+            }
+            LeafKind::FencedCode => {
+                self.painter.code(leaf.range.clone());
+                let info = leaf
+                    .info
+                    .clone()
+                    .and_then(|r| self.text.text_for_range(r).ok())
+                    .unwrap_or_default();
+                let language = info.split_whitespace().next().unwrap_or_default();
+                if is_shell(language) {
+                    for line in leaf.lines {
+                        self.lexed(line.content.clone(), shell_line);
+                    }
+                }
+            }
+            LeafKind::IndentedCode | LeafKind::ThematicBreak => {}
+            LeafKind::Html { kind } => {
+                let style = if kind == 2 {
+                    Style::COMMENT
+                } else {
+                    Style::of(Token::TextSecondary)
+                };
+                for line in leaf.lines {
+                    self.painter.set(line.content.clone(), style);
+                }
+            }
+            LeafKind::LinkRefDef => self.definition(leaf),
+            LeafKind::FrontMatter { kind } => {
+                let lex = match kind {
+                    FrontMatterKind::Yaml => yaml_line,
+                    FrontMatterKind::Toml => toml_line,
+                };
+                for line in leaf.lines {
+                    self.lexed(line.content.clone(), lex);
+                }
+            }
+        }
+    }
+}
+
+/// The context of an inline node: what its ancestors make of its text.
+#[derive(Clone, Copy, Debug, Default)]
+struct Ctx {
+    bold: bool,
+    italic: bool,
+    /// The style of a link target, inside a link, image or autolink.
+    target: Option<Style>,
+}
+
+impl Leaves<'_, '_> {
+    fn inlines(&mut self, leaf: &Leaf<'_>) {
+        let tree = self.tree.inlines(leaf, self.text);
+        for node in tree.top_level() {
+            self.inline(node, Ctx::default());
+        }
+    }
+
+    fn inline(&mut self, node: InlineNode<'_>, ctx: Ctx) {
+        let range = node.range();
+        match node.kind() {
+            InlineKind::Strong => {
+                let ctx = Ctx { bold: true, ..ctx };
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            InlineKind::Emphasis => {
+                let ctx = Ctx {
+                    italic: true,
+                    ..ctx
+                };
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            InlineKind::CodeSpan => {
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            // Raw HTML, or a comment (which may run over several lines).
+            InlineKind::RawHtml => {
+                let style = if node.text().starts_with("<!--") {
+                    Style::COMMENT
+                } else {
+                    Style::of(Token::TextSecondary)
+                };
+                for child in node.children() {
+                    self.painter.set(child.range(), style);
+                }
+            }
+            InlineKind::Link | InlineKind::Image | InlineKind::Autolink => {
+                let target = node.link().map(|link| self.target_style(&link));
+                let ctx = Ctx { target, ..ctx };
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            InlineKind::Text
+            | InlineKind::Entity
+            | InlineKind::SoftBreak
+            | InlineKind::Whitespace => self.painter.paint(range, |s| {
+                s.bold |= ctx.bold;
+                s.italic |= ctx.italic;
+            }),
+            InlineKind::Escape | InlineKind::HardBreak => {
+                let backslash = node.text().starts_with('\\');
+                if backslash {
+                    self.painter
+                        .set(range.start..range.start + 1, Style::MARKER);
+                    self.painter.paint(range.start + 1..range.end, |s| {
+                        s.bold |= ctx.bold;
+                        s.italic |= ctx.italic;
+                    });
+                }
+            }
+            InlineKind::Marker => self.painter.set(range, Style::MARKER),
+            InlineKind::CodeText => self.painter.paint(range, |s| s.color = Token::SyntaxCode),
+            InlineKind::HtmlText => self.painter.set(range, Style::of(Token::TextSecondary)),
+            InlineKind::AutolinkText | InlineKind::LinkDestination | InlineKind::LinkLabel => {
+                let style = ctx.target.unwrap_or(Style::of(Token::AccentDefault));
+                self.painter.set(range, style);
+            }
+            InlineKind::LinkTitle => self.painter.set(range, Style::of(Token::SyntaxString)),
+        }
+    }
+
+    fn target_style(&mut self, link: &LinkRef<'_>) -> Style {
+        let kind = model_kind(link.kind);
+        let destination = if link.kind == SyntaxLinkKind::EmailAutolink {
+            format!("mailto:{}", link.destination)
+        } else {
+            link.destination.to_owned()
+        };
+        link_style(self.links.status(kind, link.is_image, &destination))
+    }
+
+    /// `[label]: destination "title"`.
+    fn definition(&mut self, leaf: &Leaf<'_>) {
+        let Some(def) = leaf.link_ref_def(self.text) else {
+            return;
+        };
+        self.painter
+            .set(def.range.start..def.label_range.start, Style::MARKER);
+        self.painter.set(
+            def.label_range.end..def.destination_range.start,
+            Style::MARKER,
+        );
+        let status = self
+            .links
+            .status(gv_model::LinkKind::Full, false, &def.def.destination);
+        self.painter
+            .set(def.destination_range.clone(), link_style(status));
+        if let Some(title) = def.title_range {
+            self.painter.set(title, Style::of(Token::SyntaxString));
+        }
+    }
+
+    /// A paragraph whose second line is a delimiter row is a pipe table:
+    /// the header cells are bold, the delimiter row and the pipes markers.
+    fn table(&mut self, leaf: &Leaf<'_>) {
+        let lines: Vec<(Range<usize>, String)> = leaf
+            .lines
+            .iter()
+            .map(|l| {
+                let text = self
+                    .text
+                    .text_for_range(l.content.clone())
+                    .unwrap_or_default();
+                (l.content.clone(), text)
+            })
+            .collect();
+        let [(head_range, head), (delimiter_range, delimiter), ..] = lines.as_slice() else {
+            return;
+        };
+        if !is_delimiter_row(delimiter) || !(head.contains('|') || delimiter.contains('|')) {
+            return;
+        }
+        self.painter.paint(head_range.clone(), |s| {
+            if s.color != Token::TextTertiary {
+                s.bold = true;
+            }
+        });
+        self.painter.set(delimiter_range.clone(), Style::MARKER);
+        for (range, text) in &lines {
+            let mut escaped = false;
+            for (at, c) in text.char_indices() {
+                if c == '|' && !escaped {
+                    let start = range.start + at;
+                    self.painter.set(start..start + 1, Style::MARKER);
+                }
+                escaped = c == '\\' && !escaped;
+            }
+        }
+    }
+
+    /// `[!NOTE]` at the start of a block quote's first paragraph.
+    fn callout(&mut self, leaf: &Leaf<'_>) {
+        let Some(quote) = self.containers.last() else {
+            return;
+        };
+        if quote.kind != ContainerKind::BlockQuote || quote.line != leaf.start_line {
+            return;
+        }
+        let Some(first) = leaf.lines.first() else {
+            return;
+        };
+        let text = self
+            .text
+            .text_for_range(first.content.clone())
+            .unwrap_or_default();
+        if let Some(len) = callout_marker(&text) {
+            let start = first.content.start;
+            self.painter
+                .set(start..start + len, Style::of(Token::SyntaxTag));
+        }
+    }
+
+    /// Paints `range` (one line) with the spans `lex` finds in its text.
+    fn lexed(&mut self, range: Range<usize>, lex: Lexer) {
+        let text = self.text.text_for_range(range.clone()).unwrap_or_default();
+        for (r, style) in lex(&text) {
+            self.painter
+                .set(range.start + r.start..range.start + r.end, style);
+        }
+    }
+}
+
+/// Finds the styled spans of one line of a small language.
+type Lexer = fn(&str) -> Vec<(Range<usize>, Style)>;
+
+/// A GFM delimiter row: cells of dashes with optional colons.
+fn is_delimiter_row(line: &str) -> bool {
+    let line = line.trim();
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let line = line.strip_suffix('|').unwrap_or(line);
+    !line.is_empty()
+        && line.split('|').all(|cell| {
+            let cell = cell.trim();
+            let cell = cell.strip_prefix(':').unwrap_or(cell);
+            let cell = cell.strip_suffix(':').unwrap_or(cell);
+            !cell.is_empty() && cell.bytes().all(|b| b == b'-')
+        })
+}
+
+/// The length of a callout marker (`[!TYPE]`, with an optional `+` or `-`)
+/// at the start of `text`.
+fn callout_marker(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let kind = &rest[..close];
+    if kind.is_empty()
+        || !kind
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let mut len = 2 + close + 1;
+    if matches!(text.as_bytes().get(len), Some(b'+' | b'-')) {
+        len += 1;
+    }
+    Some(len)
+}
+
+fn is_shell(language: &str) -> bool {
+    matches!(
+        language.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "shell" | "zsh" | "console" | "shell-session" | "fish"
+    )
+}
+
+/// The style of a value: a quoted string, a number or flag, or a bare
+/// string.
+fn value_style(word: &str) -> Style {
+    let lower = word.to_ascii_lowercase();
+    if word.parse::<f64>().is_ok() || matches!(lower.as_str(), "true" | "false" | "null" | "~") {
+        Style::of(Token::SyntaxNumber)
+    } else {
+        Style::of(Token::SyntaxString)
+    }
+}
+
+/// The spans of one line of shell code: command names are keys, flags and
+/// numbers numbers, arguments and quoted text strings, `#` starts a
+/// comment.
+fn shell_line(line: &str) -> Vec<(Range<usize>, Style)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    let mut command = true;
+    while at < bytes.len() {
+        let c = bytes[at];
+        if c == b' ' || c == b'\t' {
+            at += 1;
+            continue;
+        }
+        if c == b'#' {
+            out.push((at..bytes.len(), Style::COMMENT));
+            break;
+        }
+        if matches!(c, b'|' | b';' | b'&' | b'>' | b'<' | b'(' | b')') {
+            let start = at;
+            while at < bytes.len() && matches!(bytes[at], b'|' | b';' | b'&' | b'>' | b'<') {
+                at += 1;
+            }
+            at = at.max(start + 1);
+            out.push((start..at, Style::MARKER));
+            command = !matches!(c, b'>' | b'<');
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            let start = at;
+            at += 1;
+            while at < bytes.len() && bytes[at] != c {
+                at += if bytes[at] == b'\\' { 2 } else { 1 };
+            }
+            at = (at + 1).min(bytes.len());
+            out.push((start..at, Style::of(Token::SyntaxString)));
+            command = false;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && !matches!(bytes[at], b' ' | b'\t' | b'|' | b';' | b'&') {
+            at += 1;
+        }
+        let word = &line[start..at];
+        if command && start == 0 && word == "$" {
+            out.push((start..at, Style::MARKER));
+            continue;
+        }
+        if command && !word.contains('=') {
+            out.push((start..at, Style::of(Token::SyntaxKey)));
+            command = false;
+        } else if word.starts_with('-') || word.parse::<f64>().is_ok() {
+            out.push((start..at, Style::of(Token::SyntaxNumber)));
+        } else {
+            // `path:12` and `path:12:3`: the position is a number.
+            let split = word.find(':').filter(|&i| {
+                i > 0
+                    && word[i + 1..]
+                        .split(':')
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            });
+            match split {
+                Some(i) => {
+                    out.push((start..start + i, Style::of(Token::SyntaxString)));
+                    out.push((start + i..at, Style::of(Token::SyntaxNumber)));
+                }
+                None => out.push((start..at, Style::of(Token::SyntaxString))),
+            }
+        }
+    }
+    out
+}
+
+/// The spans of a value after a key or a list dash.
+fn value_spans(line: &str, start: usize, out: &mut Vec<(Range<usize>, Style)>) {
+    let rest = &line[start..];
+    let trimmed = rest.trim_start();
+    let at = start + (rest.len() - trimmed.len());
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(comment) = trimmed.find(" #") {
+        let value = trimmed[..comment].trim_end();
+        if !value.is_empty() {
+            out.push((at..at + value.len(), value_style(value)));
+        }
+        out.push((at + comment + 1..line.len(), Style::COMMENT));
+        return;
+    }
+    if trimmed.starts_with('#') {
+        out.push((at..line.len(), Style::COMMENT));
+        return;
+    }
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        // A flow sequence or map: brackets and commas are markers.
+        let mut item = at;
+        for (i, c) in trimmed.char_indices() {
+            let pos = at + i;
+            if matches!(c, '[' | ']' | '{' | '}' | ',') {
+                let value = line[item..pos].trim();
+                if !value.is_empty() {
+                    let offset =
+                        item + (line[item..pos].len() - line[item..pos].trim_start().len());
+                    out.push((offset..offset + value.len(), value_style(value)));
+                }
+                out.push((pos..pos + 1, Style::MARKER));
+                item = pos + 1;
+            }
+        }
+        return;
+    }
+    let value = trimmed.trim_end();
+    out.push((at..at + value.len(), value_style(value)));
+}
+
+/// The spans of one line of YAML front matter.
+fn yaml_line(line: &str) -> Vec<(Range<usize>, Style)> {
+    let mut out = Vec::new();
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if trimmed.starts_with('#') {
+        out.push((indent..line.len(), Style::COMMENT));
+        return out;
+    }
+    let mut at = indent;
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or(trimmed.strip_prefix('-').filter(|r| r.is_empty()))
+    {
+        out.push((at..at + 1, Style::MARKER));
+        at = line.len() - rest.len();
+    }
+    let rest = &line[at..];
+    let key_end = rest
+        .find(": ")
+        .or_else(|| rest.strip_suffix(':').map(str::len))
+        .filter(|&end| end > 0 && !rest.starts_with(['"', '\'', '[', '{']));
+    match key_end {
+        Some(end) => {
+            out.push((at..at + end, Style::of(Token::SyntaxKey)));
+            out.push((at + end..at + end + 1, Style::MARKER));
+            value_spans(line, at + end + 1, &mut out);
+        }
+        None => value_spans(line, at, &mut out),
+    }
+    out
+}
+
+/// The spans of one line of TOML front matter.
+fn toml_line(line: &str) -> Vec<(Range<usize>, Style)> {
+    let mut out = Vec::new();
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if trimmed.starts_with('#') {
+        out.push((indent..line.len(), Style::COMMENT));
+    } else if trimmed.starts_with('[') {
+        out.push((
+            indent..indent + trimmed.trim_end().len(),
+            Style::of(Token::SyntaxNumber),
+        ));
+    } else if let Some(eq) = line.find('=') {
+        let key = line[..eq].trim();
+        if !key.is_empty() {
+            out.push((indent..indent + key.len(), Style::of(Token::SyntaxKey)));
+        }
+        out.push((eq..eq + 1, Style::MARKER));
+        value_spans(line, eq + 1, &mut out);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gv_syntax::ParseOptions;
+
+    fn styles(text: &str, options: ParseOptions) -> Vec<LineStyle> {
+        let snapshot = TextSnapshot::new(text);
+        let tree = SyntaxTree::parse_with(&snapshot, options);
+        let mut links = LinkStatuses::new(None, None);
+        highlight(&tree, &snapshot, 0..snapshot.line_count(), &mut links)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()
+    }
+
+    /// The style of the first occurrence of `needle` on line `line`.
+    fn at(lines: &[LineStyle], text: &str, line: usize, needle: &str) -> Style {
+        let content = text.lines().nth(line).unwrap();
+        let col = content
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} on line {line}"));
+        lines[line].style_at(col)
+    }
+
+    #[test]
+    fn markdown_roles() {
+        let text = "# Title **x**\n\nSome **strong** and `code` and [a](b.md) <https://x.org>.\n\n> [!NOTE]\n> body\n\n```sh\nglyphvane notes/todo.md:12 --wait\n```\n<!-- note -->\n";
+        let lines = styles(text, ParseOptions::default());
+        let title = at(&lines, text, 0, "Title");
+        assert!(title.bold && title.color == Token::TextPrimary);
+        assert_eq!(at(&lines, text, 0, "#"), Style::MARKER);
+        assert_eq!(at(&lines, text, 2, "**"), Style::MARKER);
+        assert!(at(&lines, text, 2, "strong").bold);
+        assert_eq!(at(&lines, text, 2, "`"), Style::MARKER);
+        assert_eq!(at(&lines, text, 2, "code").color, Token::SyntaxCode);
+        assert_eq!(at(&lines, text, 2, "b.md").color, Token::AccentDefault);
+        assert_eq!(at(&lines, text, 2, "https").color, Token::AccentDefault);
+        assert_eq!(at(&lines, text, 4, ">"), Style::MARKER);
+        assert_eq!(at(&lines, text, 4, "[!NOTE]").color, Token::SyntaxTag);
+        assert_eq!(at(&lines, text, 7, "sh").color, Token::SyntaxTag);
+        assert_eq!(at(&lines, text, 7, "```"), Style::MARKER);
+        assert!(lines[7].code && lines[8].code && lines[9].code);
+        assert!(!lines[10].code);
+        assert_eq!(at(&lines, text, 8, "glyphvane").color, Token::SyntaxKey);
+        assert_eq!(at(&lines, text, 8, "notes").color, Token::SyntaxString);
+        assert_eq!(at(&lines, text, 8, ":12").color, Token::SyntaxNumber);
+        assert_eq!(at(&lines, text, 8, "--wait").color, Token::SyntaxNumber);
+        assert_eq!(at(&lines, text, 10, "note"), Style::COMMENT);
+    }
+
+    #[test]
+    fn front_matter_keys_and_values() {
+        let text = "---\ntitle: Notes\ncount: 3\ntags: [a, b]\n---\n# H\n";
+        let options = ParseOptions::for_profile("gfm-file").unwrap();
+        let lines = styles(text, options);
+        assert_eq!(at(&lines, text, 0, "---"), Style::MARKER);
+        assert_eq!(at(&lines, text, 1, "title").color, Token::SyntaxKey);
+        assert_eq!(at(&lines, text, 1, ":"), Style::MARKER);
+        assert_eq!(at(&lines, text, 1, "Notes").color, Token::SyntaxString);
+        assert_eq!(at(&lines, text, 2, "3").color, Token::SyntaxNumber);
+        assert_eq!(at(&lines, text, 3, "[").color, Token::TextTertiary);
+        assert_eq!(at(&lines, text, 3, "a,").color, Token::SyntaxString);
+        assert!(at(&lines, text, 5, "H").bold);
+    }
+
+    #[test]
+    fn tables_in_paragraphs() {
+        let text = "| Key | Action |\n| --- | :-: |\n| `a` | b \\| c |\n";
+        let lines = styles(text, ParseOptions::default());
+        assert_eq!(at(&lines, text, 0, "|"), Style::MARKER);
+        assert!(at(&lines, text, 0, "Key").bold);
+        assert_eq!(lines[1].runs, vec![(0..13, Style::MARKER)]);
+        assert_eq!(at(&lines, text, 2, "a").color, Token::SyntaxCode);
+        // The escaped pipe stays text.
+        assert_eq!(at(&lines, text, 2, "\\|").color, Token::TextTertiary);
+        assert_eq!(
+            lines[2].style_at(text.lines().nth(2).unwrap().find("\\|").unwrap() + 1),
+            Style::PLAIN
+        );
+    }
+
+    #[test]
+    fn link_statuses_have_their_line_styles() {
+        assert_eq!(
+            link_style(LinkStatus::Exact),
+            Style::of(Token::AccentDefault)
+        );
+        assert_eq!(
+            link_style(LinkStatus::Unresolved).underline,
+            Some(Underline::Dashed)
+        );
+        assert_eq!(
+            link_style(LinkStatus::CaseFold).underline,
+            Some(Underline::Dotted)
+        );
+        assert_eq!(
+            link_style(LinkStatus::Ambiguous(2)).underline,
+            Some(Underline::Wavy)
+        );
+        assert_eq!(link_style(LinkStatus::External).color, Token::SyntaxUrl);
+        let blocked = link_style(LinkStatus::Blocked);
+        assert!(blocked.strike && blocked.color == Token::TextSecondary);
+    }
+
+    #[test]
+    fn inline_comments_over_several_lines() {
+        let text = "Text <!-- a\ncomment --> and <b>bold</b>.\n";
+        let lines = styles(text, ParseOptions::default());
+        assert_eq!(at(&lines, text, 0, "<!--"), Style::COMMENT);
+        assert_eq!(at(&lines, text, 1, "comment"), Style::COMMENT);
+        assert_eq!(at(&lines, text, 1, "<b>"), Style::of(Token::TextSecondary));
+        assert_eq!(at(&lines, text, 1, "bold"), Style::PLAIN);
+    }
+
+    #[test]
+    fn callout_markers() {
+        assert_eq!(callout_marker("[!NOTE] title"), Some(7));
+        assert_eq!(callout_marker("[!tip]-"), Some(7));
+        assert_eq!(callout_marker("[!]"), None);
+        assert_eq!(callout_marker("[note]"), None);
+    }
+}

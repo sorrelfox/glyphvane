@@ -88,6 +88,8 @@ pub mod size {
     pub mod editor {
         pub const LINE_NUMBER_WIDTH: f32 = 26.0;
         pub const GUTTER_GAP: f32 = 14.0;
+        /// The caret: 16 tall, centred in its 20 px row (SPEC § Editor).
+        pub const CARET_HEIGHT: f32 = 16.0;
     }
 
     pub mod settings_row {
