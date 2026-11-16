@@ -24,6 +24,17 @@
 //!   wider (a one-time reflow of the rows laid out). Columns align per
 //!   the delimiter row.
 //! - Thematic breaks, empty list items and empty quotes have fixed heights.
+//! - A Mermaid diagram is one box of the diagram's size, painted from the
+//!   engine's theme-agnostic display list ([`super::diagram`]); it keeps
+//!   its estimated height, blank, until its job lands. A fallback card or
+//!   the "not recognised" note is drawn above the source in the code style,
+//!   inside a code block's frame.
+//! - Images are boxes sized from their headers when the document was
+//!   built; their pixels come from background jobs ([`super::media`]). A
+//!   `<picture>` is one image box, the source picked by the theme.
+//!   Blocks whose images or diagram are pending are not kept, so they ask
+//!   again every frame they are drawn (and their jobs are cancelled when
+//!   they are not).
 //!
 //! Paragraph source offsets are relative to the node's start, as in the
 //! render tree. [`ItemCache`] keeps the [`InlineBlock`] of each item that
@@ -52,7 +63,9 @@ use gv_syntax::BlockId;
 use gv_syntax::table::Alignment;
 
 use super::code_highlight::{self, Jobs, LineSpans};
+use super::diagram::{Diagrams, Shown};
 use super::engine::{Items, TextAnchor};
+use super::media::{ImageShown, ImageTarget, ImageTargets, Images, SchemeOnly, scheme_only};
 use crate::icons::FILE_PLUS_DASHED;
 use crate::inline::{BoxContent, FontFamilies, FontTable, InlineBlock, InlineText, font_of};
 
@@ -97,6 +110,12 @@ pub(crate) fn table_padding_y(kind: &ItemKind, m: &Metrics) -> f32 {
     }
 }
 
+/// Whether an item is a Mermaid diagram (its padding is the code
+/// block's, without a head).
+pub(crate) fn is_diagram(kind: &ItemKind) -> bool {
+    matches!(kind, ItemKind::Diagram { .. })
+}
+
 /// The chunk position of a code item: (first, last).
 pub(crate) fn chunk_ends(kind: &ItemKind) -> (bool, bool) {
     let (k, n) = kind.chunk();
@@ -113,6 +132,9 @@ pub(crate) fn chrome_height(kind: &ItemKind, m: &Metrics) -> f32 {
         return m.table_border
             + 2.0 * table_padding_y(kind, m)
             + if last { m.table_border } else { 0.0 };
+    }
+    if is_diagram(kind) {
+        return 2.0 * m.code_padding_y;
     }
     if !is_code(kind) {
         return 0.0;
@@ -137,6 +159,9 @@ pub(crate) fn text_top(item: &Item, m: &Metrics) -> f32 {
     if let ItemKind::TableRow { .. } = item.kind {
         y += m.table_border + table_padding_y(&item.kind, m);
     }
+    if is_diagram(&item.kind) {
+        y += m.code_padding_y;
+    }
     y
 }
 
@@ -154,6 +179,9 @@ pub(crate) fn text_width(item: &Item, column: f32, m: &Metrics, wrapped: bool) -
     }
     if let ItemKind::TableRow { .. } = item.kind {
         return NO_WRAP;
+    }
+    if is_diagram(&item.kind) {
+        return (content - 2.0 * code_inset(m)).max(1.0);
     }
     if is_code(&item.kind) {
         if wrapped {
@@ -713,6 +741,53 @@ pub(crate) struct ItemCache {
     /// block (others are as their `open` attribute says). Kept across
     /// loads of the document.
     pub folds: HashMap<BlockId, bool>,
+    /// Mermaid diagrams drawn and their jobs.
+    pub diagrams: Diagrams,
+    /// Decoded images and their jobs.
+    pub images: Images,
+    /// What the document's images resolved to.
+    pub targets: Option<Arc<ImageTargets>>,
+    /// The view's theme scheme, scale and motion setting.
+    pub view: ViewFacts,
+    /// Items whose layout depends on the theme's scheme (pictures,
+    /// `#gh-*-mode-only` images).
+    scheme_items: std::collections::HashSet<ItemId>,
+    /// The image cards of the items laid out (images that cannot be shown).
+    pub image_cards: HashMap<ItemId, Vec<ImageCard>>,
+    /// The diagram items shown as a card or as their source, with their
+    /// card (none for the "not recognised" note).
+    pub diagram_frames: HashMap<ItemId, Option<Arc<gv_diagram::FallbackCard>>>,
+}
+
+/// What the view shows images and pictures with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ViewFacts {
+    /// The app theme is dark (Semi-light is light).
+    pub dark: bool,
+    /// Device pixels per px.
+    pub scale: f32,
+    /// Animations stay on their first frame.
+    pub reduce_motion: bool,
+}
+
+impl Default for ViewFacts {
+    fn default() -> Self {
+        Self {
+            dark: false,
+            scale: 1.0,
+            reduce_motion: false,
+        }
+    }
+}
+
+/// An image that cannot be shown, drawn as a card over its box.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImageCard {
+    /// The paragraph item of its box.
+    pub piece: usize,
+    pub message: String,
+    /// The file, when *Open externally* is offered.
+    pub open: Option<std::path::PathBuf>,
 }
 
 /// Code blocks met while drawing.
@@ -818,6 +893,34 @@ impl ItemCache {
     pub fn clear(&mut self) {
         self.items.clear();
         self.tables.clear();
+        self.scheme_items.clear();
+        self.image_cards.clear();
+        self.diagram_frames.clear();
+    }
+
+    /// Sets what the view shows images with: a new scheme forgets the
+    /// items that depend on it (returned: their heights are stale), a new
+    /// scale or motion setting every image's.
+    pub fn set_view(&mut self, view: ViewFacts) -> Vec<ItemId> {
+        if view == self.view {
+            return Vec::new();
+        }
+        let old = std::mem::replace(&mut self.view, view);
+        let mut ids: Vec<ItemId> = Vec::new();
+        if old.dark != view.dark {
+            ids.extend(self.scheme_items.drain());
+        }
+        if old.scale != view.scale || old.reduce_motion != view.reduce_motion {
+            ids.extend(
+                self.items
+                    .keys()
+                    .copied()
+                    .filter(|id| !ids.contains(id))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        self.forget(ids.iter().copied());
+        ids
     }
 
     /// Forgets the layouts of `ids` (their content changed), and the
@@ -825,6 +928,8 @@ impl ItemCache {
     pub fn forget(&mut self, ids: impl IntoIterator<Item = ItemId>) {
         for id in ids {
             self.items.remove(&id);
+            self.image_cards.remove(&id);
+            self.diagram_frames.remove(&id);
             if self.tables.remove(&id.block).is_some() {
                 self.items
                     .retain(|k, _| k.block != id.block || k.chunk == 0);
@@ -872,8 +977,18 @@ impl ItemCache {
         }
         let node = tree.node_of(ix)?;
         let role = content_role(&item.kind);
+        self.image_cards.remove(&item.id);
+        self.diagram_frames.remove(&item.id);
+        let mut pending = false;
         let block = match (&node.kind, &item.kind) {
             (NodeKind::Math(code), _) => Some(math_block(tree, item.node, code)),
+            (NodeKind::Diagram(code), _) => {
+                Some(self.diagram_block(tree, item, code, &mut pending))
+            }
+            (NodeKind::Picture(p), ItemKind::Picture) => {
+                self.scheme_items.insert(item.id);
+                self.picture_block(tree, item, node, p, &mut pending)
+            }
             (NodeKind::Table(t), ItemKind::TableRow { row, .. }) => {
                 let content = &t.rows.get(*row as usize)?.content;
                 let first = formulas_before(t, *row as usize);
@@ -883,8 +998,10 @@ impl ItemCache {
                     let pad = tree.options().metrics.table_padding_x;
                     w.gaps(&cells, &t.aligns, pad)
                 });
-                let block = content_block(tree, item.node, first, content, role, gaps.as_deref());
-                if gaps.is_none() {
+                let mut block =
+                    content_block(tree, item.node, first, content, role, gaps.as_deref());
+                self.place_images(item.id, content, &mut block, &mut pending);
+                if gaps.is_none() || pending {
                     // Not measured yet: laid out without its column widths,
                     // and not kept.
                     return Some(Rc::new(RefCell::new(block)));
@@ -896,7 +1013,11 @@ impl ItemCache {
                 | NodeKind::Heading { content: c, .. }
                 | NodeKind::Details { summary: c, .. },
                 _,
-            ) => Some(content_block(tree, item.node, 0, c, role, None)),
+            ) => {
+                let mut block = content_block(tree, item.node, 0, c, role, None);
+                self.place_images(item.id, c, &mut block, &mut pending);
+                Some(block)
+            }
             (NodeKind::Code(code), ItemKind::Code { lines, .. }) => {
                 let spans = self.code.spans(item.id.block, code, item.id);
                 let range = lines.start as usize..lines.end as usize;
@@ -913,6 +1034,11 @@ impl ItemCache {
         if block.is_some() {
             self.built += 1;
         }
+        if pending {
+            // Laid out again every frame until its content lands, so its
+            // jobs are asked for while it shows.
+            return block;
+        }
         self.items.insert(
             item.id,
             Cached {
@@ -921,6 +1047,243 @@ impl ItemCache {
             },
         );
         block
+    }
+
+    /// The block of a diagram item: the diagram, a placeholder of the
+    /// estimated height while it is pending, or a card or note above the
+    /// source.
+    fn diagram_block(
+        &mut self,
+        tree: &RenderTree,
+        item: &Item,
+        code: &Arc<CodeBlock>,
+        pending: &mut bool,
+    ) -> InlineBlock {
+        let styles = &tree.options().styles;
+        let zoom = styles.zoom();
+        let source = match (code.lines.first(), code.lines.last()) {
+            (Some(a), Some(b)) => a.source.start..b.source.end.max(a.source.start),
+            _ => 0..0,
+        };
+        let one_box = |w: f32, h: f32, content: Option<BoxContent>| {
+            let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Body));
+            b.inline_box(InlineBox::new(BoxKind::Other, w, h, 0.0), source.clone());
+            let mut block = InlineBlock::new(Arc::new(b.build()));
+            block.set_box_content(0, content.unwrap_or(BoxContent::Blank));
+            block
+        };
+        let (title, card) = match self.diagrams.shown(item.id.block, code, item.id) {
+            Shown::Rendered(d) => {
+                let (w, h) = (d.width * zoom, d.height * zoom);
+                return one_box(
+                    w,
+                    h,
+                    Some(BoxContent::Diagram {
+                        diagram: d,
+                        scale: zoom,
+                    }),
+                );
+            }
+            Shown::Pending => {
+                *pending = true;
+                let lh = styles.role(TextRole::Code).line_height;
+                #[allow(clippy::cast_precision_loss)]
+                let h = lh * code.lines.len().max(1) as f32;
+                return one_box(1.0, h, None);
+            }
+            Shown::Card(card) => {
+                let mut title = format!("{}: {}", card.title(), card.message);
+                if let Some((line, col)) = card.line_col {
+                    title.push_str(&format!(" (line {line}, column {col})"));
+                }
+                (title, Some(card))
+            }
+            Shown::NotRecognised => (gv_diagram::NOT_RECOGNISED_NOTE.to_owned(), None),
+            Shown::Unavailable => (
+                "Renderer error: the diagram renderer could not start.".to_owned(),
+                None,
+            ),
+        };
+        let error = card.is_some();
+        self.diagram_frames.insert(item.id, card);
+        let spans = self.code.spans(item.id.block, code, item.id);
+        let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Code));
+        let style = styles
+            .run_style(TextRole::Code, Variant::PLAIN.with(Variant::STRONG))
+            .with_color(if error {
+                ColorToken::StatusError.role()
+            } else {
+                ColorToken::TextSecondary.role()
+            });
+        b.source_anchor(source.start);
+        b.text(&title, style, source.start..source.start);
+        if !code.lines.is_empty() {
+            b.hard_break(source.start..source.start);
+            b.hard_break(source.start..source.start);
+            push_code_lines(&mut b, code, 0..code.lines.len(), styles, spans.as_ref());
+        }
+        InlineBlock::new(Arc::new(b.build()))
+    }
+
+    /// The block of a `<picture>`: one image box, the source picked by the
+    /// theme's scheme; `None` when its size is not known (the view draws
+    /// the alt text).
+    fn picture_block(
+        &mut self,
+        tree: &RenderTree,
+        item: &Item,
+        node: &BlockNode,
+        p: &gv_render_tree::Picture,
+        pending: &mut bool,
+    ) -> Option<InlineBlock> {
+        let dark = self.view.dark;
+        let gv_render_tree::ImageSize::Known { width, height } = p.size(dark) else {
+            return None;
+        };
+        let url = p.pick(dark)?;
+        let opts = tree.options();
+        let zoom = opts.styles.zoom();
+        let (mut w, mut h) = (width * zoom, height * zoom);
+        let max = opts.metrics.image_max_width;
+        if w > max && max > 0.0 {
+            h *= max / w;
+            w = max;
+        }
+        let mut b = ParagraphBuilder::new(opts.styles.paragraph_style(TextRole::Body));
+        b.inline_box(
+            InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(BoxRef::Image(0).id()),
+            0..node.source.len(),
+        );
+        let mut block = InlineBlock::new(Arc::new(b.build()));
+        let target = self.targets.as_ref().and_then(|t| t.get(url));
+        self.show_image(target, item.id, 0, (w, h), &mut block, pending);
+        Some(block)
+    }
+
+    /// Sets the content of the image boxes of `content` in `block`: the
+    /// decoded image, nothing while it decodes (a placeholder), a card
+    /// when it cannot be shown; `#gh-*-mode-only` images of the other
+    /// scheme take no room.
+    fn place_images(
+        &mut self,
+        id: ItemId,
+        content: &InlineContent,
+        block: &mut InlineBlock,
+        pending: &mut bool,
+    ) {
+        if content.images.is_empty() {
+            return;
+        }
+        let paragraph = Arc::clone(block.paragraph());
+        let mut hidden: Vec<usize> = Vec::new();
+        for (ix, (piece, span)) in paragraph
+            .items()
+            .iter()
+            .zip(content.spans.iter())
+            .enumerate()
+        {
+            let (InlineRole::Image(i), Some(b)) = (span.role, piece.inline_box()) else {
+                continue;
+            };
+            let Some(info) = content.images.get(i as usize) else {
+                continue;
+            };
+            if let Some(only) = scheme_only(&info.destination) {
+                self.scheme_items.insert(id);
+                if (only == SchemeOnly::Dark) != self.view.dark {
+                    hidden.push(ix);
+                    continue;
+                }
+            }
+            let target = self.targets.as_ref().and_then(|t| t.get(&info.destination));
+            let size = (b.width, b.ascent + b.descent);
+            self.show_image(target, id, ix, size, block, pending);
+        }
+        if !hidden.is_empty() {
+            let mut p = (*paragraph).clone();
+            for ix in hidden {
+                if let Some(old) = p.items()[ix].inline_box().copied() {
+                    p.replace_box(
+                        ix,
+                        InlineBox {
+                            width: 0.0,
+                            ascent: 0.0,
+                            descent: 0.0,
+                            ..old
+                        },
+                    );
+                }
+            }
+            block.set_paragraph(Arc::new(p));
+        }
+    }
+
+    /// Shows image `target` in the box of paragraph item `piece` of
+    /// `block` (`size` px).
+    fn show_image(
+        &mut self,
+        target: Option<ImageTarget>,
+        id: ItemId,
+        piece: usize,
+        (w, h): (f32, f32),
+        block: &mut InlineBlock,
+        pending: &mut bool,
+    ) {
+        let Some(item) = block.paragraph().items().get(piece) else {
+            return;
+        };
+        let Some(box_id) = item.inline_box().map(|b| b.id) else {
+            return;
+        };
+        let card = |message: String, open: Option<std::path::PathBuf>| ImageCard {
+            piece,
+            message,
+            open,
+        };
+        match target {
+            Some(ImageTarget::Local { path, probe: Ok(_) }) => {
+                let Some(root) = self.targets.as_ref().map(|t| t.root().to_path_buf()) else {
+                    return;
+                };
+                let device = |v: f32| {
+                    // In range: a box's side in device pixels.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let d = (v * self.view.scale).ceil().max(1.0) as u32;
+                    d
+                };
+                let request = gv_media::DecodeRequest {
+                    fit: Some((device(w), device(h))),
+                    animate: !self.view.reduce_motion,
+                };
+                match self.images.shown(&path, &root, request, id) {
+                    ImageShown::Image(image) => block.set_box_content(
+                        box_id,
+                        BoxContent::Image(gpui::ImageSource::Render(image)),
+                    ),
+                    ImageShown::Pending => *pending = true,
+                    ImageShown::Failed(e) => {
+                        block.set_box_content(box_id, BoxContent::Blank);
+                        let open = e.offers_open_externally().then_some(path);
+                        self.image_cards
+                            .entry(id)
+                            .or_default()
+                            .push(card(e.card_message(), open));
+                    }
+                }
+            }
+            Some(ImageTarget::Local {
+                path,
+                probe: Err(e),
+            }) => {
+                block.set_box_content(box_id, BoxContent::Blank);
+                let open = e.offers_open_externally().then_some(path);
+                self.image_cards
+                    .entry(id)
+                    .or_default()
+                    .push(card(e.card_message(), open));
+            }
+            _ => {}
+        }
     }
 
     /// The block of item `id` if it is cached (no layout).

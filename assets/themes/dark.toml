@@ -56,6 +56,22 @@ tag = "#D2A2E8"
 url = "#82B9F2"
 code = "#F59D87"
 
+[diagram]   # provisional, needs design: categorical palette slots 1 to 12
+category = [
+    "#2F5A8A",
+    "#8A5A20",
+    "#2F6E3E",
+    "#8A3434",
+    "#5A3F86",
+    "#6E5434",
+    "#86416E",
+    "#50565A",
+    "#6E6A1F",
+    "#206E70",
+    "#8A6E1F",
+    "#3F5F96",
+]
+
 [[shadow.popover]]
 x = 0
 y = 12

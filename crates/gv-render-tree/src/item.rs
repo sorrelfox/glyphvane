@@ -80,6 +80,12 @@ pub enum ItemKind {
     Math {
         lines: Range<u32>,
     },
+    /// A Mermaid diagram, one item; `lines` are all the block's source
+    /// lines (shown as code-like text below a fallback card when the
+    /// diagram does not render).
+    Diagram {
+        lines: Range<u32>,
+    },
     /// Row `row` of a table of `rows` rows (row 0 is the header).
     TableRow {
         row: u32,
@@ -114,7 +120,8 @@ impl ItemKind {
             Self::Code { lines, .. }
             | Self::Html { lines, .. }
             | Self::Properties { lines, .. }
-            | Self::Math { lines } => Some(lines.clone()),
+            | Self::Math { lines }
+            | Self::Diagram { lines } => Some(lines.clone()),
             _ => None,
         }
     }
@@ -137,6 +144,7 @@ impl ItemKind {
             Self::Html { .. } => "html",
             Self::Properties { .. } => "properties",
             Self::Math { .. } => "math",
+            Self::Diagram { .. } => "diagram",
             Self::TableRow { .. } => "table-row",
             Self::ThematicBreak => "thematic-break",
             Self::EmptyItem => "empty-item",
@@ -332,6 +340,16 @@ impl Flatten<'_> {
                 let lines = 0..to_u32(code.lines.len());
                 out.push(mk(0, ItemKind::Math { lines }, node.source.clone(), e));
             }
+            NodeKind::Diagram(code) => {
+                // Until the view has the diagram: its source's height in
+                // the code style, with the code block's padding.
+                let spec = self.styles.role(TextRole::Code);
+                let n = code.lines.len().max(1);
+                #[allow(clippy::cast_precision_loss)]
+                let e = Estimate::fixed(spec.line_height * n as f32 + 2.0 * m.code_padding_y);
+                let lines = 0..to_u32(code.lines.len());
+                out.push(mk(0, ItemKind::Diagram { lines }, node.source.clone(), e));
+            }
             NodeKind::Table(table) => {
                 let rows = to_u32(table.rows.len());
                 for (k, row) in table.rows.iter().enumerate() {
@@ -386,13 +404,25 @@ impl Flatten<'_> {
                 let e = self.text_estimate(&summary.measure, TextRole::Body, inset);
                 out.push(mk(0, ItemKind::Details, node.source.clone(), e));
             }
-            NodeKind::Picture(_) => {
-                let lh = self.styles.role(TextRole::Body).line_height;
+            NodeKind::Picture(p) => {
+                // The light scheme's image, until the view knows the
+                // scheme; its alt text's line without one.
+                let h = match p.size(false) {
+                    crate::ImageSize::Known { width, height }
+                        if width > 0.0 && height > 0.0 && width.is_finite() =>
+                    {
+                        let zoom = self.styles.zoom();
+                        let w = width * zoom;
+                        let max = m.image_max_width;
+                        height * zoom * if w > max && max > 0.0 { max / w } else { 1.0 }
+                    }
+                    _ => self.styles.role(TextRole::Body).line_height,
+                };
                 out.push(mk(
                     0,
                     ItemKind::Picture,
                     node.source.clone(),
-                    Estimate::fixed(lh),
+                    Estimate::fixed(h),
                 ));
             }
             NodeKind::EmptyItem | NodeKind::EmptyQuote => {
@@ -528,7 +558,10 @@ fn own_spacing(item: &Item, m: &Metrics) -> Spacing {
         ItemKind::Paragraph if in_tight_item(&item.context) => Spacing::default(),
         ItemKind::Paragraph => m.paragraph,
         ItemKind::Heading { level } => m.heading(*level),
-        ItemKind::Code { .. } | ItemKind::Html { .. } | ItemKind::TableRow { .. } => m.code,
+        ItemKind::Code { .. }
+        | ItemKind::Html { .. }
+        | ItemKind::TableRow { .. }
+        | ItemKind::Diagram { .. } => m.code,
         ItemKind::Properties { .. } => m.properties,
         ItemKind::Math { .. } => m.paragraph,
         ItemKind::ThematicBreak => m.rule,

@@ -191,7 +191,10 @@ impl BlockNode {
     /// The lines of a code block, HTML block, math block or front matter.
     pub fn lines(&self) -> Option<&Arc<CodeBlock>> {
         match &self.kind {
-            NodeKind::Code(c) | NodeKind::Html { code: c, .. } | NodeKind::Math(c) => Some(c),
+            NodeKind::Code(c)
+            | NodeKind::Html { code: c, .. }
+            | NodeKind::Math(c)
+            | NodeKind::Diagram(c) => Some(c),
             NodeKind::Properties { lines, .. } => Some(lines),
             _ => None,
         }
@@ -218,6 +221,11 @@ pub enum NodeKind {
     /// with math): the TeX source lines, joined in [`CodeBlock::text`].
     /// Copy and find see the source.
     Math(Arc<CodeBlock>),
+    /// A ` ```mermaid ` fence (profiles with the `mermaid` switch): the
+    /// diagram source lines, joined in [`CodeBlock::text`]. The view draws
+    /// the diagram, or a fallback card above the source; copy and find see
+    /// the source.
+    Diagram(Arc<CodeBlock>),
     /// A GFM table: one virtual item per row (the delimiter row is part of
     /// the header row's source).
     Table(Arc<TableBlock>),
@@ -266,7 +274,7 @@ pub enum NodeKind {
 pub type PictureSource = (Option<Arc<str>>, Arc<str>);
 
 /// The sources of a `<picture>` element.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Picture {
     /// `<source media srcset>` in order: the media query and the first
     /// URL of the source set.
@@ -275,6 +283,10 @@ pub struct Picture {
     pub fallback: Option<Arc<str>>,
     /// The `<img>`'s `alt`.
     pub alt: Arc<str>,
+    /// The size of the image picked in a light and a dark scheme (asked of
+    /// the [`ImageSizeSource`](crate::ImageSizeSource) when the block is
+    /// built).
+    pub sizes: [ImageSize; 2],
 }
 
 impl Picture {
@@ -296,6 +308,11 @@ impl Picture {
             .map(|(_, url)| &**url)
             .or(self.fallback.as_deref())
     }
+
+    /// The size of the image picked for the scheme (see [`Picture::pick`]).
+    pub fn size(&self, dark: bool) -> ImageSize {
+        self.sizes[usize::from(dark)]
+    }
 }
 
 impl NodeKind {
@@ -306,6 +323,7 @@ impl NodeKind {
             Self::Heading { .. } => "heading",
             Self::Code(_) => "code",
             Self::Math(_) => "math",
+            Self::Diagram(_) => "diagram",
             Self::Table(_) => "table",
             Self::ThematicBreak => "thematic-break",
             Self::Html { .. } => "html",

@@ -52,11 +52,23 @@ pub enum Token {
     SyntaxTag,
     SyntaxUrl,
     SyntaxCode,
+    DiagramCategory1,
+    DiagramCategory2,
+    DiagramCategory3,
+    DiagramCategory4,
+    DiagramCategory5,
+    DiagramCategory6,
+    DiagramCategory7,
+    DiagramCategory8,
+    DiagramCategory9,
+    DiagramCategory10,
+    DiagramCategory11,
+    DiagramCategory12,
 }
 
 impl Token {
     /// Every token, in role order: `ALL[i].role() == ColorRole(i)`.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 43] = [
         Self::TextPrimary,
         Self::TextSecondary,
         Self::TextTertiary,
@@ -88,6 +100,34 @@ impl Token {
         Self::SyntaxTag,
         Self::SyntaxUrl,
         Self::SyntaxCode,
+        Self::DiagramCategory1,
+        Self::DiagramCategory2,
+        Self::DiagramCategory3,
+        Self::DiagramCategory4,
+        Self::DiagramCategory5,
+        Self::DiagramCategory6,
+        Self::DiagramCategory7,
+        Self::DiagramCategory8,
+        Self::DiagramCategory9,
+        Self::DiagramCategory10,
+        Self::DiagramCategory11,
+        Self::DiagramCategory12,
+    ];
+
+    /// The categorical diagram palette, slot 1 first.
+    pub const DIAGRAM_CATEGORIES: [Self; 12] = [
+        Self::DiagramCategory1,
+        Self::DiagramCategory2,
+        Self::DiagramCategory3,
+        Self::DiagramCategory4,
+        Self::DiagramCategory5,
+        Self::DiagramCategory6,
+        Self::DiagramCategory7,
+        Self::DiagramCategory8,
+        Self::DiagramCategory9,
+        Self::DiagramCategory10,
+        Self::DiagramCategory11,
+        Self::DiagramCategory12,
     ];
 
     /// The colour role that stands for this token.
@@ -137,6 +177,18 @@ impl Token {
             Self::SyntaxTag => "syntax.tag",
             Self::SyntaxUrl => "syntax.url",
             Self::SyntaxCode => "syntax.code",
+            Self::DiagramCategory1 => "diagram.category.1",
+            Self::DiagramCategory2 => "diagram.category.2",
+            Self::DiagramCategory3 => "diagram.category.3",
+            Self::DiagramCategory4 => "diagram.category.4",
+            Self::DiagramCategory5 => "diagram.category.5",
+            Self::DiagramCategory6 => "diagram.category.6",
+            Self::DiagramCategory7 => "diagram.category.7",
+            Self::DiagramCategory8 => "diagram.category.8",
+            Self::DiagramCategory9 => "diagram.category.9",
+            Self::DiagramCategory10 => "diagram.category.10",
+            Self::DiagramCategory11 => "diagram.category.11",
+            Self::DiagramCategory12 => "diagram.category.12",
         }
     }
 
@@ -174,6 +226,18 @@ impl Token {
             Self::SyntaxTag => theme.syntax.tag,
             Self::SyntaxUrl => theme.syntax.url,
             Self::SyntaxCode => theme.syntax.code,
+            Self::DiagramCategory1 => theme.diagram.category[0],
+            Self::DiagramCategory2 => theme.diagram.category[1],
+            Self::DiagramCategory3 => theme.diagram.category[2],
+            Self::DiagramCategory4 => theme.diagram.category[3],
+            Self::DiagramCategory5 => theme.diagram.category[4],
+            Self::DiagramCategory6 => theme.diagram.category[5],
+            Self::DiagramCategory7 => theme.diagram.category[6],
+            Self::DiagramCategory8 => theme.diagram.category[7],
+            Self::DiagramCategory9 => theme.diagram.category[8],
+            Self::DiagramCategory10 => theme.diagram.category[9],
+            Self::DiagramCategory11 => theme.diagram.category[10],
+            Self::DiagramCategory12 => theme.diagram.category[11],
         }
     }
 }

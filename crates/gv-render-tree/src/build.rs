@@ -22,9 +22,9 @@ use crate::html::{self, DetailsPart};
 use crate::inline::{self, InlineCx, width_units};
 use crate::node::{
     BlockNode, CodeBlock, CodeLine, Context, Frame, FrameKind, ListMarker, Lookups, NodeKind,
-    TableBlock, TableRow,
+    Picture, TableBlock, TableRow,
 };
-use crate::status::Sources;
+use crate::status::{ImageSize, LinkTarget, Sources};
 use crate::style::TextRole;
 use crate::tree::{FrontMatterDisplay, RenderOptions};
 
@@ -285,18 +285,18 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             LeafKind::FencedCode | LeafKind::IndentedCode => {
                 let fenced = leaf.kind == LeafKind::FencedCode;
                 let code = Arc::new(self.code_block(leaf, range.start, fenced, !fenced));
-                let math =
-                    fenced && self.opts.math_fences && code.language.as_deref() == Some("math");
-                let kind = if math {
-                    NodeKind::Math(code)
-                } else {
-                    NodeKind::Code(code)
+                let lang = code.language.as_deref().filter(|_| fenced);
+                let kind = match lang {
+                    Some("math") if self.opts.math_fences => NodeKind::Math(code),
+                    Some("mermaid") if self.opts.mermaid => NodeKind::Diagram(code),
+                    _ => NodeKind::Code(code),
                 };
                 (kind, range.start, None)
             }
             LeafKind::Html { kind } => {
                 let code = Arc::new(self.code_block(leaf, range.start, false, false));
-                if let Some(p) = html::picture(&code.text) {
+                if let Some(mut p) = html::picture(&code.text) {
+                    self.size_picture(&mut p, leaf.id, range.clone());
                     (NodeKind::Picture(Arc::new(p)), range.start, None)
                 } else if let Some(DetailsPart::Open { open, summary }) = html::details(&code.text)
                 {
@@ -336,6 +336,24 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             lookups,
             table: leaf.kind == LeafKind::Table,
         })
+    }
+
+    /// Asks the image sizes of the sources a `<picture>` shows in a light
+    /// and a dark scheme.
+    fn size_picture(&self, p: &mut Picture, block: BlockId, range: Range<usize>) {
+        for dark in [false, true] {
+            p.sizes[usize::from(dark)] = match p.pick(dark) {
+                Some(url) => self.sources.images.size(&LinkTarget {
+                    kind: gv_model::LinkKind::Inline,
+                    image: true,
+                    destination: url,
+                    title: None,
+                    range: range.clone(),
+                    block,
+                }),
+                None => ImageSize::Failed,
+            };
+        }
     }
 
     /// Parses the cells of a table and builds its rows (header, then

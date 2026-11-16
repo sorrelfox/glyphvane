@@ -16,11 +16,12 @@ use std::time::{Duration, Instant};
 
 use gv_model::DocModel;
 use gv_profile::{CompiledProfile, ProfileId};
-use gv_render_tree::{LinkTarget, NoImageSizes, RenderOptions, RenderTree, Sources, UpdateReport};
+use gv_render_tree::{LinkTarget, RenderOptions, RenderTree, Sources, UpdateReport};
 use gv_syntax::{Changes, ParseOptions, SyntaxTree};
 use gv_text::{DecodeStatus, TextSnapshot};
 
 use super::links::Resolver;
+use super::media::{ImageSizes, ImageTargets};
 use super::startup;
 
 /// A loaded document. Cloning is cheap.
@@ -42,6 +43,9 @@ pub(crate) struct Loaded {
     pub lines: Option<TextSnapshot>,
     /// The profile it was read with.
     pub profile: ProfileId,
+    /// What its images resolved to (shared with the builds that follow an
+    /// editor).
+    pub images: Arc<ImageTargets>,
 }
 
 /// Where loading spent its time.
@@ -151,9 +155,14 @@ fn build(
     mark(trace, format_args!("modelled"));
 
     let t = Instant::now();
+    let images = Arc::new(ImageTargets::new(links.root().to_path_buf()));
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &images,
+    };
     let sources = Sources {
         links,
-        images: &NoImageSizes,
+        images: &sizes,
     };
     let tree = RenderTree::build(&syntax, &model, &*text, options, sources);
     timings.tree = t.elapsed();
@@ -169,6 +178,7 @@ fn build(
         timings,
         lines: None,
         profile: profile.id,
+        images,
     }
 }
 
@@ -190,9 +200,14 @@ pub(crate) fn build_tree(
     let model = DocModel::build(&syntax, &text);
     timings.model = t.elapsed();
     let t = Instant::now();
+    let images = Arc::new(ImageTargets::new(links.root().to_path_buf()));
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &images,
+    };
     let sources = Sources {
         links,
-        images: &NoImageSizes,
+        images: &sizes,
     };
     let tree = RenderTree::build(&syntax, &model, &text, options, sources);
     warm_index(&tree);
@@ -207,6 +222,7 @@ pub(crate) fn build_tree(
         timings,
         lines: Some(text),
         profile,
+        images,
     }
 }
 
@@ -229,9 +245,13 @@ pub(crate) fn update_tree(
     let model = base.model.update(&syntax, &text, changes);
     timings.model = t.elapsed();
     let t = Instant::now();
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &base.images,
+    };
     let sources = Sources {
         links,
-        images: &NoImageSizes,
+        images: &sizes,
     };
     let mut tree = RenderTree::clone(&base.tree);
     let report = tree.update(&syntax, &model, &text, changes, sources);
@@ -247,6 +267,7 @@ pub(crate) fn update_tree(
         timings,
         lines: Some(text),
         profile: base.profile,
+        images: Arc::clone(&base.images),
     };
     (loaded, report)
 }
@@ -270,9 +291,13 @@ fn mark(name: Option<&str>, step: std::fmt::Arguments<'_>) {
 /// changed); image sizes are not known yet and URLs keep their status.
 /// Returns the ids of the items that changed.
 pub(crate) fn refresh(doc: &mut Loaded, links: &Resolver) -> Vec<gv_render_tree::ItemId> {
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &doc.images,
+    };
     let sources = Sources {
         links,
-        images: &NoImageSizes,
+        images: &sizes,
     };
     let which = |t: &LinkTarget<'_>| !t.image && links.depends_on_index(t);
     Arc::make_mut(&mut doc.tree)

@@ -164,6 +164,23 @@ impl Resolver {
         self.index.root()
     }
 
+    /// The same resolver for image files: without the window's vault, it
+    /// checks the file system below the document's folder (the build runs
+    /// off the UI thread).
+    pub fn for_images(&self) -> Self {
+        if self.vault {
+            return self.clone();
+        }
+        Self {
+            probe: Some(FsProbe::new(
+                self.index.root().to_path_buf(),
+                PlatformRules::host(),
+            )),
+            vault: true,
+            ..self.clone()
+        }
+    }
+
     pub fn resolve(&self, kind: LinkKind, destination: &str) -> Resolution {
         let link = LinkRef::new(kind, destination, self.source.clone(), self.profile);
         match &self.probe {

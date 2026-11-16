@@ -43,7 +43,12 @@
 //!   one quad per dash or dot. GPUI's dashed border draws dashes of about
 //!   2 px at 1 px thickness, which cannot be told from dotted.
 //! - Colours are theme tokens: a [`gv_inline::ColorRole`] is a [`Token`].
+//! - Images with several frames (GIF, WebP, APNG) show the frame of a
+//!   shared clock ([`animation_frame`]) and ask for the next animation
+//!   frame; only painted boxes do, so animations off screen pause, and none
+//!   advance with reduced motion.
 
+pub(crate) mod diagram;
 mod element;
 mod fonts;
 mod math;
@@ -163,6 +168,12 @@ pub enum BoxContent {
         color: ColorRole,
         text_font: gpui::Font,
     },
+    /// A Mermaid diagram, `scale` px per diagram px, its top left corner at
+    /// the box's; colour roles resolve to theme tokens when painted.
+    Diagram {
+        diagram: Arc<gv_diagram::Diagram>,
+        scale: f32,
+    },
 }
 
 impl std::fmt::Debug for BoxContent {
@@ -180,8 +191,56 @@ impl std::fmt::Debug for BoxContent {
                 .field("em", em)
                 .field("color", color)
                 .finish_non_exhaustive(),
+            Self::Diagram { diagram, scale } => f
+                .debug_struct("Diagram")
+                .field("family", &diagram.family)
+                .field("items", &diagram.items.len())
+                .field("scale", scale)
+                .finish(),
         }
     }
+}
+
+/// Frames with a delay of 10 ms or less show for 100 ms (as browsers
+/// do).
+const MIN_FRAME_DELAY_MS: u64 = 11;
+const SHORT_FRAME_DELAY_MS: u64 = 100;
+
+/// The delay of a frame in ms, as shown.
+fn frame_delay_ms(image: &gpui::RenderImage, frame: usize) -> u64 {
+    let (n, d) = image.delay(frame).numer_denom_ms();
+    let ms = u64::from(n) / u64::from(d.max(1));
+    if ms < MIN_FRAME_DELAY_MS {
+        SHORT_FRAME_DELAY_MS
+    } else {
+        ms
+    }
+}
+
+/// The frame of `image` shown `elapsed_ms` after the animation clock
+/// started: the clock loops over the frames' delays.
+pub(crate) fn animation_frame(image: &gpui::RenderImage, elapsed_ms: u64) -> usize {
+    let n = image.frame_count();
+    if n <= 1 {
+        return 0;
+    }
+    let total: u64 = (0..n).map(|i| frame_delay_ms(image, i)).sum();
+    let mut t = elapsed_ms % total.max(1);
+    for i in 0..n {
+        let d = frame_delay_ms(image, i);
+        if t < d {
+            return i;
+        }
+        t -= d;
+    }
+    n - 1
+}
+
+/// Milliseconds on the shared animation clock.
+pub(crate) fn animation_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Where and how a block was painted last.

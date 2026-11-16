@@ -125,6 +125,13 @@ pub(crate) enum ControlKind {
     Task { item: BlockId, at: usize },
     /// The summary row of the `<details>` of block `block`: folds it.
     Details { block: BlockId },
+    /// *Render anyway* on the card of diagram block `block`.
+    RenderAnyway { block: BlockId },
+    /// *Copy source* on the card of the diagram of node `node`.
+    CopySource { node: usize },
+    /// *Open externally* on an image card: the file is
+    /// [`Geometry::external`]`[slot]`.
+    OpenExternally { slot: usize },
 }
 
 /// A footnote reference or backreference under the pointer.
@@ -202,8 +209,10 @@ pub(crate) struct Geometry {
     pub column: (f32, f32),
     pub items: Vec<PlacedGeom>,
     pub buttons: Vec<CodeButton>,
-    /// Task checkboxes and summary rows.
+    /// Task checkboxes, summary rows and card buttons.
     pub controls: Vec<Control>,
+    /// The files the image cards' *Open externally* buttons open.
+    pub external: Vec<std::path::PathBuf>,
     /// The area that grabs the scrollbar, and the thumb.
     pub track: Option<Bounds<Pixels>>,
     pub thumb: Option<Bounds<Pixels>>,
@@ -301,11 +310,20 @@ impl State {
 
     /// Shows `doc`, scrolled to the top.
     pub fn install(&mut self, doc: Loaded) {
+        if self
+            .doc
+            .as_ref()
+            .is_none_or(|d| !Arc::ptr_eq(&d.images, &doc.images))
+        {
+            self.cache.images.forget();
+        }
+        self.cache.targets = Some(Arc::clone(&doc.images));
         self.doc = Some(doc);
         self.engine = Engine::new(self.layout.lead(), OVERDRAW);
         self.sync = None;
         self.cache.clear();
         self.cache.code.forget_blocks();
+        self.cache.diagrams.forget_blocks();
         self.selection = None;
         self.hscroll.clear();
         self.hover = Hover::None;
@@ -542,6 +560,14 @@ impl State {
     pub fn code_text(&self, node: usize) -> Option<String> {
         let doc = self.doc.as_ref()?;
         Some(doc.tree.nodes().get(node)?.lines()?.text.clone())
+    }
+
+    /// *Render anyway*: the diagram of block `block` renders with the
+    /// trusted caps.
+    pub fn render_anyway(&mut self, block: BlockId, ts: &WindowTextSystem) {
+        if self.cache.diagrams.trust(block) {
+            self.changed(&[ItemId { block, chunk: 0 }], ts);
+        }
     }
 
     /// Turns soft wrap of a code block on or off.

@@ -167,6 +167,11 @@ pub(crate) mod tests {
         TEXTS.with(|t| t.borrow_mut().push(code.to_owned()));
     }
 
+    /// Frames being drawn on this thread now (engine jobs must see 0).
+    pub(crate) fn in_frame() -> u32 {
+        IN_FRAME.with(Cell::get)
+    }
+
     /// Highlighting jobs run on this thread so far. GPUI's test executor
     /// runs background tasks on the test's thread, so a test sees its own.
     pub(crate) fn jobs_run() -> usize {

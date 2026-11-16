@@ -228,6 +228,9 @@ fn dump_node(node: &BlockNode, out: &mut String) {
         NodeKind::Math(code) => {
             let _ = writeln!(out, "  math lines={} tex={:?}", code.lines.len(), code.text);
         }
+        NodeKind::Diagram(code) => {
+            let _ = writeln!(out, "  diagram lines={}", code.lines.len());
+        }
         NodeKind::Table(t) => {
             let _ = writeln!(out, "  table aligns={:?} rows={}", t.aligns, t.rows.len());
         }

@@ -75,6 +75,9 @@ pub struct RenderOptions {
     pub chunk_lines: usize,
     /// ` ```math ` fences are display math (GFM, Extended), not code.
     pub math_fences: bool,
+    /// ` ```mermaid ` fences are diagrams (the profile's `mermaid` switch),
+    /// not code.
+    pub mermaid: bool,
 }
 
 /// The macros in force for every formula of a tree, from one pass over
@@ -98,32 +101,39 @@ impl RenderOptions {
             metrics: Metrics::default(),
             chunk_lines: 50,
             math_fences: false,
+            mermaid: false,
         }
     }
 
     /// The options of a compiled profile: the CommonMark options with the
-    /// profile's math syntax (` ```math ` fences with GitHub math).
+    /// profile's math syntax (` ```math ` fences with GitHub math) and its
+    /// Mermaid switch.
     pub fn for_profile(profile: &CompiledProfile) -> Self {
         Self {
             math_fences: profile.switches.math == Math::GitHub,
+            mermaid: profile.switches.mermaid,
             ..Self::commonmark()
         }
     }
 
     /// The options of built-in profile `id`, without tuning or overrides.
     pub fn builtin(id: ProfileId) -> Self {
+        let switches = &gv_profile::definition(id).switches;
         Self {
-            math_fences: gv_profile::definition(id).switches.math == Math::GitHub,
+            math_fences: switches.math == Math::GitHub,
+            mermaid: switches.mermaid,
             ..Self::commonmark()
         }
     }
 
     /// These options with the profile's settings of `profile` (its math
-    /// syntax), keeping the type scale and metrics.
+    /// syntax and Mermaid switch), keeping the type scale and metrics.
     #[must_use]
     pub fn with_profile(self, profile: &CompiledProfile) -> Self {
+        let p = Self::for_profile(profile);
         Self {
-            math_fences: Self::for_profile(profile).math_fences,
+            math_fences: p.math_fences,
+            mermaid: p.mermaid,
             ..self
         }
     }

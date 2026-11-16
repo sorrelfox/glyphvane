@@ -9,13 +9,16 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+fontdb = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
+gv-diagram = { workspace = true }
 gv-editor = { workspace = true }
 gv-highlight = { workspace = true }
 gv-html = { workspace = true }
 gv-inline = { workspace = true }
 gv-math = { workspace = true }
+gv-media = { workspace = true }
 gv-model = { workspace = true }
 gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
@@ -24,9 +27,13 @@ gv-spell = { workspace = true }
 gv-syntax = { workspace = true }
 gv-text = { workspace = true }
 gv-vault = { workspace = true }
+# GPUI's animation frames (`image::Frame`), from decoded media.
+image = { workspace = true }
 nucleo-matcher = { workspace = true }
 regex = { workspace = true }
 notify-debouncer-full = { workspace = true }
+# The diagram font when no system sans-serif face is usable (OFL).
+ratex-katex-fonts = { workspace = true }
 serde = { workspace = true }
 sum_tree = { workspace = true }
 toml = { workspace = true }

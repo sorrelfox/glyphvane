@@ -37,7 +37,8 @@ use super::bench::{load_line, percentiles};
 use super::engine::{Engine, Items as _};
 use super::follow::{Cause, begin as note_navigation};
 use super::items::{
-    DocItems, NO_WRAP, chunk_ends, code_inset, is_code, status_icon_path, text_top, text_width,
+    DocItems, NO_WRAP, ViewFacts, chunk_ends, code_inset, is_code, status_icon_path, text_top,
+    text_width,
 };
 use super::live::{Spot, SyncRequest, block_items_at};
 use super::state::{
@@ -189,6 +190,78 @@ fn start_highlights(
         .detach();
     }
 }
+
+/// Renders diagrams on the background executor's low-priority pool; as
+/// each lands, the items drawn meanwhile are laid out again.
+fn start_diagrams(
+    reader: WeakEntity<Reader>,
+    requests: Vec<super::diagram::Request>,
+    cx: &mut App,
+) {
+    for request in requests {
+        let reader = reader.clone();
+        cx.spawn(async move |cx| {
+            let (request, outcome) = cx
+                .background_executor()
+                .spawn_with_priority(gpui::Priority::Low, async move {
+                    let outcome = super::diagram::run(&request);
+                    (request, outcome)
+                })
+                .await;
+            reader
+                .update(cx, |reader, cx| {
+                    let mut st = reader.state.borrow_mut();
+                    let items = st.cache.diagrams.landed(&request, outcome);
+                    if !items.is_empty() {
+                        st.stale.extend(items);
+                        drop(st);
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+}
+
+/// Decodes images on the background executor's low-priority pool; as each
+/// lands, the items drawn meanwhile are laid out again.
+fn start_images(
+    reader: WeakEntity<Reader>,
+    requests: Vec<super::media::ImageRequest>,
+    cx: &mut App,
+) {
+    for request in requests {
+        let reader = reader.clone();
+        cx.spawn(async move |cx| {
+            let (key, result) = cx
+                .background_executor()
+                .spawn_with_priority(gpui::Priority::Low, async move {
+                    let result = super::media::load(&request);
+                    (request.key, result)
+                })
+                .await;
+            reader
+                .update(cx, |reader, cx| {
+                    let mut st = reader.state.borrow_mut();
+                    let items = st.cache.images.landed(&key, result);
+                    if !items.is_empty() {
+                        st.stale.extend(items);
+                        drop(st);
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+}
+
+/// Label buttons on a card: text in the accent colour, a hover fill.
+const CARD_BUTTON_PAD_X: f32 = 6.0;
+const CARD_BUTTON_GAP: f32 = 4.0;
+/// Padding inside an image card.
+const IMAGE_CARD_PAD: f32 = 8.0;
 
 pub(crate) struct ReaderElement {
     state: Rc<RefCell<State>>,
@@ -400,6 +473,19 @@ impl Element for ReaderElement {
         let mut guard = self.state.borrow_mut();
         let st = &mut *guard;
         let ts = window.text_system().clone();
+        let view = ViewFacts {
+            dark: self.dark,
+            scale: window.scale_factor(),
+            reduce_motion: cx.reduce_motion(),
+        };
+        let scheme_changed = st.cache.set_view(view);
+        st.stale.extend(scheme_changed);
+        st.cache.diagrams.begin_frame();
+        st.cache.images.begin_frame();
+        for image in st.cache.images.take_evicted() {
+            // An image that is not in the atlas has nothing to drop.
+            let _ = window.drop_image(image);
+        }
         if !st.stale.is_empty() {
             let stale = std::mem::take(&mut st.stale);
             st.changed(&stale, &ts);
@@ -721,6 +807,108 @@ impl Element for ReaderElement {
                         });
                     }
                 }
+                // A diagram: centred, scrolling sideways when wider than the
+                // column. A card or note above the source: in a code block's
+                // frame, with *Copy source* (and *Render anyway*) on its
+                // first line.
+                ItemKind::Diagram { .. } => {
+                    let framed = cache.diagram_frames.get(&item.id).cloned();
+                    let inner = (content_w - 2.0 * code_inset(&m)).max(1.0);
+                    let text_y = top + text_top(item, &m);
+                    if let Some(card) = &framed {
+                        out.under.push(Op::Frame {
+                            bounds: bounds_of(left, content_top, content_w, bottom - content_top),
+                            borders: Edges::all(px(m.code_border)),
+                            corners: Corners::all(px(radius::BLOCK)),
+                            fill: color(Token::SurfaceSunken),
+                            border: color(Token::BorderDefault),
+                        });
+                        let mut buttons =
+                            vec![("Copy source", ControlKind::CopySource { node: item.node })];
+                        if card.as_ref().is_some_and(|c| c.render_anyway) {
+                            buttons.push((
+                                "Render anyway",
+                                ControlKind::RenderAnyway {
+                                    block: item.id.block,
+                                },
+                            ));
+                        }
+                        let mut x = left + content_w - m.code_border - code_head::PAD_RIGHT;
+                        let pad = CARD_BUTTON_PAD_X * zoom;
+                        let h = label_spec.line_height + 4.0 * zoom;
+                        let y = text_y + (body_line(styles) - h) / 2.0;
+                        for (label, kind) in buttons {
+                            let line = shape(
+                                window,
+                                label,
+                                label_font.clone(),
+                                label_spec.size,
+                                color(Token::AccentDefault),
+                            );
+                            let w = f32::from(line.width()) + 2.0 * pad;
+                            x -= w;
+                            let control = Control {
+                                bounds: bounds_of(x, y, w, h),
+                                kind,
+                            };
+                            let hovered = *hover == Hover::Control(control);
+                            out.over.push(Op::Rect {
+                                bounds: control.bounds,
+                                color: color(if hovered {
+                                    Token::StateHover
+                                } else {
+                                    Token::SurfaceSunken
+                                }),
+                                radius: px(radius::SMALL_CONTROL),
+                            });
+                            out.over.push(Op::Text {
+                                line: Box::new(line),
+                                origin: point(px(x + pad), px(y + 2.0 * zoom)),
+                                line_height: px(label_spec.line_height),
+                            });
+                            geometry.controls.push(control);
+                            x -= CARD_BUTTON_GAP * zoom;
+                        }
+                    }
+                    if let Some(block) = &block {
+                        let layout_width = text
+                            .borrow_mut()
+                            .layout(&mut block.borrow_mut(), inner, &ts)
+                            .width();
+                        let (offset, overflow) = if framed.is_some() {
+                            (0.0, 0.0)
+                        } else {
+                            (
+                                ((inner - layout_width) / 2.0).max(0.0),
+                                (layout_width - inner).max(0.0),
+                            )
+                        };
+                        let scroll = hscroll
+                            .get(&item.id.block)
+                            .copied()
+                            .unwrap_or(0.0)
+                            .clamp(0.0, overflow);
+                        let clip = bounds_of(left, content_top, content_w, bottom - content_top);
+                        let origin = point(px(left + code_inset(&m) + offset - scroll), px(text_y));
+                        out.children.push(host.child(
+                            block,
+                            local_selection.clone(),
+                            highlights.clone(),
+                            Place {
+                                origin,
+                                width: inner,
+                                mask: Some(clip),
+                            },
+                            window,
+                            cx,
+                        ));
+                        geom.code = Some(CodeGeom {
+                            block: item.id.block,
+                            clip,
+                            overflow,
+                        });
+                    }
+                }
                 kind if is_code(kind) => {
                     let (first, last) = chunk_ends(kind);
                     let r = px(radius::BLOCK);
@@ -871,9 +1059,9 @@ impl Element for ReaderElement {
                         });
                     }
                 }
-                ItemKind::Picture => {
-                    // Images come with the media engine: the picked
-                    // source's alt text and name for now.
+                ItemKind::Picture if block.is_none() => {
+                    // A picture whose image cannot be shown: the picked
+                    // source's alt text and name.
                     if let gv_render_tree::NodeKind::Picture(pic) = &node.kind {
                         let src = pic.pick(self.dark).unwrap_or("");
                         let name = src.rsplit('/').next().unwrap_or(src);
@@ -1172,10 +1360,122 @@ impl Element for ReaderElement {
                 });
             }
         }
+        // Image cards: images that cannot be shown, over their boxes.
+        let mut cards = Vec::new();
+        for g in &geometry.items {
+            let Some(item) = tree.items().get(g.ix) else {
+                continue;
+            };
+            let (Some(list), Some(block)) = (cache.image_cards.get(&item.id), &g.text) else {
+                continue;
+            };
+            let b = block.borrow();
+            let (Some(layout), Some(origin)) = (b.layout(), b.bounds().map(|r| r.origin)) else {
+                continue;
+            };
+            for card in list {
+                if let Some(r) = layout.item_rects(card.piece).first() {
+                    let rect = bounds_of(
+                        f32::from(origin.x) + r.x,
+                        f32::from(origin.y) + r.y,
+                        r.width,
+                        r.height,
+                    );
+                    cards.push((rect, card.clone()));
+                }
+            }
+        }
+        for (rect, card) in cards {
+            let pad = IMAGE_CARD_PAD * zoom;
+            let (x0, y0) = (f32::from(rect.origin.x), f32::from(rect.origin.y));
+            let w = f32::from(rect.size.width);
+            out.over.push(Op::Frame {
+                bounds: rect,
+                borders: Edges::all(px(HAIRLINE)),
+                corners: Corners::all(px(radius::CHIP)),
+                fill: color(Token::SurfaceSunken),
+                border: color(Token::BorderStrong),
+            });
+            let icon_size = icon::INLINE * zoom;
+            out.over.push(Op::Icon {
+                bounds: bounds_of(
+                    x0 + pad,
+                    y0 + pad + (body.line_height - icon_size) / 2.0,
+                    icon_size,
+                    icon_size,
+                ),
+                path: IconName::Image.path(),
+                color: color(Token::TextSecondary),
+            });
+            let text_x = x0 + pad + icon_size + CALLOUT_ICON_GAP * zoom;
+            let room = (x0 + w - pad - text_x).max(0.0);
+            let message = fit_text(&card.message, room, body.size);
+            let line = shape(
+                window,
+                &message,
+                body_font.clone(),
+                body.size,
+                color(Token::TextSecondary),
+            );
+            out.over.push(Op::Text {
+                line: Box::new(line),
+                origin: point(px(text_x), px(y0 + pad)),
+                line_height: px(body.line_height),
+            });
+            if let Some(path) = card.open {
+                let line = shape(
+                    window,
+                    "Open externally",
+                    label_font.clone(),
+                    label_spec.size,
+                    color(Token::AccentDefault),
+                );
+                let bw = f32::from(line.width()) + 2.0 * CARD_BUTTON_PAD_X * zoom;
+                let bh = label_spec.line_height + 4.0 * zoom;
+                let control = Control {
+                    bounds: bounds_of(
+                        text_x - CARD_BUTTON_PAD_X * zoom,
+                        y0 + pad + body.line_height,
+                        bw,
+                        bh,
+                    ),
+                    kind: ControlKind::OpenExternally {
+                        slot: geometry.external.len(),
+                    },
+                };
+                if *hover == Hover::Control(control) {
+                    out.over.push(Op::Rect {
+                        bounds: control.bounds,
+                        color: color(Token::StateHover),
+                        radius: px(radius::SMALL_CONTROL),
+                    });
+                }
+                out.over.push(Op::Text {
+                    line: Box::new(line),
+                    origin: point(px(text_x), px(y0 + pad + body.line_height + 2.0 * zoom)),
+                    line_height: px(label_spec.line_height),
+                });
+                geometry.external.push(path);
+                geometry.controls.push(control);
+            }
+        }
+
         cache.end_frame();
         let requests = cache.code.take_requests();
         if !requests.is_empty() {
             start_highlights(self.reader.clone(), requests, cx);
+        }
+        // Jobs of diagrams and images that did not show this frame stop;
+        // the new ones start.
+        cache.diagrams.end_frame();
+        cache.images.end_frame();
+        let diagrams = cache.diagrams.take_requests();
+        if !diagrams.is_empty() {
+            start_diagrams(self.reader.clone(), diagrams, cx);
+        }
+        let images = cache.images.take_requests();
+        if !images.is_empty() {
+            start_images(self.reader.clone(), images, cx);
         }
 
         // The scrollbar: a thumb, no track.
@@ -1405,6 +1705,7 @@ impl ReaderElement {
                 let press = std::mem::take(&mut st.press);
                 let mut follow = None;
                 let mut toggle = None;
+                let mut open_file = None;
                 match (press, e.button) {
                     (Press::None, _) => return,
                     (Press::Control(control), MouseButton::Left) => {
@@ -1416,6 +1717,18 @@ impl ReaderElement {
                                 ControlKind::Details { block } => {
                                     let ts = window.text_system().clone();
                                     st.toggle_details(block, &ts);
+                                }
+                                ControlKind::RenderAnyway { block } => {
+                                    let ts = window.text_system().clone();
+                                    st.render_anyway(block, &ts);
+                                }
+                                ControlKind::CopySource { node } => {
+                                    if let Some(code) = st.code_text(node) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                    }
+                                }
+                                ControlKind::OpenExternally { slot } => {
+                                    open_file = st.geometry.external.get(slot).cloned();
                                 }
                             }
                         }
@@ -1466,6 +1779,9 @@ impl ReaderElement {
                     }
                 }
                 drop(st);
+                if let Some(path) = open_file {
+                    crate::platform::launcher(cx).open_with_default_app(&path, cx);
+                }
                 if let Some(t) = toggle {
                     let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::ToggleTask(t)));
                 }
@@ -1698,4 +2014,24 @@ fn extend_selection(st: &mut State, pos: Point<Pixels>) {
     {
         s.head = offset;
     }
+}
+
+/// `text` cut to about `room` px at `size` px per em (an average advance
+/// of 0.55 em), with an ellipsis when cut.
+fn fit_text(text: &str, room: f32, size: f32) -> String {
+    let per = (size * 0.55).max(1.0);
+    // In range: a count of characters that fit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max = (room / per).floor().max(0.0) as usize;
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// The height of a line of code text in `styles`.
+fn body_line(styles: &gv_render_tree::StyleTable) -> f32 {
+    styles.role(TextRole::Code).line_height
 }

@@ -12,6 +12,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::node::Picture;
+use crate::status::ImageSize;
 
 /// A start or end tag of an HTML block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +222,7 @@ pub(crate) fn picture(s: &str) -> Option<Picture> {
         sources: sources.into_boxed_slice(),
         fallback,
         alt: Arc::from(alt),
+        sizes: [ImageSize::Pending; 2],
     })
 }
 

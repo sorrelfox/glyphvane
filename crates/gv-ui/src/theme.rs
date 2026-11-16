@@ -200,6 +200,7 @@ pub struct Theme {
     pub status: Status,
     pub selection: Selection,
     pub syntax: Syntax,
+    pub diagram: DiagramColors,
     pub shadow: Shadows,
 }
 
@@ -305,6 +306,15 @@ pub struct Syntax {
     pub tag: Color,
     pub url: Color,
     pub code: Color,
+}
+
+/// Diagram colours: the categorical palette of pie slices, chart series,
+/// git branches and mindmap and timeline sections (`diagram.category.1` to
+/// `.12`; provisional, not designed yet).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagramColors {
+    pub category: [Color; 12],
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

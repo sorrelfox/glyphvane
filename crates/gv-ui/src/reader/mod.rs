@@ -48,6 +48,7 @@
 
 mod bench;
 pub(crate) mod code_highlight;
+pub(crate) mod diagram;
 mod edited;
 mod element;
 mod engine;
@@ -58,6 +59,7 @@ mod items;
 mod links;
 mod live;
 mod load;
+pub(crate) mod media;
 pub mod startup;
 mod state;
 #[cfg(test)]

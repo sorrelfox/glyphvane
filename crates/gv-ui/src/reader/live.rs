@@ -350,6 +350,7 @@ fn splice(st: &mut State, doc: Loaded, report: Option<UpdateReport>) {
         report.inserted.clone(),
         changed,
     );
+    st.cache.targets = Some(Arc::clone(&doc.images));
     st.doc = Some(doc);
     st.selection = None;
     st.hover = Hover::None;

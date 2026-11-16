@@ -434,6 +434,12 @@ impl Painter<'_> {
             Some(BoxContent::Image(source)) => {
                 match resolve_image(source, self.window, self.cx) {
                     Some(image) => {
+                        let frame = if image.frame_count() > 1 && !self.cx.reduce_motion() {
+                            self.window.request_animation_frame();
+                            super::animation_frame(&image, super::animation_clock_ms())
+                        } else {
+                            0
+                        };
                         // A failure (for example a full atlas) leaves the
                         // box empty for this frame.
                         let _ = self.window.paint_image(
@@ -441,7 +447,7 @@ impl Painter<'_> {
                             bounds,
                             Corners::default(),
                             image,
-                            0,
+                            frame,
                             false,
                         );
                     }
@@ -462,6 +468,15 @@ impl Painter<'_> {
                 );
             }
             Some(BoxContent::Blank) => {}
+            Some(BoxContent::Diagram { diagram, scale }) => {
+                super::diagram::paint_diagram(
+                    self.window,
+                    diagram,
+                    bounds.origin,
+                    *scale,
+                    self.palette,
+                );
+            }
             Some(BoxContent::Math {
                 layout,
                 em,
