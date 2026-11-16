@@ -201,6 +201,12 @@ pub(crate) enum Press {
     Thumb {
         grab: f32,
     },
+    /// Dragging the sideways thumb of block `block`, grabbed `grab` px
+    /// right of its left end.
+    HThumb {
+        block: BlockId,
+        grab: f32,
+    },
     Button(CodeButton),
     /// A task checkbox or a summary row.
     Control(Control),
@@ -215,6 +221,29 @@ pub(crate) struct CodeGeom {
     /// Where its text shows.
     pub clip: Bounds<Pixels>,
     /// How far its text can scroll sideways.
+    pub overflow: f32,
+    /// How much of the text's width shows (the clip without the code's
+    /// padding).
+    pub view: f32,
+    /// How far it is scrolled sideways.
+    pub scroll: f32,
+    /// Whether its left and right sides are faded (text out of sight
+    /// there).
+    pub fades: (bool, bool),
+}
+
+/// The sideways scrollbar of a table or code block that scrolls
+/// sideways, as the last frame drew it: inside the block's bottom edge,
+/// or the bottom of its visible part.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HBar {
+    pub block: BlockId,
+    /// The area that grabs the thumb: its row, across the block.
+    pub zone: Bounds<Pixels>,
+    /// Window x of the track's left end and its width.
+    pub track: (f32, f32),
+    pub thumb: Bounds<Pixels>,
+    /// How far the block scrolls sideways.
     pub overflow: f32,
 }
 
@@ -251,6 +280,8 @@ pub(crate) struct Geometry {
     /// The area that grabs the scrollbar, and the thumb.
     pub track: Option<Bounds<Pixels>>,
     pub thumb: Option<Bounds<Pixels>>,
+    /// The sideways scrollbars of the blocks that scroll sideways.
+    pub hbars: Vec<HBar>,
 }
 
 /// Frame timings, for the log and the debug benchmark.
@@ -277,7 +308,7 @@ pub(crate) struct State {
     pub cache: ItemCache,
     pub text: Rc<RefCell<InlineText>>,
     pub selection: Option<Selection>,
-    /// Sideways scroll of code blocks without soft wrap.
+    /// Sideways scroll of code blocks without soft wrap and of tables.
     pub hscroll: HashMap<BlockId, f32>,
     pub hover: Hover,
     pub press: Press,
@@ -584,7 +615,9 @@ impl State {
 
     /// What is under the pointer at `position`.
     pub fn hover_at(&self, position: Point<Pixels>) -> Hover {
-        if self.geometry.track.is_some_and(|t| t.contains(&position)) {
+        if self.geometry.track.is_some_and(|t| t.contains(&position))
+            || self.hbar_at(position).is_some()
+        {
             return Hover::Scrollbar;
         }
         if let Some(b) = self.button_at(position) {
@@ -643,6 +676,32 @@ impl State {
             };
             engine.invalidate(&items, range);
         }
+    }
+
+    /// The sideways scrollbar whose zone holds a window position.
+    pub fn hbar_at(&self, position: Point<Pixels>) -> Option<HBar> {
+        self.geometry
+            .hbars
+            .iter()
+            .find(|b| b.zone.contains(&position))
+            .copied()
+    }
+
+    /// Drags the sideways thumb of block `block`, grabbed `grab` px right
+    /// of its left end, to window x `x`: the block scrolls as far as the
+    /// thumb's place along the track says.
+    pub fn drag_hthumb(&mut self, block: BlockId, x: f32, grab: f32) {
+        let Some(bar) = self.geometry.hbars.iter().find(|b| b.block == block) else {
+            return;
+        };
+        let (track_x, track_w) = bar.track;
+        let room = track_w - f32::from(bar.thumb.size.width);
+        let at = if room > 0.0 {
+            ((x - grab - track_x) / room).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.hscroll.insert(block, at * bar.overflow);
     }
 
     /// Scrolls the code block `code` sideways by `dx` px.

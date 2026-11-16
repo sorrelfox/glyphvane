@@ -8,12 +8,17 @@
 //! when even that is too narrow, follows the view's width while the column
 //! stays at its maximum, and its cells are hit, selected and followed
 //! where they are drawn. Diagrams are in `media_tests`.
+//!
+//! A table or unwrapped code block that scrolls sideways shows a thumb at
+//! the bottom of its visible part, which drags and jumps, and fades over
+//! the sides whose text is out of sight.
 
 use gpui::{ScrollDelta, ScrollEvent};
 use gv_render_tree::ItemKind;
 
 use super::*;
-use crate::reader::state::Hover;
+use crate::metrics::size::SCROLLBAR_MIN_THUMB;
+use crate::reader::state::{HBar, Hover};
 use crate::settings::Target;
 
 /// A widest word of the second column: longer than a third of the column.
@@ -445,4 +450,257 @@ fn find_reveals_a_match_in_a_scrolled_table(cx: &mut TestAppContext) {
         f32::from(at.x) >= t.frame.0 && f32::from(end.x) <= t.frame.0 + t.frame.1,
         "{at:?}..{end:?} in {t:?}"
     );
+}
+
+// ----- sideways scrollbars and fades ------------------------------------------
+
+/// A table like [`wide_table`] with `rows` body rows: taller than the view.
+fn tall_table(rows: usize) -> String {
+    let mut md = String::from(
+        "# Tall\n\n| Option | Key | Kind | Default | Notes |\n|---|---|---|---|---|\n",
+    );
+    for i in 0..rows {
+        md.push_str(&format!(
+            "| Typographer_extensions | `{KEY}` | `string` | `github_ascii_only_with_dashes` \
+             | row {i} of the slug notes |\n"
+        ));
+    }
+    md.push_str("\nafter the table\n");
+    md
+}
+
+/// A drawn item's clip and its fades (left, right).
+type Clipped = (Bounds<Pixels>, (bool, bool));
+
+/// The sideways bar of the first table or code block, and the clips and
+/// fades of its drawn items.
+fn bar_of(s: &State) -> Option<(HBar, Vec<Clipped>)> {
+    let bar = *s.geometry.hbars.first()?;
+    let items = s
+        .geometry
+        .items
+        .iter()
+        .filter_map(|g| g.code)
+        .filter(|c| c.block == bar.block)
+        .map(|c| (c.clip, c.fades))
+        .collect();
+    Some((bar, items))
+}
+
+/// The drawn items' fades of the first block that scrolls sideways.
+fn fades(s: &State) -> Vec<(bool, bool)> {
+    s.geometry
+        .items
+        .iter()
+        .filter_map(|g| g.code)
+        .filter(|c| c.overflow > 0.5)
+        .map(|c| c.fades)
+        .collect()
+}
+
+#[gpui::test]
+fn a_table_that_scrolls_sideways_shows_a_thumb_at_its_bottom(cx: &mut TestAppContext) {
+    let mut w = open_wide(cx, &wide_table(), 900.0);
+    let t = w.table();
+    assert!(t.overflow > 0.0, "{t:?}");
+    {
+        let s = w.st.borrow();
+        assert_eq!(s.geometry.hbars.len(), 1, "{:?}", s.geometry.hbars);
+        let (bar, clips) = bar_of(&s).expect("a sideways bar");
+        let first = clips.first().expect("rows").0;
+        let last = clips.last().expect("rows").0;
+        // Along the table's inside, 4 px in from each side; 6 thick, 3 px
+        // above its bottom edge.
+        assert_eq!(bar.track.0, f32::from(first.left()) + scrollbar::INSET_Y);
+        assert_eq!(
+            bar.track.1,
+            f32::from(first.size.width) - 2.0 * scrollbar::INSET_Y
+        );
+        assert_eq!(f32::from(bar.thumb.size.height), SCROLLBAR_THUMB);
+        assert_eq!(
+            f32::from(bar.thumb.bottom()),
+            f32::from(last.bottom()) - scrollbar::INSET_X
+        );
+        // As long as the part that shows is of the whole, at the start.
+        let view = f32::from(first.size.width);
+        let want = (bar.track.1 * view / (view + t.overflow)).max(SCROLLBAR_MIN_THUMB);
+        assert!(
+            (f32::from(bar.thumb.size.width) - want).abs() < 0.5,
+            "{bar:?} {want}"
+        );
+        assert_eq!(f32::from(bar.thumb.left()), bar.track.0);
+        assert!((bar.overflow - t.overflow).abs() < 0.01);
+        // The pointer over it is not over text.
+        assert_eq!(s.hover_at(bar.thumb.center()), Hover::Scrollbar);
+    }
+    // A table that fits has none.
+    w.resize(1700.0);
+    assert!(w.st.borrow().geometry.hbars.is_empty());
+}
+
+#[gpui::test]
+fn the_sideways_thumb_drags_and_a_press_beside_it_jumps(cx: &mut TestAppContext) {
+    let mut w = open_wide(cx, &wide_table(), 900.0);
+    let (bar, _) = bar_of(&w.st.borrow()).expect("a sideways bar");
+    let room = bar.track.1 - f32::from(bar.thumb.size.width);
+    // Dragged 40 px right: scrolled as far along.
+    let from = bar.thumb.center();
+    let to = from + point(px(40.0), px(0.0));
+    w.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    w.vcx
+        .simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    w.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    w.settle();
+    {
+        let s = w.st.borrow();
+        let scrolled = s.hscroll.get(&bar.block).copied().unwrap_or(0.0);
+        assert!(
+            (scrolled - 40.0 / room * bar.overflow).abs() < 0.5,
+            "{scrolled} of {}",
+            bar.overflow
+        );
+        let (now, _) = bar_of(&s).expect("the bar");
+        assert!((f32::from(now.thumb.left() - bar.thumb.left()) - 40.0).abs() < 0.5);
+        // Nothing was selected on the way.
+        assert!(s.selected().is_none());
+    }
+    // A press at the track's right end: the thumb jumps there, the table to
+    // its end.
+    let end = point(px(bar.track.0 + bar.track.1 - 1.0), bar.thumb.center().y);
+    w.vcx
+        .simulate_mouse_down(end, MouseButton::Left, Modifiers::none());
+    w.vcx
+        .simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    w.settle();
+    let s = w.st.borrow();
+    let scrolled = s.hscroll.get(&bar.block).copied().unwrap_or(0.0);
+    assert!((scrolled - bar.overflow).abs() < 0.5, "{scrolled}");
+    let (now, _) = bar_of(&s).expect("the bar");
+    assert!(
+        (f32::from(now.thumb.right()) - (bar.track.0 + bar.track.1)).abs() < 0.5,
+        "{now:?}"
+    );
+}
+
+#[gpui::test]
+fn the_sideways_thumb_stays_on_screen_on_a_tall_table(cx: &mut TestAppContext) {
+    let mut w = open_wide(cx, &tall_table(60), 900.0);
+    // The table fills the view: the thumb is at the view's bottom.
+    {
+        let mut s = w.st.borrow_mut();
+        let doc = s.doc.as_ref().expect("loaded");
+        let row = doc
+            .tree
+            .items()
+            .iter()
+            .position(|it| matches!(it.kind, ItemKind::TableRow { row: 20, .. }))
+            .expect("row 20");
+        s.engine.jump_to(row, 10.0);
+    }
+    w.settle();
+    {
+        let s = w.st.borrow();
+        let (bar, clips) = bar_of(&s).expect("a sideways bar");
+        let view = s.geometry.bounds;
+        assert!(
+            clips.first().expect("rows").0.top() <= view.top()
+                && clips.last().expect("rows").0.bottom() >= view.bottom(),
+            "the table covers the view"
+        );
+        assert_eq!(
+            f32::from(bar.thumb.bottom()),
+            f32::from(view.bottom()) - scrollbar::INSET_X
+        );
+    }
+    // Its end in sight: the thumb is at the table's bottom edge.
+    w.st.borrow_mut().engine.scroll_to_end();
+    w.settle();
+    let s = w.st.borrow();
+    let (bar, clips) = bar_of(&s).expect("a sideways bar");
+    let last = clips.last().expect("rows").0;
+    assert!(last.bottom() < s.geometry.bounds.bottom(), "{last:?}");
+    assert_eq!(
+        f32::from(bar.thumb.bottom()),
+        f32::from(last.bottom()) - scrollbar::INSET_X
+    );
+}
+
+#[gpui::test]
+fn fades_show_on_the_sides_whose_text_is_out_of_sight(cx: &mut TestAppContext) {
+    let mut w = open_wide(cx, &wide_table(), 900.0);
+    let (bar, _) = bar_of(&w.st.borrow()).expect("a sideways bar");
+    let rows = fades(&w.st.borrow());
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|f| *f == (false, true)),
+        "at the start: {rows:?}"
+    );
+    for (scroll, want) in [
+        (bar.overflow / 2.0, (true, true)),
+        (bar.overflow, (true, false)),
+        (0.0, (false, true)),
+    ] {
+        w.st.borrow_mut().hscroll.insert(bar.block, scroll);
+        w.settle();
+        let rows = fades(&w.st.borrow());
+        assert!(rows.iter().all(|f| *f == want), "at {scroll}: {rows:?}");
+    }
+    // A table that fits fades nowhere.
+    w.resize(1700.0);
+    let s = w.st.borrow();
+    assert!(
+        s.geometry
+            .items
+            .iter()
+            .filter_map(|g| g.code)
+            .all(|c| c.fades == (false, false))
+    );
+}
+
+#[gpui::test]
+fn an_unwrapped_code_block_shows_the_thumb_and_fades(cx: &mut TestAppContext) {
+    let long = "x".repeat(300);
+    let md = format!("```sh\necho {long}\nls\n```\n\nafter\n");
+    let mut w = open_wide(cx, &md, 1280.0);
+    let (bar, clips) = bar_of(&w.st.borrow()).expect("a sideways bar");
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].1, (false, true));
+    assert_eq!(
+        f32::from(bar.thumb.bottom()),
+        f32::from(clips[0].0.bottom()) - scrollbar::INSET_X
+    );
+    // Dragged to the end: the left side fades instead.
+    let from = bar.thumb.center();
+    let to = from + point(px(bar.track.1), px(0.0));
+    w.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    w.vcx
+        .simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    w.vcx
+        .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    w.settle();
+    {
+        let s = w.st.borrow();
+        let scrolled = s.hscroll.get(&bar.block).copied().unwrap_or(0.0);
+        assert!((scrolled - bar.overflow).abs() < 0.5, "{scrolled}");
+        assert_eq!(fades(&s), vec![(true, false)]);
+    }
+    // Wrapped: nothing scrolls, so no thumb and no fades.
+    let wrap = {
+        let s = w.st.borrow();
+        s.geometry
+            .buttons
+            .iter()
+            .find(|b| b.kind == ButtonKind::Wrap)
+            .expect("the wrap button")
+            .bounds
+            .center()
+    };
+    w.vcx.simulate_click(wrap, Modifiers::none());
+    w.settle();
+    let s = w.st.borrow();
+    assert!(s.geometry.hbars.is_empty());
+    assert!(fades(&s).is_empty());
 }

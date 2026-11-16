@@ -31,8 +31,10 @@
 //! - A click on a link emits [`ReaderEvent::FollowLink`]; Mod-click asks for
 //!   a new tab and a middle click for a background tab. The window decides
 //!   what to do ([`navigation`]).
-//! - Wheel scrolling (sideways in code blocks that do not wrap), the
-//!   scrollbar thumb, and the keys of [`key_bindings`].
+//! - Wheel scrolling (sideways in code blocks that do not wrap and in
+//!   tables), the scrollbar thumb, the sideways thumbs of tables and code
+//!   that scroll sideways (with fades over their hidden sides), and the
+//!   keys of [`key_bindings`].
 //! - A code block's head copies the block and toggles its soft wrap.
 //! - Find in page ([`find`]): Mod+F opens the find popover at the top right
 //!   of the document area; matches are highlighted and the current one is

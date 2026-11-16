@@ -40,6 +40,9 @@ pub mod size {
     /// The shortest the scrollbar thumb gets in a long document (not
     /// designed).
     pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+    /// The fade over each side of a table or code block whose text is
+    /// scrolled out of sight there (not designed).
+    pub const SCROLL_FADE: f32 = 24.0;
     /// Copy and wrap buttons in a code block's head.
     pub const CODE_BUTTON: f32 = 20.0;
     pub const THEME_CARD_PREVIEW: f32 = 84.0;
@@ -209,7 +212,9 @@ pub mod spacing {
     }
 
     /// The preview's scrollbar: 3 from the right edge, 4 from the top and
-    /// the bottom. No track.
+    /// the bottom. No track. A sideways one (tables and code that scroll
+    /// sideways) is the same turned: 3 from the bottom edge, 4 from the
+    /// sides.
     pub mod scrollbar {
         pub const INSET_X: f32 = 3.0;
         pub const INSET_Y: f32 = 4.0;

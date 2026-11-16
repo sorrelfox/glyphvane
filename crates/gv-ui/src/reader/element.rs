@@ -8,13 +8,14 @@
 //!   [`InlineParagraph`] per visible text item (laid out as a root at the
 //!   item's width and prepainted at its place) and records what to draw
 //!   around them: the caret band (Split view), code block frames and
-//!   heads, quote bars, list markers, rules, the ambiguity badges of links
-//!   and the scrollbar.
+//!   heads, quote bars, list markers, rules, the ambiguity badges of links,
+//!   the scrollbar, and for tables and code that scroll sideways the fades
+//!   over their hidden sides and a sideways thumb.
 //! - **Paint** draws the frames, the paragraphs (code clipped to its box),
-//!   then the head buttons, badges and the scrollbar, and registers the
-//!   pointer handlers: wheel scrolling (sideways inside code blocks),
-//!   selection by dragging, link clicks, the code buttons and the
-//!   scrollbar thumb.
+//!   then the fades, head buttons, badges and the thumbs, and registers the
+//!   pointer handlers: wheel scrolling (sideways inside code blocks and
+//!   tables), selection by dragging, link clicks, the code buttons and the
+//!   thumbs.
 
 use std::cell::RefCell;
 use std::panic;
@@ -24,11 +25,12 @@ use std::time::Instant;
 
 use gpui::assets::IconName;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Corners, CursorStyle,
-    DispatchPhase, Edges, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyElement, App, AvailableSpace, Background, Bounds, ClipboardItem, ContentMask, Corners,
+    CursorStyle, DispatchPhase, Edges, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollEvent, ShapedLine, SharedString, Style, TextAlign, TextRun,
-    TransformationMatrix, WeakEntity, Window, fill, point, px, quad, relative, size,
+    TransformationMatrix, WeakEntity, Window, fill, linear_color_stop, linear_gradient, point, px,
+    quad, relative, size,
 };
 use gv_inline::ItemKind as PieceKind;
 use gv_render_tree::{FrameKind, ItemKind, ListMarker, StatusIcon, TextRole, Variant, style_id};
@@ -42,13 +44,15 @@ use super::items::{
 };
 use super::live::{Spot, SyncRequest, block_items_at};
 use super::state::{
-    ButtonKind, CodeButton, CodeGeom, Control, ControlKind, Geometry, Hover, LinkHit, PlacedGeom,
-    Press, Selection, State,
+    ButtonKind, CodeButton, CodeGeom, Control, ControlKind, Geometry, HBar, Hover, LinkHit,
+    PlacedGeom, Press, Selection, State,
 };
 use super::{Disposition, LinkRequest, Reader, ReaderEvent, find, startup};
 use crate::icons::Icon;
 use crate::inline::{InlineParagraph, Palette, Token};
-use crate::metrics::size::{CHECKBOX, CODE_BUTTON, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, split};
+use crate::metrics::size::{
+    CHECKBOX, CODE_BUTTON, SCROLL_FADE, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, split,
+};
 use crate::metrics::spacing::{code_head, document as doc_spacing, inline, scrollbar};
 use crate::metrics::{HAIRLINE, icon, radius, text};
 
@@ -65,6 +69,11 @@ enum Op {
         bounds: Bounds<Pixels>,
         color: Hsla,
         radius: Pixels,
+    },
+    /// A rectangle filled with a gradient.
+    Fill {
+        bounds: Bounds<Pixels>,
+        background: Background,
     },
     Frame {
         bounds: Bounds<Pixels>,
@@ -93,6 +102,7 @@ impl Op {
                 color,
                 radius,
             } => window.paint_quad(fill(*bounds, *color).corner_radii(*radius)),
+            Self::Fill { bounds, background } => window.paint_quad(fill(*bounds, *background)),
             Self::Frame {
                 bounds,
                 borders,
@@ -627,9 +637,13 @@ impl Element for ReaderElement {
                 .map(|m| m.highlights(p.ix, node.source.start))
                 .unwrap_or_default();
 
+            // What is behind the item's content, bottom up: the page, the
+            // caret band and the boxes around it (its fades end in it).
+            let mut backdrop = vec![color(Token::SurfacePage)];
             // The caret band: the block's content and 2 px more above and
             // below, 6 px beyond it on each side.
             if let Some(band) = band_items.as_ref().filter(|r| r.contains(&p.ix)) {
+                backdrop.push(color(Token::StateHover));
                 let (first, last) = (p.ix == band.start, p.ix + 1 == band.end);
                 let (r, zero) = (px(radius::CHIP), px(0.0));
                 let y0 = if first {
@@ -694,6 +708,7 @@ impl Element for ReaderElement {
                         // The box: tinted, radius 6, no border; the title
                         // row (icon and type name) where it starts.
                         let (tint, status, icon_name) = alert_style(kind);
+                        backdrop.push(color(tint));
                         let opens = item.opens_frame(i);
                         let closes = item.closes_frame(i);
                         let y0 = if opens { box_top } else { top };
@@ -756,6 +771,7 @@ impl Element for ReaderElement {
                         let w = (column - item.frame_x(i, &m)).max(1.0);
                         let (r, zero) = (px(radius::BLOCK), px(0.0));
                         let fill = palette.role(tint.role());
+                        backdrop.push(fill);
                         out.under.push(Op::Frame {
                             bounds: bounds_of(fx, y0, w, box_bottom - y0),
                             borders: Edges::default(),
@@ -778,6 +794,7 @@ impl Element for ReaderElement {
                         let w = (column - item.frame_x(i, &m)).max(1.0);
                         let (r, zero) = (px(radius::BLOCK), px(0.0));
                         let line = px(HAIRLINE);
+                        backdrop.push(color(Token::SurfaceWindow));
                         out.under.push(Op::Frame {
                             bounds: bounds_of(fx, y0, w, box_bottom - y0),
                             borders: Edges {
@@ -948,10 +965,18 @@ impl Element for ReaderElement {
                             window,
                             cx,
                         ));
+                        // The header row's fades end in its fill.
+                        if *row == 0 {
+                            backdrop.push(color(Token::SurfaceSunken));
+                        }
+                        let fades = push_fades(&mut out.over, clip, scroll, overflow, &backdrop);
                         geom.code = Some(CodeGeom {
                             block: item.id.block,
                             clip,
                             overflow,
+                            view: inner,
+                            scroll,
+                            fades,
                         });
                     }
                 }
@@ -1055,6 +1080,9 @@ impl Element for ReaderElement {
                             block: item.id.block,
                             clip,
                             overflow,
+                            view: inner,
+                            scroll,
+                            fades: (false, false),
                         });
                     }
                 }
@@ -1201,10 +1229,15 @@ impl Element for ReaderElement {
                             window,
                             cx,
                         ));
+                        backdrop.push(color(Token::SurfaceSunken));
+                        let fades = push_fades(&mut out.over, clip, scroll, overflow, &backdrop);
                         geom.code = Some(CodeGeom {
                             block: item.id.block,
                             clip,
                             overflow,
+                            view: inner,
+                            scroll,
+                            fades,
                         });
                     }
                 }
@@ -1627,6 +1660,18 @@ impl Element for ReaderElement {
             start_images(self.reader.clone(), images, cx);
         }
 
+        // The sideways scrollbars of the tables and code blocks that scroll
+        // sideways: a thumb like the scrollbar's, inside the block's bottom
+        // edge, or the bottom of its visible part.
+        for bar in hbars(&geometry.items, bounds) {
+            out.over.push(Op::Rect {
+                bounds: bar.thumb,
+                color: color(Token::BorderStrong),
+                radius: px(radius::SCROLLBAR),
+            });
+            geometry.hbars.push(bar);
+        }
+
         // The scrollbar: a thumb, no track.
         let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
         let track_h = f32::from(bounds.size.height) - 2.0 * scrollbar::INSET_Y;
@@ -1835,6 +1880,10 @@ impl ReaderElement {
                         drag_thumb(&mut st, e.position, grab);
                         true
                     }
+                    Press::HThumb { block, grab } if e.dragging() => {
+                        st.drag_hthumb(block, f32::from(e.position.x), grab);
+                        true
+                    }
                     Press::Select {
                         origin,
                         moved,
@@ -1921,6 +1970,7 @@ impl ReaderElement {
                         }
                     }
                     (Press::Thumb { .. }, MouseButton::Left) => st.engine.end_drag(),
+                    (Press::HThumb { .. }, MouseButton::Left) => {}
                     (Press::Button(button), MouseButton::Left) => {
                         if st.button_at(e.position) == Some(button) {
                             match button.kind {
@@ -2141,6 +2191,20 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
         drag_thumb(st, pos, grab);
         return;
     }
+    if let Some(bar) = st.hbar_at(pos) {
+        let grab = if bar.thumb.contains(&point(pos.x, bar.thumb.center().y)) {
+            f32::from(pos.x - bar.thumb.left())
+        } else {
+            // A press beside the thumb jumps there, centred on the pointer.
+            f32::from(bar.thumb.size.width) / 2.0
+        };
+        st.press = Press::HThumb {
+            block: bar.block,
+            grab,
+        };
+        st.drag_hthumb(bar.block, f32::from(pos.x), grab);
+        return;
+    }
     if let Some(button) = st.button_at(pos) {
         st.press = Press::Button(button);
         return;
@@ -2178,6 +2242,98 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
         moved: e.modifiers.shift,
         link,
     };
+}
+
+/// Fades the sides of `clip` whose text is out of sight: the left one
+/// once the text is scrolled `scroll` px from its start, the right one
+/// while some of its `overflow` px are still to the right. Each is a
+/// gradient from transparent to the block's `backdrop` (its layers, bottom
+/// up, from the topmost opaque one). Returns which are drawn.
+fn push_fades(
+    over: &mut Vec<Op>,
+    clip: Bounds<Pixels>,
+    scroll: f32,
+    overflow: f32,
+    backdrop: &[Hsla],
+) -> (bool, bool) {
+    let left = scroll > 0.5;
+    let right = scroll < overflow - 0.5;
+    let (x, y) = (f32::from(clip.left()), f32::from(clip.top()));
+    let (w, h) = (f32::from(clip.size.width), f32::from(clip.size.height));
+    let fade = SCROLL_FADE.min(w / 3.0);
+    let opaque = backdrop.iter().rposition(|c| c.a >= 0.999).unwrap_or(0);
+    // Toward the hidden side: 270° points left, 90° right.
+    for (on, at, angle) in [(left, x, 270.0), (right, x + w - fade, 90.0)] {
+        if !on {
+            continue;
+        }
+        for &c in &backdrop[opaque..] {
+            over.push(Op::Fill {
+                bounds: bounds_of(at, y, fade, h),
+                background: linear_gradient(
+                    angle,
+                    linear_color_stop(c.opacity(0.0), 0.0),
+                    linear_color_stop(c, 1.0),
+                ),
+            });
+        }
+    }
+    (left, right)
+}
+
+/// The sideways scrollbars of the placed items `items` in a view `bounds`:
+/// one per block that scrolls sideways (a table's rows, a code block's
+/// chunks), its thumb `SCROLLBAR_THUMB` thick, 3 px above the bottom of the
+/// block's visible part, along its clip 4 px in from each side; sized and
+/// placed by how much of the text shows and how far it is scrolled.
+fn hbars(items: &[PlacedGeom], bounds: Bounds<Pixels>) -> Vec<HBar> {
+    // Per block: the clips' union, the most it scrolls, what shows and how
+    // far it is scrolled.
+    let mut blocks: Vec<(CodeGeom, f32, f32)> = Vec::new();
+    for c in items.iter().filter_map(|g| g.code) {
+        if c.overflow <= 0.5 {
+            continue;
+        }
+        let (top, bottom) = (f32::from(c.clip.top()), f32::from(c.clip.bottom()));
+        match blocks.iter_mut().find(|(b, _, _)| b.block == c.block) {
+            Some((b, t, bt)) => {
+                *t = t.min(top);
+                *bt = bt.max(bottom);
+                b.overflow = b.overflow.max(c.overflow);
+                b.scroll = b.scroll.max(c.scroll);
+            }
+            None => blocks.push((c, top, bottom)),
+        }
+    }
+    let thick = SCROLLBAR_THUMB;
+    blocks
+        .into_iter()
+        .filter_map(|(c, top, bottom)| {
+            let top = top.max(f32::from(bounds.top()));
+            let bottom = bottom.min(f32::from(bounds.bottom()));
+            let track_x = f32::from(c.clip.left()) + scrollbar::INSET_Y;
+            let track_w = f32::from(c.clip.size.width) - 2.0 * scrollbar::INSET_Y;
+            if bottom - top < thick + 2.0 * scrollbar::INSET_X || track_w < SCROLLBAR_MIN_THUMB {
+                return None;
+            }
+            let shown = c.view / (c.view + c.overflow);
+            let thumb_w = (track_w * shown).max(SCROLLBAR_MIN_THUMB).min(track_w);
+            let x = track_x + (track_w - thumb_w) * (c.scroll / c.overflow).clamp(0.0, 1.0);
+            let y = bottom - scrollbar::INSET_X - thick;
+            Some(HBar {
+                block: c.block,
+                zone: bounds_of(
+                    f32::from(c.clip.left()),
+                    y - scrollbar::INSET_X,
+                    f32::from(c.clip.size.width),
+                    bottom - (y - scrollbar::INSET_X),
+                ),
+                track: (track_x, track_w),
+                thumb: bounds_of(x, y, thumb_w, thick),
+                overflow: c.overflow,
+            })
+        })
+        .collect()
 }
 
 fn drag_thumb(st: &mut State, pos: Point<Pixels>, grab: f32) {
