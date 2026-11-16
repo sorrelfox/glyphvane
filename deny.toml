@@ -64,7 +64,14 @@ allow = [
 confidence-threshold = 0.93
 # Per-crate exceptions; each entry needs an ADR reference in a comment.
 exceptions = [
-    #{ allow = ["EPL-2.0"], crate = "example", reason = "ADR-NNN" },
+    #{ allow = ["EPL-2.0"], crate = "example" },  # ADR-NNN
+    # ADR-016: the code highlighter. EUPL-1.2 is copyleft and not on the
+    # allow list; it is accepted for this crate only, through the EUPL's
+    # compatibility clause (Art. 5 and the Appendix list GPL-3.0), so the
+    # combined work ships under GPL-3.0-or-later. Changes to giallo itself
+    # stay EUPL-1.2. The notices (packaging/THIRD-PARTY-NOTICES.txt) carry
+    # the EUPL-1.2 text.
+    { allow = ["EUPL-1.2"], crate = "giallo" },
 ]
 # Not every allowed license is in use yet.
 unused-allowed-license = "allow"

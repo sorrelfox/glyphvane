@@ -1,0 +1,18 @@
+language: Some("html")
+outcome: Highlighted
+0..1 punctuation "<"
+1..2 tag "a"
+3..7 attribute "href"
+7..8 punctuation "="
+8..16 string "\"x.html\""
+17..22 attribute "class"
+22..23 punctuation "="
+23..24 string "c"
+24..25 punctuation ">"
+30..31 punctuation "&"
+31..34 constant "amp"
+34..35 punctuation ";"
+40..42 punctuation "</"
+42..43 tag "a"
+43..44 punctuation ">"
+44..54 comment "<!-- c -->"

@@ -8,6 +8,7 @@ mod deps;
 mod fixtures;
 mod fuzz_seed;
 mod headers;
+mod highlight_bundle;
 mod icount;
 mod latency;
 mod package;
@@ -61,6 +62,10 @@ Commands:
   size-report --bin-dir DIR [--baseline FILE] [--json FILE]
                         Executable sizes against the NFR-SIZE budgets and a
                         baseline (fails on > 3 % growth).
+  highlight-bundle [--source DIR] [--linguist FILE]
+                        Build gv-highlight's licence-filtered grammar bundle,
+                        its manifest and the grammar notices from
+                        crates/gv-highlight/bundle/grammars.toml.
   bench-icount [--save-baseline NAME] [--baseline NAME [--limit PCT]]
                         Instruction-count benchmarks under Valgrind (Linux);
                         fails on > 3 % growth against the baseline; see
@@ -115,6 +120,7 @@ fn run() -> Result<bool> {
         "package" => package::run(&root, rest),
         "size-report" => package::size::run(rest),
         "bench-icount" => icount::run(&root, rest),
+        "highlight-bundle" => highlight_bundle::run(&root, rest),
         other => {
             eprint!("unknown command `{other}`\n\n{HELP}");
             Ok(false)

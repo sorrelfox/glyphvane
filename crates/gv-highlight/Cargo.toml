@@ -9,6 +9,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+giallo = { workspace = true }
+log = { workspace = true }
+miniz_oxide = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

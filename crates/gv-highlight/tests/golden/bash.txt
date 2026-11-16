@@ -1,0 +1,18 @@
+language: Some("shellscript")
+outcome: Highlighted
+0..9 comment "#!/bin/sh"
+10..13 keyword "for"
+14..15 variable "f"
+16..18 keyword "in"
+19..23 string "*.md"
+23..24 punctuation ";"
+25..27 keyword "do"
+28..32 function "echo"
+33..34 string "\""
+34..36 variable "$f"
+36..37 string "\""
+38..39 operator "|"
+40..42 function "wc"
+43..45 constant "-l"
+45..46 punctuation ";"
+47..51 keyword "done"

@@ -183,6 +183,15 @@ fontdb = "0.23.0"
 # clipboard does not carry (MIT OR Apache-2.0). Without the default
 # `image-data` feature: no image decoder. gv-app adds Wayland data-control.
 arboard = { version = "3.7.0", default-features = false }
+# Code highlighting (gv-highlight): TextMate grammars through giallo, pure
+# Rust (fancy-regex) without its `dump` feature, which would add zstd's C
+# code; grammars come from our own bundle instead. EUPL-1.2, allowed for this
+# crate only (deny.toml, ADR-016). One maintainer and frequent breaking
+# releases: exact pin, bump deliberately after the gv-highlight tests pass.
+giallo = { version = "=0.6.0", default-features = false }
+# The bundle's raw-deflate decoder (the version flate2 already pulls in; MIT
+# OR Zlib OR Apache-2.0).
+miniz_oxide = "0.9.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

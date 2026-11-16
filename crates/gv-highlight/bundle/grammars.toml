@@ -1,0 +1,266 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+#
+# Input of `cargo xtask highlight-bundle`, which builds `grammars.bin`,
+# `manifest.tsv` and the grammar section of
+# packaging/THIRD-PARTY-NOTICES.txt from the files listed here.
+#
+# Rules (enforced by the xtask):
+# - Every grammar in `languages` is bundled, with the grammars it embeds and
+#   the injection grammars that target it.
+# - A grammar is bundled only if its licence is on `allow`, either from the
+#   upstream metadata or from a `[[reviewed]]` entry below. Grammars with an
+#   unknown or missing licence are left out (they stay unhighlighted where
+#   another grammar embeds them). A language in `languages` that cannot be
+#   bundled fails the build.
+# - `[[reviewed]]` entries are hand-checked against the upstream repository at
+#   the commit the grammar was taken from. Add one only after reading the
+#   licence there, and record the date.
+
+# The common fence languages, as tm-grammars grammar names.
+languages = [
+  "asm",
+  "c",
+  "clojure",
+  "cpp",
+  "csharp",
+  "css",
+  "csv",
+  "dart",
+  "diff",
+  "docker",
+  "elixir",
+  "erlang",
+  "fortran-free-form",
+  "go",
+  "graphql",
+  "groovy",
+  "haskell",
+  "html",
+  "ini",
+  "java",
+  "javascript",
+  "json",
+  "jsx",
+  "julia",
+  "kotlin",
+  "latex",
+  "lua",
+  "make",
+  "markdown",
+  "matlab",
+  "mermaid",
+  "nim",
+  "nix",
+  "objective-c",
+  "ocaml",
+  "perl",
+  "php",
+  "powershell",
+  "proto",
+  "python",
+  "r",
+  "ruby",
+  "rust",
+  "scala",
+  "scss",
+  "shellscript",
+  "shellsession",
+  "sql",
+  "svelte",
+  "swift",
+  "terraform",
+  "toml",
+  "tsx",
+  "typescript",
+  "viml",
+  "vue",
+  "xml",
+  "yaml",
+  "zig",
+]
+
+# TextMate grammars, as collected by the tm-grammars package.
+[source]
+repository = "shikijs/textmate-grammars-themes"
+# The commit giallo 0.6.0 builds its own registry from.
+commit = "8f1828ebccc57930cf0adde9b35ae929584fe191"
+path = "packages/tm-grammars"
+
+# GitHub Linguist: the language names, aliases and extensions that fence info
+# strings use.
+[linguist]
+repository = "github-linguist/linguist"
+tag = "v9.7.0"
+path = "lib/linguist/languages.yml"
+
+[licences]
+# SPDX identifiers as tm-grammars writes them. All are compatible with
+# GPL-3.0-or-later. `LicenseRef-TextMate-Bundle` is the all-permissive
+# TextMate bundle licence ("Permission to copy, use, modify, sell and
+# distribute this software is granted...").
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "0BSD",
+  "Zlib",
+  "Unlicense",
+  "CC0-1.0",
+  "MPL-2.0",
+  "GPL-3.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "LicenseRef-TextMate-Bundle",
+]
+
+# Linguist languages whose `tm_scope` differs from the bundled grammar's
+# scope name: Linguist language name -> grammar name.
+[linguist_overrides]
+"Markdown" = "markdown"
+"Mermaid" = "mermaid"
+"Vue" = "vue"
+"Svelte" = "svelte"
+"Fortran Free Form" = "fortran-free-form"
+"Protocol Buffer" = "proto"
+"HCL" = "terraform"
+"Terraform Template" = "terraform"
+"Vim Script" = "viml"
+"Assembly" = "asm"
+"Unix Assembly" = "asm"
+"TeX" = "latex"
+"Objective-C" = "objective-c"
+"Dockerfile" = "docker"
+"Makefile" = "make"
+"MATLAB" = "matlab"
+"PowerShell" = "powershell"
+"Nix" = "nix"
+"CSV" = "csv"
+"INI" = "ini"
+"Diff" = "diff"
+"ShellSession" = "shellsession"
+
+# Fence names that neither Linguist nor tm-grammars knows, -> grammar name.
+[extra_aliases]
+"shell" = "shellscript"
+"terminal" = "shellsession"
+"shell-session" = "shellsession"
+"fortran" = "fortran-free-form"
+"golang" = "go"
+"py3" = "python"
+"jl" = "julia"
+"tf" = "terraform"
+"hcl" = "terraform"
+"f90" = "fortran-free-form"
+"mmd" = "mermaid"
+# Common extensions that Linguist shares between languages.
+"ex" = "elixir"
+"ml" = "ocaml"
+"pl" = "perl"
+"gradle" = "groovy"
+"svg" = "xml"
+# Fences marked `tex` are almost always LaTeX; the plain TeX grammar is
+# only used where LaTeX embeds it.
+"tex" = "latex"
+
+# Hand-verified licences for grammars whose metadata has no usable licence
+# field (missing or NOASSERTION). Checked on 2026-11-13 (yaml, toml, matlab,
+# elixir, nim) and 2026-11-16 (sass, abap) against the upstream repository at
+# the commit recorded in tm-grammars. `notice` is the text shipped in the
+# third-party notices when tm-grammars' NOTICE file has no entry for the
+# grammar.
+#
+# Checked and left out (no licence found upstream): glsl
+# (polym0rph/GLSL.tmbundle has no licence file or statement).
+
+[[reviewed]]
+grammar = "yaml"
+licence = "LicenseRef-TextMate-Bundle"
+verified = "2026-11-13"
+source = "https://github.com/textmate/yaml.tmbundle/blob/e54ceae3b719506dba7e481a77cea4a8b576ae46/README.mdown"
+notice = """
+YAML grammar, from the TextMate YAML bundle (https://github.com/textmate/yaml.tmbundle).
+
+Permission to copy, use, modify, sell and distribute this software is
+granted. This software is provided "as is" without express or implied
+warranty, and with no claim as to its suitability for any purpose.
+"""
+
+[[reviewed]]
+grammar = "toml"
+licence = "LicenseRef-TextMate-Bundle"
+verified = "2026-11-13"
+source = "https://github.com/textmate/toml.tmbundle/blob/e82b64c1e86396220786846201e9aa3f0a2d9ca2/README.mdown"
+notice = """
+TOML grammar, from the TextMate TOML bundle (https://github.com/textmate/toml.tmbundle).
+
+Permission to copy, use, modify, sell and distribute this software is
+granted. This software is provided "as is" without express or implied
+warranty, and with no claim as to its suitability for any purpose.
+"""
+
+[[reviewed]]
+grammar = "abap"
+licence = "LicenseRef-TextMate-Bundle"
+verified = "2026-11-16"
+source = "https://github.com/pvl/abap.tmbundle/blob/92e17e62a9449d2a6f87bfb30b4f920986c24018/README.md"
+notice = """
+ABAP grammar, from abap.tmbundle (https://github.com/pvl/abap.tmbundle).
+
+Permission to copy, use, modify, sell and distribute this software is
+granted. This software is provided "as is" without express or implied
+warranty, and with no claim as to its suitability for any purpose.
+"""
+
+[[reviewed]]
+grammar = "matlab"
+licence = "BSD-2-Clause"
+verified = "2026-11-13"
+source = "https://github.com/mathworks/MATLAB-Language-grammar/blob/69dbf20c1eb19efd629c0438a2a493e60617e8de/license.txt"
+notice = """
+MATLAB grammar, from MATLAB-Language-grammar (https://github.com/mathworks/MATLAB-Language-grammar).
+
+Copyright 2018 The MathWorks, Inc.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+"""
+
+[[reviewed]]
+grammar = "elixir"
+licence = "Apache-2.0"
+verified = "2026-11-13"
+source = "https://github.com/elixir-editors/elixir-tmbundle/blob/43c8cd957d5ac6e1abbd8730fc7a08c81a6e76c9/LICENSE"
+
+[[reviewed]]
+grammar = "nim"
+licence = "MIT"
+verified = "2026-11-13"
+source = "https://github.com/pragmagic/vscode-nim/blob/0272a0544ddf147fde98f8a8f2b624b7dcb19eb3/LICENSE"
+
+[[reviewed]]
+grammar = "sass"
+licence = "MIT"
+verified = "2026-11-16"
+source = "https://github.com/TheRealSyler/vscode-sass-indented/blob/f0e50cfaca4b64a1d49f8d938f188d6fd0bcfb6f/LICENSE"

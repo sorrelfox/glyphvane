@@ -1,0 +1,12 @@
+language: Some("yaml")
+outcome: Highlighted
+0..4 property "name"
+4..5 operator ":"
+6..8 string "gv"
+9..14 property "items"
+14..15 operator ":"
+18..19 punctuation "-"
+20..21 number "1"
+24..25 punctuation "-"
+26..31 string "\"two\""
+32..38 comment "# note"

@@ -1,0 +1,11 @@
+language: Some("toml")
+outcome: Highlighted
+0..1 punctuation "["
+1..8 heading "package"
+8..9 punctuation "]"
+10..14 property "name"
+15..16 punctuation "="
+17..21 string "\"gv\""
+22..29 property "version"
+30..31 punctuation "="
+32..33 number "3"

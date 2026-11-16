@@ -16,6 +16,8 @@ gv-syntax = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10.9"
+# Grammar bundle configuration (`cargo xtask highlight-bundle`).
+toml = { workspace = true }
 
 [lints]
 workspace = true

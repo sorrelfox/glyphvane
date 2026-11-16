@@ -1,0 +1,13 @@
+language: Some("diff")
+outcome: Highlighted
+0..3 punctuation "---"
+3..7 heading " a/x"
+8..11 punctuation "+++"
+11..15 heading " b/x"
+16..18 punctuation "@@"
+18..25 heading " -1 +1 "
+25..27 punctuation "@@"
+28..29 punctuation "-"
+29..32 deleted "old"
+33..34 punctuation "+"
+34..37 inserted "new"
