@@ -269,6 +269,12 @@ impl HighlightCache {
     pub fn get(&self, line: usize) -> Option<&Rc<LineStyle>> {
         self.lines.get(&line)
     }
+
+    /// Caches `style` for `line`.
+    #[cfg(test)]
+    pub fn insert_for_test(&mut self, line: usize, style: LineStyle) {
+        self.lines.insert(line, Rc::new(style));
+    }
 }
 
 /// Per-byte styles of a window of lines, painted layer by layer.

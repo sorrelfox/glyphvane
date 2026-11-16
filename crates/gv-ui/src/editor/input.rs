@@ -8,8 +8,9 @@
 //! never from the last paint: Wayland asks for the input method's area
 //! inside the event that delivered the preedit, before the next frame is
 //! laid out (IME spike, Problem 1). A row that changed since the last frame
-//! is shaped again on the spot ([`super::rows::RowCache`]). Positions are
-//! on display rows: the wrap rows of the wrap layer while soft wrap is on.
+//! is made from the display map and shaped again on the spot
+//! ([`super::rows::RowCache`]). Positions are on display rows: the wrap
+//! rows of the wrap layer while soft wrap is on.
 //!
 //! UTF-16 ranges from the platform go through `gv-editor`'s input-method
 //! API, which clips them to characters and never splits a surrogate pair
@@ -156,24 +157,24 @@ impl EditorView {
         let map = RowMap::of(&doc.editor);
         let start = map.visual_start(line);
         let first = map.first_row(start);
-        let visual = VisualLine::new(
-            doc.editor.text(),
-            doc.editor.display().replace_snapshot(),
-            start,
-        )?;
+        let text = doc.editor.text();
+        let tabs = doc.editor.display();
+        let visual = VisualLine::new(text, tabs.replace_snapshot(), start)?;
         let breaks = map.breaks(&visual);
         let env = RowEnv {
+            text,
+            tabs,
             fonts: &fonts,
             palette: &palette,
             theme,
             whitespace,
-            tab_size: doc.editor.display().tab_size().get(),
+            tab_size: tabs.tab_size().get(),
             space,
         };
-        let style = visual.style(&doc.highlights);
+        let styles = visual.styles(&doc.highlights);
         let row = doc
             .rows
-            .row(&visual, style.as_ref(), breaks, env, window)
+            .row(&visual, styles, breaks, env, window)
             .cloned()?;
         Some((first, visual, row))
     }
@@ -205,12 +206,14 @@ impl EditorView {
         if display_row >= row_count {
             return Some(len);
         }
-        let (first, visual, row) = self.line_row(line, window, cx)?;
+        let (first, _, row) = self.line_row(line, window, cx)?;
         let segment = display_row.saturating_sub(first);
         let x = f32::from(position.x) - self.text_origin_x(&columns);
         let column = row.column_at(segment, x).min(row.content_len());
-        let text = self.doc.as_ref()?.editor.text();
-        let offset = snap_to_grapheme(text, visual.to_buffer(column));
+        let editor = &self.doc.as_ref()?.editor;
+        let text = editor.text();
+        let offset = row.offset_of(text, editor.display().replace_snapshot(), column);
+        let offset = snap_to_grapheme(text, offset);
         Some(clip_caret(text, offset, Bias::Left))
     }
 
@@ -230,9 +233,11 @@ impl EditorView {
             text.line_of_offset(range.start).ok()?
         };
         let (first, visual, row) = self.line_row(line, window, cx)?;
-        let start = visual.local(range.start, Bias::Left);
-        let end = visual
-            .local(range.end.min(visual.range.end), Bias::Right)
+        let editor = &self.doc.as_ref()?.editor;
+        let (text, replace) = (editor.text(), editor.display().replace_snapshot());
+        let start = row.column_of(text, replace, range.start, Bias::Left);
+        let end = row
+            .column_of(text, replace, range.end.min(visual.range.end), Bias::Right)
             .max(start);
         let (segment, x0) = row.x(start);
         let x1 = row.x_in(segment, end);

@@ -37,7 +37,7 @@ use gv_editor::Editor;
 use gv_editor::display_map::{
     LineWrapper, RewrapJob, TabPoint, TabSnapshot, TextMeasure, WrapPoint, WrapRow, WrapSnapshot,
 };
-use gv_text::{Bias, TextSnapshot};
+use gv_text::TextSnapshot;
 
 use super::fold::{PLACEHOLDER_CHAR, VisualLine};
 use super::{EditorView, LINE};
@@ -172,8 +172,8 @@ fn is_zero_width(c: char) -> bool {
     )
 }
 
-/// Where a wrap row of a line starts: a buffer column (line-relative
-/// bytes) and the continuation indent in columns (0 on the first row).
+/// Where a wrap row of a line starts: a column of the line's tab row and
+/// the continuation indent in columns (0 on the first row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Break {
     pub column: usize,
@@ -295,8 +295,9 @@ impl<'a> RowMap<'a> {
         }
     }
 
-    /// Where the rows of visual line `line` start, in its columns: one break
-    /// at column 0 for a line that does not wrap.
+    /// Where the rows of visual line `line` start, in columns of its tab
+    /// row (the wrap layer's row starts): one break at column 0 for a line
+    /// that does not wrap.
     pub fn breaks(self, line: &VisualLine) -> Vec<Break> {
         let first = Break {
             column: 0,
@@ -305,21 +306,17 @@ impl<'a> RowMap<'a> {
         let Self::Wrap(wrap) = self else {
             return vec![first];
         };
-        let text = wrap.buffer();
         let mut breaks = vec![first];
-        let mut row = WrapRow(self.first_row(line.first) as u32);
+        let mut row = wrap
+            .tab_point_to_wrap_point(TabPoint::new(line.row, 0))
+            .row();
         while let Some(indent) = wrap.soft_wrap_indent(row) {
             row = row + WrapRow(1);
-            let point = wrap.wrap_point_to_buffer_point(WrapPoint::new(row, indent), Bias::Left);
-            let Ok(start) = text.line_start(point.line) else {
-                break;
-            };
-            let offset = start + point.column;
-            if !line.holds(offset) {
+            let point = wrap.to_tab_point(WrapPoint::new(row, indent));
+            if point.row() != line.row {
                 break;
             }
-            let column = line.local(offset, Bias::Left);
-            // A row inside one expanded tab starts nowhere new.
+            let column = point.column() as usize;
             if breaks.last().is_some_and(|b| column > b.column) {
                 breaks.push(Break { column, indent });
             }

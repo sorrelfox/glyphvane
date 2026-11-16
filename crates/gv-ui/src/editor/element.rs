@@ -332,12 +332,15 @@ impl EditorView {
         };
         let found = find.marks.touching(text.revision(), visible.clone());
         let marked = doc.editor.marked_ranges();
+        let replace = tabs.replace_snapshot();
         let env = RowEnv {
+            text: &text,
+            tabs: &tabs,
             fonts: &fonts,
             palette: &palette,
             theme,
             whitespace,
-            tab_size: doc.editor.display().tab_size().get(),
+            tab_size: tabs.tab_size().get(),
             space,
         };
         let color = |t: Token| palette.color(t);
@@ -357,14 +360,49 @@ impl EditorView {
             let range = visual.range.clone();
             let has_terminator = text.line_terminator(visual.last).ok().flatten().is_some();
             let breaks = map.breaks(visual);
-            let style = visual.style(&doc.highlights);
-            let Some(row) = doc.rows.row(visual, style.as_ref(), breaks, env, window) else {
+            let styles = visual.styles(&doc.highlights);
+            let Some(row) = doc.rows.row(visual, styles, breaks, env, window) else {
                 continue;
             };
             widest = widest.max(row.content_width());
-            let local = |offset: usize| visual.local(offset, Bias::Left);
-            let local_end = |offset: usize| visual.local(offset, Bias::Right);
+            let local = |offset: usize| row.column_of(&text, replace, offset, Bias::Left);
+            let local_end = |offset: usize| row.column_of(&text, replace, offset, Bias::Right);
             let on_line = |offset: usize| visual.holds(offset);
+            // Columns of what is drawn on the line, once for all its rows:
+            // ranges with whether they go past its end (they hold its
+            // terminator).
+            let spans_of = |ranges: &mut dyn Iterator<Item = &Range<usize>>| {
+                ranges
+                    .filter(|r| r.end >= range.start && r.start <= range.end)
+                    .map(|r| {
+                        let a = local(r.start.max(range.start));
+                        let b = local_end(r.end.min(range.end));
+                        (a, b, r.end > range.end && has_terminator)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let found_spans = spans_of(&mut found.iter().map(|(r, _)| r));
+            let found_current: Vec<bool> = found
+                .iter()
+                .filter(|(r, _)| r.end >= range.start && r.start <= range.end)
+                .map(|(_, current)| *current)
+                .collect();
+            let selection_spans = spans_of(
+                &mut selections
+                    .iter()
+                    .filter(|(r, _)| !r.is_empty())
+                    .map(|(r, _)| r),
+            );
+            let marked_spans: Vec<(usize, usize)> = marked
+                .iter()
+                .filter(|m| m.start <= range.end && m.end >= range.start)
+                .map(|m| (local(m.start), local(m.end)))
+                .collect();
+            let caret_columns: Vec<usize> = selections
+                .iter()
+                .filter(|(_, h)| on_line(*h))
+                .map(|(_, h)| local(*h))
+                .collect();
             let line_top = row_top(line_row);
             let line_h = row.segments.len() as f32 * LINE;
 
@@ -410,19 +448,12 @@ impl EditorView {
                     .push((display_row, line, (k > 0).then_some(segment.indent)));
 
                 // Find matches, as selections are drawn.
-                for (r, current) in &found {
-                    if r.end < range.start || r.start > range.end {
-                        continue;
-                    }
-                    let (a, b) = (
-                        local(r.start.max(range.start)),
-                        local_end(r.end.min(range.end)),
-                    );
+                for (&(a, b, beyond), current) in found_spans.iter().zip(&found_current) {
                     if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
                         continue;
                     }
                     let (a, b) = (a.max(cols.start), b.min(cols.end));
-                    let past_end = is_last && r.end > range.end && has_terminator;
+                    let past_end = is_last && beyond;
                     if a == b && !past_end {
                         continue;
                     }
@@ -442,19 +473,12 @@ impl EditorView {
                 // Selections, past the row's end when they go on, and past
                 // the line's end when they hold its terminator.
                 let mut selected: Vec<Range<usize>> = Vec::new();
-                for (r, _) in selections.iter().filter(|(r, _)| !r.is_empty()) {
-                    if r.end < range.start || r.start > range.end {
-                        continue;
-                    }
-                    let (a, b) = (
-                        local(r.start.max(range.start)),
-                        local_end(r.end.min(range.end)),
-                    );
+                for &(a, b, beyond) in &selection_spans {
                     if b < cols.start || a > cols.end || (!is_last && a == cols.end) {
                         continue;
                     }
                     let (a, b) = (a.max(cols.start), b.min(cols.end));
-                    let past_end = is_last && r.end > range.end && has_terminator;
+                    let past_end = is_last && beyond;
                     if a == b && !past_end {
                         continue;
                     }
@@ -511,11 +535,7 @@ impl EditorView {
                     });
                 }
                 // The composition: a thin underline.
-                for m in marked
-                    .iter()
-                    .filter(|m| m.start <= range.end && m.end >= range.start)
-                {
-                    let (a, b) = (local(m.start), local(m.end));
+                for &(a, b) in &marked_spans {
                     let (a, b, on_row) = if a == b {
                         (a, b, row.segment_of(a) == k)
                     } else {
@@ -538,11 +558,11 @@ impl EditorView {
                     });
                 }
                 // Carets.
-                for (_, head) in selections.iter().filter(|(_, h)| on_line(*h)) {
-                    if !focused || row.segment_of(local(*head)) != k {
+                for &column in &caret_columns {
+                    if !focused || row.segment_of(column) != k {
                         continue;
                     }
-                    let x = origin_x + row.x_in(k, local(*head));
+                    let x = origin_x + row.x_in(k, column);
                     let y = top + (LINE - editor_size::CARET_HEIGHT) / 2.0;
                     let rect = bounds_of(x, y, CARET_WIDTH, editor_size::CARET_HEIGHT);
                     #[cfg(test)]
@@ -713,10 +733,18 @@ impl EditorView {
         }) else {
             return;
         };
-        let Some((first, visual, row)) = self.line_row(line, window, cx) else {
+        let Some((first, _, row)) = self.line_row(line, window, cx) else {
             return;
         };
-        let column = visual.local(head, Bias::Left);
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let column = row.column_of(
+            editor.text(),
+            editor.display().replace_snapshot(),
+            head,
+            Bias::Left,
+        );
         let (segment, x) = row.x(column);
         let display_row = first + segment;
         let pad_top = self.layout.pad_top();

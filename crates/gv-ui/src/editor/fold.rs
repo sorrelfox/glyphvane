@@ -10,8 +10,8 @@
 //! - **Visual lines.** A display line of the replace layer: a buffer line,
 //!   and when folds start on it, the placeholder of each fold and the rest
 //!   of the line the fold ends on ([`VisualLine`]). Rows are shaped per
-//!   visual line, in *columns* of its content: the buffer text of its
-//!   pieces with the placeholder `⋯` between them.
+//!   visual line from the display map's chunks of its row
+//!   ([`super::rows`]), in *columns* of the tab layer's row.
 //! - **Placeholders** are drawn as a chip: `surface.sunken` (`state.press`
 //!   on the code fill and the current line, where `surface.sunken` would
 //!   not show), radius `radius::CHIP`, the `⋯` in `text.secondary` with a
@@ -42,13 +42,12 @@ use std::time::Duration;
 
 use gpui::{Context, Pixels, Point, Window};
 use gv_editor::SyntaxRef;
-use gv_editor::display_map::{PLACEHOLDER, ReplaceSnapshot};
+use gv_editor::display_map::{Highlight, PLACEHOLDER, ReplaceSnapshot, StyleId};
 use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
 use super::highlight::{HighlightCache, LineStyle, Style};
 use super::wrap::RowMap;
 use super::{EditorLayout, EditorView, LINE};
-use crate::inline::Token;
 use crate::metrics::size::split;
 
 /// How long the text must rest after a reparse before the foldable regions
@@ -73,8 +72,6 @@ const _: () = assert!(PLACEHOLDER.len() == PLACEHOLDER_CHAR.len_utf8());
 struct Piece {
     /// Its buffer bytes.
     buffer: Range<usize>,
-    /// Where it starts in the visual line's content.
-    at: usize,
     /// Its buffer line and that line's start.
     line: usize,
     line_start: usize,
@@ -83,8 +80,8 @@ struct Piece {
 /// A fold placeholder in a visual line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Mark {
-    /// The `⋯` in the content.
-    pub columns: Range<usize>,
+    /// The `⋯`'s byte columns in the replace layer's row.
+    pub input: Range<usize>,
     /// The buffer bytes it hides (a run of folds).
     pub buffer: Range<usize>,
 }
@@ -97,10 +94,36 @@ pub(crate) struct VisualLine {
     pub last: usize,
     /// From the start of `first` to the end of `last` (no terminator).
     pub range: Range<usize>,
-    /// The text shaped: the pieces with a placeholder between each two.
-    pub content: String,
+    /// Its row in the replace and tab layers.
+    pub row: u32,
+    /// The buffer text it shows, between the placeholders.
     pieces: Vec<Piece>,
     pub marks: Vec<Mark>,
+}
+
+/// The highlighting a visual line is shaped with: the cached style of each
+/// buffer line it shows, as highlights over buffer bytes for the display
+/// map's chunks, with the styles their ids stand for.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LineStyles {
+    /// The cached style of each piece's line (what a cached row is checked
+    /// against).
+    pub lines: Vec<Option<Rc<LineStyle>>>,
+    /// A fenced code line: drawn on the code fill.
+    pub code: bool,
+}
+
+impl LineStyles {
+    /// Whether two are the same highlighting.
+    pub fn same(&self, other: &Self) -> bool {
+        self.code == other.code
+            && self.lines.len() == other.lines.len()
+            && self.lines.iter().zip(&other.lines).all(|pair| match pair {
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b) || **a == **b,
+                (None, None) => true,
+                _ => false,
+            })
+    }
 }
 
 impl VisualLine {
@@ -108,16 +131,22 @@ impl VisualLine {
     /// starts a row of the replace layer).
     pub fn new(text: &TextSnapshot, replace: &ReplaceSnapshot, first: usize) -> Option<Self> {
         let line_range = text.line_range(first).ok()?;
-        if !replace.has_folds() || !replace.is_line_folded(first) {
-            let content = text.text_for_range(line_range.clone()).ok()?;
+        let plain = !replace.has_folds() && replace.replacements().is_empty();
+        if plain || !replace.is_line_folded(first) {
+            let row = if plain {
+                u32::try_from(first).ok()?
+            } else {
+                replace
+                    .to_replace_point(BufferPoint::new(first, 0), Bias::Left)
+                    .row()
+            };
             return Some(Self {
                 first,
                 last: first,
                 range: line_range.clone(),
-                content,
+                row,
                 pieces: vec![Piece {
                     buffer: line_range.clone(),
-                    at: 0,
                     line: first,
                     line_start: line_range.start,
                 }],
@@ -127,7 +156,6 @@ impl VisualLine {
         let row = replace
             .to_replace_point(BufferPoint::new(first, 0), Bias::Left)
             .row();
-        let mut content = String::new();
         let mut pieces = Vec::new();
         let mut marks = Vec::new();
         let (mut line, mut line_start) = (first, line_range.start);
@@ -139,15 +167,12 @@ impl VisualLine {
             }
             pieces.push(Piece {
                 buffer: pos..hidden.start,
-                at: content.len(),
                 line,
                 line_start,
             });
-            content.push_str(&text.text_for_range(pos..hidden.start).ok()?);
-            let at = content.len();
-            content.push_str(PLACEHOLDER);
             marks.push(Mark {
-                columns: at..content.len(),
+                input: placeholder.range.start.column() as usize
+                    ..placeholder.range.end.column() as usize,
                 buffer: hidden.clone(),
             });
             pos = hidden.end;
@@ -157,71 +182,22 @@ impl VisualLine {
         let end = text.line_range(line).ok()?.end.max(pos);
         pieces.push(Piece {
             buffer: pos..end,
-            at: content.len(),
             line,
             line_start,
         });
-        content.push_str(&text.text_for_range(pos..end).ok()?);
         Some(Self {
             first,
             last: line,
             range: line_range.start..end,
-            content,
+            row,
             pieces,
             marks,
         })
     }
 
-    /// The column of buffer offset `offset`, clamped to the line. An offset
-    /// hidden in a fold is the placeholder's start (`Bias::Left`) or end.
-    pub fn local(&self, offset: usize, bias: Bias) -> usize {
-        if offset <= self.range.start {
-            return 0;
-        }
-        if let Some(piece) = self
-            .pieces
-            .iter()
-            .find(|p| p.buffer.start <= offset && offset <= p.buffer.end)
-        {
-            return piece.at + offset - piece.buffer.start;
-        }
-        if let Some(mark) = self
-            .marks
-            .iter()
-            .find(|m| m.buffer.start < offset && offset < m.buffer.end)
-        {
-            return match bias {
-                Bias::Left => mark.columns.start,
-                Bias::Right => mark.columns.end,
-            };
-        }
-        self.content.len()
-    }
-
-    /// The buffer offset of column `column` (a column inside a placeholder
-    /// is the start of the text it hides).
-    pub fn to_buffer(&self, column: usize) -> usize {
-        if let Some(piece) = self
-            .pieces
-            .iter()
-            .find(|p| p.at <= column && column <= p.at + p.buffer.len())
-        {
-            return piece.buffer.start + column - piece.at;
-        }
-        self.marks
-            .iter()
-            .find(|m| m.columns.contains(&column))
-            .map_or(self.range.end, |m| m.buffer.start)
-    }
-
     /// Whether caret offset `offset` is on this line.
     pub fn holds(&self, offset: usize) -> bool {
         self.range.start <= offset && offset <= self.range.end
-    }
-
-    /// The placeholders' columns.
-    pub fn mark_columns(&self) -> Vec<Range<usize>> {
-        self.marks.iter().map(|m| m.columns.clone()).collect()
     }
 
     /// The buffer lines whose highlighting the line shows.
@@ -233,41 +209,50 @@ impl VisualLine {
             .map(|(_, p)| p.line)
     }
 
-    /// The highlighting of the line: that of each piece's buffer line,
-    /// moved to the piece's columns, and `text.secondary` for the
-    /// placeholders. The buffer line's own (cached) style when nothing is
-    /// folded.
-    pub fn style(&self, highlights: &HighlightCache) -> Option<Rc<LineStyle>> {
-        if self.marks.is_empty() {
-            return highlights.get(self.first).cloned();
-        }
-        let mut runs: Vec<(Range<usize>, Style)> = Vec::new();
-        let mut code = false;
-        for (i, piece) in self.pieces.iter().enumerate() {
+    /// The cached highlighting of the buffer lines the line shows.
+    pub fn styles(&self, highlights: &HighlightCache) -> LineStyles {
+        let lines: Vec<Option<Rc<LineStyle>>> = self
+            .pieces
+            .iter()
+            .map(|piece| highlights.get(piece.line).cloned())
+            .collect();
+        let code = lines
+            .first()
+            .is_some_and(|s| s.as_ref().is_some_and(|s| s.code));
+        LineStyles { lines, code }
+    }
+
+    /// The highlights of `styles` over the buffer text the line shows,
+    /// with the styles their ids stand for (id `i` is `styles[i]`). Text
+    /// without a highlight is plain.
+    pub fn highlights(&self, styles: &LineStyles) -> (Vec<Highlight>, Vec<Style>) {
+        let mut highlights: Vec<Highlight> = Vec::new();
+        let mut table: Vec<Style> = Vec::new();
+        for (piece, style) in self.pieces.iter().zip(&styles.lines) {
+            let Some(style) = style else {
+                continue;
+            };
             let from = piece.buffer.start - piece.line_start;
             let to = piece.buffer.end - piece.line_start;
-            let style = highlights.get(piece.line);
-            if i == 0 {
-                code = style.is_some_and(|s| s.code);
-            }
-            let line_runs = style.map(|s| s.clamped(to)).unwrap_or_else(|| {
-                if to > 0 {
-                    vec![(0..to, Style::PLAIN)]
-                } else {
-                    Vec::new()
-                }
-            });
-            for (r, s) in line_runs {
+            for (r, s) in style.clamped(to) {
                 let (a, b) = (r.start.max(from), r.end.min(to));
-                if a < b {
-                    runs.push((piece.at + a - from..piece.at + b - from, s));
+                if a >= b || s == Style::PLAIN {
+                    continue;
                 }
-            }
-            if let Some(mark) = self.marks.get(i) {
-                runs.push((mark.columns.clone(), Style::of(Token::TextSecondary)));
+                let id = match table.iter().position(|t| *t == s) {
+                    Some(id) => id,
+                    None => {
+                        table.push(s);
+                        table.len() - 1
+                    }
+                };
+                highlights.push(Highlight {
+                    range: piece.line_start + a..piece.line_start + b,
+                    style: StyleId(u32::try_from(id).unwrap_or(u32::MAX)),
+                });
             }
         }
-        Some(Rc::new(LineStyle { runs, code }))
+        (highlights, table)
     }
 }
 
@@ -512,11 +497,15 @@ pub(crate) fn chevron_slot() -> f32 {
 /// segment `segment` of `row`, if the placeholder is on that segment.
 pub(crate) fn chip_span(row: &super::rows::Row, segment: usize, mark: &Mark) -> Option<(f32, f32)> {
     use crate::metrics::size::editor::FOLD_CHIP_INSET_X;
-    if row.segment_of(mark.columns.start) != segment {
+    let (start, end) = (
+        row.text.column_of_input(mark.input.start),
+        row.text.column_of_input(mark.input.end),
+    );
+    if row.segment_of(start) != segment {
         return None;
     }
-    let x0 = row.x_in(segment, mark.columns.start);
-    let x1 = row.x_in(segment, mark.columns.end);
+    let x0 = row.x_in(segment, start);
+    let x1 = row.x_in(segment, end);
     Some((
         x0 + FOLD_CHIP_INSET_X,
         (x1 - FOLD_CHIP_INSET_X).max(x0 + 1.0),
@@ -543,33 +532,26 @@ mod tests {
     fn an_unfolded_line_is_its_buffer_line() {
         let editor = folded("one\ntwo\n", None);
         let vl = line(&editor, 1);
-        assert_eq!((vl.first, vl.last, vl.range.clone()), (1, 1, 4..7));
-        assert_eq!(vl.content, "two");
-        assert_eq!(vl.local(5, Bias::Left), 1);
-        assert_eq!(vl.to_buffer(3), 7);
+        assert_eq!(
+            (vl.first, vl.last, vl.range.clone(), vl.row),
+            (1, 1, 4..7, 1)
+        );
+        assert!(vl.marks.is_empty());
+        assert_eq!(vl.styled_lines().collect::<Vec<_>>(), [1]);
     }
 
     #[test]
     fn a_fold_joins_its_lines_with_a_placeholder() {
-        // "# A" folds to the end of "b"; "after" stays on the row.
+        // "# A" folds to the end of "c"; the next line starts a row.
         let text = "# A\nb\nc\n# B\n";
         let editor = folded(text, Some(3..7));
         let vl = line(&editor, 0);
-        assert_eq!((vl.first, vl.last), (0, 2));
-        assert_eq!(vl.content, "# A⋯");
+        assert_eq!((vl.first, vl.last, vl.row), (0, 2, 0));
         assert_eq!(vl.range, 0..7);
-        assert_eq!(vl.marks[0].columns, 3..6);
+        assert_eq!(vl.marks[0].input, 3..6);
         assert_eq!(vl.marks[0].buffer, 3..7);
-        // Ends of the fold are its placeholder's ends.
-        assert_eq!(vl.local(3, Bias::Left), 3);
-        assert_eq!(vl.local(7, Bias::Left), 6);
-        // Hidden offsets go to either end.
-        assert_eq!(vl.local(5, Bias::Left), 3);
-        assert_eq!(vl.local(5, Bias::Right), 6);
-        assert_eq!(vl.to_buffer(6), 7);
-        assert_eq!(vl.to_buffer(4), 3);
-        // The next visual line starts after the fold.
-        assert_eq!(line(&editor, 3).content, "# B");
+        let next = line(&editor, 3);
+        assert_eq!((next.range.clone(), next.row), (8..11, 1));
     }
 
     #[test]
@@ -577,29 +559,47 @@ mod tests {
         let text = "ab\ncd\nef\n";
         let editor = folded(text, [1..4, 7..8]);
         let vl = line(&editor, 0);
-        assert_eq!(vl.content, "a⋯d");
         assert_eq!(vl.marks.len(), 1, "the second fold is on another row");
+        assert_eq!(vl.styled_lines().collect::<Vec<_>>(), [0, 1]);
         let editor = folded(text, [1..4, 4..5]);
         let vl = line(&editor, 0);
-        assert_eq!(vl.content, "a⋯⋯");
         assert_eq!(vl.marks.len(), 2, "touching folds keep two placeholders");
+        assert_eq!(vl.marks[1].input, 4..7);
         assert_eq!(vl.last, 1);
-        assert_eq!(vl.local(4, Bias::Left), 4, "between the placeholders");
     }
 
     #[test]
-    fn styles_move_with_their_pieces() {
+    fn highlights_cover_the_pieces_shown() {
         let text = "ab\ncd\n";
         let editor = folded(text, Some(1..4));
         let vl = line(&editor, 0);
-        let style = vl.style(&HighlightCache::default()).expect("a style");
-        assert_eq!(
-            style.runs,
-            vec![
-                (0..1, Style::PLAIN),
-                (1..4, Style::of(Token::TextSecondary)),
-                (4..5, Style::PLAIN),
-            ]
+        let mut cache = HighlightCache::default();
+        let bold = Style {
+            bold: true,
+            ..Style::PLAIN
+        };
+        cache.insert_for_test(
+            0,
+            LineStyle {
+                runs: vec![(0..1, bold), (1..2, Style::PLAIN)],
+                code: true,
+            },
         );
+        cache.insert_for_test(
+            1,
+            LineStyle {
+                runs: vec![(0..1, Style::MARKER), (1..2, bold)],
+                code: false,
+            },
+        );
+        let styles = vl.styles(&cache);
+        assert!(styles.code, "the first line's");
+        let (highlights, table) = vl.highlights(&styles);
+        // "a" bold; "c" folded away; "d" bold.
+        assert_eq!(table, [bold]);
+        let ranges: Vec<Range<usize>> = highlights.iter().map(|h| h.range.clone()).collect();
+        assert_eq!(ranges, [0..1, 4..5]);
+        assert!(styles.same(&vl.styles(&cache)));
+        assert!(!styles.same(&LineStyles::default()));
     }
 }

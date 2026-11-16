@@ -29,6 +29,7 @@ use crate::{AppSettings, ThemeChoice};
 mod find;
 mod fold;
 mod paste;
+mod rows;
 
 const WIDTH: f32 = 1280.0;
 const HEIGHT: f32 = 800.0;

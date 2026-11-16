@@ -2,10 +2,16 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! Shaped rows: a visual line ([`VisualLine`]: a buffer line, or one
-//! joined to others by folds) with its styled runs, shaped as one GPUI
-//! [`ShapedLine`] per wrap row ([`Segment`]), kept across frames while the
-//! line's text, folds, highlighting and wraps stay the same. Columns are
-//! the visual line's (line-relative bytes when nothing is folded).
+//! joined to others by folds) built from the display map's chunks of its
+//! row in the tab layer, with the styles the chunks carry, shaped as one
+//! GPUI [`ShapedLine`] per wrap row ([`Segment`]), kept across frames while
+//! the line's text, folds, highlighting and wraps stay the same.
+//!
+//! Columns are byte columns of the tab layer's row: the line's text with
+//! tabs expanded and fold placeholders in place of folded text. Highlights
+//! go to the chunks as [`Highlight`]s over buffer bytes and come back as
+//! style ids on them; a buffer offset finds its column through the replace
+//! layer, and soft-wrap rows start at the wrap layer's columns.
 //!
 //! GPUI also caches glyph layouts for the lines of the last two frames, by
 //! text and fonts; this cache adds the display text, the run list and the
@@ -14,13 +20,16 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::rc::Rc;
 
 use gpui::{Font, Hsla, ShapedLine, SharedString, StrikethroughStyle, TextRun, Window, px};
+use gv_editor::display_map::{
+    Highlight, ReplacePoint, ReplaceSnapshot, Replaced, TabPoint, TabSnapshot,
+};
+use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
-use super::fold::VisualLine;
-use super::highlight::{LineStyle, Style, Underline};
-use super::layout::{RowText, ends_in_hard_break};
+use super::fold::{LineStyles, VisualLine};
+use super::highlight::{Style, Underline};
+use super::layout::RowText;
 use super::wrap::Break;
 use crate::inline::{FontFamilies, Palette, Token, font_of};
 use crate::metrics::{HAIRLINE, text};
@@ -71,8 +80,8 @@ pub(crate) struct Decoration {
 /// One wrap row of a line, shaped.
 #[derive(Debug, Clone)]
 pub(crate) struct Segment {
-    /// Its buffer columns (line-relative bytes): from its break to the next
-    /// one, or to the end of the content.
+    /// Its columns: from its break to the next one, or to the end of the
+    /// content.
     pub columns: Range<usize>,
     /// Its display bytes; the last segment holds a `↵` mark too.
     pub display: Range<usize>,
@@ -85,19 +94,21 @@ pub(crate) struct Segment {
 /// One shaped line, in one segment per wrap row.
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
-    /// What it was made from.
-    content: String,
-    /// The fold placeholders in `content`.
-    placeholders: Vec<Range<usize>>,
-    style: Option<Rc<LineStyle>>,
+    /// What it was made from: the buffer text of the line's range, the
+    /// folded ranges and the highlighting.
+    source: String,
+    folded: Vec<Range<usize>>,
+    styles: LineStyles,
     whitespace: bool,
     theme: ThemeId,
     tab_size: u32,
     breaks: Vec<Break>,
     space: f32,
+    /// Its row in the replace and tab layers.
+    pub row: u32,
     /// The display text and its mapping.
     pub text: RowText,
-    /// The line's runs (line-relative buffer bytes).
+    /// The line's runs, in columns.
     pub runs: Vec<(Range<usize>, Style)>,
     /// One per wrap row, at least one.
     pub segments: Vec<Segment>,
@@ -108,16 +119,54 @@ pub(crate) struct Row {
 }
 
 impl Row {
-    /// The segment a caret at buffer column `column` is drawn in: a column
-    /// where a row wraps is the start of the next row.
+    /// The column of buffer offset `offset`: an offset hidden in a fold is
+    /// the placeholder's start ([`Bias::Left`]) or end; an offset before
+    /// the line is its start and one after it its end.
+    pub fn column_of(
+        &self,
+        text: &TextSnapshot,
+        replace: &ReplaceSnapshot,
+        offset: usize,
+        bias: Bias,
+    ) -> usize {
+        let Ok(point) = text.offset_to_point(offset.min(text.len())) else {
+            return 0;
+        };
+        let at = replace.to_replace_point(point, bias);
+        match at.row().cmp(&self.row) {
+            std::cmp::Ordering::Less => 0,
+            std::cmp::Ordering::Greater => self.content_len(),
+            std::cmp::Ordering::Equal => self.text.column_of_input(at.column() as usize),
+        }
+    }
+
+    /// The buffer offset of column `column` (a column inside a placeholder
+    /// is the start of the text it hides, one inside a tab the tab's).
+    pub fn offset_of(
+        &self,
+        text: &TextSnapshot,
+        replace: &ReplaceSnapshot,
+        column: usize,
+    ) -> usize {
+        let input = self.text.input_of_column(column);
+        let point = replace.to_buffer_point(
+            ReplacePoint::new(self.row, u32::try_from(input).unwrap_or(u32::MAX)),
+            Bias::Left,
+        );
+        text.point_to_offset(BufferPoint::new(point.line, point.column))
+            .unwrap_or(text.len())
+    }
+
+    /// The segment a caret at column `column` is drawn in: a column where a
+    /// row wraps is the start of the next row.
     pub fn segment_of(&self, column: usize) -> usize {
         self.segments
             .partition_point(|s| s.columns.start <= column)
             .saturating_sub(1)
     }
 
-    /// The x of buffer column `column` (line-relative bytes) in segment
-    /// `segment` (clamped to it), from the left of the text.
+    /// The x of column `column` in segment `segment` (clamped to it), from
+    /// the left of the text.
     pub fn x_in(&self, segment: usize, column: usize) -> f32 {
         let Some(s) = self.segments.get(segment) else {
             return 0.0;
@@ -130,7 +179,7 @@ impl Row {
         s.indent + f32::from(s.shaped.x_for_index(display - s.display.start))
     }
 
-    /// The segment of buffer column `column` and its x there.
+    /// The segment of column `column` and its x there.
     pub fn x(&self, column: usize) -> (usize, f32) {
         let segment = self.segment_of(column);
         (segment, self.x_in(segment, column))
@@ -155,12 +204,12 @@ impl Row {
             .fold(0.0, f32::max)
     }
 
-    /// The buffer column of segment `segment` closest to `x` (from the left
-    /// of the text). Past the end of a row that wraps, the column before
-    /// its last character: the end is the next row's start.
+    /// The column of segment `segment` closest to `x` (from the left of the
+    /// text). Past the end of a row that wraps, the column before its last
+    /// character: the end is the next row's start.
     pub fn column_at(&self, segment: usize, x: f32) -> usize {
         let Some(s) = self.segments.get(segment) else {
-            return self.content.len();
+            return self.content_len();
         };
         let x = x - s.indent;
         if x <= 0.0 {
@@ -172,11 +221,11 @@ impl Row {
             .content_end()
             .clamp(s.display.start, s.display.end);
         let display = s.display.start + closest_index(&s.shaped, x);
-        let column = self.text.to_buffer(display.min(content_end));
+        let column = self.text.to_column(display.min(content_end));
         if last {
             return column.min(s.columns.end);
         }
-        let before_last = self.content[..s.columns.end]
+        let before_last = self.text.content[..s.columns.end]
             .char_indices()
             .next_back()
             .map_or(s.columns.start, |(at, _)| at)
@@ -185,11 +234,11 @@ impl Row {
     }
 
     pub fn content_len(&self) -> usize {
-        self.content.len()
+        self.text.content.len()
     }
 
     /// Segment `segment` shaped again with tertiary text inside `selected`
-    /// (buffer columns) drawn in `text.secondary`: `text.tertiary` must not
+    /// (columns) drawn in `text.secondary`: `text.tertiary` must not
     /// sit on `selection.text`.
     pub fn with_selection(
         &self,
@@ -346,6 +395,44 @@ fn text_runs(
         .collect()
 }
 
+/// The runs of a row's spans: the style each id stands for (`styles[id]`),
+/// `text.secondary` for fold placeholders, plain without either.
+fn runs_of(text: &RowText, styles: &[Style]) -> Vec<(Range<usize>, Style)> {
+    text.spans
+        .iter()
+        .filter(|span| !span.columns.is_empty())
+        .map(|span| {
+            let style = match span.replaced {
+                Some(Replaced::Fold(_)) => Style::of(Token::TextSecondary),
+                _ => span
+                    .style
+                    .and_then(|id| styles.get(id.0 as usize))
+                    .copied()
+                    .unwrap_or(Style::PLAIN),
+            };
+            (span.columns.clone(), style)
+        })
+        .collect()
+}
+
+/// Whether `text`'s bytes in `range` are `stored`, without copying them.
+fn same_text(text: &TextSnapshot, range: Range<usize>, stored: &str) -> bool {
+    if range.len() != stored.len() {
+        return false;
+    }
+    let Ok(chunks) = text.chunks(range) else {
+        return false;
+    };
+    let mut at = 0;
+    for chunk in chunks {
+        if stored.get(at..at + chunk.len()) != Some(chunk) {
+            return false;
+        }
+        at += chunk.len();
+    }
+    at == stored.len()
+}
+
 /// The underlines of a row's link targets.
 fn decorations(text: &RowText, runs: &[(Range<usize>, Style)]) -> Vec<Decoration> {
     let mut out: Vec<Decoration> = Vec::new();
@@ -373,6 +460,9 @@ fn decorations(text: &RowText, runs: &[(Range<usize>, Style)]) -> Vec<Decoration
 /// What a row is made with, besides its line.
 #[derive(Clone, Copy)]
 pub(crate) struct RowEnv<'a> {
+    /// The text and its display map's tab layer.
+    pub text: &'a TextSnapshot,
+    pub tabs: &'a TabSnapshot,
     pub fonts: &'a Fonts,
     pub palette: &'a Palette,
     pub theme: ThemeId,
@@ -394,47 +484,41 @@ pub(crate) struct RowCache {
 const SPARE_ROWS: usize = 256;
 
 impl RowCache {
-    /// The row of visual line `line`, shaped now unless the cached one
-    /// still fits. The line wraps at `breaks` (one at column 0 when it does
-    /// not wrap).
+    /// The row of visual line `line`, made from the display map's chunks
+    /// and shaped now unless the cached one still fits. The line has the
+    /// highlighting `styles` and wraps at `breaks` (one at column 0 when it
+    /// does not wrap).
     pub fn row(
         &mut self,
         line: &VisualLine,
-        style: Option<&Rc<LineStyle>>,
+        styles: LineStyles,
         breaks: Vec<Break>,
         env: RowEnv<'_>,
         window: &Window,
     ) -> Option<&Row> {
-        let content = &line.content;
-        let placeholders = line.mark_columns();
         let key = line.first;
         self.used.push(key);
-        let fresh = match self.rows.get(&key) {
+        let fresh = match self.rows.get_mut(&key) {
             Some(row) => {
-                row.content != *content
-                    || row.placeholders != placeholders
-                    || row.whitespace != env.whitespace
+                let stale = row.whitespace != env.whitespace
                     || row.theme != env.theme
                     || row.tab_size != env.tab_size
                     || row.breaks != breaks
                     || row.space != env.space
-                    || match (&row.style, style) {
-                        (Some(a), Some(b)) => !Rc::ptr_eq(a, b) && **a != **b,
-                        (None, None) => false,
-                        _ => true,
-                    }
+                    || !row
+                        .folded
+                        .iter()
+                        .eq(line.marks.iter().map(|mark| &mark.buffer))
+                    || !row.styles.same(&styles)
+                    || !same_text(env.text, line.range.clone(), &row.source);
+                // Folds above move the line to another row.
+                row.row = line.row;
+                stale
             }
             None => true,
         };
         if fresh {
-            let row = make_row(
-                content.clone(),
-                placeholders,
-                style.cloned(),
-                breaks,
-                env,
-                window,
-            );
+            let row = make_row(line, styles, breaks, env, window);
             self.rows.insert(key, row);
         }
         self.rows.get(&key)
@@ -451,29 +535,28 @@ impl RowCache {
 }
 
 fn make_row(
-    content: String,
-    placeholders: Vec<Range<usize>>,
-    style: Option<Rc<LineStyle>>,
+    line: &VisualLine,
+    styles: LineStyles,
     mut breaks: Vec<Break>,
     env: RowEnv<'_>,
     window: &Window,
 ) -> Row {
-    let hard_break = env.whitespace && ends_in_hard_break(&content);
-    let text = RowText::with_placeholders(
-        &content,
-        env.tab_size,
+    let (highlights, table): (Vec<Highlight>, Vec<Style>) = line.highlights(&styles);
+    let row_end = TabPoint::new(line.row, env.tabs.line_len(line.row));
+    let text = RowText::from_chunks(
+        env.tabs
+            .highlighted_chunks(TabPoint::new(line.row, 0)..row_end, &highlights),
         env.whitespace,
-        hard_break,
-        &placeholders,
     );
-    let runs = match &style {
-        Some(style) => style.clamped(content.len()),
-        None if content.is_empty() => Vec::new(),
-        None => vec![(0..content.len(), Style::PLAIN)],
-    };
+    let runs = runs_of(&text, &table);
     let all_runs = text_runs(&text, &runs, &[], env.fonts, env.palette);
     let key = breaks.clone();
-    // Breaks inside the content, in order, the first at column 0.
+    let content = &text.content;
+    // Breaks inside the content, in order, the first at column 0; a row
+    // that starts inside an expanded tab starts with the tab.
+    for b in &mut breaks {
+        b.column = text.tab_start(b.column);
+    }
     breaks.retain(|b| b.column < content.len() && content.is_char_boundary(b.column));
     if breaks.first().is_none_or(|b| b.column != 0) {
         breaks.insert(
@@ -520,16 +603,20 @@ fn make_row(
             .collect()
     };
     let decorations = decorations(&text, &runs);
-    let code = style.as_ref().is_some_and(|s| s.code);
+    let code = styles.code;
     Row {
-        content,
-        placeholders,
-        style,
+        source: env
+            .text
+            .text_for_range(line.range.clone())
+            .unwrap_or_default(),
+        folded: line.marks.iter().map(|mark| mark.buffer.clone()).collect(),
+        styles,
         whitespace: env.whitespace,
         theme: env.theme,
         tab_size: env.tab_size,
         breaks: key,
         space: env.space,
+        row: line.row,
         text,
         runs,
         segments,

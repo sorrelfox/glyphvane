@@ -15,8 +15,9 @@
 //!    syntax tree (SPEC § Editor); link targets take their resolution
 //!    status from the window's path index.
 //! 4. One element ([`element`]) covers the view. It shapes only the visible
-//!    rows ([`rows`], one GPUI shaped line per wrap row of a buffer line,
-//!    kept while the line, its highlighting and its wraps stay the same)
+//!    rows ([`rows`]: a line's text and styles from the display map's
+//!    chunks, one GPUI shaped line per wrap row, kept while the line, its
+//!    highlighting and its wraps stay the same)
 //!    and draws the gutter, the current line, selections, carets, the
 //!    composition underline, link underlines and the scrollbar.
 //!
