@@ -518,10 +518,29 @@ the identity layer's own tests.
    `tabs`).
 
 The random tests of `tab_map.rs` and `wrap_map.rs` still have no fold
-mutations (those files are unchanged); the tab and wrap layers over folds
+mutations; the tab and wrap layers over folds
 are property-tested in `tests/folds.rs` instead.
 
 ### Updating the replace layer
 
 As for the other display-map ports. When `inlay_map.rs` is ported for Live
 Preview, merge it into this layer rather than stacking it below.
+
+### Local changes of 2026-11-16 (payloads and chunk styles)
+
+These go beyond upstream and are our own:
+
+1. `replace_map.rs`: the fold placeholder becomes a payload,
+   `Fold(FoldId) | Hidden | Widget`. `Hidden` outputs nothing; a widget
+   outputs its text (or U+FFFC for a box) and may cover an empty range.
+   `ReplaceMap::set_replacements` sets these replacements; an edit that
+   touches one drops it, and a fold that overlaps one wins. Point
+   conversions honour the bias at inlays and hidden text.
+2. `primitives.rs`: `Chunk` carries `style: Option<StyleId>` and
+   `replaced: Option<Replaced>`.
+3. `tab_map.rs`, `wrap_map.rs`: `highlighted_chunks(range, &[Highlight])`
+   cuts chunks at highlight boundaries; `chunks()` passes no highlights.
+   This plays the role of upstream's highlights argument to `chunks()`.
+4. Tests: `replace_map/tests.rs` adds tests for hidden text, widgets and
+   inlays, and a random test mixing folds, replacements and buffer edits
+   that also checks the tab and wrap layers against fresh builds.

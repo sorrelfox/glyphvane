@@ -13,13 +13,18 @@
 //
 // Modified by the Glyphvane contributors (2026-11-13): reduced to the fields
 // and operations the display-map layers use, without highlighting, renderer
-// or UTF-16 fields; see third_party/zed/PROVENANCE.md.
+// or UTF-16 fields; see third_party/zed/PROVENANCE.md. (2026-11-16): chunks
+// carry a style id and the replacement they show instead of Zed's
+// highlight style and renderer.
 
 //! Types shared by every display-map layer: a row/column [`Point`], an
-//! [`Edit`] between two snapshots, a [`TextSummary`] of a range, and the
-//! [`Chunk`]s that layers hand to each other.
+//! [`Edit`] between two snapshots, a [`TextSummary`] of a range, the
+//! [`Chunk`]s that layers hand to each other, and the [`Highlight`]s a
+//! caller can ask chunks to carry.
 
 use std::ops::{Add, AddAssign, Range, Sub};
+
+use super::replace_map::Replaced;
 
 /// The largest chunk a layer hands on, in bytes. Chunk bitmaps are `u128`,
 /// one bit per byte.
@@ -187,11 +192,32 @@ impl AddAssign<&Self> for TextSummary {
     }
 }
 
+/// A style class: an id the caller of `chunks` gives meaning to (a syntax
+/// class, a Live Preview style). The display map only carries it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StyleId(pub u32);
+
+/// A style class over a range of **buffer** bytes, for the
+/// `highlighted_chunks` of every layer. A slice of them must be sorted and
+/// must not overlap; an end inside a character takes in the whole
+/// character.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Highlight {
+    /// Buffer bytes.
+    pub range: Range<usize>,
+    /// The class.
+    pub style: StyleId,
+}
+
 /// A piece of layer text, at most [`MAX_CHUNK_LEN`] bytes, with bitmaps
 /// that have one bit per byte of `text`.
 ///
 /// Rows are separated by `\n` only: the layer above the buffer turns every
 /// line terminator (LF, CRLF, lone CR) into one `\n`.
+///
+/// The tab and wrap layers keep `style` and `replaced` on the pieces they
+/// cut a chunk into (expanded tabs included); the text they add (soft-wrap
+/// breaks and indents) has neither.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chunk<'a> {
     /// The text.
@@ -204,6 +230,12 @@ pub struct Chunk<'a> {
     pub newlines: u128,
     /// Whether the text is the expansion of a tab (only spaces).
     pub is_tab: bool,
+    /// The style class: a widget's own, or the [`Highlight`] over the
+    /// buffer text the chunk shows. `None` without either.
+    pub style: Option<StyleId>,
+    /// The replacement the chunk shows (a fold placeholder or a widget's
+    /// text, always a chunk of its own); `None` for buffer text.
+    pub replaced: Option<Replaced>,
 }
 
 impl<'a> Chunk<'a> {
@@ -231,6 +263,8 @@ impl<'a> Chunk<'a> {
             tabs,
             newlines,
             is_tab: false,
+            style: None,
+            replaced: None,
         }
     }
 }

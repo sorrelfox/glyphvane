@@ -12,7 +12,7 @@
 //! | Layer | Module | Point | What it does |
 //! |---|---|---|---|
 //! | Buffer | `gv_text` | [`BufferPoint`] (line, byte column, `usize`) | The exact text, with LF, CRLF and lone CR line endings |
-//! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds (each shown as one [`PLACEHOLDER`]), later inline replacements; every line ending becomes one `\n` |
+//! | Replace | [`replace_map`] | [`ReplacePoint`] | Folds (each shown as one [`PLACEHOLDER`]) and other [`Replacement`]s (hidden text, inline [`Widget`]s); every line ending becomes one `\n` |
 //! | Tab | [`tab_map`] | [`TabPoint`] | Expands hard tabs to tab stops |
 //! | Wrap | [`wrap_map`] | [`WrapPoint`] | Soft wrap, measured through [`TextMeasure`], with continuation indents from a [`WrapIndent`] |
 //! | Block | [`block_map`] | input row, or [`Y`] in 1/64 px | Block widgets above, below or instead of display lines, with heights in pixels; over the wrap layer, or the tab layer while soft wrap is off |
@@ -67,10 +67,11 @@ pub use block_map::{
     SUBPIXELS_PER_PX, WhenDeleted, Y,
 };
 pub use line_wrapper::{Boundary, IndentAdjustment, LineFragment, LineWrapper};
-pub use primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
+pub use primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, StyleId, TextSummary};
 pub use replace_map::{
-    Fold, FoldId, PLACEHOLDER, Placeholder, ReplaceChunks, ReplaceEdit, ReplaceMap, ReplacePoint,
-    ReplaceSnapshot,
+    Fold, FoldId, OBJECT_REPLACEMENT, PLACEHOLDER, Payload, Placeholder, ReplaceChunks,
+    ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot, Replaced, Replacement, Widget,
+    WidgetContent, WidgetId,
 };
 pub use tab_map::{
     MAX_EXPANSION_COLUMN, MAX_TAB_SIZE, TabChunks, TabEdit, TabMap, TabPoint, TabPointCursor,

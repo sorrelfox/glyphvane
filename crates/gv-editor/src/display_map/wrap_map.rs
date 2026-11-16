@@ -15,7 +15,8 @@
 // isomorphic transforms are capped at 32 rows so an edit re-summarizes a
 // bounded amount of text; invisibles, highlighting, tracing and multi-buffer
 // row infos are removed, and the tests run without GPUI. The full list is in
-// third_party/zed/PROVENANCE.md.
+// third_party/zed/PROVENANCE.md. (2026-11-16): chunks take caller highlights
+// and pass them to the tab layer.
 
 //! The wrap layer: soft-wraps the tab layer's rows at a width.
 //!
@@ -54,7 +55,7 @@ use sum_tree::{Cursor, Dimensions, SumTree};
 
 use super::BufferPoint;
 use super::line_wrapper::{IndentAdjustment, LineFragment, LineWrapper};
-use super::primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
+use super::primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, TextSummary};
 use super::tab_map::{TabChunks, TabEdit, TabPoint, TabSnapshot};
 use super::text_measure::TextMeasure;
 use super::wrap_indent::WrapIndent;
@@ -863,6 +864,18 @@ impl WrapSnapshot {
     /// last of the text ends with `\n`; a continuation row starts with its
     /// indent in spaces.
     pub fn chunks(&self, rows: Range<WrapRow>) -> WrapChunks<'_> {
+        self.highlighted_chunks(rows, &[])
+    }
+
+    /// [`chunks`](Self::chunks) with the style ids of `highlights` (see
+    /// [`ReplaceSnapshot::highlighted_chunks`](super::ReplaceSnapshot::highlighted_chunks));
+    /// the breaks and indents of
+    /// soft wraps carry none.
+    pub fn highlighted_chunks<'a>(
+        &'a self,
+        rows: Range<WrapRow>,
+        highlights: &'a [Highlight],
+    ) -> WrapChunks<'a> {
         let output_start = WrapPoint::new(rows.start, 0);
         let output_end = WrapPoint::new(rows.end, 0);
         let mut transforms = self
@@ -878,7 +891,9 @@ impl WrapSnapshot {
         let input_start = input_start.min(max_point);
         let input_end = input_end.min(max_point);
         WrapChunks {
-            input_chunks: self.tab_snapshot.chunks(input_start..input_end),
+            input_chunks: self
+                .tab_snapshot
+                .highlighted_chunks(input_start..input_end, highlights),
             input_chunk: Chunk::default(),
             output_position: output_start,
             max_output_row: rows.end,

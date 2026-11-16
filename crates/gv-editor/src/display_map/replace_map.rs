@@ -15,7 +15,10 @@
 // removes it; placeholders are a fold id instead of a render closure; the
 // public API takes points instead of fold offsets; highlighting, row infos,
 // fold widths and tracing are removed, and the tests run without GPUI. The
-// full list is in third_party/zed/PROVENANCE.md.
+// full list is in third_party/zed/PROVENANCE.md. (2026-11-16): a transform
+// carries a payload (a fold, hidden text or a widget, the last with an empty
+// range allowed), the layer holds replacements beside the folds, and chunks
+// carry style ids from caller highlights.
 
 //! The replace layer: the first layer above the buffer.
 //!
@@ -29,14 +32,15 @@
 //! - **every fold** replaced by one placeholder character,
 //!   [`PLACEHOLDER`] (`⋯`). Folds that overlap share one placeholder;
 //!   folds that only touch keep one each, so the position between them
-//!   stays visible.
+//!   stays visible;
+//! - **every [`Replacement`]** shown as its payload: nothing (hidden text,
+//!   such as a Markdown marker in Live Preview) or a [`Widget`]'s text. A
+//!   widget may replace an empty range: an inlay between two characters.
 //!
-//! A [`ReplacePoint`] is a row and a byte column in that text. There is no
-//! offset coordinate: offsets in this text differ from buffer offsets
-//! wherever CRLF occurs or a fold is.
-//!
-//! Later (Live Preview) the same layer will hide Markdown markers and put
-//! inline widgets in place of ranges; they are replacements like folds.
+//! What a range shows is its transform's [`Payload`]. A [`ReplacePoint`] is
+//! a row and a byte column in that text. There is no offset coordinate:
+//! offsets in this text differ from buffer offsets wherever CRLF occurs or
+//! a replacement is.
 //!
 //! # Folds
 //!
@@ -47,13 +51,34 @@
 //! ([`ReplaceMap::sync_with_unfolded`] reports which); edits next to it
 //! keep it.
 //!
+//! # Replacements
+//!
+//! [`ReplaceMap::set_replacements`] sets the other replacements: derived
+//! state (Live Preview computes them from the syntax tree and the
+//! selections), sorted and not overlapping. An edit that touches one (its
+//! ends included) removes it; the owner computes it again. Where a
+//! replacement overlaps a fold, the fold wins and the replacement is not
+//! shown.
+//!
+//! # Transforms
+//!
 //! The layer is a sum tree of transforms, as in Zed's fold map: isomorphic
-//! runs of buffer text and fold placeholders, each summarized by its
-//! buffer length and lines on the input side and its lines on the output
-//! side, so conversions are O(log n). Positions inside a placeholder do not
-//! exist: they clip to its start ([`Bias::Left`]) or end
-//! ([`Bias::Right`]), and buffer positions inside a fold map to the
-//! placeholder's start or end the same way.
+//! runs of buffer text and replacements, each summarized by its buffer
+//! length and lines on the input side and its lines on the output side, so
+//! conversions are O(log n). Positions inside a placeholder or a widget do
+//! not exist: they clip to its start ([`Bias::Left`]) or end
+//! ([`Bias::Right`]), and buffer positions inside a replacement map to its
+//! start or end the same way. A buffer position where widgets with empty
+//! ranges stand maps before them ([`Bias::Left`]) or after them
+//! ([`Bias::Right`]).
+//!
+//! # Chunks
+//!
+//! [`ReplaceSnapshot::highlighted_chunks`] (and the same method of the tab
+//! and wrap layers) cut the text where caller [`Highlight`]s start and end
+//! and give each chunk the [`StyleId`] over it; a widget's chunks carry the
+//! widget's own style. Every replacement's text comes in chunks of its own
+//! with [`Chunk::replaced`] set.
 
 use std::cmp::{self, Ordering};
 use std::collections::HashSet;
@@ -65,7 +90,7 @@ use gv_text::{Bias, EditSummary, TextSnapshot};
 use sum_tree::{Cursor, Dimensions, SumTree};
 
 use super::BufferPoint;
-use super::primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
+use super::primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, StyleId, TextSummary};
 
 /// The text a fold shows in place of its range: one `⋯` (U+22EF, three
 /// bytes), as in Zed.
@@ -73,6 +98,10 @@ pub const PLACEHOLDER: &str = "\u{22ef}";
 
 /// [`PLACEHOLDER`]'s length in bytes.
 const PLACEHOLDER_LEN: u32 = PLACEHOLDER.len() as u32;
+
+/// The text of a [`WidgetContent::Box`]: U+FFFC OBJECT REPLACEMENT
+/// CHARACTER.
+pub const OBJECT_REPLACEMENT: &str = "\u{fffc}";
 
 /// A position in the replace layer's text: a row and a byte column.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -128,6 +157,133 @@ pub struct Fold {
     pub range: Range<usize>,
 }
 
+/// Identifies a widget; the owner of the replacements gives the ids.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WidgetId(pub u64);
+
+/// What a widget shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WidgetContent {
+    /// Text on one row (no line terminator).
+    Text(Arc<str>),
+    /// Something `width` px wide that the view draws itself (an image,
+    /// inline math). Its text is [`OBJECT_REPLACEMENT`]: soft wrap measures
+    /// it as that character.
+    Box {
+        /// In px.
+        width: f32,
+    },
+}
+
+/// An inline widget: text shown in place of a buffer range, or between two
+/// characters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Widget {
+    /// The owner's id for it; chunks carry it in [`Replaced::Widget`].
+    pub id: WidgetId,
+    /// What it shows.
+    pub content: WidgetContent,
+    /// Its style class, carried by its chunks.
+    pub style: Option<StyleId>,
+}
+
+impl Widget {
+    /// A widget that shows `text` (one row).
+    pub fn text(id: WidgetId, text: &str, style: Option<StyleId>) -> Self {
+        Self {
+            id,
+            content: WidgetContent::Text(Arc::from(text)),
+            style,
+        }
+    }
+
+    /// The text it takes in the layer.
+    pub fn display_text(&self) -> &str {
+        match &self.content {
+            WidgetContent::Text(text) => text,
+            WidgetContent::Box { .. } => OBJECT_REPLACEMENT,
+        }
+    }
+}
+
+/// What a transform that is not plain buffer text shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Payload {
+    /// A run of overlapping folds, as [`PLACEHOLDER`], with the run's first
+    /// fold.
+    Fold(FoldId),
+    /// Nothing: the bytes are hidden.
+    Hidden,
+    /// A widget's text.
+    Widget(Arc<Widget>),
+}
+
+impl Payload {
+    /// The text it takes in the layer.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Fold(_) => PLACEHOLDER,
+            Self::Hidden => "",
+            Self::Widget(widget) => widget.display_text(),
+        }
+    }
+}
+
+/// What a chunk shows in place of buffer text ([`Chunk::replaced`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Replaced {
+    /// A fold placeholder, with the first fold of its run.
+    Fold(FoldId),
+    /// A widget's text.
+    Widget(WidgetId),
+}
+
+/// A replacement other than a fold (see [`ReplaceMap::set_replacements`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Replacement {
+    /// The buffer bytes it replaces: on character boundaries, neither end
+    /// inside a CRLF. Empty only for a widget (an inlay).
+    pub range: Range<usize>,
+    /// The widget shown instead, or `None` to hide the bytes.
+    pub widget: Option<Arc<Widget>>,
+}
+
+impl Replacement {
+    /// Hides `range`.
+    pub fn hide(range: Range<usize>) -> Self {
+        Self {
+            range,
+            widget: None,
+        }
+    }
+
+    /// Shows `widget` in place of `range` (or at `range.start` when it is
+    /// empty).
+    pub fn widget(range: Range<usize>, widget: Widget) -> Self {
+        Self {
+            range,
+            widget: Some(Arc::new(widget)),
+        }
+    }
+
+    /// What it shows.
+    pub fn payload(&self) -> Payload {
+        match &self.widget {
+            Some(widget) => Payload::Widget(Arc::clone(widget)),
+            None => Payload::Hidden,
+        }
+    }
+}
+
+/// Replacements sorted by start, an empty one before a non-empty one that
+/// starts at the same offset.
+fn replacement_order(a: &Replacement, b: &Replacement) -> Ordering {
+    a.range
+        .start
+        .cmp(&b.range.start)
+        .then_with(|| a.range.end.cmp(&b.range.end))
+}
+
 /// Where a placeholder is: one per run of overlapping folds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Placeholder {
@@ -180,12 +336,12 @@ impl sum_tree::ContextLessSummary for TransformSummary {
     }
 }
 
-/// An isomorphic run of buffer text, or a placeholder for folded text.
+/// An isomorphic run of buffer text, or a replacement.
 #[derive(Clone, Debug, Default)]
 struct Transform {
     summary: TransformSummary,
-    /// For a placeholder: the first fold of its run.
-    placeholder: Option<FoldId>,
+    /// What a replacement shows; `None` for an isomorphic run.
+    payload: Option<Payload>,
 }
 
 impl Transform {
@@ -195,22 +351,44 @@ impl Transform {
                 input,
                 output: input.lines,
             },
-            placeholder: None,
+            payload: None,
         }
     }
 
-    fn fold(id: FoldId, input: InputSummary) -> Self {
+    fn replaced(payload: Payload, input: InputSummary) -> Self {
+        let len = match &payload {
+            Payload::Fold(_) => PLACEHOLDER_LEN,
+            payload => to_u32(payload.text().len()),
+        };
         Self {
             summary: TransformSummary {
                 input,
-                output: Point::new(0, PLACEHOLDER_LEN),
+                output: Point::new(0, len),
             },
-            placeholder: Some(id),
+            payload: Some(payload),
         }
     }
 
+    /// Whether it is a replacement (not buffer text).
+    fn is_replaced(&self) -> bool {
+        self.payload.is_some()
+    }
+
+    /// Whether it is a fold placeholder.
     fn is_fold(&self) -> bool {
-        self.placeholder.is_some()
+        self.fold_id().is_some()
+    }
+
+    fn fold_id(&self) -> Option<FoldId> {
+        match self.payload {
+            Some(Payload::Fold(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Whether it is a widget with an empty range (an inlay).
+    fn is_inlay(&self) -> bool {
+        self.is_replaced() && self.summary.input.len == 0
     }
 }
 
@@ -288,7 +466,7 @@ fn push_isomorphic(transforms: &mut SumTree<Transform>, input: InputSummary) {
     let mut did_merge = false;
     transforms.update_last(
         |last| {
-            if !last.is_fold() {
+            if !last.is_replaced() {
                 last.summary.input.add(&input);
                 last.summary.output += input.lines;
                 did_merge = true;
@@ -307,14 +485,14 @@ fn join_isomorphic(
     transforms: &mut SumTree<Transform>,
     cursor: &mut Cursor<'_, 'static, Transform, InputOffset>,
 ) {
-    let Some(item) = cursor.item().filter(|item| !item.is_fold()) else {
+    let Some(item) = cursor.item().filter(|item| !item.is_replaced()) else {
         return;
     };
     let summary = item.summary;
     let mut did_merge = false;
     transforms.update_last(
         |last| {
-            if !last.is_fold() {
+            if !last.is_replaced() {
                 last.summary.add(&summary);
                 did_merge = true;
             }
@@ -363,6 +541,85 @@ fn merged_folds(folds: &[Fold]) -> Vec<(FoldId, Range<usize>)> {
     merged
 }
 
+/// The replacement that has `offset` strictly inside, if any.
+fn replacement_across(replacements: &[Replacement], offset: usize) -> Option<&Replacement> {
+    let index = replacements.partition_point(|r| r.range.end <= offset);
+    replacements
+        .get(index)
+        .filter(|replacement| replacement.range.start < offset)
+}
+
+/// What the layer shows in place of buffer bytes in `region` (byte offsets
+/// of `folds`' and `replacements`' buffer), in order: the runs of folds
+/// that start in it, and the replacements that start in it and do not
+/// overlap a fold (an empty one only counts as overlapping when strictly
+/// inside). Empty replacements at the region's end count only with
+/// `with_end`.
+fn shown_in(
+    folds: &[Fold],
+    replacements: &[Replacement],
+    region: Range<usize>,
+    with_end: bool,
+) -> Vec<(Range<usize>, Payload)> {
+    let mut runs: Vec<(Range<usize>, FoldId)> = Vec::new();
+    let mut index = folds.partition_point(|fold| fold.range.start < region.start);
+    while let Some(fold) = folds.get(index)
+        && fold.range.start < region.end
+    {
+        let id = fold.id;
+        let mut range = fold.range.clone();
+        index += 1;
+        // Upstream also joins folds that touch (`merge_adjacent`).
+        while let Some(next) = folds.get(index)
+            && next.range.start < range.end
+        {
+            range.end = range.end.max(next.range.end);
+            index += 1;
+        }
+        runs.push((range, id));
+    }
+    let mut shown: Vec<(Range<usize>, Payload)> = runs
+        .iter()
+        .map(|(range, id)| (range.clone(), Payload::Fold(*id)))
+        .collect();
+    if replacements.is_empty() {
+        return shown;
+    }
+    let mut index = replacements.partition_point(|r| r.range.start < region.start);
+    let mut any = false;
+    while let Some(replacement) = replacements.get(index) {
+        let range = &replacement.range;
+        let inside =
+            range.start < region.end || (with_end && range.is_empty() && range.start == region.end);
+        if !inside {
+            break;
+        }
+        index += 1;
+        let run = runs.partition_point(|(run, _)| run.end <= range.start);
+        let covered = runs.get(run).is_some_and(|(run, _)| {
+            if range.is_empty() {
+                run.start < range.start
+            } else {
+                run.start < range.end
+            }
+        });
+        if !covered {
+            shown.push((range.clone(), replacement.payload()));
+            any = true;
+        }
+    }
+    if any && !runs.is_empty() {
+        // Stable: inlays at one offset keep their order, before the
+        // replacement that starts there.
+        shown.sort_by(|a, b| {
+            a.0.start
+                .cmp(&b.0.start)
+                .then_with(|| a.0.end.cmp(&b.0.end))
+        });
+    }
+    shown
+}
+
 // ----- the map ----------------------------------------------------------------
 
 /// A buffer edit in byte offsets: old range in the old buffer, new range
@@ -384,6 +641,7 @@ impl ReplaceMap {
             buffer,
             transforms: SumTree::from_item(Transform::isomorphic(input), ()),
             folds: Arc::new(Vec::new()),
+            replacements: Arc::new(Vec::new()),
             version: 0,
         };
         (
@@ -446,6 +704,7 @@ impl ReplaceMap {
         let Some(input_edits) = input_edits else {
             let old_max = self.snapshot.max_point();
             let unfolded = std::mem::take(Arc::make_mut(&mut self.snapshot.folds));
+            self.snapshot.replacements = Arc::new(Vec::new());
             let input = input_summary(&buffer, 0..buffer.len());
             self.snapshot.transforms = SumTree::from_item(Transform::isomorphic(input), ());
             self.snapshot.buffer = buffer;
@@ -458,6 +717,7 @@ impl ReplaceMap {
         };
 
         let unfolded = self.move_folds(&old_buffer, &buffer, edits);
+        self.move_replacements(edits);
         let replace_edits = self.sync_transforms(buffer, input_edits);
         self.check_invariants();
         (self.snapshot.clone(), replace_edits, unfolded)
@@ -580,6 +840,132 @@ impl ReplaceMap {
         removed
     }
 
+    /// Moves the replacements through `summary`, removing those an edit
+    /// touches (their ends included).
+    fn move_replacements(&mut self, summary: &EditSummary) {
+        if self.snapshot.replacements.is_empty() {
+            return;
+        }
+        let edits = summary.edits();
+        let moved: Vec<Replacement> = self
+            .snapshot
+            .replacements
+            .iter()
+            .filter_map(|replacement| {
+                let range = &replacement.range;
+                let index = edits.partition_point(|edit| edit.old.end < range.start);
+                if edits
+                    .get(index)
+                    .is_some_and(|edit| edit.old.start <= range.end)
+                {
+                    return None;
+                }
+                let start = summary.transform_offset(range.start, Bias::Left);
+                Some(Replacement {
+                    range: start..start + range.len(),
+                    widget: replacement.widget.clone(),
+                })
+            })
+            .collect();
+        self.snapshot.replacements = Arc::new(moved);
+    }
+
+    /// Sets the replacements other than folds, replacing the ones there
+    /// were, and returns the new snapshot and the edits.
+    ///
+    /// Ranges are byte ranges of the current buffer, clipped to character
+    /// boundaries and moved out of CRLFs. Skipped: a replacement that
+    /// overlaps one before it (in start order), hidden empty ranges, and
+    /// widgets whose text holds a line break or that take no room at all.
+    /// Where a replacement overlaps a fold it is kept but not shown.
+    pub fn set_replacements(
+        &mut self,
+        replacements: impl IntoIterator<Item = Replacement>,
+    ) -> (ReplaceSnapshot, Vec<ReplaceEdit>) {
+        let buffer = self.snapshot.buffer.clone();
+        let mut new: Vec<Replacement> = replacements
+            .into_iter()
+            .filter_map(|replacement| {
+                let range = &replacement.range;
+                let range = if range.is_empty() {
+                    let at = buffer.clip_offset(range.start.min(buffer.len()), Bias::Left);
+                    let at = clip_out_of_crlf(&buffer, at, Bias::Left);
+                    at..at
+                } else {
+                    let start = buffer.clip_offset(range.start.min(buffer.len()), Bias::Right);
+                    let start = clip_out_of_crlf(&buffer, start, Bias::Right);
+                    let end = buffer.clip_offset(range.end.min(buffer.len()), Bias::Left);
+                    let end = clip_out_of_crlf(&buffer, end, Bias::Left);
+                    start..end.max(start)
+                };
+                let keep = match &replacement.widget {
+                    None => !range.is_empty(),
+                    Some(widget) => {
+                        let text = widget.display_text();
+                        !text.contains(['\n', '\r']) && !(text.is_empty() && range.is_empty())
+                    }
+                };
+                keep.then_some(Replacement {
+                    range,
+                    widget: replacement.widget,
+                })
+            })
+            .collect();
+        new.sort_by(replacement_order);
+        let mut kept: Vec<Replacement> = Vec::with_capacity(new.len());
+        for replacement in new {
+            if kept
+                .last()
+                .is_none_or(|last| last.range.end <= replacement.range.start)
+            {
+                kept.push(replacement);
+            }
+        }
+
+        // The ranges of the replacements that differ.
+        let old = &self.snapshot.replacements;
+        let mut edits = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        let key = |r: &Replacement| (r.range.start, r.range.end);
+        loop {
+            let range = match (old.get(i), kept.get(j)) {
+                (None, None) => break,
+                (Some(a), Some(b)) if key(a) == key(b) => {
+                    i += 1;
+                    j += 1;
+                    if a == b {
+                        continue;
+                    }
+                    a.range.clone()
+                }
+                (Some(a), Some(b)) if replacement_order(a, b).is_lt() => {
+                    i += 1;
+                    a.range.clone()
+                }
+                (Some(a), None) => {
+                    i += 1;
+                    a.range.clone()
+                }
+                (_, Some(b)) => {
+                    j += 1;
+                    b.range.clone()
+                }
+            };
+            edits.push(Edit {
+                old: range.clone(),
+                new: range,
+            });
+        }
+        if edits.is_empty() {
+            return (self.snapshot.clone(), Vec::new());
+        }
+        self.snapshot.replacements = Arc::new(kept);
+        let edits = consolidate_edits(edits);
+        let replace_edits = self.sync_transforms(buffer, edits);
+        self.check_invariants();
+        (self.snapshot.clone(), replace_edits)
+    }
+
     /// Folds `ranges` (byte ranges of the current buffer, clipped to
     /// character boundaries and moved out of CRLFs; empty ones and ranges
     /// already folded exactly are skipped). Returns the new snapshot and
@@ -699,9 +1085,11 @@ impl ReplaceMap {
 
         let old = &self.snapshot;
         let folds = &old.folds;
+        let replacements = &old.replacements;
         let mut new_transforms = SumTree::<Transform>::default();
         let mut cursor = old.transforms.cursor::<InputOffset>(());
-        cursor.seek(&InputOffset(0), sum_tree::Bias::Right);
+        // Left: stay before inlays at the start.
+        cursor.seek(&InputOffset(0), sum_tree::Bias::Left);
 
         let mut edits_iter = input_edits.iter().cloned().peekable();
         while let Some(mut edit) = edits_iter.next() {
@@ -711,13 +1099,35 @@ impl ReplaceMap {
             // isomorphic: there no edit starts inside it, but here the
             // previous region can end with the text of a fold an edit
             // removed, and the next edit can start in the text after it.)
-            if cursor.end().0 <= edit.old.start {
+            //
+            // The region starts where the transform the edit starts in
+            // starts, and before that at the start of a replacement across
+            // it (one a fold hid, which can start before the fold).
+            let mut target = edit.old.start;
+            if !replacements.is_empty() {
+                let shift = edit.new.start as isize - edit.old.start as isize;
+                loop {
+                    let (start, ..) = old.transforms.find::<InputOffset, _>(
+                        (),
+                        &InputOffset(target),
+                        sum_tree::Bias::Left,
+                    );
+                    let new_start = (start.0 as isize + shift) as usize;
+                    let Some(across) = replacement_across(replacements, new_start) else {
+                        break;
+                    };
+                    let earlier =
+                        ((across.range.start as isize - shift) as usize).max(cursor.start().0);
+                    if earlier >= target {
+                        break;
+                    }
+                    target = earlier;
+                }
+            }
+            if cursor.end().0 <= target {
                 join_isomorphic(&mut new_transforms, &mut cursor);
             }
-            new_transforms.append(
-                cursor.slice(&InputOffset(edit.old.start), sum_tree::Bias::Left),
-                (),
-            );
+            new_transforms.append(cursor.slice(&InputOffset(target), sum_tree::Bias::Left), ());
             let pulled = edit.old.start - cursor.start().0;
             edit.old.start -= pulled;
             edit.new.start -= pulled;
@@ -738,38 +1148,45 @@ impl ReplaceMap {
                         }
                         edits_iter.next();
                     }
-                    _ => break,
+                    _ => {
+                        // A replacement across the region's end (one a
+                        // fold hid) takes the region past its end.
+                        let new_end = (edit.new.start + edit.old.len()) as isize + delta;
+                        let Some(across) = replacement_across(replacements, new_end as usize)
+                        else {
+                            break;
+                        };
+                        let shift = new_end - edit.old.end as isize;
+                        let old_end = (across.range.end as isize - shift) as usize;
+                        cursor.seek(&InputOffset(old_end), sum_tree::Bias::Right);
+                        cursor.next();
+                    }
                 }
             }
             edit.new.end = ((edit.new.start + edit.old.len()) as isize + delta) as usize;
 
-            let mut fold_index = folds.partition_point(|fold| fold.range.start < edit.new.start);
-            while let Some(fold) = folds.get(fold_index)
-                && fold.range.start < edit.new.end
-            {
-                let id = fold.id;
-                let mut range = fold.range.clone();
-                fold_index += 1;
-                // Upstream also joins folds that touch (`merge_adjacent`).
-                while let Some(next) = folds.get(fold_index)
-                    && next.range.start < range.end
-                {
-                    range.end = range.end.max(next.range.end);
-                    fold_index += 1;
+            // Inlays where the region starts were copied with the slice
+            // before it (when the slice ends with one); inlays where it ends
+            // stay in the old transforms after it, unless those are done.
+            let region_start = edit.new.start;
+            let inlays_copied = new_transforms.last().is_some_and(Transform::is_inlay);
+            let at_end = cursor.item().is_none();
+            for (range, payload) in shown_in(folds, replacements, edit.new.clone(), at_end) {
+                if range.is_empty() && range.start == region_start && inlays_copied {
+                    continue;
                 }
-
                 let sum = new_transforms.summary().input.len;
-                debug_assert!(range.start >= sum, "fold {range:?} starts before {sum}");
+                debug_assert!(range.start >= sum, "{range:?} starts before {sum}");
                 if range.start > sum {
                     push_isomorphic(
                         &mut new_transforms,
                         input_summary(&buffer, sum..range.start),
                     );
                 }
-                if range.end > range.start {
-                    let start = range.start.max(sum);
+                let start = range.start.max(sum);
+                if range.end > start || (range.is_empty() && range.start == start) {
                     new_transforms.push(
-                        Transform::fold(id, input_summary(&buffer, start..range.end)),
+                        Transform::replaced(payload, input_summary(&buffer, start..range.end)),
                         (),
                     );
                 }
@@ -826,17 +1243,17 @@ impl ReplaceMap {
             "transform lines do not match the buffer"
         );
         let mut previous_isomorphic = false;
-        let mut runs = Vec::new();
+        let mut shown = Vec::new();
         let mut offset = 0;
         for transform in snapshot.transforms.iter() {
             assert!(
-                transform.is_fold() || !previous_isomorphic,
+                transform.is_replaced() || !previous_isomorphic,
                 "adjacent isomorphic transforms"
             );
-            previous_isomorphic = !transform.is_fold();
+            previous_isomorphic = !transform.is_replaced();
             let end = offset + transform.summary.input.len;
-            if let Some(id) = transform.placeholder {
-                runs.push((id, offset..end));
+            if let Some(payload) = &transform.payload {
+                shown.push((offset..end, payload.clone()));
             }
             offset = end;
         }
@@ -850,7 +1267,25 @@ impl ReplaceMap {
             assert!(!snapshot.buffer.is_inside_crlf(fold.range.start));
             assert!(!snapshot.buffer.is_inside_crlf(fold.range.end));
         }
-        assert_eq!(runs, merged_folds(&snapshot.folds), "placeholders");
+        assert!(
+            snapshot
+                .replacements
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start),
+            "replacements overlap: {:?}",
+            snapshot.replacements
+        );
+        for replacement in snapshot.replacements.iter() {
+            assert!(!snapshot.buffer.is_inside_crlf(replacement.range.start));
+            assert!(!snapshot.buffer.is_inside_crlf(replacement.range.end));
+        }
+        let expected = shown_in(
+            &snapshot.folds,
+            &snapshot.replacements,
+            0..snapshot.buffer.len(),
+            true,
+        );
+        assert_eq!(shown, expected, "transforms");
     }
 }
 
@@ -905,7 +1340,7 @@ fn layer_edits(
     let mut old_cursor = old_transforms.cursor::<Dims>(());
     let mut new_cursor = new_transforms.cursor::<Dims>(());
     let is_fold = |cursor: &Cursor<'_, 'static, Transform, Dims>| {
-        cursor.item().is_some_and(Transform::is_fold)
+        cursor.item().is_some_and(Transform::is_replaced)
     };
 
     let mut widened: Vec<InputEdit> = Vec::with_capacity(input_edits.len());
@@ -1101,6 +1536,9 @@ pub struct ReplaceSnapshot {
     transforms: SumTree<Transform>,
     /// Sorted by [`fold_order`], in `buffer`'s coordinates.
     folds: Arc<Vec<Fold>>,
+    /// Sorted by [`replacement_order`], not overlapping, in `buffer`'s
+    /// coordinates.
+    replacements: Arc<Vec<Replacement>>,
     version: usize,
 }
 
@@ -1109,6 +1547,7 @@ impl std::fmt::Debug for ReplaceSnapshot {
         f.debug_struct("ReplaceSnapshot")
             .field("buffer", &self.buffer)
             .field("folds", &self.folds)
+            .field("replacements", &self.replacements.len())
             .field("version", &self.version)
             .finish_non_exhaustive()
     }
@@ -1120,7 +1559,8 @@ impl ReplaceSnapshot {
         &self.buffer
     }
 
-    /// Increases with every change of the text or the folds.
+    /// Increases with every change of the text, the folds or the
+    /// replacements.
     pub fn version(&self) -> usize {
         self.version
     }
@@ -1173,14 +1613,14 @@ impl ReplaceSnapshot {
     /// Clips a point to a valid one: a row past the end goes to the end of
     /// the text, a column past the end of its row to the end of the row, a
     /// column inside a character moves by `bias`, and a position inside a
-    /// placeholder goes to its start ([`Bias::Left`]) or end
+    /// placeholder or a widget goes to its start ([`Bias::Left`]) or end
     /// ([`Bias::Right`]).
     pub fn clip_point(&self, point: ReplacePoint, bias: Bias) -> ReplacePoint {
         let (start, end, item) = self
             .transforms
             .find::<Dimensions<ReplacePoint, InputPoint>, _>((), &point, sum_tree::Bias::Right);
         match item {
-            Some(transform) if transform.is_fold() => {
+            Some(transform) if transform.is_replaced() => {
                 if point == start.0 || bias == Bias::Left {
                     start.0
                 } else {
@@ -1199,8 +1639,10 @@ impl ReplaceSnapshot {
     /// The replace point of a buffer point, clipped first. The position
     /// between the CR and the LF of a CRLF goes to the end of its line
     /// ([`Bias::Left`]) or the start of the next ([`Bias::Right`]); a
-    /// position inside a fold to the start ([`Bias::Left`]) or end
-    /// ([`Bias::Right`]) of its placeholder.
+    /// position inside a replacement to the start ([`Bias::Left`]) or end
+    /// ([`Bias::Right`]) of what it shows, and a replacement's ends to the
+    /// ends of what it shows. Where inlays stand, [`Bias::Left`] is before
+    /// them and [`Bias::Right`] after them.
     pub fn to_replace_point(&self, point: BufferPoint, bias: Bias) -> ReplacePoint {
         let clipped = self.buffer.clip_point(point, bias);
         let content = self.content_len(clipped.line);
@@ -1212,19 +1654,23 @@ impl ReplaceSnapshot {
                 Bias::Right => Point::new(to_u32(clipped.line + 1), 0),
             }
         };
+        // Seeking left stops at the first transform that ends at the
+        // point (before inlays there), seeking right after the last one.
         let (start, end, item) = self
             .transforms
             .find::<Dimensions<InputPoint, ReplacePoint>, _>(
                 (),
                 &InputPoint(input),
-                sum_tree::Bias::Right,
+                seek_bias(bias),
             );
         match item {
-            Some(transform) if transform.is_fold() => {
-                if bias == Bias::Left || input == start.0.0 {
+            Some(transform) if transform.is_replaced() => {
+                if input == start.0.0 {
                     start.1
-                } else {
+                } else if input == end.0.0 || bias == Bias::Right {
                     end.1
+                } else {
+                    start.1
                 }
             }
             Some(_) => ReplacePoint(cmp::min(advance(start.1.0, input - start.0.0), end.1.0)),
@@ -1232,14 +1678,25 @@ impl ReplaceSnapshot {
         }
     }
 
-    /// The buffer point of a replace point, clipped first: a placeholder's
-    /// start is its fold's start and its end the fold's end.
+    /// The buffer point of a replace point, clipped first: the start of
+    /// what a replacement shows is the start of its range and the end the
+    /// end. Where hidden text stands, [`Bias::Left`] is before it and
+    /// [`Bias::Right`] after it.
     pub fn to_buffer_point(&self, point: ReplacePoint, bias: Bias) -> BufferPoint {
         let clipped = self.clip_point(point, bias);
-        let (start, _, _) = self
+        let (start, end, item) = self
             .transforms
-            .find::<Dimensions<ReplacePoint, InputPoint>, _>((), &clipped, sum_tree::Bias::Right);
-        let input = advance(start.1.0, clipped.0 - start.0.0);
+            .find::<Dimensions<ReplacePoint, InputPoint>, _>((), &clipped, seek_bias(bias));
+        let input = match item {
+            Some(transform) if transform.is_replaced() => {
+                if clipped == start.0 {
+                    start.1.0
+                } else {
+                    end.1.0
+                }
+            }
+            _ => advance(start.1.0, clipped.0 - start.0.0),
+        };
         BufferPoint::new(input.row as usize, input.column as usize)
     }
 
@@ -1254,6 +1711,17 @@ impl ReplaceSnapshot {
     /// are clipped, the start with [`Bias::Left`] and the end with
     /// [`Bias::Right`].
     pub fn chunks(&self, range: Range<ReplacePoint>) -> ReplaceChunks<'_> {
+        self.highlighted_chunks(range, &[])
+    }
+
+    /// [`chunks`](Self::chunks) cut where `highlights` (sorted, not
+    /// overlapping) start and end, each with the style over it; a widget's
+    /// chunks carry its own style instead.
+    pub fn highlighted_chunks<'a>(
+        &'a self,
+        range: Range<ReplacePoint>,
+        highlights: &'a [Highlight],
+    ) -> ReplaceChunks<'a> {
         let start = self.clip_point(range.start, Bias::Left);
         let end = self.clip_point(range.end, Bias::Right).max(start);
         let start_offset = self.buffer_offset(start, Bias::Left);
@@ -1266,9 +1734,13 @@ impl ReplaceSnapshot {
             snapshot: self,
             transforms,
             text: None,
+            split: None,
+            replaced: "",
             start: start_offset,
             end: end_offset,
             end_point: end,
+            highlights,
+            highlight_index: highlights.partition_point(|h| h.range.end <= start_offset),
         }
     }
 
@@ -1322,6 +1794,42 @@ impl ReplaceSnapshot {
     /// The number of folds.
     pub fn fold_count(&self) -> usize {
         self.folds.len()
+    }
+
+    /// The replacements other than folds, sorted (see
+    /// [`ReplaceMap::set_replacements`]), shown or not.
+    pub fn replacements(&self) -> &[Replacement] {
+        &self.replacements
+    }
+
+    /// What is shown at `point`: the payload of the replacement that starts
+    /// there or has it inside (for several, the first), with its range in
+    /// the layer and in the buffer. `None` on buffer text.
+    pub fn payload_at(
+        &self,
+        point: ReplacePoint,
+    ) -> Option<(Payload, Range<ReplacePoint>, Range<usize>)> {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<ReplacePoint, InputOffset>>(());
+        cursor.seek(&point, sum_tree::Bias::Left);
+        while let Some(transform) = cursor.item() {
+            if cursor.start().0 > point {
+                break;
+            }
+            if let Some(payload) = &transform.payload
+                && cursor.end().0 >= point
+                && (cursor.end().0 > point || cursor.start().0 == point)
+            {
+                return Some((
+                    payload.clone(),
+                    cursor.start().0..cursor.end().0,
+                    cursor.start().1.0..cursor.end().1.0,
+                ));
+            }
+            cursor.next();
+        }
+        None
     }
 
     /// The folds that share bytes with `range` (byte offsets); for an empty
@@ -1378,7 +1886,7 @@ impl ReplaceSnapshot {
             if cursor.start().0 >= end {
                 break;
             }
-            if let Some(fold) = transform.placeholder {
+            if let Some(fold) = transform.fold_id() {
                 placeholders.push(Placeholder {
                     fold,
                     range: cursor.start().0..cursor.end().0,
@@ -1395,7 +1903,7 @@ impl ReplaceSnapshot {
         let (start, end, item) = self
             .transforms
             .find::<Dimensions<ReplacePoint, InputOffset>, _>((), &point, sum_tree::Bias::Right);
-        let fold = item?.placeholder?;
+        let fold = item?.fold_id()?;
         Some(Placeholder {
             fold,
             range: start.0..end.0,
@@ -1417,23 +1925,87 @@ impl ReplaceSnapshot {
 }
 
 /// The replace layer's text in chunks of at most [`MAX_CHUNK_LEN`] bytes.
-/// Never yields an empty chunk; a placeholder is a chunk of its own.
+/// Never yields an empty chunk; a replacement's text comes in chunks of its
+/// own.
 #[derive(Debug)]
 pub struct ReplaceChunks<'a> {
     snapshot: &'a ReplaceSnapshot,
     transforms: Cursor<'a, 'static, Transform, Dimensions<ReplacePoint, InputOffset>>,
     /// The text of the isomorphic transform being read.
     text: Option<BufferChunks<'a>>,
+    /// The rest of a piece of buffer text cut at a highlight boundary, and
+    /// its buffer offset.
+    split: Option<(usize, &'a str)>,
+    /// The rest of the replacement being read (`replaced_by` says which).
+    replaced: &'a str,
     /// Buffer offsets of the range.
     start: usize,
     end: usize,
     end_point: ReplacePoint,
+    highlights: &'a [Highlight],
+    /// The first highlight that may cover text still to come.
+    highlight_index: usize,
 }
 
 impl<'a> ReplaceChunks<'a> {
-    /// Restarts the iterator on another range of the same snapshot.
+    /// Restarts the iterator on another range of the same snapshot, with
+    /// the same highlights.
     pub fn seek(&mut self, range: Range<ReplacePoint>) {
-        *self = self.snapshot.chunks(range);
+        *self = self.snapshot.highlighted_chunks(range, self.highlights);
+    }
+
+    /// The chunk of buffer text `text` at buffer offset `offset`, cut at the
+    /// next highlight boundary (the rest is kept for the next call).
+    fn highlighted(&mut self, offset: usize, text: &'a str) -> Chunk<'a> {
+        let highlights = self.highlights;
+        if highlights.is_empty() {
+            return Chunk::new(text);
+        }
+        while highlights
+            .get(self.highlight_index)
+            .is_some_and(|h| h.range.end <= offset)
+        {
+            self.highlight_index += 1;
+        }
+        let (style, run) = match highlights.get(self.highlight_index) {
+            Some(h) if h.range.start <= offset => (Some(h.style), h.range.end - offset),
+            Some(h) => (None, h.range.start - offset),
+            None => (None, text.len()),
+        };
+        let mut len = run.clamp(1, text.len());
+        // A boundary inside a character takes in the whole character.
+        while !text.is_char_boundary(len) {
+            len += 1;
+        }
+        let (head, tail) = text.split_at(len);
+        if !tail.is_empty() {
+            self.split = Some((offset + len, tail));
+        }
+        Chunk {
+            style,
+            ..Chunk::new(head)
+        }
+    }
+
+    /// The next chunk of the replacement being read.
+    fn replaced_chunk(&mut self, payload: &'a Payload) -> Chunk<'a> {
+        let text = self.replaced;
+        let mut len = text.len().min(MAX_CHUNK_LEN);
+        while !text.is_char_boundary(len) {
+            len -= 1;
+        }
+        let (head, tail) = text.split_at(len);
+        self.replaced = tail;
+        let (replaced, style) = match payload {
+            Payload::Fold(id) => (Replaced::Fold(*id), None),
+            Payload::Widget(widget) => (Replaced::Widget(widget.id), widget.style),
+            Payload::Hidden => unreachable!("hidden text has no chunks"),
+        };
+        Chunk {
+            style,
+            replaced: Some(replaced),
+            ..Chunk::new(head)
+        }
     }
 }
 
@@ -1442,9 +2014,20 @@ impl<'a> Iterator for ReplaceChunks<'a> {
 
     fn next(&mut self) -> Option<Chunk<'a>> {
         loop {
+            if let Some((offset, text)) = self.split.take() {
+                return Some(self.highlighted(offset, text));
+            }
+            if !self.replaced.is_empty() {
+                let payload = self.transforms.item()?.payload.as_ref()?;
+                let chunk = self.replaced_chunk(payload);
+                if self.replaced.is_empty() {
+                    self.transforms.next();
+                }
+                return Some(chunk);
+            }
             if let Some(text) = &mut self.text {
-                if let Some(chunk) = text.next() {
-                    return Some(chunk);
+                if let Some((offset, piece)) = text.next() {
+                    return Some(self.highlighted(offset, piece));
                 }
                 self.text = None;
                 self.transforms.next();
@@ -1453,9 +2036,14 @@ impl<'a> Iterator for ReplaceChunks<'a> {
             if self.transforms.start().0 >= self.end_point {
                 return None;
             }
-            if transform.is_fold() {
-                self.transforms.next();
-                return Some(Chunk::new(PLACEHOLDER));
+            if let Some(payload) = &transform.payload {
+                let text = payload.text();
+                if text.is_empty() {
+                    self.transforms.next();
+                } else {
+                    self.replaced = text;
+                }
+                continue;
             }
             let input_start = self.transforms.start().1.0;
             let from = self.start.max(input_start);
@@ -1469,21 +2057,25 @@ impl<'a> Iterator for ReplaceChunks<'a> {
     }
 }
 
-/// Buffer text with every line terminator as one `\n`, in chunks of at most
-/// [`MAX_CHUNK_LEN`] bytes, none empty. The range must not end inside a
-/// CRLF.
+/// Buffer text with every line terminator as one `\n`, in pieces of at
+/// most [`MAX_CHUNK_LEN`] bytes, none empty, each with its buffer offset
+/// (its bytes are the buffer's, a lone CR given as `\n`). The range must
+/// not end inside a CRLF.
 #[derive(Debug)]
 struct BufferChunks<'a> {
     buffer_chunks: Option<Peekable<gv_text::Chunks<'a>>>,
     /// The rest of the current buffer chunk.
     pending: &'a str,
+    /// The buffer offset of `pending`.
+    offset: usize,
 }
 
 impl<'a> BufferChunks<'a> {
     fn new(buffer: &'a TextSnapshot, range: Range<usize>) -> Self {
         Self {
-            buffer_chunks: buffer.chunks(range).ok().map(Iterator::peekable),
+            buffer_chunks: buffer.chunks(range.clone()).ok().map(Iterator::peekable),
             pending: "",
+            offset: range.start,
         }
     }
 
@@ -1503,18 +2095,20 @@ impl<'a> BufferChunks<'a> {
 }
 
 impl<'a> Iterator for BufferChunks<'a> {
-    type Item = Chunk<'a>;
+    type Item = (usize, &'a str);
 
-    fn next(&mut self) -> Option<Chunk<'a>> {
+    fn next(&mut self) -> Option<(usize, &'a str)> {
         loop {
             let text = self.pending;
             if text.is_empty() {
                 self.pending = self.buffer_chunks.as_mut()?.next()?;
                 continue;
             }
+            let at = self.offset;
             let split = match text.find('\r') {
                 Some(0) => {
                     self.pending = &text[1..];
+                    self.offset += 1;
                     let crlf = match text.as_bytes().get(1) {
                         Some(&byte) => byte == b'\n',
                         None => self.next_starts_with_lf(),
@@ -1523,7 +2117,7 @@ impl<'a> Iterator for BufferChunks<'a> {
                         // The LF that follows ends the row.
                         continue;
                     }
-                    return Some(Chunk::new("\n"));
+                    return Some((at, "\n"));
                 }
                 Some(cr) => cr,
                 None => text.len(),
@@ -1534,8 +2128,17 @@ impl<'a> Iterator for BufferChunks<'a> {
             }
             let (head, tail) = text.split_at(len);
             self.pending = tail;
-            return Some(Chunk::new(head));
+            self.offset += len;
+            return Some((at, head));
         }
+    }
+}
+
+/// The sum-tree bias for a [`Bias`].
+fn seek_bias(bias: Bias) -> sum_tree::Bias {
+    match bias {
+        Bias::Left => sum_tree::Bias::Left,
+        Bias::Right => sum_tree::Bias::Right,
     }
 }
 

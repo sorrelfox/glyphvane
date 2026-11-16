@@ -12,6 +12,8 @@
 // multi-buffer, edits and chunk ranges are points instead of offsets,
 // highlighting, row infos, tracing and `unsafe` are removed, and the tests
 // run without GPUI. The full list is in third_party/zed/PROVENANCE.md.
+// (2026-11-16): chunks take caller highlights and pass them to the replace
+// layer.
 
 //! The tab layer: expands hard tabs to the next tab stop.
 //!
@@ -28,7 +30,7 @@ use std::ops::Range;
 use gv_text::{Bias, TextSnapshot};
 
 use super::BufferPoint;
-use super::primitives::{Chunk, Edit, MAX_CHUNK_LEN, Point, TextSummary};
+use super::primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, TextSummary};
 use super::replace_map::{ReplaceChunks, ReplaceEdit, ReplacePoint, ReplaceSnapshot};
 
 /// The default for [`TabSnapshot::max_expansion_column`].
@@ -335,6 +337,17 @@ impl TabSnapshot {
     /// The expanded text in `range`, in chunks. Expanded tabs come as
     /// chunks of spaces with `is_tab` set.
     pub fn chunks(&self, range: Range<TabPoint>) -> TabChunks<'_> {
+        self.highlighted_chunks(range, &[])
+    }
+
+    /// [`chunks`](Self::chunks) with the style ids of `highlights` (see
+    /// [`ReplaceSnapshot::highlighted_chunks`]); an expanded tab carries
+    /// the style of its tab.
+    pub fn highlighted_chunks<'a>(
+        &'a self,
+        range: Range<TabPoint>,
+        highlights: &'a [Highlight],
+    ) -> TabChunks<'a> {
         let range = range.start..range.end.max(range.start);
         let (input_start, expanded_char_column, to_next_stop) =
             self.tab_point_to_replace_point(range.start, Bias::Left);
@@ -348,7 +361,9 @@ impl TabSnapshot {
 
         TabChunks {
             snapshot: self,
-            replace_chunks: self.replace_snapshot.chunks(input_start..input_end),
+            replace_chunks: self
+                .replace_snapshot
+                .highlighted_chunks(input_start..input_end, highlights),
             input_column,
             column: expanded_char_column,
             max_expansion_column: self.max_expansion_column,
@@ -713,10 +728,6 @@ impl TabChunks<'_> {
 impl<'a> Iterator for TabChunks<'a> {
     type Item = Chunk<'a>;
 
-    #[expect(
-        clippy::needless_update,
-        reason = "kept from upstream: carries chunk fields added later, such as highlight classes"
-    )]
     fn next(&mut self) -> Option<Self::Item> {
         while self.chunk.text.is_empty() {
             let chunk = self.replace_chunks.next()?;
