@@ -792,6 +792,7 @@ fn profile_changes_rerender_and_table_columns_line_up(cx: &mut TestAppContext) {
 }
 
 mod code_tests;
+mod constructs_tests;
 mod find_tests;
 
 /// Timing runs with the platform's real text system (Linux), for the

@@ -39,12 +39,14 @@ use std::sync::{Arc, OnceLock};
 use gpui::WindowTextSystem;
 use gpui::assets::IconName;
 use gv_highlight::{HighlightKey, TokenClass};
-use gv_inline::{Affinity, Align, Bias, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
+use gv_inline::{
+    Affinity, Align, Background, Bias, BoxKind, InlineBox, Paragraph, ParagraphBuilder,
+};
 use gv_math::MathEngine;
 use gv_render_tree::{
     BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, InlineRole, Item, ItemId, ItemKind,
-    LinkSuffix, MATH_DISPLAY_SCALE, Metrics, NodeKind, RenderTree, StatusIcon, StyleTable,
-    TableBlock, TextRole, Variant, link_decor,
+    LinkSuffix, MATH_DISPLAY_SCALE, Metrics, NodeKind, Property, RenderTree, StatusIcon,
+    StyleTable, TableBlock, TextRole, Variant, link_decor,
 };
 use gv_syntax::BlockId;
 use gv_syntax::table::Alignment;
@@ -128,7 +130,7 @@ pub(crate) fn chrome_height(kind: &ItemKind, m: &Metrics) -> f32 {
 
 /// Px from the top of an item's box (its gap included) to its text.
 pub(crate) fn text_top(item: &Item, m: &Metrics) -> f32 {
-    let mut y = item.gap_before;
+    let mut y = item.gap_before + item.frame_insets().0;
     if is_code(&item.kind) && chunk_ends(&item.kind).0 {
         y += m.code_border + m.code_head + m.code_padding_y;
     }
@@ -145,7 +147,11 @@ pub(crate) fn code_inset(m: &Metrics) -> f32 {
 
 /// The width an item's text is laid out at, for a column `column` wide.
 pub(crate) fn text_width(item: &Item, column: f32, m: &Metrics, wrapped: bool) -> f32 {
-    let content = (column - item.content_x(m)).max(1.0);
+    let mut content = (column - item.content_x(m) - item.content_right(m)).max(1.0);
+    if let ItemKind::Properties { .. } = item.kind {
+        // The keys' column.
+        content = (content - m.property_key - m.property_gap).max(1.0);
+    }
     if let ItemKind::TableRow { .. } = item.kind {
         return NO_WRAP;
     }
@@ -351,42 +357,92 @@ fn push_code_lines(
     }
 }
 
-/// The paragraph of front matter lines: `key:` in `text.secondary`, the
-/// value in `text.primary`.
-fn properties_paragraph(code: &CodeBlock, lines: Range<usize>, styles: &StyleTable) -> Paragraph {
+/// The paragraph of the front matter properties written on `lines`: one
+/// line per property with its values (the keys are drawn in their column
+/// by the view: [`property_rows`]), tags as pills, other lists joined with
+/// commas.
+fn properties_paragraph(
+    code: &CodeBlock,
+    props: &[Property],
+    lines: Range<usize>,
+    styles: &StyleTable,
+) -> Paragraph {
     let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Properties));
     let value = styles.run_style(TextRole::Properties, Variant::PLAIN);
-    let key = value.with_color(ColorToken::TextSecondary.role());
-    if let Some(first) = code.lines.get(lines.start) {
-        b.source_anchor(first.source.start);
-    }
-    let first_line = lines.start;
-    for i in lines {
-        let Some(line) = code.lines.get(i) else {
-            break;
+    let zoom = styles.zoom();
+    let pill = styles
+        .run_style(TextRole::Properties, Variant::PLAIN)
+        .with_background(Background {
+            role: ColorToken::AccentTint.role(),
+            padding_x: TAG_PILL_PADDING_X * zoom,
+            padding_y: 0.0,
+            radius: TAG_PILL_RADIUS * zoom,
+        });
+    let mut first = true;
+    let mut prev_end: Option<usize> = None;
+    for p in props.iter().filter(|p| lines.contains(&(p.line as usize))) {
+        let Some(line) = code.lines.get(p.line as usize) else {
+            continue;
         };
-        if i > first_line
-            && let Some(prev) = code.lines.get(i - 1)
-        {
-            b.hard_break(prev.source.end..line.start.max(prev.source.end));
-        }
-        let text = code.line(i);
         let src = line.source.clone();
-        let split = text
-            .find(':')
-            .filter(|_| text.len() == src.len() && line.indent == 0);
-        match split {
-            Some(k) => {
-                b.text(&text[..=k], key, src.start..src.start + k + 1);
-                if k + 1 < text.len() {
-                    b.text(&text[k + 1..], value, src.start + k + 1..src.end);
-                }
-            }
-            None => push_code_line(&mut b, text, usize::from(line.indent), src, value, &[]),
+        if first {
+            b.source_anchor(src.start);
+        } else if let Some(end) = prev_end {
+            b.hard_break(end..src.start.max(end));
         }
+        first = false;
+        prev_end = Some(src.end);
+        if p.values.is_empty() {
+            b.text(" ", value, src.end..src.end);
+            continue;
+        }
+        if p.tags {
+            for (i, v) in p.values.iter().enumerate() {
+                if i > 0 {
+                    b.text("\u{a0}", value, src.end..src.end);
+                }
+                let tag = if v.starts_with('#') {
+                    v.to_string()
+                } else {
+                    format!("#{v}")
+                };
+                b.text(&tag, pill, src.clone());
+            }
+        } else {
+            let joined = p.values.join(", ");
+            b.text(&joined, value, src.clone());
+        }
+    }
+    if first && let Some(l) = code.lines.get(lines.start) {
+        b.source_anchor(l.source.start);
     }
     b.build()
 }
+
+/// The properties written on `lines` of front matter with the item index
+/// of their first piece in [`properties_paragraph`]'s paragraph.
+pub(crate) fn property_rows<'p>(
+    props: &'p [Property],
+    lines: Range<usize>,
+    paragraph: &Paragraph,
+) -> Vec<(usize, &'p Property)> {
+    let mut starts = vec![0];
+    for (ix, it) in paragraph.items().iter().enumerate() {
+        if it.is_hard_break() {
+            starts.push(ix + 1);
+        }
+    }
+    props
+        .iter()
+        .filter(|p| lines.contains(&(p.line as usize)))
+        .zip(starts)
+        .map(|(p, ix)| (ix, p))
+        .collect()
+}
+
+/// A tag pill: radius 9, padding 0 8 (the design's 18 px pill).
+const TAG_PILL_RADIUS: f32 = 9.0;
+const TAG_PILL_PADDING_X: f32 = 8.0;
 
 /// The process-wide math engine: its layout cache is shared by every view
 /// (layouts are in em and theme-independent).
@@ -609,7 +665,7 @@ impl TableWidths {
 /// The text block of an item, if it has text.
 fn make_block(item: &Item, node: &BlockNode, styles: &StyleTable) -> Option<InlineBlock> {
     match (&item.kind, &node.kind) {
-        (ItemKind::Paragraph | ItemKind::Heading { .. }, _) => {
+        (ItemKind::Paragraph | ItemKind::Heading { .. } | ItemKind::Details, _) => {
             node.inline().map(|c| inline_block(c))
         }
         (ItemKind::Code { lines, .. } | ItemKind::Html { lines, .. }, _) => {
@@ -619,10 +675,15 @@ fn make_block(item: &Item, node: &BlockNode, styles: &StyleTable) -> Option<Inli
                 code, range, styles, None,
             ))))
         }
-        (ItemKind::Properties { lines, .. }, NodeKind::Properties { lines: code, .. }) => {
+        (
+            ItemKind::Properties { lines, .. },
+            NodeKind::Properties {
+                lines: code, props, ..
+            },
+        ) => {
             let range = lines.start as usize..lines.end as usize;
             Some(InlineBlock::new(Arc::new(properties_paragraph(
-                code, range, styles,
+                code, props, range, styles,
             ))))
         }
         _ => None,
@@ -648,6 +709,10 @@ pub(crate) struct ItemCache {
     pub evicted: u64,
     /// Code highlighting of the code blocks laid out.
     pub code: CodeHighlights,
+    /// `<details>` opened or closed by the reader, by the summary row's
+    /// block (others are as their `open` attribute says). Kept across
+    /// loads of the document.
+    pub folds: HashMap<BlockId, bool>,
 }
 
 /// Code blocks met while drawing.
@@ -767,6 +832,27 @@ impl ItemCache {
         }
     }
 
+    /// Whether the `<details>` whose summary row is block `block` of
+    /// `tree` is open.
+    pub fn details_open(&self, tree: &RenderTree, block: BlockId) -> bool {
+        if let Some(&open) = self.folds.get(&block) {
+            return open;
+        }
+        tree.index_of(ItemId { block, chunk: 0 })
+            .and_then(|ix| tree.node_of(ix))
+            .is_some_and(|n| matches!(n.kind, NodeKind::Details { open: true, .. }))
+    }
+
+    /// Whether item `ix` of `tree` is folded away in a closed `<details>`.
+    pub fn hidden(&self, tree: &RenderTree, ix: usize) -> bool {
+        tree.items().get(ix).is_some_and(|item| {
+            item.context.iter().any(|f| {
+                matches!(f.kind, gv_render_tree::FrameKind::Details)
+                    && !self.details_open(tree, f.id)
+            })
+        })
+    }
+
     /// The column widths of table `block`, once measured.
     pub fn table(&self, block: BlockId) -> Option<&TableWidths> {
         self.tables.get(&block)
@@ -805,9 +891,12 @@ impl ItemCache {
                 }
                 Some(block)
             }
-            (NodeKind::Paragraph(c) | NodeKind::Heading { content: c, .. }, _) => {
-                Some(content_block(tree, item.node, 0, c, role, None))
-            }
+            (
+                NodeKind::Paragraph(c)
+                | NodeKind::Heading { content: c, .. }
+                | NodeKind::Details { summary: c, .. },
+                _,
+            ) => Some(content_block(tree, item.node, 0, c, role, None)),
             (NodeKind::Code(code), ItemKind::Code { lines, .. }) => {
                 let spans = self.code.spans(item.id.block, code, item.id);
                 let range = lines.start as usize..lines.end as usize;
@@ -977,10 +1066,16 @@ impl Items for DocItems<'_> {
     }
 
     fn estimate(&self, ix: usize, width: f32) -> f32 {
+        if self.cache.hidden(self.tree, ix) {
+            return 0.0;
+        }
         self.tree.items()[ix].height_estimate(width)
     }
 
     fn measure(&mut self, ix: usize, width: f32) -> f32 {
+        if self.cache.hidden(self.tree, ix) {
+            return 0.0;
+        }
         self.prepare(ix);
         let item = &self.tree.items()[ix];
         let m = *self.metrics();
@@ -998,7 +1093,8 @@ impl Items for DocItems<'_> {
                 _ => self.tree.options().styles.role(TextRole::Body).line_height,
             },
         };
-        item.gap_before + content
+        let (above, below) = item.frame_insets();
+        item.gap_before + above + content + below
     }
 
     fn text_anchor(&mut self, ix: usize, offset: f32) -> Option<TextAnchor> {
@@ -1284,24 +1380,47 @@ mod tests {
     }
 
     #[test]
-    fn front_matter_keys_are_secondary() {
+    fn front_matter_values_and_tag_pills() {
+        let text = "title: Hi\ntags: [a, b]";
+        let line = |a: usize, b: usize| gv_render_tree::CodeLine {
+            text: a..b,
+            source: 4 + a..4 + b,
+            start: 4 + a,
+            indent: 0,
+            units: 9,
+        };
         let code = CodeBlock {
             fenced: false,
             info: None,
             language: None,
-            text: "title: Hi".to_owned(),
-            lines: Box::new([gv_render_tree::CodeLine {
-                text: 0..9,
-                source: 4..13,
-                start: 4,
-                indent: 0,
-                units: 9,
-            }]),
+            text: text.to_owned(),
+            lines: Box::new([line(0, 9), line(10, 22)]),
         };
-        let p = properties_paragraph(&code, 0..1, &StyleTable::preview());
-        assert_eq!(p.text(), "title: Hi");
-        let key = p.items()[0].style().expect("text").color;
-        assert_eq!(key, ColorToken::TextSecondary.role());
-        assert_eq!(p.items()[1].source(), 10..13);
+        let prop = |key: &str, values: &[&str], line: u32, tags: bool| Property {
+            key: Arc::from(key),
+            values: values.iter().map(|v| Arc::from(*v)).collect(),
+            line,
+            tags,
+        };
+        let props = [
+            prop("title", &["Hi"], 0, false),
+            prop("tags", &["a", "b"], 1, true),
+        ];
+        let styles = StyleTable::preview();
+        let p = properties_paragraph(&code, &props, 0..2, &styles);
+        // The values only (the keys are drawn in their column), one line
+        // per property; tags are pills.
+        assert_eq!(p.text(), "Hi\n#a\u{a0}#b");
+        assert_eq!(
+            p.items()[0].style().expect("text").color,
+            ColorToken::TextPrimary.role()
+        );
+        let pill = p.items()[2].style().expect("a tag");
+        assert_eq!(
+            pill.background.map(|b| b.role),
+            Some(ColorToken::AccentTint.role())
+        );
+        let rows = property_rows(&props, 0..2, &p);
+        assert_eq!(rows.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(), [0, 2]);
     }
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Bounds, Pixels, Point, WindowTextSystem};
-use gv_render_tree::ItemId;
+use gv_render_tree::{FrameKind, InlineRole, ItemId};
 use gv_syntax::BlockId;
 
 use super::bench::Bench;
@@ -110,6 +110,32 @@ pub(crate) struct CodeButton {
     pub kind: ButtonKind,
 }
 
+/// A control the last frame drew in the document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Control {
+    pub bounds: Bounds<Pixels>,
+    pub kind: ControlKind,
+}
+
+/// What a control does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlKind {
+    /// The checkbox of task item `item` (the list item's block), whose
+    /// first block starts at source offset `at`.
+    Task { item: BlockId, at: usize },
+    /// The summary row of the `<details>` of block `block`: folds it.
+    Details { block: BlockId },
+}
+
+/// A footnote reference or backreference under the pointer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FootnoteHit {
+    /// A reference's number: jumps to the footnote.
+    Ref { label: Arc<str> },
+    /// A footnote's `↩` back to its reference `k` (0-based).
+    Back { label: Arc<str>, k: u32 },
+}
+
 /// What is under the pointer.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) enum Hover {
@@ -118,6 +144,8 @@ pub(crate) enum Hover {
     Text,
     Link(LinkHit),
     Button(CodeButton),
+    Control(Control),
+    Footnote(FootnoteHit),
     Scrollbar,
 }
 
@@ -139,6 +167,10 @@ pub(crate) enum Press {
         grab: f32,
     },
     Button(CodeButton),
+    /// A task checkbox or a summary row.
+    Control(Control),
+    /// A footnote reference or backreference.
+    Footnote(FootnoteHit),
 }
 
 /// The code part of a placed item.
@@ -170,6 +202,8 @@ pub(crate) struct Geometry {
     pub column: (f32, f32),
     pub items: Vec<PlacedGeom>,
     pub buttons: Vec<CodeButton>,
+    /// Task checkboxes and summary rows.
+    pub controls: Vec<Control>,
     /// The area that grabs the scrollbar, and the thumb.
     pub track: Option<Bounds<Pixels>>,
     pub thumb: Option<Bounds<Pixels>>,
@@ -356,6 +390,126 @@ impl State {
             .find(|c| c.clip.contains(&position))
     }
 
+    /// The control under a window position.
+    pub fn control_at(&self, position: Point<Pixels>) -> Option<Control> {
+        self.geometry
+            .controls
+            .iter()
+            .find(|c| c.bounds.contains(&position))
+            .copied()
+    }
+
+    /// The footnote reference or backreference under a window position.
+    pub fn footnote_at(&self, position: Point<Pixels>) -> Option<FootnoteHit> {
+        let y = f32::from(position.y);
+        let g = self
+            .geometry
+            .items
+            .iter()
+            .find(|g| g.top <= y && y < g.bottom)?;
+        let block = g.text.as_ref()?;
+        let piece = block.borrow().item_at(position)?;
+        let doc = self.doc.as_ref()?;
+        let content = doc.tree.item_inline(g.ix)?;
+        match content.spans.get(piece)?.role {
+            InlineRole::FootnoteRef(i) => Some(FootnoteHit::Ref {
+                label: content.footnotes.get(i as usize)?.label.clone(),
+            }),
+            InlineRole::FootnoteBackref(k) => {
+                let item = doc.tree.items().get(g.ix)?;
+                let label = item.context.iter().find_map(|f| match &f.kind {
+                    FrameKind::Footnote { label, .. } => Some(label.clone()),
+                    _ => None,
+                })?;
+                Some(FootnoteHit::Back { label, k })
+            }
+            _ => None,
+        }
+    }
+
+    /// Follows a footnote reference to its footnote, or a backreference
+    /// to its reference. Returns whether the view moved.
+    pub fn follow_footnote(&mut self, hit: &FootnoteHit) -> bool {
+        let Some(doc) = self.doc.as_ref() else {
+            return false;
+        };
+        let target = match hit {
+            FootnoteHit::Ref { label } => doc.tree.footnote_item(label),
+            FootnoteHit::Back { label, k } => doc
+                .tree
+                .footnote_refs(label)
+                .get(*k as usize)
+                .map(|(ix, _)| *ix),
+        };
+        let Some(ix) = target else {
+            return false;
+        };
+        self.engine.jump_near_top(ix, 0.0);
+        true
+    }
+
+    /// Opens or closes the `<details>` of summary block `block`.
+    pub fn toggle_details(&mut self, block: BlockId, ts: &WindowTextSystem) {
+        let State {
+            doc,
+            engine,
+            cache,
+            text,
+            ..
+        } = self;
+        let Some(doc) = doc else {
+            return;
+        };
+        let open = !cache.details_open(&doc.tree, block);
+        cache.folds.insert(block, open);
+        let changed: Vec<usize> = doc
+            .tree
+            .items()
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                it.id.block == block
+                    || it
+                        .context
+                        .iter()
+                        .any(|f| f.id == block && matches!(f.kind, FrameKind::Details))
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        let items = DocItems {
+            tree: &doc.tree,
+            cache,
+            text,
+            ts,
+        };
+        engine.invalidate(&items, changed);
+    }
+
+    /// The edit a click on a task checkbox asks for: the status character
+    /// of list item `item` (whose first block starts at `at`) toggled
+    /// between ` ` and `x` (any other status becomes ` `).
+    pub fn task_toggle(&self, item: BlockId, at: usize) -> Option<super::TaskToggle> {
+        let doc = self.doc.as_ref()?;
+        struct Find {
+            item: BlockId,
+            marker: Option<Range<usize>>,
+        }
+        impl gv_syntax::Visitor for Find {
+            fn enter(&mut self, c: &gv_syntax::Container) {
+                if c.id == self.item && c.is_task() {
+                    self.marker.clone_from(&c.marker);
+                }
+            }
+        }
+        let mut find = Find { item, marker: None };
+        gv_syntax::walk_range(&doc.syntax, at..at + 1, &mut find);
+        let marker = find.marker?;
+        let offset = marker.start + 1;
+        let from = doc.text.get(offset..)?.chars().next()?;
+        let to = if from == ' ' { 'x' } else { ' ' };
+        Some(super::TaskToggle { offset, from, to })
+    }
+
     /// What is under the pointer at `position`.
     pub fn hover_at(&self, position: Point<Pixels>) -> Hover {
         if self.geometry.track.is_some_and(|t| t.contains(&position)) {
@@ -363,6 +517,12 @@ impl State {
         }
         if let Some(b) = self.button_at(position) {
             return Hover::Button(b);
+        }
+        if let Some(c) = self.control_at(position) {
+            return Hover::Control(c);
+        }
+        if let Some(f) = self.footnote_at(position) {
+            return Hover::Footnote(f);
         }
         if let Some(link) = self.link_at(position) {
             return Hover::Link(link);

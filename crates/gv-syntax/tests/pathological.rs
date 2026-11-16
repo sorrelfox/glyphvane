@@ -566,6 +566,46 @@ fn gfm_cases() -> Vec<Case> {
             |k| format!("{}@b", "a.".repeat(10_000)).repeat(k),
             None,
         ),
+        case(
+            "gfm: many footnote references",
+            50_000,
+            |k| format!("{}\n\n[^a]: x\n", "[^a]".repeat(k)),
+            Some(|o, k| o.matches("data-footnote-ref>").count() == k),
+        ),
+        case(
+            "gfm: nested footnote openers",
+            50_000,
+            |k| format!("{}a{}\n\n[^a]: x\n", "[^".repeat(k), "]".repeat(k)),
+            None,
+        ),
+        case(
+            "gfm: many footnotes",
+            10_000,
+            |k| {
+                (0..k)
+                    .map(|i| format!("x[^{i}]\n\n[^{i}]: n\n\n"))
+                    .collect::<String>()
+            },
+            Some(|o, k| o.matches("<li id=\"fn-").count() == k),
+        ),
+        case(
+            "gfm: nested footnote definitions, then blank lines",
+            20_000,
+            |k| format!("{}x\n{}", "[^a]: ".repeat(k), "\n".repeat(k)),
+            None,
+        ),
+        case(
+            "gfm: many task items",
+            50_000,
+            |k| "- [ ] x\n- [x]\n".repeat(k),
+            None,
+        ),
+        case(
+            "gfm: alert markers",
+            50_000,
+            |k| "> [!NOTE]\n".repeat(k),
+            None,
+        ),
     ]
 }
 
@@ -643,7 +683,18 @@ fn render_math_pandoc(src: &str) -> String {
 
 /// Renders with the GFM renderer and every extension on.
 fn render_gfm(src: &str) -> String {
-    render_gfm_html(src, &["table", "strikethrough", "autolink", "tagfilter"])
+    render_gfm_html(
+        src,
+        &[
+            "table",
+            "strikethrough",
+            "autolink",
+            "tagfilter",
+            "tasklist",
+            "footnotes",
+            "alerts",
+        ],
+    )
 }
 
 fn fixed_cases() -> Vec<Fixed> {

@@ -407,6 +407,10 @@ fn level_of(doc: &Doc, container: Container) -> Option<Level> {
             delimiter,
         }),
         ContainerKind::Item => LevelKind::Item(item_info(doc, container.range.start)?),
+        // An alert continues like a block quote; a footnote definition's
+        // indent is not a prefix the line commands write.
+        ContainerKind::Alert { .. } => LevelKind::Quote,
+        ContainerKind::FootnoteDefinition => return None,
     };
     Some(Level {
         range: container.range,

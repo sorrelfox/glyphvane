@@ -36,10 +36,13 @@
 //! separated by gap boxes the view sizes from the column widths),
 //! strikethrough, extended autolinks and math (formula boxes, ` ```math `
 //! and `$$` blocks; [`RenderTree::math_macros`] runs the document's macro
-//! pass). Raw HTML (blocks and inline) is shown as text and flagged
-//! `raw_html_pending` until the HTML pipeline exists; front matter is a
-//! properties placeholder (or hidden). The node, frame, marker and item
-//! kinds leave room for task lists, callouts and embeds.
+//! pass), task items (their marker is a checkbox), footnotes (numbered
+//! references; the definitions in a footnote section after the document,
+//! see [`RenderTree::footnote_section_start`]) and GitHub alerts (an
+//! [`FrameKind::Alert`] box). Raw HTML (blocks and inline) is shown as
+//! text and flagged `raw_html_pending` until the HTML pipeline exists,
+//! except `<details>` (a summary row folding the blocks up to its end) and
+//! `<picture>`; front matter is a property list (or hidden).
 //!
 //! # Coordinates
 //!
@@ -50,10 +53,13 @@
 mod build;
 mod dump;
 mod find;
+mod footnote;
+mod html;
 mod inline;
 mod item;
 mod metrics;
 mod node;
+mod properties;
 mod status;
 mod style;
 mod text;
@@ -61,13 +67,16 @@ mod tree;
 
 pub use build::MAX_FRAMES;
 pub use find::{FindError, FindIndex, Finder, Matches};
+pub use footnote::FootnoteIndex;
 pub use inline::MATH_DISPLAY_SCALE;
-pub use item::{Estimate, Item, ItemId, ItemKind, indent};
+pub use item::{Estimate, Item, ItemId, ItemKind, indent, right_indent};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
-    BlockNode, BoxRef, CodeBlock, CodeLine, Context, Frame, FrameKind, ImageInfo, InlineContent,
-    InlineRole, InlineSpan, LinkInfo, ListMarker, MathInfo, NodeKind, TableBlock, TableRow, Units,
+    BlockNode, BoxRef, CodeBlock, CodeLine, Context, FootnoteRefInfo, Frame, FrameKind, ImageInfo,
+    InlineContent, InlineRole, InlineSpan, LinkInfo, ListMarker, MathInfo, NodeKind, Picture,
+    PictureSource, TableBlock, TableRow, Units,
 };
+pub use properties::Property;
 pub use status::{
     AllPending, ImageSize, ImageSizeSource, LinkStatus, LinkStatusSource, LinkTarget, NoImageSizes,
     Sources,

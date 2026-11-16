@@ -29,6 +29,20 @@ impl RenderOptions {
 
 /// Renders `tree` as HTML into `out`.
 pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
+    render_with(tree, out, opts, None);
+}
+
+/// Writes the HTML of a footnote reference, given its normalized label.
+pub(super) type FootnoteHtml<'f> = &'f mut dyn FnMut(&str, &mut String);
+
+/// [`render`] with the footnote references written by `footnotes` (as
+/// their source text without it).
+pub(super) fn render_with(
+    tree: &InlineTree,
+    out: &mut String,
+    opts: RenderOptions,
+    mut footnotes: Option<FootnoteHtml<'_>>,
+) {
     let nodes = &tree.nodes;
     // Open elements: where they end, their closing tag, their kind.
     let mut closers: Vec<(u32, &'static str, K)> = Vec::new();
@@ -125,6 +139,13 @@ pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
                 out.push_str("</span>");
                 next = n.next as usize;
             }
+            K::FootnoteRef => {
+                match (&mut footnotes, tree.footnote_label(n.data)) {
+                    (Some(f), Some(label)) => f(label, out),
+                    _ => escape_html(out, tree.slice(n.start, n.end)),
+                }
+                next = n.next as usize;
+            }
             K::RawHtml => {
                 let raw = tree.slice(n.start, n.end);
                 if opts.tagfilter {
@@ -142,7 +163,8 @@ pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
             | K::MathText
             | K::LinkDestination
             | K::LinkTitle
-            | K::LinkLabel => {}
+            | K::LinkLabel
+            | K::FootnoteLabel => {}
         }
         i = next;
     }
@@ -248,6 +270,8 @@ pub(super) fn plain_text(
                 }
                 next = n.next as usize;
             }
+            // Its number is document-global: no text here.
+            K::FootnoteRef => next = n.next as usize,
             K::Emphasis
             | K::Strong
             | K::Strikethrough
@@ -261,7 +285,8 @@ pub(super) fn plain_text(
             | K::MathText
             | K::LinkDestination
             | K::LinkTitle
-            | K::LinkLabel => {}
+            | K::LinkLabel
+            | K::FootnoteLabel => {}
         }
         i = next;
     }
@@ -302,7 +327,7 @@ pub(super) fn project(
                 push_raw(out, super::tree::math_tex(tree, &n));
                 next = n.next as usize;
             }
-            K::RawHtml => next = n.next as usize,
+            K::RawHtml | K::FootnoteRef => next = n.next as usize,
             // Containers: their text children follow; syntax tokens render
             // nothing.
             K::Emphasis
@@ -318,7 +343,8 @@ pub(super) fn project(
             | K::MathText
             | K::LinkDestination
             | K::LinkTitle
-            | K::LinkLabel => {}
+            | K::LinkLabel
+            | K::FootnoteLabel => {}
         }
         i = next;
     }
@@ -417,7 +443,7 @@ static HREF_SAFE: [bool; 256] = {
 /// Appends a URL for an `href` or `src` attribute: unsafe bytes are
 /// percent-encoded, `&` and `'` become entities, a `%` that does not start a
 /// percent-escape is encoded, U+0000 is encoded as U+FFFD.
-pub(super) fn escape_href(out: &mut String, s: &str) {
+pub(crate) fn escape_href(out: &mut String, s: &str) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let b = s.as_bytes();
     let mut copied = 0;

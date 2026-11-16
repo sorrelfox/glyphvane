@@ -35,9 +35,11 @@ use gv_syntax::inline::{
     Children, InlineKind, InlineNode, InlineTree, LinkKind as SynLinkKind, TextProjection,
 };
 
+use crate::footnote::FootnoteIndex;
 use crate::metrics::Metrics;
 use crate::node::{
-    BoxRef, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, MathInfo, Measure, Units,
+    BoxRef, FootnoteRefInfo, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, MathInfo,
+    Measure, Units,
 };
 use crate::status::{ImageSize, LinkTarget, Sources};
 use crate::style::{ColorToken, Family, LinkSuffix, StyleTable, TextRole, Variant, link_decor};
@@ -48,7 +50,15 @@ pub(crate) struct InlineCx<'a> {
     pub metrics: &'a Metrics,
     pub sources: Sources<'a>,
     pub block: BlockId,
+    /// The document's footnote numbers.
+    pub footnotes: Option<&'a FootnoteIndex>,
 }
+
+/// Size of a footnote reference's number relative to the text around it.
+const FOOTNOTE_SCALE: f32 = 0.75;
+/// How far a footnote reference's number is raised, in em of the text
+/// around it.
+const FOOTNOTE_RAISE: f32 = 0.35;
 
 /// Builds the inline content of a block whose node starts at `base`.
 pub(crate) fn build(
@@ -61,6 +71,54 @@ pub(crate) fn build(
     b.para
         .source_anchor(tree.source_range().start.saturating_sub(base));
     b.walk(tree.top_level());
+    b.finish()
+}
+
+/// [`build`], then the backreferences of a footnote referenced `count`
+/// times after the content (at `end`, absolute): `↩`, `↩²`, ….
+pub(crate) fn build_with_backrefs(
+    tree: &InlineTree,
+    base: usize,
+    end: usize,
+    count: u32,
+    cx: &InlineCx<'_>,
+) -> InlineContent {
+    let mut b = Builder::new(cx, TextRole::Body, base);
+    b.para
+        .source_anchor(tree.source_range().start.saturating_sub(base));
+    b.walk(tree.top_level());
+    b.backrefs(end, count);
+    b.finish()
+}
+
+/// Inline content of only the backreferences of a footnote referenced
+/// `count` times, at `at` (absolute; the node starts there).
+pub(crate) fn build_backrefs_only(at: usize, count: u32, cx: &InlineCx<'_>) -> InlineContent {
+    let mut b = Builder::new(cx, TextRole::Body, at);
+    b.para.source_anchor(0);
+    b.backrefs(at, count);
+    b.finish()
+}
+
+/// Inline content of plain text (no Markdown): a `<details>` summary.
+pub(crate) fn build_plain(
+    text: &str,
+    source: Range<usize>,
+    base: usize,
+    role: TextRole,
+    cx: &InlineCx<'_>,
+) -> InlineContent {
+    let mut b = Builder::new(cx, role, base);
+    b.para.source_anchor(source.start.saturating_sub(base));
+    let state = State {
+        variant: Variant::PLAIN,
+        link: None,
+        alt: None,
+        strike: false,
+    };
+    let key = b.key(state, InlineRole::Text);
+    let exact = text.len() == source.len();
+    b.piece(text, source, exact, key);
     b.finish()
 }
 
@@ -148,6 +206,7 @@ struct Builder<'c, 'a> {
     line_height: f32,
     raw_html: bool,
     math: Vec<MathInfo>,
+    footnotes: Vec<FootnoteRefInfo>,
 }
 
 impl<'c, 'a> Builder<'c, 'a> {
@@ -167,6 +226,7 @@ impl<'c, 'a> Builder<'c, 'a> {
             line_height: cx.styles.role(role).line_height,
             raw_html: false,
             math: Vec::new(),
+            footnotes: Vec::new(),
         }
     }
 
@@ -179,6 +239,7 @@ impl<'c, 'a> Builder<'c, 'a> {
             links: self.links.into_boxed_slice(),
             images: self.images.into_boxed_slice(),
             math: self.math.into_boxed_slice(),
+            footnotes: self.footnotes.into_boxed_slice(),
             raw_html_pending: self.raw_html,
             measure: Measure {
                 lines: self.lines.into_boxed_slice(),
@@ -255,6 +316,7 @@ impl Builder<'_, '_> {
                     }
                 }
                 InlineKind::Autolink => self.autolink(&node, state),
+                InlineKind::FootnoteRef => self.footnote_ref(&node, state),
                 InlineKind::CodeSpan => self.code_span(&node, state),
                 InlineKind::RawHtml => self.raw_html(&node, state),
                 InlineKind::Text => {
@@ -297,8 +359,62 @@ impl Builder<'_, '_> {
                 | InlineKind::MathText
                 | InlineKind::LinkDestination
                 | InlineKind::LinkTitle
-                | InlineKind::LinkLabel => {}
+                | InlineKind::LinkLabel
+                | InlineKind::FootnoteLabel => {}
             }
+        }
+    }
+
+    /// A footnote reference: its number, raised (its source text when the
+    /// footnote has no number).
+    fn footnote_ref(&mut self, node: &InlineNode<'_>, state: State) {
+        let label = node.footnote_label().unwrap_or("");
+        let number = self.cx.footnotes.and_then(|f| f.number(label));
+        let source = node.range();
+        let Some(number) = number.filter(|_| state.alt.is_none()) else {
+            let key = self.key(state, InlineRole::Text);
+            self.piece(node.text(), source, false, key);
+            return;
+        };
+        let index = u32::try_from(self.footnotes.len()).unwrap_or(u32::MAX);
+        self.footnotes.push(FootnoteRefInfo {
+            label: Arc::from(label),
+            number,
+            source: self.rel(source.clone()),
+        });
+        self.flush();
+        let key = RunKey {
+            state,
+            role: InlineRole::FootnoteRef(index),
+        };
+        self.piece(&number.to_string(), source, false, key);
+        self.flush();
+    }
+
+    /// The backreferences of a footnote after its last paragraph, at `at`
+    /// (absolute): one `↩` per reference, the later ones numbered.
+    fn backrefs(&mut self, at: usize, count: u32) {
+        const SUPERSCRIPT: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+        let state = State {
+            variant: Variant::PLAIN,
+            link: None,
+            alt: None,
+            strike: false,
+        };
+        for k in 0..count {
+            let mut text = String::from("\u{a0}\u{21a9}");
+            if k > 0 {
+                for d in (k + 1).to_string().bytes() {
+                    text.push(SUPERSCRIPT[usize::from(d - b'0')]);
+                }
+            }
+            self.flush();
+            let key = RunKey {
+                state,
+                role: InlineRole::FootnoteBackref(k),
+            };
+            self.piece(&text, at..at, false, key);
+            self.flush();
         }
     }
 
@@ -388,6 +504,15 @@ impl Builder<'_, '_> {
             }
             InlineRole::LinkSuffix => {
                 return style.with_color(ColorToken::TextSecondary.role());
+            }
+            InlineRole::FootnoteRef(_) => {
+                let size = style.size;
+                style = style.with_color(ColorToken::AccentDefault.role());
+                style.size = size * FOOTNOTE_SCALE;
+                return style.with_baseline_shift(size * FOOTNOTE_RAISE);
+            }
+            InlineRole::FootnoteBackref(_) => {
+                return style.with_color(ColorToken::AccentDefault.role());
             }
             _ => {}
         }

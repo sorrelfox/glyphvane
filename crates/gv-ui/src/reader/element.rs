@@ -41,7 +41,8 @@ use super::items::{
 };
 use super::live::{Spot, SyncRequest, block_items_at};
 use super::state::{
-    ButtonKind, CodeButton, CodeGeom, Geometry, Hover, LinkHit, PlacedGeom, Press, Selection, State,
+    ButtonKind, CodeButton, CodeGeom, Control, ControlKind, Geometry, Hover, LinkHit, PlacedGeom,
+    Press, Selection, State,
 };
 use super::{Disposition, LinkRequest, Reader, ReaderEvent, find, startup};
 use crate::icons::Icon;
@@ -194,6 +195,8 @@ pub(crate) struct ReaderElement {
     reader: WeakEntity<Reader>,
     focus: gpui::FocusHandle,
     palette: Arc<Palette>,
+    /// The app theme is dark (`<picture>` sources follow it).
+    dark: bool,
 }
 
 impl ReaderElement {
@@ -202,15 +205,53 @@ impl ReaderElement {
         reader: WeakEntity<Reader>,
         focus: gpui::FocusHandle,
         palette: Arc<Palette>,
+        dark: bool,
     ) -> Self {
         Self {
             state,
             reader,
             focus,
             palette,
+            dark,
         }
     }
 }
+
+/// The colours and icon of an alert type: its tint, its status colour
+/// and its Lucide icon. Important has no colour in the design: the accent
+/// (not designed).
+fn alert_style(kind: gv_syntax::AlertKind) -> (Token, Token, IconName) {
+    use gv_syntax::AlertKind;
+    match kind {
+        AlertKind::Note => (Token::StatusInfoTint, Token::StatusInfo, IconName::Info),
+        AlertKind::Tip => (
+            Token::StatusSuccessTint,
+            Token::StatusSuccess,
+            IconName::Lightbulb,
+        ),
+        AlertKind::Important => (Token::AccentTint, Token::AccentDefault, IconName::Info),
+        AlertKind::Warning => (
+            Token::StatusWarningTint,
+            Token::StatusWarning,
+            IconName::TriangleAlert,
+        ),
+        AlertKind::Caution => (
+            Token::StatusErrorTint,
+            Token::StatusError,
+            IconName::CircleX,
+        ),
+    }
+}
+
+/// Size of a callout's title icon, of the disclosure triangle of a
+/// summary row, and the gap after them (the design's callout: icon 15,
+/// gap 7; the summary row is not designed).
+const CALLOUT_ICON: f32 = 15.0;
+const CALLOUT_ICON_GAP: f32 = 7.0;
+const SUMMARY_CHEVRON: f32 = 13.0;
+/// A callout's title: 14/20, weight 600.
+const CALLOUT_TITLE_SIZE: f32 = 14.0;
+const SUMMARY_GUTTER: f32 = 18.0;
 
 impl IntoElement for ReaderElement {
     type Element = Self;
@@ -426,25 +467,36 @@ impl Element for ReaderElement {
                 .font(style_id(role, Variant::PLAIN))
                 .clone()
         };
-        let (body_font, label_font, badge_font) = (
+        let (body_font, label_font, badge_font, title_font) = (
             font(TextRole::Body),
             font(TextRole::CodeLabel),
             font(TextRole::Badge),
+            font(TextRole::H5),
         );
         let body = styles.role(TextRole::Body);
         let label_spec = styles.role(TextRole::CodeLabel);
 
+        let zoom = styles.zoom();
         for p in &placed {
+            if cache.hidden(tree, p.ix) {
+                // Folded away in a closed `<details>`.
+                continue;
+            }
             let item = &tree.items()[p.ix];
             let Some(node) = tree.node_of(p.ix) else {
                 continue;
             };
             let top = f32::from(bounds.top()) + p.y;
-            let bottom = top + p.height;
-            let content_top = top + item.gap_before;
+            // A callout's padding and title row are inside the item's box,
+            // around its content.
+            let (inset_top, inset_bottom) = item.frame_insets();
+            let box_top = top + item.gap_before;
+            let box_bottom = top + p.height;
+            let bottom = box_bottom - inset_bottom;
+            let content_top = box_top + inset_top;
             let indent = item.content_x(&m);
             let left = x0 + indent;
-            let content_w = (column - indent).max(1.0);
+            let content_w = (column - indent - item.content_right(&m)).max(1.0);
             let local_selection = selected.as_ref().and_then(|r| {
                 let a = r.start.saturating_sub(node.source.start);
                 let b = r.end.saturating_sub(node.source.start);
@@ -508,6 +560,67 @@ impl Element for ReaderElement {
                     FrameKind::Item { marker } if item.opens_frame(i) => {
                         markers.push((fx + m.list_indent, marker));
                     }
+                    FrameKind::Footnote { number, .. } if item.opens_frame(i) => {
+                        markers.push((
+                            fx + m.list_indent,
+                            ListMarker::Ordered {
+                                number: u64::from(number),
+                                delimiter: b'.',
+                            },
+                        ));
+                    }
+                    FrameKind::Alert { kind } => {
+                        // The box: tinted, radius 6, no border; the title
+                        // row (icon and type name) where it starts.
+                        let (tint, status, icon_name) = alert_style(kind);
+                        let opens = item.opens_frame(i);
+                        let closes = item.closes_frame(i);
+                        let y0 = if opens { box_top } else { top };
+                        let w = (column - item.frame_x(i, &m)).max(1.0);
+                        let (r, zero) = (px(radius::BLOCK), px(0.0));
+                        out.under.push(Op::Frame {
+                            bounds: bounds_of(fx, y0, w, box_bottom - y0),
+                            borders: Edges::default(),
+                            corners: Corners {
+                                top_left: if opens { r } else { zero },
+                                top_right: if opens { r } else { zero },
+                                bottom_right: if closes { r } else { zero },
+                                bottom_left: if closes { r } else { zero },
+                            },
+                            fill: color(tint),
+                            border: color(tint),
+                        });
+                        if opens {
+                            let title_top = box_top + m.callout_padding_top;
+                            let icon_size = CALLOUT_ICON * zoom;
+                            let ix = fx + m.callout_padding_x;
+                            out.over.push(Op::Icon {
+                                bounds: bounds_of(
+                                    ix,
+                                    title_top + (m.callout_title - icon_size) / 2.0,
+                                    icon_size,
+                                    icon_size,
+                                ),
+                                path: icon_name.path(),
+                                color: color(status),
+                            });
+                            let title = shape(
+                                window,
+                                kind.title(),
+                                title_font.clone(),
+                                CALLOUT_TITLE_SIZE * zoom,
+                                color(status),
+                            );
+                            out.over.push(Op::Text {
+                                line: Box::new(title),
+                                origin: point(
+                                    px(ix + icon_size + CALLOUT_ICON_GAP * zoom),
+                                    px(title_top),
+                                ),
+                                line_height: px(m.callout_title),
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -516,7 +629,7 @@ impl Element for ReaderElement {
             let mut geom = PlacedGeom {
                 ix: p.ix,
                 top,
-                bottom,
+                bottom: box_bottom,
                 text: block.clone(),
                 node_start: node.source.start,
                 code: None,
@@ -758,7 +871,86 @@ impl Element for ReaderElement {
                         });
                     }
                 }
+                ItemKind::Picture => {
+                    // Images come with the media engine: the picked
+                    // source's alt text and name for now.
+                    if let gv_render_tree::NodeKind::Picture(pic) = &node.kind {
+                        let src = pic.pick(self.dark).unwrap_or("");
+                        let name = src.rsplit('/').next().unwrap_or(src);
+                        let label = match (pic.alt.is_empty(), name.is_empty()) {
+                            (false, false) => format!("{} ({name})", pic.alt),
+                            (false, true) => pic.alt.to_string(),
+                            (true, _) => name.to_owned(),
+                        };
+                        let icon_size = icon::INLINE * zoom;
+                        out.over.push(Op::Icon {
+                            bounds: bounds_of(
+                                left,
+                                content_top + (body.line_height - icon_size) / 2.0,
+                                icon_size,
+                                icon_size,
+                            ),
+                            path: IconName::Image.path(),
+                            color: color(Token::TextSecondary),
+                        });
+                        let line = shape(
+                            window,
+                            &label,
+                            body_font.clone(),
+                            body.size,
+                            color(Token::TextSecondary),
+                        );
+                        out.over.push(Op::Text {
+                            line: Box::new(line),
+                            origin: point(
+                                px(left + icon_size + CALLOUT_ICON_GAP * zoom),
+                                px(content_top),
+                            ),
+                            line_height: px(body.line_height),
+                        });
+                    }
+                }
                 _ => {
+                    if item.kind == ItemKind::Details {
+                        // The disclosure triangle, in the gutter left of the
+                        // summary; the whole row folds the details.
+                        let open = cache.details_open(tree, item.id.block);
+                        let side = SUMMARY_CHEVRON * zoom;
+                        let gutter = SUMMARY_GUTTER * zoom;
+                        let row = bounds_of(
+                            left - gutter,
+                            content_top,
+                            content_w + gutter,
+                            bottom - content_top,
+                        );
+                        out.over.push(Op::Icon {
+                            bounds: bounds_of(
+                                left - gutter,
+                                content_top + (body.line_height - side) / 2.0,
+                                side,
+                                side,
+                            ),
+                            path: if open {
+                                IconName::ChevronDown.path()
+                            } else {
+                                IconName::ChevronRight.path()
+                            },
+                            color: color(Token::TextSecondary),
+                        });
+                        geometry.controls.push(Control {
+                            bounds: row,
+                            kind: ControlKind::Details {
+                                block: item.id.block,
+                            },
+                        });
+                    }
+                    // Properties: the values right of the keys' column.
+                    let key_column = if let ItemKind::Properties { .. } = item.kind {
+                        m.property_key + m.property_gap
+                    } else {
+                        0.0
+                    };
+                    let left = left + key_column;
                     if let Some(block) = &block {
                         let tw = text_width(item, column, &m, false);
                         let first = text
@@ -767,6 +959,44 @@ impl Element for ReaderElement {
                             .lines()
                             .first()
                             .map(|l| (l.baseline, l.top, l.height));
+                        if let (
+                            ItemKind::Properties { lines, .. },
+                            gv_render_tree::NodeKind::Properties { props, .. },
+                        ) = (&item.kind, &node.kind)
+                        {
+                            let b = block.borrow();
+                            if let Some(layout) = b.layout() {
+                                let range = lines.start as usize..lines.end as usize;
+                                let spec = styles.role(TextRole::Properties);
+                                let key_font = font(TextRole::Properties);
+                                for (piece, prop) in
+                                    super::items::property_rows(props, range, layout.paragraph())
+                                {
+                                    let Some(line) = layout.lines().iter().find(|l| {
+                                        l.frags.clone().any(|k| layout.fragments()[k].item >= piece)
+                                    }) else {
+                                        continue;
+                                    };
+                                    let key = shape(
+                                        window,
+                                        &prop.key,
+                                        key_font.clone(),
+                                        spec.size,
+                                        color(Token::TextSecondary),
+                                    );
+                                    out.over.push(Op::Text {
+                                        origin: origin_for_baseline(
+                                            &key,
+                                            left - key_column,
+                                            content_top + line.baseline,
+                                            spec.line_height,
+                                        ),
+                                        line: Box::new(key),
+                                        line_height: px(spec.line_height),
+                                    });
+                                }
+                            }
+                        }
                         if let Some((baseline, top, height)) = first {
                             marker_at = MarkerAt::Text {
                                 baseline: content_top + baseline,
@@ -800,6 +1030,22 @@ impl Element for ReaderElement {
                         MarkerAt::LineTop(y) => y + (body.line_height - side) / 2.0,
                     };
                     let boxed = bounds_of(x, y, side, side);
+                    if let Some(frame) = item.context.iter().rev().find(|f| {
+                        matches!(
+                            f.kind,
+                            FrameKind::Item {
+                                marker: ListMarker::Task { .. }
+                            }
+                        )
+                    }) {
+                        geometry.controls.push(Control {
+                            bounds: boxed,
+                            kind: ControlKind::Task {
+                                item: frame.id,
+                                at: node.source.start,
+                            },
+                        });
+                    }
                     out.over.push(Op::Frame {
                         bounds: boxed,
                         borders: if checked {
@@ -991,7 +1237,9 @@ impl Element for ReaderElement {
             let dragging_text = matches!(st.press, Press::Select { moved: true, .. });
             let cursor = match &hover {
                 _ if dragging_text => Some(CursorStyle::IBeam),
-                Hover::Link(_) | Hover::Button(_) => Some(CursorStyle::PointingHand),
+                Hover::Link(_) | Hover::Button(_) | Hover::Control(_) | Hover::Footnote(_) => {
+                    Some(CursorStyle::PointingHand)
+                }
                 Hover::Text => Some(CursorStyle::IBeam),
                 Hover::Scrollbar | Hover::None => None,
             };
@@ -1156,8 +1404,28 @@ impl ReaderElement {
                 let mut st = state.borrow_mut();
                 let press = std::mem::take(&mut st.press);
                 let mut follow = None;
+                let mut toggle = None;
                 match (press, e.button) {
                     (Press::None, _) => return,
+                    (Press::Control(control), MouseButton::Left) => {
+                        if st.control_at(e.position) == Some(control) {
+                            match control.kind {
+                                ControlKind::Task { item, at } => {
+                                    toggle = st.task_toggle(item, at);
+                                }
+                                ControlKind::Details { block } => {
+                                    let ts = window.text_system().clone();
+                                    st.toggle_details(block, &ts);
+                                }
+                            }
+                        }
+                    }
+                    (Press::Footnote(hit), MouseButton::Left) => {
+                        if st.footnote_at(e.position).as_ref() == Some(&hit) {
+                            st.selection = None;
+                            st.follow_footnote(&hit);
+                        }
+                    }
                     (Press::Thumb { .. }, MouseButton::Left) => st.engine.end_drag(),
                     (Press::Button(button), MouseButton::Left) => {
                         if st.button_at(e.position) == Some(button) {
@@ -1198,6 +1466,9 @@ impl ReaderElement {
                     }
                 }
                 drop(st);
+                if let Some(t) = toggle {
+                    let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::ToggleTask(t)));
+                }
                 if let Some(req) = follow {
                     note_navigation(Cause::Link {
                         destination: req.destination.clone(),
@@ -1362,6 +1633,16 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
     }
     if let Some(button) = st.button_at(pos) {
         st.press = Press::Button(button);
+        return;
+    }
+    if let Some(control) = st.control_at(pos) {
+        st.press = Press::Control(control);
+        return;
+    }
+    if !e.modifiers.shift
+        && let Some(hit) = st.footnote_at(pos)
+    {
+        st.press = Press::Footnote(hit);
         return;
     }
     let Some(offset) = st.offset_at(pos) else {

@@ -507,7 +507,11 @@ pub(crate) fn highlight(
             | TokenKind::QuoteMarker
             | TokenKind::ListMarker
             | TokenKind::Marker => painter.set(r, Style::MARKER),
-            TokenKind::InfoString => painter.set(r, Style::of(Token::SyntaxTag)),
+            // Fence languages and the markers of task boxes, footnote
+            // labels and alert types.
+            TokenKind::InfoString | TokenKind::ExtMarker => {
+                painter.set(r, Style::of(Token::SyntaxTag));
+            }
             TokenKind::Bom
             | TokenKind::Whitespace
             | TokenKind::CodeIndent
@@ -634,7 +638,8 @@ impl Leaves<'_, '_> {
             InlineKind::CodeSpan
             | InlineKind::Strikethrough
             | InlineKind::InlineMath
-            | InlineKind::DisplayMath => {
+            | InlineKind::DisplayMath
+            | InlineKind::FootnoteRef => {
                 node.children().for_each(|c| self.inline(c, ctx));
             }
             // Raw HTML, or a comment (which may run over several lines).
@@ -676,7 +681,10 @@ impl Leaves<'_, '_> {
                 self.painter.paint(range, |s| s.color = Token::SyntaxCode);
             }
             InlineKind::HtmlText => self.painter.set(range, Style::of(Token::TextSecondary)),
-            InlineKind::AutolinkText | InlineKind::LinkDestination | InlineKind::LinkLabel => {
+            InlineKind::AutolinkText
+            | InlineKind::LinkDestination
+            | InlineKind::LinkLabel
+            | InlineKind::FootnoteLabel => {
                 let style = ctx.target.unwrap_or(Style::of(Token::AccentDefault));
                 self.painter.set(range, style);
             }

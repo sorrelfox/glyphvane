@@ -90,6 +90,10 @@ pub enum ItemKind {
     EmptyItem,
     /// A block quote without content: its bar.
     EmptyQuote,
+    /// The summary row of a `<details>` element.
+    Details,
+    /// A `<picture>` element.
+    Picture,
 }
 
 impl ItemKind {
@@ -137,6 +141,8 @@ impl ItemKind {
             Self::ThematicBreak => "thematic-break",
             Self::EmptyItem => "empty-item",
             Self::EmptyQuote => "empty-quote",
+            Self::Details => "details",
+            Self::Picture => "picture",
         }
     }
 }
@@ -206,13 +212,28 @@ pub struct Item {
     pub opens: u8,
     /// The innermost `closes` frames of the context end with this item.
     pub closes: u8,
+    /// See [`Item::frame_insets`] (set with the gaps).
+    pub insets: (f32, f32),
     pub estimate: Estimate,
 }
 
 impl Item {
     /// Estimated height of the item's box at `width`, gap included.
     pub fn height_estimate(&self, width: f32) -> f32 {
-        self.gap_before + self.estimate.height(width)
+        self.gap_before + self.insets.0 + self.estimate.height(width) + self.insets.1
+    }
+
+    /// The px its frames add inside its box above and below its content: a
+    /// callout's padding and title row where it starts, its padding where
+    /// it ends.
+    pub fn frame_insets(&self) -> (f32, f32) {
+        self.insets
+    }
+
+    /// The x offset of the content's right edge from the column's (the
+    /// callouts' right padding).
+    pub fn content_right(&self, metrics: &Metrics) -> f32 {
+        self.context.iter().map(|f| right_indent(f, metrics)).sum()
     }
 
     /// Whether frame `i` of the context starts at this item.
@@ -243,8 +264,17 @@ impl Item {
 pub fn indent(frame: &Frame, m: &Metrics) -> f32 {
     match frame.kind {
         FrameKind::Quote { .. } => m.quote_indent,
-        FrameKind::List { .. } => 0.0,
-        FrameKind::Item { .. } => m.list_indent,
+        FrameKind::List { .. } | FrameKind::Details => 0.0,
+        FrameKind::Item { .. } | FrameKind::Footnote { .. } => m.list_indent,
+        FrameKind::Alert { .. } => m.callout_padding_x,
+    }
+}
+
+/// The indent a frame gives its content from the right.
+pub fn right_indent(frame: &Frame, m: &Metrics) -> f32 {
+    match frame.kind {
+        FrameKind::Alert { .. } => m.callout_padding_x,
+        _ => 0.0,
     }
 }
 
@@ -262,7 +292,11 @@ impl Flatten<'_> {
     /// [`link`]).
     pub fn node_items(&self, node: &BlockNode, ix: usize, out: &mut Vec<Item>) {
         let m = self.metrics;
-        let inset: f32 = node.context.iter().map(|f| indent(f, m)).sum();
+        let inset: f32 = node
+            .context
+            .iter()
+            .map(|f| indent(f, m) + right_indent(f, m))
+            .sum();
         let mk = |chunk: u32, kind: ItemKind, source: Range<usize>, estimate: Estimate| Item {
             id: ItemId {
                 block: node.id,
@@ -275,6 +309,7 @@ impl Flatten<'_> {
             gap_before: 0.0,
             opens: 0,
             closes: 0,
+            insets: (0.0, 0.0),
             estimate,
         };
         match &node.kind {
@@ -345,6 +380,19 @@ impl Flatten<'_> {
                     ItemKind::ThematicBreak,
                     node.source.clone(),
                     Estimate::fixed(m.rule_height),
+                ));
+            }
+            NodeKind::Details { summary, .. } => {
+                let e = self.text_estimate(&summary.measure, TextRole::Body, inset);
+                out.push(mk(0, ItemKind::Details, node.source.clone(), e));
+            }
+            NodeKind::Picture(_) => {
+                let lh = self.styles.role(TextRole::Body).line_height;
+                out.push(mk(
+                    0,
+                    ItemKind::Picture,
+                    node.source.clone(),
+                    Estimate::fixed(lh),
                 ));
             }
             NodeKind::EmptyItem | NodeKind::EmptyQuote => {
@@ -484,6 +532,7 @@ fn own_spacing(item: &Item, m: &Metrics) -> Spacing {
         ItemKind::Properties { .. } => m.properties,
         ItemKind::Math { .. } => m.paragraph,
         ItemKind::ThematicBreak => m.rule,
+        ItemKind::Details | ItemKind::Picture => m.paragraph,
         ItemKind::EmptyItem | ItemKind::EmptyQuote => Spacing::default(),
     };
     Spacing {
@@ -522,8 +571,27 @@ fn frame_spacing(ctx: &[Frame], i: usize, m: &Metrics) -> Spacing {
                 m.list
             }
         }
-        FrameKind::Item { .. } => Spacing::default(),
+        FrameKind::Item { .. } | FrameKind::Footnote { .. } | FrameKind::Details => {
+            Spacing::default()
+        }
+        FrameKind::Alert { .. } => m.callout,
     }
+}
+
+/// The insets of an item's frames (see [`Item::frame_insets`]).
+fn frame_insets(item: &Item, m: &Metrics) -> (f32, f32) {
+    let (mut top, mut bottom) = (0.0, 0.0);
+    for (i, f) in item.context.iter().enumerate() {
+        if let FrameKind::Alert { .. } = f.kind {
+            if item.opens_frame(i) {
+                top += m.callout_padding_top + m.callout_title + m.callout_title_gap;
+            }
+            if item.closes_frame(i) {
+                bottom += m.callout_padding_bottom;
+            }
+        }
+    }
+    (top, bottom)
 }
 
 /// Number of leading frames two contexts share.
@@ -563,6 +631,9 @@ pub(crate) fn link(items: &mut [Item], range: Range<usize>, m: &Metrics) {
             let it = &mut items[i];
             it.closes = to_u8(it.context.len());
         }
+    }
+    for it in &mut items[start..end] {
+        it.insets = frame_insets(it, m);
     }
 }
 

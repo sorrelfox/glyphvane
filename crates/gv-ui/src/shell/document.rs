@@ -45,7 +45,7 @@ use crate::editor::{EditorLayout, EditorView, Top};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
-use crate::reader::{Reader, ReaderEvent, ScrollTarget, startup};
+use crate::reader::{Reader, ReaderEvent, ScrollTarget, TaskToggle, startup};
 use crate::split::{Side, SplitView};
 use crate::theme::Theme;
 
@@ -171,7 +171,13 @@ impl Workspace {
         event: ReaderEvent,
         cx: &mut Context<'_, Self>,
     ) {
-        let ReaderEvent::FollowLink(request) = event;
+        let request = match event {
+            ReaderEvent::FollowLink(request) => request,
+            ReaderEvent::ToggleTask(toggle) => {
+                self.toggle_split_task(reader, toggle, cx);
+                return;
+            }
+        };
         let Some(preview) = self
             .tabs
             .iter()
@@ -188,6 +194,85 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// A task checkbox clicked in the Reading view `reader` of a tab: the
+    /// toggle is written back through the tab's Source view (one undoable
+    /// edit, made and loaded on first use), then the Reading view shows
+    /// the edited text where it was. Nothing changes in a tab that may not
+    /// be edited (viewer mode).
+    pub(super) fn toggle_task(
+        &mut self,
+        reader: &Entity<Reader>,
+        toggle: TaskToggle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.reader.as_ref() == Some(reader))
+        else {
+            return;
+        };
+        if !self.can_edit(index, cx) {
+            return;
+        }
+        let Some(editor) = self.ensure_editor(index, cx) else {
+            return;
+        };
+        if editor.read(cx).editor().is_some() {
+            Self::write_task(&editor, reader, toggle, cx);
+            return;
+        }
+        // The Source view is loading its file: write back once it is in.
+        let done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reader = reader.clone();
+        cx.observe(&editor, move |_, editor, cx| {
+            if !done.get() && editor.read(cx).editor().is_some() {
+                done.set(true);
+                Self::write_task(&editor, &reader, toggle, cx);
+            }
+        })
+        .detach();
+    }
+
+    /// Writes `toggle` to `editor` and shows the result in `reader`.
+    fn write_task(
+        editor: &Entity<EditorView>,
+        reader: &Entity<Reader>,
+        toggle: TaskToggle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let changed = editor.update(cx, |e, cx| e.apply_task_toggle(toggle, cx));
+        if !changed {
+            return;
+        }
+        if let Some(text) = editor.update(cx, |e, _| e.take_preview_text()) {
+            reader.update(cx, |r, cx| r.show_edited(text, cx));
+        }
+    }
+
+    /// A task checkbox clicked in a Split view's preview pane `reader`: the
+    /// toggle goes to the Split view's editor, which the pane follows.
+    fn toggle_split_task(
+        &mut self,
+        reader: &Entity<Reader>,
+        toggle: TaskToggle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.split_reader(cx).as_ref() == Some(reader))
+        else {
+            return;
+        };
+        if !self.can_edit(index, cx) {
+            return;
+        }
+        if let Some(editor) = self.tabs[index].editor.clone() {
+            editor.update(cx, |e, cx| e.apply_task_toggle(toggle, cx));
+        }
     }
 
     /// A jump inside tab `index`'s document (a heading, a fragment, Back):

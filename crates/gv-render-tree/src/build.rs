@@ -17,6 +17,8 @@ use gv_syntax::inline::{
 use gv_syntax::{BlockId, Container, ContainerKind, Leaf, LeafKind, LeafLine, RefMap, Visitor};
 use gv_text::TextSource;
 
+use crate::footnote::FootnoteIndex;
+use crate::html::{self, DetailsPart};
 use crate::inline::{self, InlineCx, width_units};
 use crate::node::{
     BlockNode, CodeBlock, CodeLine, Context, Frame, FrameKind, ListMarker, Lookups, NodeKind,
@@ -44,12 +46,34 @@ pub(crate) struct Reuse<'a> {
     pub same_refs: bool,
 }
 
+/// The nodes of a footnote definition, for the footnote section.
+pub(crate) struct Section {
+    /// The normalized label.
+    pub label: Arc<str>,
+    /// Its number; `None` when nothing refers to it (it is not shown).
+    pub number: Option<u32>,
+    /// The definition's block (its range is set when it ends).
+    pub id: BlockId,
+    pub range: Range<usize>,
+    pub nodes: Vec<BlockNode>,
+}
+
+/// A `<details>` whose blocks are being built: the depth of its container
+/// and the frames before its own.
+struct OpenDetails {
+    depth: usize,
+    frames: usize,
+}
+
 /// An open container.
 struct Open {
     id: BlockId,
     kind: ContainerKind,
     /// Number of nodes when it was entered.
     first_node: usize,
+    /// Number of nodes where its nodes go (the document's, or a footnote
+    /// definition's) when it was entered.
+    first_made: usize,
     /// Lists: items seen so far.
     items: u32,
     /// Lists: number of lists around it.
@@ -76,6 +100,23 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     pub built: usize,
     scratch: Vec<u8>,
     segments: Vec<Range<usize>>,
+    /// The document's footnote numbers.
+    pub footnotes: Option<Arc<FootnoteIndex>>,
+    /// Whether the blocks of footnote definitions go to [`Self::sections`]
+    /// (else to `nodes`, like any block).
+    pub divert: bool,
+    /// The footnote definitions met, in document order.
+    pub sections: Vec<Section>,
+    /// Indices into `sections` of the definitions open now.
+    diverting: Vec<usize>,
+    /// The frames around each open footnote definition, set aside.
+    saved_frames: Vec<Vec<Frame>>,
+    /// The `<details>` open now.
+    details: Vec<OpenDetails>,
+
+    /// The paragraph that gets footnote backreferences: its block and the
+    /// number of references.
+    pub backrefs: Option<(BlockId, u32)>,
 }
 
 impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
@@ -103,6 +144,23 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             built: 0,
             scratch: Vec::new(),
             segments: Vec::new(),
+            footnotes: None,
+            divert: true,
+            sections: Vec::new(),
+            diverting: Vec::new(),
+            saved_frames: Vec::new(),
+            details: Vec::new(),
+            backrefs: None,
+        }
+    }
+
+    fn inline_cx(&self, block: BlockId) -> InlineCx<'_> {
+        InlineCx {
+            styles: &self.opts.styles,
+            metrics: &self.opts.metrics,
+            sources: self.sources,
+            block,
+            footnotes: self.footnotes.as_deref(),
         }
     }
 
@@ -115,7 +173,21 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         c
     }
 
+    /// Number of nodes where new nodes go now.
+    fn made(&self) -> usize {
+        match self.diverting.last() {
+            Some(&k) if self.divert => self.sections[k].nodes.len(),
+            _ => self.nodes.len(),
+        }
+    }
+
     fn push(&mut self, node: BlockNode, origin: Option<usize>) {
+        if self.divert
+            && let Some(&k) = self.diverting.last()
+        {
+            self.sections[k].nodes.push(node);
+            return;
+        }
         self.nodes.push(node);
         self.origin.push(origin);
     }
@@ -176,7 +248,12 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                     return None;
                 }
                 let lines = Arc::new(self.code_block(leaf, range.start, false, false));
-                (NodeKind::Properties { kind, lines }, range.start, None)
+                let props = crate::properties::parse(kind, &lines).into();
+                (
+                    NodeKind::Properties { kind, lines, props },
+                    range.start,
+                    None,
+                )
             }
             LeafKind::Paragraph => {
                 let (content, lookups) = self.inline(leaf, first_content, TextRole::Body);
@@ -219,15 +296,23 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             }
             LeafKind::Html { kind } => {
                 let code = Arc::new(self.code_block(leaf, range.start, false, false));
-                (
-                    NodeKind::Html {
-                        kind,
-                        raw_html_pending: true,
-                        code,
-                    },
-                    range.start,
-                    None,
-                )
+                if let Some(p) = html::picture(&code.text) {
+                    (NodeKind::Picture(Arc::new(p)), range.start, None)
+                } else if let Some(DetailsPart::Open { open, summary }) = html::details(&code.text)
+                {
+                    let summary = self.summary(&code, range.start, summary);
+                    (NodeKind::Details { summary, open }, range.start, None)
+                } else {
+                    (
+                        NodeKind::Html {
+                            kind,
+                            raw_html_pending: true,
+                            code,
+                        },
+                        range.start,
+                        None,
+                    )
+                }
             }
         };
         self.built += 1;
@@ -261,11 +346,13 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         self.text.copy_range(delim, &mut self.scratch);
         let aligns = gv_syntax::table::delimiter_row(&self.scratch).unwrap_or_default();
         let columns = aligns.len();
+        let footnotes = self.footnotes.clone();
         let cx = InlineCx {
             styles: &self.opts.styles,
             metrics: &self.opts.metrics,
             sources: self.sources,
             block: leaf.id,
+            footnotes: footnotes.as_deref(),
         };
         let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));
         let mut labels: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = Vec::new();
@@ -352,13 +439,14 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             &*self.refs,
             self.inline_opts,
         );
-        let cx = InlineCx {
-            styles: &self.opts.styles,
-            metrics: &self.opts.metrics,
-            sources: self.sources,
-            block: leaf.id,
+        let cx = self.inline_cx(leaf.id);
+        let content = match self.backrefs {
+            Some((id, count)) if id == leaf.id && role == TextRole::Body => {
+                let end = leaf.lines.last().map_or(base, |l| l.content.end);
+                inline::build_with_backrefs(&tree, base, end, count, &cx)
+            }
+            _ => inline::build(&tree, base, role, &cx),
         };
-        let content = inline::build(&tree, base, role, &cx);
         let mut seen = std::collections::HashSet::new();
         let lookups: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = tree
             .label_lookups()
@@ -437,6 +525,51 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         }
     }
 
+    /// The summary row's content: the summary's text where the block's
+    /// text has it, else `Details` (as browsers show it).
+    fn summary(
+        &mut self,
+        code: &CodeBlock,
+        base: usize,
+        summary: Option<(String, Range<usize>)>,
+    ) -> Arc<crate::node::InlineContent> {
+        let cx = self.inline_cx(BlockId(0));
+        let (text, source) = match summary {
+            Some((text, r)) => {
+                // The text range in the block's text, in the document.
+                let to_doc = |t: usize| {
+                    let line = code
+                        .lines
+                        .iter()
+                        .rposition(|l| l.text.start <= t)
+                        .unwrap_or(0);
+                    let l = &code.lines[line];
+                    base + (l.source.start + t.saturating_sub(l.text.start)).min(l.source.end)
+                };
+                (text, to_doc(r.start)..to_doc(r.end))
+            }
+            None => ("Details".to_owned(), base..base),
+        };
+        Arc::new(inline::build_plain(
+            &text,
+            source,
+            base,
+            TextRole::Body,
+            &cx,
+        ))
+    }
+
+    /// Ends the `<details>` opened at depth `depth` or deeper.
+    fn close_details(&mut self, depth: usize) {
+        while let Some(d) = self.details.last()
+            && d.depth >= depth
+        {
+            self.frames.truncate(d.frames);
+            self.ctx = None;
+            self.details.pop();
+        }
+    }
+
     /// Sets the top-level block of the nodes from `first` on.
     fn set_top(&mut self, first: usize, top: Range<usize>) {
         for n in &mut self.nodes[first..] {
@@ -471,15 +604,18 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
             })
             .count();
         let list_depth = u16::try_from(list_depth).unwrap_or(u16::MAX);
-        let quote_depth = self
-            .open
-            .iter()
-            .filter(|o| o.kind == ContainerKind::BlockQuote)
-            .count();
+        let quote_depth = self.open.iter().filter(|o| o.kind.is_quote()).count();
         let quote_depth = u16::try_from(quote_depth).unwrap_or(u16::MAX);
+        if c.kind == ContainerKind::FootnoteDefinition {
+            self.enter_footnote(c);
+            return;
+        }
         let framed = self.frames.len() < MAX_FRAMES;
         let kind = match c.kind {
             ContainerKind::BlockQuote => FrameKind::Quote { depth: quote_depth },
+            ContainerKind::Alert { kind } => FrameKind::Alert { kind },
+            // Entered by `enter_footnote` above.
+            ContainerKind::FootnoteDefinition => return,
             ContainerKind::BulletList { marker, tight } => FrameKind::List {
                 ordered: false,
                 tight,
@@ -517,7 +653,15 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
                     }
                     None => ListMarker::Bullet { depth: 0 },
                 };
-                FrameKind::Item { marker }
+                match self.task_status(c) {
+                    Some(status) => FrameKind::Item {
+                        marker: ListMarker::Task {
+                            checked: status != ' ',
+                            status,
+                        },
+                    },
+                    None => FrameKind::Item { marker },
+                }
             }
         };
         if framed {
@@ -528,6 +672,7 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
             id: c.id,
             kind: c.kind,
             first_node: self.nodes.len(),
+            first_made: self.made(),
             items: 0,
             list_depth,
             framed,
@@ -539,8 +684,18 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
             return;
         };
         debug_assert_eq!(o.id, c.id);
-        let empty = self.nodes.len() == o.first_node;
-        if empty && matches!(o.kind, ContainerKind::Item | ContainerKind::BlockQuote) {
+        // `<details>` opened inside end with it.
+        self.close_details(self.open.len() + 1);
+        if o.kind == ContainerKind::FootnoteDefinition {
+            self.exit_footnote(c, &o);
+            return;
+        }
+        let empty = self.made() == o.first_made;
+        if empty && matches!(o.kind, ContainerKind::Alert { .. }) {
+            // An alert needs a body (GitHub): it is the block quote it is,
+            // holding its marker.
+            self.empty_alert(c);
+        } else if empty && matches!(o.kind, ContainerKind::Item | ContainerKind::BlockQuote) {
             let kind = if o.kind == ContainerKind::Item {
                 NodeKind::EmptyItem
             } else {
@@ -574,16 +729,156 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
         if leaf.kind == LeafKind::LinkRefDef {
             return;
         }
-        match self.try_reuse(leaf) {
+        // `<details>`: an HTML block that closes the innermost one here
+        // ends its frame (and is not shown when it holds only the tag).
+        let depth = self.open.len();
+        let mut part = None;
+        if let LeafKind::Html { .. } = leaf.kind {
+            self.scratch.clear();
+            for l in leaf.lines {
+                self.text.copy_range(l.content.clone(), &mut self.scratch);
+                self.scratch.push(b'\n');
+            }
+            part = html::details(&String::from_utf8_lossy(&self.scratch));
+            if let Some(DetailsPart::Close { only }) = part
+                && self.details.last().is_some_and(|d| d.depth == depth)
+            {
+                self.close_details(depth);
+                if only {
+                    return;
+                }
+            }
+        }
+        let made = match self.try_reuse(leaf) {
             Some((n, index)) => {
                 self.reused += 1;
                 self.push(n, Some(index));
+                true
             }
-            None => {
-                if let Some(n) = self.build_leaf(leaf) {
+            None => match self.build_leaf(leaf) {
+                Some(n) => {
                     self.push(n, None);
+                    true
                 }
+                None => false,
+            },
+        };
+        if made && let Some(DetailsPart::Open { .. }) = part {
+            // The blocks after it, up to its `</details>`, fold with it.
+            let frames = self.frames.len();
+            if frames < MAX_FRAMES {
+                self.frames.push(Frame {
+                    id: leaf.id,
+                    kind: FrameKind::Details,
+                });
+                self.ctx = None;
             }
+            self.details.push(OpenDetails { depth, frames });
+        }
+    }
+}
+
+impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
+    /// The status character of a task item's checkbox, if the item is one.
+    fn task_status(&mut self, c: &Container) -> Option<char> {
+        let m = c.marker.clone().filter(|_| c.kind == ContainerKind::Item)?;
+        self.scratch.clear();
+        self.text.copy_range(m, &mut self.scratch);
+        let s = String::from_utf8_lossy(&self.scratch);
+        s.strip_prefix('[')?.chars().next()
+    }
+
+    /// A footnote definition starts: its blocks go to its section, in a
+    /// footnote frame of their own (the containers around the definition
+    /// do not show in the footnote section).
+    fn enter_footnote(&mut self, c: &Container) {
+        self.scratch.clear();
+        if let Some(l) = c.footnote_label() {
+            self.text.copy_range(l, &mut self.scratch);
+        }
+        let label = gv_syntax::inline::normalize_label(&String::from_utf8_lossy(&self.scratch));
+        let number = self.footnotes.as_ref().and_then(|f| f.number(&label));
+        let label: Arc<str> = Arc::from(label);
+        self.saved_frames.push(std::mem::take(&mut self.frames));
+        self.frames.push(Frame {
+            id: c.id,
+            kind: FrameKind::Footnote {
+                number: number.unwrap_or(0),
+                label: Arc::clone(&label),
+            },
+        });
+        self.ctx = None;
+        self.sections.push(Section {
+            label,
+            number,
+            id: c.id,
+            range: c.range.clone(),
+            nodes: Vec::new(),
+        });
+        self.diverting.push(self.sections.len() - 1);
+        self.open.push(Open {
+            id: c.id,
+            kind: c.kind,
+            first_node: self.nodes.len(),
+            first_made: self.made(),
+            items: 0,
+            list_depth: 0,
+            framed: true,
+        });
+    }
+
+    fn exit_footnote(&mut self, c: &Container, o: &Open) {
+        if let Some(k) = self.diverting.pop()
+            && let Some(s) = self.sections.get_mut(k)
+        {
+            s.range = c.range.clone();
+            for n in &mut s.nodes {
+                n.top = c.range.clone();
+            }
+        }
+        self.frames = self.saved_frames.pop().unwrap_or_default();
+        self.ctx = None;
+        if self.open.is_empty() {
+            self.set_top(o.first_node, c.range.clone());
+        }
+    }
+
+    /// An alert without blocks: a block quote holding its `[!TYPE]`.
+    fn empty_alert(&mut self, c: &Container) {
+        let Some(marker) = c.marker.clone() else {
+            return;
+        };
+        let saved = self.frames.last().cloned();
+        let depth = self.open.iter().filter(|o| o.kind.is_quote()).count();
+        if let Some(f) = self.frames.last_mut() {
+            f.kind = FrameKind::Quote {
+                depth: u16::try_from(depth).unwrap_or(u16::MAX),
+            };
+            self.ctx = None;
+        }
+        let lines = [gv_syntax::LeafLine {
+            line: c.line,
+            content: marker.clone(),
+            has_content: true,
+            ..gv_syntax::LeafLine::default()
+        }];
+        let leaf = Leaf {
+            id: c.id,
+            kind: LeafKind::Paragraph,
+            lines: &lines,
+            info: None,
+            open_line: c.line,
+            start_line: c.line,
+            end_line: c.line,
+            range: c.range.clone(),
+        };
+        if let Some(mut n) = self.build_leaf(&leaf) {
+            n.source = marker.start..c.range.end.max(marker.end);
+            self.push(n, None);
+        }
+        if let (Some(f), Some(saved)) = (self.frames.last_mut(), saved) {
+            *f = saved;
+            self.ctx = None;
         }
     }
 }

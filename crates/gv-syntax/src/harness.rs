@@ -84,9 +84,10 @@ pub fn render_commonmark_html(src: &str) -> String {
 /// `extensions` names the cmark-gfm extensions to enable (see
 /// [`GFM_EXTENSIONS`]), as the GFM spec lists them per example and
 /// cmark-gfm's spec runner passes them: `table`, `strikethrough`,
-/// `autolink` and `tagfilter`. `tasklist` and `footnotes` are not
-/// implemented yet, and unknown names are ignored. Front matter is off, as
-/// in cmark-gfm.
+/// `autolink` and `tagfilter`, plus `tasklist` and `footnotes` (comrak's
+/// markup for both, which cmark-gfm's spec runner leaves out) and comrak's
+/// `alerts` (GitHub's alert rules, see [`crate::BlockKind::Alert`]). Unknown
+/// names are ignored. Front matter is off, as in cmark-gfm.
 pub fn render_gfm_html(src: &str, extensions: &[&str]) -> String {
     let has = |name: &str| extensions.contains(&name);
     let options = ParseOptions {
@@ -94,6 +95,13 @@ pub fn render_gfm_html(src: &str, extensions: &[&str]) -> String {
         strikethrough: has("strikethrough"),
         strikethrough_single: has("strikethrough"),
         autolinks: has("autolink"),
+        task_lists: if has("tasklist") {
+            crate::options::TaskLists::Standard
+        } else {
+            crate::options::TaskLists::Off
+        },
+        footnotes: has("footnotes"),
+        alerts: has("alerts"),
         ..ParseOptions::COMMONMARK
     };
     let html = GfmHtmlOptions {

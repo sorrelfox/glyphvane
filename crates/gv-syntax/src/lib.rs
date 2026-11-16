@@ -33,8 +33,9 @@
 //!   CommonMark-exact HTML emitter and [`to_gfm_html`] the cmark-gfm-exact
 //!   one; [`cst_dump`] the S-expression dump.
 //! - **Options.** [`ParseOptions`] holds the profile switches the parser
-//!   reads (front matter, GFM tables, strikethrough and extended
-//!   autolinks); the default is CommonMark exactly.
+//!   reads (front matter, GFM tables, task lists, strikethrough, extended
+//!   autolinks, footnotes, GitHub alerts and math); the default is
+//!   CommonMark exactly.
 //! - **Changes.** A reparse reports the replaced window ([`Changes`]);
 //!   reports of consecutive reparses compose ([`Changes::compose`]).
 //!
@@ -62,8 +63,8 @@ pub use block::MAX_NESTING;
 pub use gv_profile::{CompiledProfile, ProfileId};
 pub use html::{GfmHtmlOptions, to_commonmark_html, to_gfm_html};
 pub use incremental::{Budget, Change, Changes, Reparse, ReparseTask};
-pub use options::{DollarMath, FrontMatterOptions, ParseOptions};
-pub use tree::event::{BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};
+pub use options::{DollarMath, FrontMatterOptions, ParseOptions, TaskLists};
+pub use tree::event::{AlertKind, BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};
 pub use tree::index::BlockIndex;
 pub use tree::walk::{
     Container, ContainerKind, Leaf, LeafKind, LeafLine, Visitor, walk, walk_range,

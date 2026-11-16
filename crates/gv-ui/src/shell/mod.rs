@@ -1062,6 +1062,7 @@ impl Workspace {
                 ReaderEvent::FollowLink(request) => {
                     this.follow_link(reader.clone(), request.clone(), window, cx);
                 }
+                ReaderEvent::ToggleTask(toggle) => this.toggle_task(reader, *toggle, cx),
             },
         );
         let changes = cx.observe(&reader, |this, reader, cx| this.reader_changed(&reader, cx));

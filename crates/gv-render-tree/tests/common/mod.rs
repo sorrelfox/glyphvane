@@ -99,15 +99,24 @@ pub fn canonical(rt: &RenderTree) -> String {
 }
 
 /// Content byte ranges of every rendered leaf.
-fn rendered_content(tree: &SyntaxTree, opts: &RenderOptions) -> Vec<Range<usize>> {
+fn rendered_content(tree: &SyntaxTree, opts: &RenderOptions, text: &str) -> Vec<Range<usize>> {
     struct V<'a> {
         out: Vec<Range<usize>>,
         opts: &'a RenderOptions,
+        text: &'a str,
     }
     impl Visitor for V<'_> {
         fn leaf(&mut self, leaf: &Leaf<'_>) {
             match leaf.kind {
                 LeafKind::LinkRefDef => return,
+                // A block of only `</details>` ends its details and shows
+                // nothing.
+                LeafKind::Html { .. }
+                    if leaf.lines.len() == 1
+                        && self.text[leaf.lines[0].content.clone()].trim() == "</details>" =>
+                {
+                    return;
+                }
                 LeafKind::FrontMatter { .. }
                     if self.opts.front_matter == FrontMatterDisplay::Hidden =>
                 {
@@ -125,6 +134,7 @@ fn rendered_content(tree: &SyntaxTree, opts: &RenderOptions) -> Vec<Range<usize>
     let mut v = V {
         out: Vec::new(),
         opts,
+        text,
     };
     gv_syntax::walk(tree, &mut v);
     v.out
@@ -203,7 +213,7 @@ pub fn check(doc: &Doc) {
     }
     // Every rendered content byte is in exactly one item (items are
     // disjoint, so: in one item).
-    for r in rendered_content(&doc.tree, rt.options()) {
+    for r in rendered_content(&doc.tree, rt.options(), &doc.text) {
         let k = rt.item_at(r.start).unwrap_or(usize::MAX);
         let ok = items
             .get(k)

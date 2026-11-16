@@ -48,6 +48,7 @@
 
 mod bench;
 pub(crate) mod code_highlight;
+mod edited;
 mod element;
 mod engine;
 mod find;
@@ -179,6 +180,18 @@ pub struct LinkRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReaderEvent {
     FollowLink(LinkRequest),
+    /// A task checkbox was clicked: the document's owner writes the
+    /// toggle back (one undoable edit) unless the document is read-only.
+    ToggleTask(TaskToggle),
+}
+
+/// A task item's status character to replace: `from` at byte `offset` of
+/// the shown text becomes `to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskToggle {
+    pub offset: usize,
+    pub from: char,
+    pub to: char,
 }
 
 /// Where to scroll a document.
@@ -861,6 +874,7 @@ impl Render for Reader {
                     cx.weak_entity(),
                     self.focus.clone(),
                     Palette::of(Appearance::current_id(cx)),
+                    Appearance::current_id(cx) == crate::theme::ThemeId::Dark,
                 ))
                 .children(popover),
             LoadStatus::Failed(err) => {

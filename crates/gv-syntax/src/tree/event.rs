@@ -55,10 +55,15 @@ pub enum TokenKind {
     Content = 8,
     /// `\n`, `\r\n` or `\r`.
     LineEnding = 9,
+    /// The marker of an extension on a container's first line, right
+    /// after the container opens: a task item's checkbox (`[ ]`, `[x]`), a
+    /// footnote definition's label (`[^label]:`), an alert's type
+    /// (`[!NOTE]`). See [`Container::marker`](crate::Container::marker).
+    ExtMarker = 10,
 }
 
 impl TokenKind {
-    const ALL: [TokenKind; 10] = [
+    const ALL: [TokenKind; 11] = [
         TokenKind::Bom,
         TokenKind::Whitespace,
         TokenKind::ContainerPrefix,
@@ -69,6 +74,7 @@ impl TokenKind {
         TokenKind::InfoString,
         TokenKind::Content,
         TokenKind::LineEnding,
+        TokenKind::ExtMarker,
     ];
 
     /// The kind's name in the CST dump.
@@ -84,6 +90,7 @@ impl TokenKind {
             TokenKind::InfoString => "info",
             TokenKind::Content => "content",
             TokenKind::LineEnding => "line-ending",
+            TokenKind::ExtMarker => "ext-marker",
         }
     }
 }
@@ -119,6 +126,62 @@ impl FrontMatterKind {
             FrontMatterKind::Yaml => "yaml",
             FrontMatterKind::Toml => "toml",
         }
+    }
+}
+
+/// The five GitHub alert types (`> [!NOTE]` …).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum AlertKind {
+    /// `[!NOTE]`.
+    Note,
+    /// `[!TIP]`.
+    Tip,
+    /// `[!IMPORTANT]`.
+    Important,
+    /// `[!WARNING]`.
+    Warning,
+    /// `[!CAUTION]`.
+    Caution,
+}
+
+impl AlertKind {
+    /// Every type, in GitHub's documentation order.
+    pub const ALL: [AlertKind; 5] = [
+        AlertKind::Note,
+        AlertKind::Tip,
+        AlertKind::Important,
+        AlertKind::Warning,
+        AlertKind::Caution,
+    ];
+
+    /// The type's name in lower case (`note`), as in GitHub's CSS classes
+    /// and the CST dump.
+    pub fn name(self) -> &'static str {
+        match self {
+            AlertKind::Note => "note",
+            AlertKind::Tip => "tip",
+            AlertKind::Important => "important",
+            AlertKind::Warning => "warning",
+            AlertKind::Caution => "caution",
+        }
+    }
+
+    /// The title GitHub shows (`Note`).
+    pub fn title(self) -> &'static str {
+        match self {
+            AlertKind::Note => "Note",
+            AlertKind::Tip => "Tip",
+            AlertKind::Important => "Important",
+            AlertKind::Warning => "Warning",
+            AlertKind::Caution => "Caution",
+        }
+    }
+
+    /// The type named `name`, ignoring ASCII case.
+    pub fn from_name(name: &[u8]) -> Option<AlertKind> {
+        AlertKind::ALL
+            .into_iter()
+            .find(|k| k.name().as_bytes().eq_ignore_ascii_case(name))
     }
 }
 
@@ -173,6 +236,19 @@ pub enum BlockKind {
     /// same line). Like a fenced code block, it may hold blank lines and
     /// runs to the end of its container when unclosed.
     MathBlock,
+    /// A GitHub alert (with [`ParseOptions::alerts`](crate::ParseOptions::alerts)):
+    /// a top-level block quote whose first line is only `[!TYPE]`. It
+    /// continues like a block quote; the `[!TYPE]` is an
+    /// [`TokenKind::ExtMarker`] token.
+    Alert {
+        /// Its type.
+        kind: AlertKind,
+    },
+    /// A footnote definition (with
+    /// [`ParseOptions::footnotes`](crate::ParseOptions::footnotes)):
+    /// `[^label]:` and the blocks indented under it. The `[^label]:` and
+    /// the spaces after it are an [`TokenKind::ExtMarker`] token.
+    FootnoteDefinition,
 }
 
 impl BlockKind {
@@ -191,6 +267,8 @@ impl BlockKind {
             BlockKind::Html { .. } => 8,
             BlockKind::FrontMatter { .. } => 9,
             BlockKind::MathBlock => 10,
+            BlockKind::Alert { .. } => 11,
+            BlockKind::FootnoteDefinition => 12,
         }
     }
 
@@ -202,6 +280,8 @@ impl BlockKind {
                 | BlockKind::BulletList { .. }
                 | BlockKind::OrderedList { .. }
                 | BlockKind::Item
+                | BlockKind::Alert { .. }
+                | BlockKind::FootnoteDefinition
         )
     }
 
@@ -269,6 +349,8 @@ const K_INDENTED: u8 = 8;
 const K_HTML: u8 = 9;
 const K_FRONT: u8 = 10;
 const K_MATH: u8 = 11;
+const K_ALERT: u8 = 12;
+const K_FOOTNOTE: u8 = 13;
 
 /// A packed event: 8 bytes. The BlockId of an `Open` lives in a parallel
 /// array.
@@ -318,6 +400,8 @@ impl Ev {
             BlockKind::Html { kind } => (K_HTML, u16::from(kind), 0),
             BlockKind::FrontMatter { kind } => (K_FRONT, kind as u16, 0),
             BlockKind::MathBlock => (K_MATH, 0, 0),
+            BlockKind::Alert { kind } => (K_ALERT, kind as u16, 0),
+            BlockKind::FootnoteDefinition => (K_FOOTNOTE, 0, 0),
         };
         Ev {
             tag: T_OPEN,
@@ -383,6 +467,13 @@ impl Ev {
         self.tag == T_REFDEF
     }
 
+    /// Whether this opens a footnote definition (it defines a label, like
+    /// a `RefDef` marker).
+    #[inline]
+    pub(crate) fn is_footnote_open(self) -> bool {
+        self.tag == T_OPEN && self.a == K_FOOTNOTE
+    }
+
     /// Whether this is a token (the most common event).
     #[inline]
     pub(crate) fn is_token(self) -> bool {
@@ -440,6 +531,13 @@ impl Ev {
             K_FENCED => BlockKind::FencedCode,
             K_INDENTED => BlockKind::IndentedCode,
             K_MATH => BlockKind::MathBlock,
+            K_ALERT => BlockKind::Alert {
+                kind: AlertKind::ALL
+                    .get(usize::from(self.b))
+                    .copied()
+                    .unwrap_or(AlertKind::Note),
+            },
+            K_FOOTNOTE => BlockKind::FootnoteDefinition,
             K_FRONT => BlockKind::FrontMatter {
                 kind: if self.b == FrontMatterKind::Toml as u16 {
                     FrontMatterKind::Toml
@@ -523,6 +621,13 @@ mod tests {
                 kind: FrontMatterKind::Toml,
             },
             BlockKind::MathBlock,
+            BlockKind::Alert {
+                kind: AlertKind::Caution,
+            },
+            BlockKind::Alert {
+                kind: AlertKind::Note,
+            },
+            BlockKind::FootnoteDefinition,
         ];
         for k in kinds {
             assert_eq!(Ev::open(k).open_kind(), Some(k));

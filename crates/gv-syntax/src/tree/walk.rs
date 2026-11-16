@@ -30,7 +30,7 @@ use std::ops::Range;
 use gv_text::TextSource;
 
 use crate::inline::api::{RefDefSpans, parse_ref_def_spans};
-use crate::tree::event::{BlockId, BlockKind, Event, FrontMatterKind, TokenKind};
+use crate::tree::event::{AlertKind, BlockId, BlockKind, Event, FrontMatterKind, TokenKind};
 use crate::tree::range::{self, OpenAt};
 use crate::tree::{LineView, SyntaxTree, TreeData};
 
@@ -46,6 +46,29 @@ pub struct Container {
     pub range: Range<usize>,
     /// 0-based line of its `Open`.
     pub line: usize,
+    /// The extension marker on its first line
+    /// ([`TokenKind::ExtMarker`]): the checkbox of a task item (`[x]`; an
+    /// item without one is no task item), the `[^label]:` of a footnote
+    /// definition, the `[!TYPE]` of an alert. `None` for other containers.
+    pub marker: Option<Range<usize>>,
+}
+
+impl Container {
+    /// Whether this is a task list item.
+    pub fn is_task(&self) -> bool {
+        self.kind == ContainerKind::Item && self.marker.is_some()
+    }
+
+    /// For a footnote definition, the range of its label (between `[^`
+    /// and `]:`).
+    pub fn footnote_label(&self) -> Option<Range<usize>> {
+        match (self.kind, &self.marker) {
+            (ContainerKind::FootnoteDefinition, Some(m)) if m.len() >= 4 => {
+                Some(m.start + 2..m.end - 2)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Container kinds with their resolved properties.
@@ -69,8 +92,29 @@ pub enum ContainerKind {
         /// Whether the list is tight.
         tight: bool,
     },
-    /// A list item.
+    /// A list item (a task item when its [`Container::marker`] is set).
     Item,
+    /// A GitHub alert: a block quote whose first line is `[!TYPE]`
+    /// ([`Container::marker`]). Its blocks follow; an alert with no
+    /// blocks is rendered as GitHub does, as the block quote it is.
+    Alert {
+        /// Its type.
+        kind: AlertKind,
+    },
+    /// A footnote definition (`[^label]:`, [`Container::marker`]) and its
+    /// blocks.
+    FootnoteDefinition,
+}
+
+impl ContainerKind {
+    /// Whether this is a block quote or an alert (a block quote with a
+    /// type).
+    pub fn is_quote(self) -> bool {
+        matches!(
+            self,
+            ContainerKind::BlockQuote | ContainerKind::Alert { .. }
+        )
+    }
 }
 
 /// Leaf kinds with their resolved properties.
@@ -241,6 +285,17 @@ struct CFrame {
     tight: Option<bool>,
     /// Whether [`Visitor::enter`] was called for it.
     entered: bool,
+    /// Its [`Container::marker`].
+    marker: Option<Range<usize>>,
+}
+
+/// Whether a container of kind `bk` waits for its first child (or its
+/// end) before it is entered: its extension marker follows its `Open`.
+fn deferred(bk: BlockKind) -> bool {
+    matches!(
+        bk,
+        BlockKind::Item | BlockKind::Alert { .. } | BlockKind::FootnoteDefinition
+    )
 }
 
 /// The open leaf block (at most one is open at a time: the innermost).
@@ -410,8 +465,13 @@ impl Replay<'_> {
                         depth,
                         tight,
                         entered: false,
+                        marker: None,
                     });
-                    if self.filter.as_ref().is_none_or(|f| off >= f.start) {
+                    // A range walk enters a container that starts at the
+                    // range's start only once it turns out not to be empty
+                    // there (a child, a leaf or its end past the start): an
+                    // empty block at the start does not intersect the range.
+                    if !deferred(bk) && self.filter.as_ref().is_none_or(|f| off > f.start) {
                         self.enter_pending(v);
                     }
                 } else {
@@ -442,7 +502,7 @@ impl Replay<'_> {
                         self.spare = f.lines;
                     }
                 } else if let Some(top) = self.containers.last() {
-                    if !top.entered && self.filter.as_ref().is_some_and(|r| off > r.start) {
+                    if !top.entered && self.filter.as_ref().is_none_or(|r| off > r.start) {
                         self.enter_pending(v);
                     }
                     if let Some(f) = self.containers.pop()
@@ -455,6 +515,13 @@ impl Replay<'_> {
                 let r = off..off + t.len as usize;
                 off = r.end;
                 let Some(f) = self.leaf.as_mut() else {
+                    if t.kind == TokenKind::ExtMarker
+                        && let Some(c) = self.containers.last_mut()
+                        && c.marker.is_none()
+                        && c.line == l.index
+                    {
+                        c.marker = Some(r);
+                    }
                     continue;
                 };
                 if f.lines.last().is_none_or(|x| x.line != l.index) {
@@ -561,6 +628,11 @@ pub fn walk_range(tree: &SyntaxTree, range: Range<usize>, v: &mut impl Visitor) 
                 depth: o.depth,
                 tight: None,
                 entered: false,
+                marker: if deferred(o.kind) {
+                    marker_after(t, o)
+                } else {
+                    None
+                },
             });
         } else {
             // A leaf open at the line start: replay from its `Open`.
@@ -613,6 +685,26 @@ impl SyntaxTree {
     }
 }
 
+/// The extension marker on the line of the `Open` at `o`, right after it
+/// (before the next `Open` or `Close`).
+fn marker_after(t: &TreeData, o: &OpenAt) -> Option<Range<usize>> {
+    let cur = t.cursor_at_line(o.line);
+    let l = t.line(&cur)?;
+    let mut off = o.offset;
+    for e in l.events.iter().skip(o.event + 1) {
+        if let Some(tok) = e.token() {
+            let end = off + tok.len as usize;
+            if tok.kind == TokenKind::ExtMarker {
+                return Some(off..end);
+            }
+            off = end;
+        } else if e.is_open() || e.is_close() {
+            return None;
+        }
+    }
+    None
+}
+
 fn container(f: &CFrame, end: usize) -> Container {
     let tight = f.tight.unwrap_or(true);
     let kind = match f.bk {
@@ -623,6 +715,8 @@ fn container(f: &CFrame, end: usize) -> Container {
             delimiter,
             tight,
         },
+        BlockKind::Alert { kind } => ContainerKind::Alert { kind },
+        BlockKind::FootnoteDefinition => ContainerKind::FootnoteDefinition,
         _ => ContainerKind::Item,
     };
     Container {
@@ -630,6 +724,7 @@ fn container(f: &CFrame, end: usize) -> Container {
         kind,
         range: f.start..end,
         line: f.line,
+        marker: f.marker.clone(),
     }
 }
 

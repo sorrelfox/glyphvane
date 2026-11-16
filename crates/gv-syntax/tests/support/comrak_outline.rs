@@ -182,6 +182,8 @@ pub fn gv_outline<S: TextSource + ?Sized>(
                     if tight { "tight" } else { "loose" }
                 ),
                 ContainerKind::Item => format!("item @{line}"),
+                ContainerKind::Alert { kind } => format!("alert {} @{line}", kind.name()),
+                ContainerKind::FootnoteDefinition => format!("footnote_definition @{line}"),
             };
             self.push(s);
             self.depth += 1;

@@ -234,6 +234,8 @@ copy: "Dup\n\nDup\n\nSetext x\n\n"
 === front matter Properties: "---\ntitle: A\ntags: [x, y]\n---\nBody\n"
 item 0 #1.0 properties 0/1 lines 0..2 0..30 gap=0 opens=0 closes=0 h600=44 h200=44
   front matter Yaml lines=2
+    "title": ["A"]
+    "tags": ["x", "y"]
     line 0: "title: A"
     line 1: "tags: [x, y]"
 item 1 #2.0 paragraph 30..35 gap=12 opens=0 closes=0 h600=24 h200=24

@@ -44,10 +44,11 @@ use gv_syntax::inline::RefLookup;
 use gv_syntax::{BlockId, Changes, Container, Leaf, LeafKind, RefMap, SyntaxTree, Visitor};
 use gv_text::TextSource;
 
-use crate::build::{NodeBuilder, Reuse};
+use crate::build::{NodeBuilder, Reuse, Section};
+use crate::footnote::FootnoteIndex;
 use crate::item::{Flatten, Item, ItemId, ItemKind, link};
 use crate::metrics::Metrics;
-use crate::node::{BlockNode, NodeKind};
+use crate::node::{BlockNode, Context, NodeKind};
 use crate::status::{LinkTarget, Sources};
 use crate::style::StyleTable;
 
@@ -175,7 +176,18 @@ pub struct RenderTree {
     macros: OnceLock<Arc<MacroTable>>,
     /// Per-block soft wrap of code blocks.
     code_wrap: HashMap<BlockId, bool>,
+    /// The footnote numbers, when the document defines footnotes.
+    footnotes: Option<Arc<FootnoteIndex>>,
+    /// The first item of the footnote section (the items' length without
+    /// one). Section items render the footnote definitions, in the order of
+    /// their numbers: their sources are not in document order.
+    section: usize,
+    /// The first node of the footnote section.
+    section_node: usize,
 }
+
+/// The block id of the rule above the footnote section.
+pub const FOOTNOTE_RULE: BlockId = BlockId(u64::MAX);
 
 impl RenderTree {
     /// Builds the render tree of `tree` (the parse of `text`), with
@@ -199,6 +211,7 @@ impl RenderTree {
         code_wrap: HashMap<BlockId, bool>,
     ) -> RenderTree {
         let refs = tree.ref_map(text);
+        let footnotes = FootnoteIndex::scan(tree, text, &refs).map(Arc::new);
         let mut t = RenderTree {
             opts,
             len: tree.len(),
@@ -208,17 +221,174 @@ impl RenderTree {
             index: OnceLock::new(),
             macros: OnceLock::new(),
             code_wrap,
+            footnotes: footnotes.clone(),
+            section: 0,
+            section_node: 0,
         };
         let inline_opts = tree.options().inline();
         let mut b = NodeBuilder::new(text, refs, &t.opts, inline_opts, sources, None);
+        b.footnotes = footnotes;
         gv_syntax::walk(tree, &mut b);
         let nodes = std::mem::take(&mut b.nodes);
+        let sections = std::mem::take(&mut b.sections);
+        drop(b);
         t.nodes = nodes;
+        let main = t.nodes.len();
+        t.section_node = main;
+        t.footnote_section(tree, text, sources, sections);
         t.assign_anchors(model);
-        t.items = t.flatten(0..t.nodes.len());
+        t.items = t.flatten(0..main);
+        t.section = t.items.len();
+        let section = t.flatten(main..t.nodes.len());
+        t.items.extend(section);
         let n = t.items.len();
         link(&mut t.items, 0..n, &t.opts.metrics);
         t
+    }
+
+    /// Appends the footnote section: a rule, then the referenced footnote
+    /// definitions by number (the first definition of a label), each with
+    /// its backreferences after its last paragraph (or on a line of their
+    /// own when it does not end with one).
+    fn footnote_section<S: TextSource + ?Sized>(
+        &mut self,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        sections: Vec<Section>,
+    ) {
+        let Some(index) = self.footnotes.clone() else {
+            return;
+        };
+        let mut defs: Vec<Section> = sections
+            .into_iter()
+            .filter(|s| s.number.is_some())
+            .collect();
+        defs.sort_by_key(|s| s.number);
+        defs.dedup_by_key(|s| s.number);
+        if defs.is_empty() {
+            return;
+        }
+        let end = self.len;
+        self.nodes.push(BlockNode {
+            id: FOOTNOTE_RULE,
+            kind: NodeKind::ThematicBreak,
+            source: end..end,
+            context: Arc::from([]),
+            block: end..end,
+            top: end..end,
+            lookups: None,
+            table: false,
+        });
+        let refs = self.refs.clone().unwrap_or_else(|| tree.ref_map(text));
+        for mut def in defs {
+            let count = index.references(&def.label);
+            let last = def.nodes.last();
+            let ends_with_paragraph = last
+                .is_some_and(|n| matches!(n.kind, NodeKind::Paragraph(_)) && n.context.len() == 1);
+            if ends_with_paragraph && let Some(last) = def.nodes.last() {
+                // Built again with its backreferences.
+                let mut finder = LeafFinder {
+                    id: last.id,
+                    table: false,
+                    builder: NodeBuilder::new(
+                        text,
+                        Arc::clone(&refs),
+                        &self.opts,
+                        tree.options().inline(),
+                        sources,
+                        None,
+                    ),
+                    found: None,
+                };
+                finder.builder.footnotes = Some(Arc::clone(&index));
+                finder.builder.divert = false;
+                finder.builder.backrefs = Some((last.id, count));
+                gv_syntax::walk_range(tree, last.block.clone(), &mut finder);
+                if let (Some(mut node), Some(last)) = (finder.found, def.nodes.last_mut()) {
+                    node.context = last.context.clone();
+                    node.top = last.top.clone();
+                    *last = node;
+                }
+            } else {
+                // A line of backreferences after the definition.
+                let at = def.range.end;
+                let context = def.nodes.first().map_or_else(
+                    || {
+                        Context::from(vec![crate::node::Frame {
+                            id: def.id,
+                            kind: crate::node::FrameKind::Footnote {
+                                number: def.number.unwrap_or(0),
+                                label: Arc::clone(&def.label),
+                            },
+                        }])
+                    },
+                    |n| Context::from(&n.context[..1]),
+                );
+                let cx = crate::inline::InlineCx {
+                    styles: &self.opts.styles,
+                    metrics: &self.opts.metrics,
+                    sources,
+                    block: def.id,
+                    footnotes: Some(&index),
+                };
+                let content = crate::inline::build_backrefs_only(at, count, &cx);
+                def.nodes.push(BlockNode {
+                    id: BlockId(u64::MAX - 1 - u64::from(def.number.unwrap_or(0))),
+                    kind: NodeKind::Paragraph(Arc::new(content)),
+                    source: at..at,
+                    context,
+                    block: at..at,
+                    top: def.range.clone(),
+                    lookups: None,
+                    table: false,
+                });
+            }
+            self.nodes.extend(def.nodes);
+        }
+    }
+
+    /// The document's footnote numbers, if it defines footnotes.
+    pub fn footnotes(&self) -> Option<&FootnoteIndex> {
+        self.footnotes.as_deref()
+    }
+
+    /// The index of the first item of the footnote section (the number of
+    /// items when there is none).
+    pub fn footnote_section_start(&self) -> usize {
+        self.section
+    }
+
+    /// The first item of footnote `label`'s definition in the footnote
+    /// section.
+    pub fn footnote_item(&self, label: &str) -> Option<usize> {
+        (self.section..self.items.len()).find(|&ix| {
+            self.items[ix].context.first().is_some_and(
+                |f| matches!(&f.kind, crate::node::FrameKind::Footnote { label: l, .. } if &**l == label),
+            )
+        })
+    }
+
+    /// The references to footnote `label`, in document order: the item and
+    /// the reference's document range.
+    pub fn footnote_refs(&self, label: &str) -> Vec<(usize, Range<usize>)> {
+        let mut out = Vec::new();
+        for (ix, item) in self.items.iter().enumerate() {
+            let Some(node) = self.nodes.get(item.node) else {
+                continue;
+            };
+            let Some(c) = node.item_inline(&item.kind) else {
+                continue;
+            };
+            for f in c.footnotes.iter().filter(|f| &*f.label == label) {
+                out.push((
+                    ix,
+                    node.to_document(f.source.start)..node.to_document(f.source.end),
+                ));
+            }
+        }
+        out.sort_by_key(|(_, r)| r.start);
+        out
     }
 
     /// Updates the tree after a reparse: `tree` is the new syntax tree,
@@ -256,6 +426,10 @@ impl RenderTree {
             };
         }
         let refs = tree.ref_map(text);
+        if self.footnotes.is_some() || refs.footnote_count() > 0 {
+            // Footnote numbers and the footnote section are document-wide.
+            return self.rebuild(tree, model, text, sources);
+        }
         let same_refs = self.refs.as_ref().is_some_and(|r| Arc::ptr_eq(r, &refs));
 
         // The region to rebuild, in new coordinates: whole top-level blocks
@@ -373,6 +547,9 @@ impl RenderTree {
             it.node = it.node.saturating_add_signed(node_delta);
         }
         link(&mut self.items, ia..ia + inserted, &self.opts.metrics);
+        // No footnotes here (see above): no section.
+        self.section = self.items.len();
+        self.section_node = self.nodes.len();
 
         let mut report = UpdateReport {
             removed: ia..ib,
@@ -521,6 +698,7 @@ impl RenderTree {
     pub fn set_metrics(&mut self, metrics: Metrics) {
         self.opts.metrics = metrics;
         self.items = self.flatten(0..self.nodes.len());
+        self.section = self.items.partition_point(|it| it.node < self.section_node);
         let n = self.items.len();
         link(&mut self.items, 0..n, &self.opts.metrics);
         self.index = OnceLock::new();
@@ -571,6 +749,21 @@ impl RenderTree {
             ),
             found: None,
         };
+        finder.builder.footnotes = self.footnotes.clone();
+        finder.builder.divert = false;
+        if k >= self.section_node()
+            && let Some(label) = old.context.first().and_then(|f| match &f.kind {
+                crate::node::FrameKind::Footnote { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            && matches!(old.kind, NodeKind::Paragraph(_))
+            && self.nodes.get(k + 1).is_none_or(|n| {
+                n.context.first().map(|f| f.id) != old.context.first().map(|f| f.id)
+            })
+        {
+            let count = self.footnotes.as_ref().map_or(0, |f| f.references(&label));
+            finder.builder.backrefs = Some((old.id, count));
+        }
         gv_syntax::walk_range(tree, old.block.clone(), &mut finder);
         let Some(mut node) = finder.found else {
             return false;
@@ -735,21 +928,35 @@ impl RenderTree {
     }
 
     /// The item whose source contains `offset`, or the first item after
-    /// it (`None` past the last item).
+    /// it (`None` past the last item). The footnote section's items count
+    /// where their sources are.
     pub fn item_at(&self, offset: usize) -> Option<usize> {
-        let k = self.items.partition_point(|it| it.source.end <= offset);
-        (k < self.items.len()).then_some(k)
+        let main = &self.items[..self.section];
+        let k = main.partition_point(|it| it.source.end <= offset);
+        if let Some(ix) = (self.section..self.items.len()).find(|&ix| {
+            let s = &self.items[ix].source;
+            s.start <= offset && offset < s.end
+        }) && main.get(k).is_none_or(|it| it.source.start > offset)
+        {
+            return Some(ix);
+        }
+        (k < self.section).then_some(k)
     }
 
     /// The items whose sources intersect `range` (an empty range stands for
-    /// the position: the item containing it).
+    /// the position: the item containing it), outside the footnote
+    /// section.
     pub fn items_in(&self, range: Range<usize>) -> Range<usize> {
-        let a = self
-            .items
-            .partition_point(|it| it.source.end <= range.start);
+        let main = &self.items[..self.section];
+        let a = main.partition_point(|it| it.source.end <= range.start);
         let end = range.end.max(range.start + 1);
-        let b = self.items.partition_point(|it| it.source.start < end);
+        let b = main.partition_point(|it| it.source.start < end);
         a..b.max(a)
+    }
+
+    /// The index of the first node of the footnote section.
+    fn section_node(&self) -> usize {
+        self.section_node
     }
 
     /// The math macros in force for formula `k` of node `node` (a math

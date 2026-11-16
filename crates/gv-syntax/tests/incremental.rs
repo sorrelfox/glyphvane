@@ -175,13 +175,28 @@ const TABLES: &[&str] = &[
     "$$x$$\n",
     "$x$ and $$y$$ and $`z`$\n",
     "> $$\n",
+    // Task items, footnotes and alerts (the GFM file and Extended
+    // profiles).
+    "- [ ] task\n",
+    "- [x]\n",
+    "* [X] done\n  more\n",
+    "1. [ ]\tx\n",
+    "[ ] x\n",
+    "x[^1] y[^a]\n",
+    "[^1]: note\n",
+    "[^a]:\n",
+    "    continued\n",
+    "> [!NOTE]\n",
+    "> [!tip]  \n> body\n",
+    "> [!NOTE] title\n",
 ];
 
 /// Strings typed or pasted by edits.
 const TYPED: &[&str] = &[
     "x", " ", "\n", "\r", "\r\n", "\t", ">", "-", "*", "+", "#", "`", "```", "~~~", "1.", "2)",
     "[", "]", ":", "=", "<", "<div>", "    ", "> ", "- ", "\u{e9}", "\n\n", "]: /u", "-->", "\"",
-    "---", "\n---\n", "...", "+++\n", "|", "| - |", "$", "$$", "$$\n",
+    "---", "\n---\n", "...", "+++\n", "|", "| - |", "$", "$$", "$$\n", "[ ]", "[x] ", "[^1]",
+    "[^1]: ", "[!NOTE]", "!",
 ];
 
 fn fragment() -> impl Strategy<Value = String> {

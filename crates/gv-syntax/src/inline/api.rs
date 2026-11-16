@@ -33,6 +33,13 @@ pub trait RefLookup {
     /// The definition of `normalized_label` (see [`normalize_label`]), if
     /// any.
     fn lookup(&self, normalized_label: &str) -> Option<&RefDef>;
+
+    /// Whether a footnote is defined for `normalized_label` (the label
+    /// without its `^`). None are by default.
+    fn has_footnote(&self, normalized_label: &str) -> bool {
+        let _ = normalized_label;
+        false
+    }
 }
 
 /// A link reference definition.
@@ -81,6 +88,9 @@ pub struct InlineTree {
     pub(super) arena: String,
     /// Labels looked up (arena ranges).
     pub(super) lookups: Vec<(u32, u32)>,
+    /// Normalized labels of the footnote references (arena ranges), indexed
+    /// by the nodes' data.
+    pub(super) footnotes: Vec<(u32, u32)>,
 }
 
 /// The inline switches of a flavor profile. The default is CommonMark
@@ -105,6 +115,9 @@ pub struct InlineOptions {
     pub math_code: bool,
     /// `\(x\)` inline and `\[x\]` display math.
     pub math_brackets: bool,
+    /// Footnote references: `[^label]` when a footnote is defined for the
+    /// label ([`RefLookup::has_footnote`]) and the brackets are no link.
+    pub footnotes: bool,
 }
 
 impl InlineOptions {
@@ -116,6 +129,7 @@ impl InlineOptions {
         math: DollarMath::Off,
         math_code: false,
         math_brackets: false,
+        footnotes: false,
     };
 
     /// The GFM extensions.
@@ -198,6 +212,25 @@ pub fn render_inlines_html_with(tree: &InlineTree, out: &mut String, options: In
             gfm: options.gfm,
             tagfilter: options.tagfilter,
         },
+    );
+}
+
+/// [`render_inlines_html_with`], with each footnote reference written by
+/// `footnote` from its normalized label (the block emitter numbers them).
+pub fn render_inlines_html_footnotes(
+    tree: &InlineTree,
+    out: &mut String,
+    options: InlineHtmlOptions,
+    footnote: &mut dyn FnMut(&str, &mut String),
+) {
+    html::render_with(
+        tree,
+        out,
+        html::RenderOptions {
+            gfm: options.gfm,
+            tagfilter: options.tagfilter,
+        },
+        Some(footnote),
     );
 }
 

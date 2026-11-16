@@ -20,7 +20,7 @@ use gv_inline::Paragraph;
 use gv_model::LinkKind;
 use gv_syntax::inline::RefDef;
 use gv_syntax::table::Alignment;
-use gv_syntax::{BlockId, FrontMatterKind};
+use gv_syntax::{AlertKind, BlockId, FrontMatterKind};
 
 use crate::status::{ImageSize, LinkStatus};
 
@@ -57,6 +57,21 @@ pub enum FrameKind {
     },
     /// A list item: an indent, and the marker on its first line.
     Item { marker: ListMarker },
+    /// A GitHub alert: a box tinted in its type's colour with a title row
+    /// (icon and the type's name) above its blocks.
+    Alert { kind: AlertKind },
+    /// A footnote definition in the footnote section at the end of the
+    /// document: an indent with its number on the first line.
+    Footnote {
+        /// Its number (order of first reference).
+        number: u32,
+        /// Its normalized label.
+        label: Arc<str>,
+    },
+    /// The blocks of a `<details>` element, after its summary row
+    /// ([`NodeKind::Details`], whose block id is the frame's id). Folded
+    /// away while the details are closed.
+    Details,
 }
 
 /// The marker of a list item.
@@ -72,7 +87,8 @@ pub enum ListMarker {
     Ordered { number: u64, delimiter: u8 },
     /// A task item (GFM and later profiles; never made by the CommonMark
     /// profile): a checkbox, and the status character for custom
-    /// statuses.
+    /// statuses. The checkbox's place in the source comes from the
+    /// item's container ([`gv_syntax::Container::marker`]).
     Task { checked: bool, status: char },
 }
 
@@ -142,7 +158,9 @@ impl BlockNode {
     /// The inline content of a paragraph or heading.
     pub fn inline(&self) -> Option<&Arc<InlineContent>> {
         match &self.kind {
-            NodeKind::Paragraph(c) | NodeKind::Heading { content: c, .. } => Some(c),
+            NodeKind::Paragraph(c)
+            | NodeKind::Heading { content: c, .. }
+            | NodeKind::Details { summary: c, .. } => Some(c),
             _ => None,
         }
     }
@@ -219,11 +237,65 @@ pub enum NodeKind {
     Properties {
         kind: FrontMatterKind,
         lines: Arc<CodeBlock>,
+        /// The properties read from the lines.
+        props: Arc<[crate::properties::Property]>,
     },
     /// A list item with no content: only its marker.
     EmptyItem,
     /// A block quote with no content: only its bar.
     EmptyQuote,
+    /// The summary row of a `<details>` element (an HTML block that opens
+    /// one): a disclosure triangle and the summary's text. The blocks up
+    /// to the closing `</details>` are in [`FrameKind::Details`] frames
+    /// with this node's id.
+    Details {
+        /// The summary as plain text (`Details` without one, as browsers
+        /// show it).
+        summary: Arc<InlineContent>,
+        /// Open by default (`<details open>`).
+        open: bool,
+    },
+    /// A `<picture>` element (an HTML block): its sources and fallback
+    /// image. The view picks a source by the app theme
+    /// ([`Picture::pick`]).
+    Picture(Arc<Picture>),
+}
+
+/// A `<source>` of a `<picture>`: its media query and the first URL of
+/// its source set.
+pub type PictureSource = (Option<Arc<str>>, Arc<str>);
+
+/// The sources of a `<picture>` element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    /// `<source media srcset>` in order: the media query and the first
+    /// URL of the source set.
+    pub sources: Box<[PictureSource]>,
+    /// The `<img>` fallback's `src`.
+    pub fallback: Option<Arc<str>>,
+    /// The `<img>`'s `alt`.
+    pub alt: Arc<str>,
+}
+
+impl Picture {
+    /// The image a browser shows when the colour scheme is dark (`dark`)
+    /// or light: the first source whose media query is empty or holds
+    /// `prefers-color-scheme` with the scheme asked for, else the
+    /// fallback.
+    pub fn pick(&self, dark: bool) -> Option<&str> {
+        let want = if dark { "dark" } else { "light" };
+        self.sources
+            .iter()
+            .find(|(media, _)| match media {
+                None => true,
+                Some(m) => {
+                    let m = m.to_ascii_lowercase();
+                    !m.contains("prefers-color-scheme") || m.contains(want)
+                }
+            })
+            .map(|(_, url)| &**url)
+            .or(self.fallback.as_deref())
+    }
 }
 
 impl NodeKind {
@@ -240,6 +312,8 @@ impl NodeKind {
             Self::Properties { .. } => "properties",
             Self::EmptyItem => "empty-item",
             Self::EmptyQuote => "empty-quote",
+            Self::Details { .. } => "details",
+            Self::Picture(_) => "picture",
         }
     }
 }
@@ -258,6 +332,8 @@ pub struct InlineContent {
     pub images: Box<[ImageInfo]>,
     /// Inline and display math, in order.
     pub math: Box<[MathInfo]>,
+    /// Footnote references, in order.
+    pub footnotes: Box<[FootnoteRefInfo]>,
     /// The content holds raw inline HTML, shown as text until the HTML
     /// pipeline renders it.
     pub raw_html_pending: bool,
@@ -301,6 +377,24 @@ pub enum InlineRole {
     /// count: after the last cell); the box's id is [`BoxRef::Cell`]. Copy
     /// and find see a tab between two cells, nothing at the row's ends.
     CellGap(u32),
+    /// The number of footnote reference `i` of
+    /// [`InlineContent::footnotes`], raised: a click jumps to the
+    /// footnote.
+    FootnoteRef(u32),
+    /// The `↩` after a footnote's text that leads back to its reference
+    /// number `k` (0-based, in document order). Not content.
+    FootnoteBackref(u32),
+}
+
+/// A footnote reference of a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FootnoteRefInfo {
+    /// The normalized label.
+    pub label: Arc<str>,
+    /// The footnote's number.
+    pub number: u32,
+    /// The `[^label]`, relative to the node's start.
+    pub source: Range<usize>,
 }
 
 /// What an inline box of a paragraph stands for, as encoded in its
@@ -351,7 +445,10 @@ impl BoxRef {
 impl InlineRole {
     /// Whether the item is document content (copied and searched).
     pub fn is_content(self) -> bool {
-        !matches!(self, Self::LinkSuffix | Self::Image(_))
+        !matches!(
+            self,
+            Self::LinkSuffix | Self::Image(_) | Self::FootnoteBackref(_)
+        )
     }
 }
 

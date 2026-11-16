@@ -160,6 +160,7 @@ fn parse_with(
         links: Vec::new(),
         arena: String::new(),
         lookups: Vec::new(),
+        footnotes: Vec::new(),
         refs,
         backticks: None,
         html_skip: 0,
@@ -184,6 +185,7 @@ fn parse_with(
         links,
         arena,
         lookups,
+        footnotes,
         ..
     } = p;
     if nodes.capacity() <= SCRATCH_KEEP {
@@ -200,6 +202,7 @@ fn parse_with(
         links,
         arena,
         lookups,
+        footnotes,
     }
 }
 
@@ -219,6 +222,8 @@ struct Parser<'a> {
     links: Vec<LinkData>,
     arena: String,
     lookups: Vec<(u32, u32)>,
+    /// Normalized labels of footnote references (arena ranges).
+    footnotes: Vec<(u32, u32)>,
     refs: &'a dyn RefLookup,
     /// Backtick runs after the first code span opener, as `(length, start)`,
     /// sorted: built on first use, so closers are found in O(log n).
@@ -1192,8 +1197,73 @@ impl Parser<'_> {
             self.make_link(br, p, tail);
             return;
         }
+        if self.footnote_ref(br, p) {
+            return;
+        }
         self.brackets.pop();
         self.pos = p + 1;
+    }
+
+    /// `[^label]` closed at `p` that is no link: a footnote reference if a
+    /// footnote is defined for the label (cmark-gfm). The label is on one
+    /// line and holds only text (no code spans, autolinks or raw HTML);
+    /// delimiters inside it are text.
+    fn footnote_ref(&mut self, br: Bracket, p: usize) -> bool {
+        // A label holds at most 999 characters, like a link label: this
+        // also keeps nested brackets linear.
+        if !self.opts.footnotes
+            || br.image
+            || br.bracket_after
+            || p - br.text_start > 4 * scan::MAX_LABEL_CHARS
+        {
+            return false;
+        }
+        let raw = &self.t[br.text_start..p];
+        if !scan::chars_at_most(raw, scan::MAX_LABEL_CHARS + 1) {
+            return false;
+        }
+        let Some(label) = raw.strip_prefix('^') else {
+            return false;
+        };
+        if label.is_empty() || label.contains(['\n', '\r']) {
+            return false;
+        }
+        let opener = br.node;
+        let mut c = self.nodes[opener as usize].next;
+        while c != NIL {
+            if self.nodes[c as usize].kind != K::Text {
+                return false;
+            }
+            c = self.nodes[c as usize].next;
+        }
+        let a = self.arena.len();
+        scan::normalize_label_into(label, &mut self.arena);
+        let z = self.arena.len();
+        if a == z || !self.refs.has_footnote(&self.arena[a..z]) {
+            self.arena.truncate(a);
+            return false;
+        }
+        while self.last_delim != NIL && self.last_delim >= br.delim_base {
+            self.remove_delim(self.last_delim);
+        }
+        // The opener and the text after it become the reference.
+        let start = self.nodes[opener as usize].start as usize;
+        let prev = self.nodes[opener as usize].prev;
+        if prev == NIL {
+            self.node(0).first = NIL;
+        } else {
+            self.node(prev).next = NIL;
+        }
+        self.node(0).last = prev;
+        let index = self.footnotes.len() as u32;
+        self.footnotes.push((a as u32, z as u32));
+        let n = self.add(K::FootnoteRef, start, p + 1, index);
+        self.child(n, K::Marker, start, start + 2);
+        self.child(n, K::FootnoteLabel, start + 2, p);
+        self.child(n, K::Marker, p, p + 1);
+        self.brackets.pop();
+        self.pos = p + 1;
+        true
     }
 
     /// `(destination "title")` at `i`, if it is there.

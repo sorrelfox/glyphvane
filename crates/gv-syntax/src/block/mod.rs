@@ -41,8 +41,9 @@ pub(crate) mod scan;
 pub(crate) mod state;
 
 use crate::inline::api::parse_ref_def;
+use crate::options::TaskLists;
 use crate::table;
-use crate::tree::event::{BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
+use crate::tree::event::{AlertKind, BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
 use state::{Closed, Entry, Interner, Kind, ROOT, RefMode, StateId, TABLE_VISITED};
 
 /// Maximum number of simultaneously open blocks, the document included.
@@ -317,6 +318,14 @@ pub(crate) struct BlockOptions {
     pub table_min_dashes: u8,
     /// `$$` math blocks.
     pub math_blocks: bool,
+    /// Task list items.
+    pub task_lists: TaskLists,
+    /// Footnote definitions.
+    pub footnotes: bool,
+    /// Their continuation indent.
+    pub footnote_indent: u8,
+    /// GitHub alerts.
+    pub alerts: bool,
 }
 
 impl BlockOptions {
@@ -325,8 +334,79 @@ impl BlockOptions {
             tables: options.tables,
             table_min_dashes: options.table_min_dashes,
             math_blocks: options.math_blocks(),
+            task_lists: options.task_lists,
+            footnotes: options.footnotes,
+            footnote_indent: options.footnote_indent.max(1),
+            alerts: options.alerts,
         }
     }
+}
+
+/// A task item's checkbox at the start of `s` (an item's first content):
+/// `[`, one character (a space, `x` or `X`, or with `any` any character
+/// but `]` and line endings), `]`, then a space, a tab or the end of `s`.
+/// Returns the checkbox's length.
+pub(crate) fn task_box(s: &[u8], any: bool) -> Option<usize> {
+    if s.first() != Some(&b'[') {
+        return None;
+    }
+    let n = if any {
+        let width = match s.get(1) {
+            Some(&c) if c < 0x80 => 1,
+            Some(&c) if c >= 0xF0 => 4,
+            Some(&c) if c >= 0xE0 => 3,
+            Some(_) => 2,
+            None => return None,
+        };
+        let c = std::str::from_utf8(s.get(1..1 + width)?)
+            .ok()?
+            .chars()
+            .next()?;
+        if matches!(c, ']' | '\n' | '\r') {
+            return None;
+        }
+        width
+    } else {
+        if !matches!(s.get(1), Some(b' ' | b'x' | b'X')) {
+            return None;
+        }
+        1
+    };
+    if s.get(1 + n) != Some(&b']') {
+        return None;
+    }
+    match s.get(2 + n) {
+        None | Some(b' ' | b'\t') => Some(2 + n),
+        _ => None,
+    }
+}
+
+/// A footnote definition's label at the start of `s`: `[^`, one or more
+/// bytes other than `]`, spaces, tabs and line endings, then `]:`
+/// (cmark-gfm's `scan_footnote_definition`). Returns the length of the
+/// `[^label]:`.
+pub(crate) fn footnote_def_start(s: &[u8]) -> Option<usize> {
+    if !s.starts_with(b"[^") {
+        return None;
+    }
+    let len = s[2..]
+        .iter()
+        .position(|&c| matches!(c, b']' | b' ' | b'\t' | b'\n' | b'\r'))?;
+    (len > 0 && s.get(2 + len) == Some(&b']') && s.get(3 + len) == Some(&b':')).then_some(len + 4)
+}
+
+/// A GitHub alert marker: `s` (a block quote's first line after its
+/// marker) is `[!TYPE]` and nothing but spaces and tabs. Returns the type
+/// and the marker's length.
+pub(crate) fn alert_marker(s: &[u8]) -> Option<(AlertKind, usize)> {
+    let rest = s.strip_prefix(b"[!")?;
+    let close = rest.iter().position(|&c| c == b']')?;
+    let kind = AlertKind::from_name(&rest[..close])?;
+    let end = close + 3;
+    s[end..]
+        .iter()
+        .all(|&c| scan::is_space_or_tab(c))
+        .then_some((kind, end))
 }
 
 /// A `$$` math block opener: `s` is the line from its first non-space
@@ -1082,6 +1162,18 @@ impl BlockParser {
                     }
                     true
                 }
+                Kind::FootnoteDefinition => {
+                    let indent = usize::from(self.opts.footnote_indent);
+                    if cur.indent >= indent {
+                        cur.advance(indent, true);
+                        self.pre_tok(&mut cur, TokenKind::ContainerPrefix);
+                        true
+                    } else {
+                        // Only a line with nothing at all left continues it
+                        // without the indent (cmark-gfm).
+                        cur.blank && cur.fns == cur.offset
+                    }
+                }
                 Kind::Html { ty } => !(ty >= 6 && cur.blank),
                 Kind::Paragraph { .. } => !cur.blank,
                 Kind::Table => {
@@ -1139,9 +1231,31 @@ impl BlockParser {
                     if cur.peek(cur.offset).is_some_and(scan::is_space_or_tab) {
                         cur.advance(1, true);
                     }
-                    container = self.add_child(Kind::BlockQuote, BlockKind::BlockQuote, sink);
+                    // A GitHub alert: a block quote at the top level (not in
+                    // a list, a quote or a footnote) whose first line is
+                    // only `[!TYPE]`.
+                    let alert = if self.opts.alerts && !cur.partial {
+                        let mut p = container;
+                        while p > 0 && !self.stack[p].kind.can_contain(Kind::BlockQuote) {
+                            p -= 1;
+                        }
+                        let end = cur.content_end.max(cur.offset);
+                        (p == 0)
+                            .then(|| alert_marker(&b[cur.offset..end]))
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let bk =
+                        alert.map_or(BlockKind::BlockQuote, |(kind, _)| BlockKind::Alert { kind });
+                    container = self.add_child(Kind::BlockQuote, bk, sink);
                     let e = cur.prefix_end();
                     self.tok(&mut cur, sink, TokenKind::QuoteMarker, e);
+                    if let Some((_, n)) = alert {
+                        let end = cur.offset + n;
+                        self.tok(&mut cur, sink, TokenKind::ExtMarker, end);
+                        cur.advance(n, false);
+                    }
                     started = true;
                 } else if let Some((level, m)) = scan::atx_heading_start(s) {
                     self.close_unmatched_for(Kind::Heading, sink);
@@ -1218,6 +1332,26 @@ impl BlockParser {
                         Err(p) => self.tb_kill = fns + p,
                     }
                 }
+            }
+            if !started
+                && !indented
+                && self.opts.footnotes
+                && can_nest
+                && c == Some(b'[')
+                && let Some(m) = footnote_def_start(&b[fns..cur.content_end.max(fns)])
+            {
+                self.close_unmatched_for(Kind::FootnoteDefinition, sink);
+                container = self.add_child(
+                    Kind::FootnoteDefinition,
+                    BlockKind::FootnoteDefinition,
+                    sink,
+                );
+                self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                self.tok(&mut cur, sink, TokenKind::ExtMarker, fns + m);
+                let end = skip_ws(b, fns + m, cur.content_end);
+                cur.advance(end - cur.offset, false);
+                self.tok(&mut cur, sink, TokenKind::Whitespace, end);
+                started = true;
             }
             if !started
                 && (!indented || matches!(ck, Kind::List { .. }))
@@ -1441,8 +1575,43 @@ impl BlockParser {
                     self.tok(&mut cur, sink, TokenKind::Content, end);
                     self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
                 } else {
-                    let fns = cur.fns;
-                    let refs = self.start_candidate(&b[fns..cur.content_end.max(fns)], interner);
+                    let mut fns = cur.fns;
+                    let mut task = false;
+                    if self.opts.task_lists != TaskLists::Off
+                        && matches!(kind, Kind::Item { .. })
+                        && !self.stack[ci].has_child
+                        && let Some(n) = task_box(
+                            &b[fns..cur.content_end.max(fns)],
+                            self.opts.task_lists == TaskLists::AnyCharacter,
+                        )
+                    {
+                        // A task item: the checkbox is the item's marker,
+                        // the rest of the line its first paragraph.
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                        self.tok(&mut cur, sink, TokenKind::ExtMarker, fns + n);
+                        fns = skip_ws(b, fns + n, cur.content_end);
+                        if fns >= cur.content_end {
+                            // Only the checkbox: the item counts as holding
+                            // a closed paragraph (the `[ ]` one), as in
+                            // CommonMark, so looseness is decided the same.
+                            let ce = cur.content_end.max(cur.tp);
+                            self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
+                            self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                            if self.stoppers.last() == Some(&len32(ci)) {
+                                self.stoppers.pop();
+                            }
+                            self.stack[ci].has_child = true;
+                            self.stack[ci].last = Some(Closed::default());
+                            self.touch(ci);
+                            return;
+                        }
+                        task = true;
+                    }
+                    let refs = if task {
+                        RefMode::Text
+                    } else {
+                        self.start_candidate(&b[fns..cur.content_end.max(fns)], interner)
+                    };
                     let defer = refs != RefMode::Text;
                     let idx = self.add_child_ex(
                         Kind::Paragraph { refs, cells: 0 },

@@ -56,6 +56,11 @@ pub enum InlineKind {
     /// Display math inside a paragraph: `$$x$$` or `\[x\]`. Same shape as
     /// [`InlineMath`](Self::InlineMath).
     DisplayMath,
+    /// A footnote reference `[^label]` to a defined footnote (with
+    /// [`InlineOptions::footnotes`](super::InlineOptions::footnotes)): a
+    /// `[^` marker, a [`FootnoteLabel`](Self::FootnoteLabel) token, a `]`
+    /// marker. The normalized label is [`InlineNode::footnote_label`].
+    FootnoteRef,
     /// Raw inline HTML: one or more [`HtmlText`](Self::HtmlText) tokens.
     RawHtml,
     /// Literal text.
@@ -90,6 +95,8 @@ pub enum InlineKind {
     LinkTitle,
     /// The label of a full reference link (`[text][label]`).
     LinkLabel,
+    /// The label of a footnote reference, as written.
+    FootnoteLabel,
 }
 
 impl InlineKind {
@@ -112,6 +119,7 @@ impl InlineKind {
             Self::Autolink => "Autolink",
             Self::InlineMath => "InlineMath",
             Self::DisplayMath => "DisplayMath",
+            Self::FootnoteRef => "FootnoteRef",
             Self::RawHtml => "RawHtml",
             Self::Text => "Text",
             Self::Escape => "Escape",
@@ -127,6 +135,7 @@ impl InlineKind {
             Self::LinkDestination => "LinkDestination",
             Self::LinkTitle => "LinkTitle",
             Self::LinkLabel => "LinkLabel",
+            Self::FootnoteLabel => "FootnoteLabel",
         }
     }
 }
@@ -759,6 +768,26 @@ impl InlineTree {
             })
     }
 
+    /// The footnote references, in order: the normalized label and the
+    /// document range of each `[^label]`.
+    pub fn footnote_refs(&self) -> impl Iterator<Item = (&str, Range<usize>)> + '_ {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind == InlineKind::FootnoteRef)
+            .map(move |n| {
+                (
+                    self.footnote_label(n.data).unwrap_or(""),
+                    self.src_range(n.start, n.end),
+                )
+            })
+    }
+
+    /// The normalized label of footnote reference `i`.
+    pub(super) fn footnote_label(&self, i: u32) -> Option<&str> {
+        let &(a, z) = self.footnotes.get(i as usize)?;
+        self.arena.get(a as usize..z as usize)
+    }
+
     /// The normalized labels this parse looked up, including the lookups that
     /// found nothing, in order (with repeats). An inline cache must be
     /// invalidated when the definition of any of them changes.
@@ -851,6 +880,15 @@ impl<'a> InlineNode<'a> {
         let n = self.node();
         matches!(n.kind, InlineKind::InlineMath | InlineKind::DisplayMath)
             .then(|| math_tex(self.tree, n))
+    }
+
+    /// The normalized label of a [`FootnoteRef`](InlineKind::FootnoteRef)
+    /// node; `None` for other nodes.
+    pub fn footnote_label(&self) -> Option<&'a str> {
+        let n = self.node();
+        (n.kind == InlineKind::FootnoteRef)
+            .then(|| self.tree.footnote_label(n.data))
+            .flatten()
     }
 
     /// Appends a text projection of this node and its descendants (see

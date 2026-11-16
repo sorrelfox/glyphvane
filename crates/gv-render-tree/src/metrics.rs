@@ -59,6 +59,20 @@ pub struct Metrics {
     pub quote: Spacing,
     /// Front matter properties: 0/12.
     pub properties: Spacing,
+    /// The key column of front matter properties (68) and the gap after
+    /// it (8).
+    pub property_key: f32,
+    pub property_gap: f32,
+    /// Callouts and alerts: 0/12 outside (as paragraphs).
+    pub callout: Spacing,
+    /// A callout's padding: 9 above, 10 below, 12 at the sides.
+    pub callout_padding_top: f32,
+    pub callout_padding_bottom: f32,
+    pub callout_padding_x: f32,
+    /// A callout's title row: 14/20.
+    pub callout_title: f32,
+    /// Space between the title row and the first block: 3.
+    pub callout_title_gap: f32,
     /// Indentation of a list item's content; the marker sits in it (not
     /// designed: 24).
     pub list_indent: f32,
@@ -112,6 +126,14 @@ impl Default for Metrics {
             list: Spacing::new(0.0, 12.0),
             quote: Spacing::new(0.0, 12.0),
             properties: Spacing::new(0.0, 12.0),
+            property_key: 68.0,
+            property_gap: 8.0,
+            callout: Spacing::new(0.0, 12.0),
+            callout_padding_top: 9.0,
+            callout_padding_bottom: 10.0,
+            callout_padding_x: 12.0,
+            callout_title: 20.0,
+            callout_title_gap: 3.0,
             list_indent: 24.0,
             quote_indent: 16.0,
             quote_bar: 3.0,
@@ -147,6 +169,14 @@ impl Metrics {
             list: self.list.scaled(f),
             quote: self.quote.scaled(f),
             properties: self.properties.scaled(f),
+            property_key: self.property_key * f,
+            property_gap: self.property_gap * f,
+            callout: self.callout.scaled(f),
+            callout_padding_top: self.callout_padding_top * f,
+            callout_padding_bottom: self.callout_padding_bottom * f,
+            callout_padding_x: self.callout_padding_x * f,
+            callout_title: self.callout_title * f,
+            callout_title_gap: self.callout_title_gap * f,
             list_indent: self.list_indent * f,
             quote_indent: self.quote_indent * f,
             quote_bar: self.quote_bar * f,

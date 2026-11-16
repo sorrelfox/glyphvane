@@ -21,10 +21,13 @@ use std::sync::Arc;
 
 use gv_text::TextSource;
 
+use std::collections::HashMap;
+
 use crate::inline::api::{
-    InlineHtmlOptions, InlineInput, InlineOptions, parse_inlines_with, parse_table_cell,
-    push_tagfiltered, render_inlines_html_with, unescape_string,
+    InlineHtmlOptions, InlineInput, InlineOptions, InlineTree, parse_inlines_with,
+    parse_table_cell, push_tagfiltered, render_inlines_html_footnotes, unescape_string,
 };
+use crate::inline::html::escape_href;
 use crate::table::{self, Alignment};
 use crate::tree::walk::{self, Container, ContainerKind, Leaf, LeafKind, Visitor};
 use crate::tree::{RefMap, SyntaxTree};
@@ -72,9 +75,54 @@ fn render<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S, html: InlineHtmlO
         inline: tree.options().inline(),
         html,
         padded: 0,
+        footnotes: Footnotes::default(),
+        open: Vec::new(),
+        defs: Vec::new(),
+        def_labels: std::collections::HashSet::new(),
     };
     walk::walk(tree, &mut r);
+    r.footnote_section();
     r.out
+}
+
+/// Footnote numbering: by first reference, in document order (comrak's
+/// `find_footnote_references`).
+#[derive(Default)]
+struct Footnotes {
+    /// Normalized label to (number, references so far).
+    seen: HashMap<String, (u32, u32)>,
+    next: u32,
+}
+
+/// What an open container needs at its exit.
+enum OpenState {
+    None,
+    /// An alert: where its markup starts and where its header ends in the
+    /// output, and its marker (to write it as a block quote if it holds
+    /// nothing).
+    Alert {
+        start: usize,
+        header_end: usize,
+        marker: String,
+    },
+    /// A footnote definition: the output it interrupted, its labels, and
+    /// where the `</p>` of its last direct child paragraph is.
+    Footnote {
+        saved: String,
+        normalized: String,
+        name: String,
+        para_close: Option<usize>,
+    },
+}
+
+/// A rendered footnote definition, waiting for the footnote section.
+struct Def {
+    normalized: String,
+    name: String,
+    html: String,
+    /// Where the backreferences go inside the last paragraph (`</p>`), if
+    /// the definition ends with one.
+    para_close: Option<usize>,
 }
 
 struct Renderer<'s, S: TextSource + ?Sized> {
@@ -88,6 +136,13 @@ struct Renderer<'s, S: TextSource + ?Sized> {
     html: InlineHtmlOptions,
     /// Empty cells written so far to pad short table rows.
     padded: usize,
+    footnotes: Footnotes,
+    /// Per open container (parallel to `stack`).
+    open: Vec<OpenState>,
+    /// Footnote definitions in document order.
+    defs: Vec<Def>,
+    /// Their normalized labels.
+    def_labels: std::collections::HashSet<String>,
 }
 
 /// At most this many empty cells pad short table rows in one document
@@ -139,7 +194,114 @@ impl<S: TextSource + ?Sized> Renderer<'_, S> {
             &*self.refs,
             self.inline,
         );
-        render_inlines_html_with(&tree, &mut self.out, self.html);
+        self.render_inlines(&tree);
+    }
+
+    /// Writes an inline tree, numbering its footnote references.
+    fn render_inlines(&mut self, tree: &InlineTree) {
+        let refs = Arc::clone(&self.refs);
+        let footnotes = &mut self.footnotes;
+        let mut out = std::mem::take(&mut self.out);
+        render_inlines_html_footnotes(tree, &mut out, self.html, &mut |label, out| {
+            let name = refs.footnote(label).unwrap_or(label);
+            let (ix, n) = match footnotes.seen.get_mut(label) {
+                Some(e) => {
+                    e.1 += 1;
+                    *e
+                }
+                None => {
+                    footnotes.next += 1;
+                    footnotes.seen.insert(label.to_owned(), (footnotes.next, 1));
+                    (footnotes.next, 1)
+                }
+            };
+            out.push_str("<sup class=\"footnote-ref\"><a href=\"#fn-");
+            escape_href(out, name);
+            out.push_str("\" id=\"fnref-");
+            escape_href(out, name);
+            if n > 1 {
+                out.push('-');
+                out.push_str(&n.to_string());
+            }
+            out.push_str("\" data-footnote-ref>");
+            out.push_str(&ix.to_string());
+            out.push_str("</a></sup>");
+        });
+        self.out = out;
+    }
+
+    /// The direct child of a footnote definition (or anything else) that
+    /// is not a paragraph: the definition no longer ends with a paragraph.
+    fn child_started(&mut self) {
+        if let Some(OpenState::Footnote { para_close, .. }) = self.open.last_mut() {
+            *para_close = None;
+        }
+    }
+
+    /// The footnote section (comrak's markup): the referenced definitions
+    /// by number, each with its backreferences.
+    fn footnote_section(&mut self) {
+        let mut defs: Vec<(u32, u32, Def)> = Vec::new();
+        for d in std::mem::take(&mut self.defs) {
+            if let Some(&(ix, n)) = self.footnotes.seen.get(&d.normalized) {
+                defs.push((ix, n, d));
+            }
+        }
+        if defs.is_empty() {
+            return;
+        }
+        defs.sort_by_key(|(ix, ..)| *ix);
+        self.cr();
+        self.out
+            .push_str("<section class=\"footnotes\" data-footnotes>\n<ol>\n");
+        for (k, (_, n, d)) in defs.into_iter().enumerate() {
+            let fnix = k + 1;
+            let mut backrefs = String::new();
+            for r in 1..=n {
+                let suffix = if r > 1 {
+                    format!("-{r}")
+                } else {
+                    String::new()
+                };
+                if r > 1 {
+                    backrefs.push(' ');
+                }
+                backrefs.push_str("<a href=\"#fnref-");
+                escape_href(&mut backrefs, &d.name);
+                backrefs.push_str(&format!(
+                    "{suffix}\" class=\"footnote-backref\" data-footnote-backref \
+                     data-footnote-backref-idx=\"{fnix}{suffix}\" \
+                     aria-label=\"Back to reference {fnix}{suffix}\">\u{21a9}"
+                ));
+                if r > 1 {
+                    backrefs.push_str(&format!("<sup class=\"footnote-ref\">{r}</sup>"));
+                }
+                backrefs.push_str("</a>");
+            }
+            self.out.push_str("<li id=\"fn-");
+            escape_href(&mut self.out, &d.name);
+            self.out.push_str("\">");
+            let mut html = d.html;
+            match d.para_close {
+                Some(at) if at <= html.len() => {
+                    html.insert_str(at, &format!(" {backrefs}"));
+                    if !html.is_empty() {
+                        self.out.push('\n');
+                    }
+                    self.out.push_str(&html);
+                }
+                _ => {
+                    if !html.is_empty() {
+                        self.out.push('\n');
+                    }
+                    self.out.push_str(&html);
+                    self.out.push_str(&backrefs);
+                    self.out.push('\n');
+                }
+            }
+            self.out.push_str("</li>\n");
+        }
+        self.out.push_str("</ol>\n</section>\n");
     }
 
     /// The cells of a table line (document ranges); `None` if it is not a
@@ -218,7 +380,7 @@ impl<S: TextSource + ?Sized> Renderer<'_, S> {
             self.out.push('>');
             if let Some(cell) = cells.get(i) {
                 let tree = parse_table_cell(self.text, cell.clone(), &*self.refs, self.inline);
-                render_inlines_html_with(&tree, &mut self.out, self.html);
+                self.render_inlines(&tree);
             }
             self.out.push_str("</");
             self.out.push_str(tag);
@@ -294,10 +456,50 @@ fn info_word(raw: &[u8]) -> String {
 
 impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
     fn enter(&mut self, c: &Container) {
+        self.child_started();
+        let mut state = OpenState::None;
         match c.kind {
             ContainerKind::BlockQuote => {
                 self.cr();
                 self.out.push_str("<blockquote>\n");
+            }
+            ContainerKind::Alert { kind } => {
+                // comrak's alert markup.
+                self.cr();
+                let start = self.out.len();
+                self.out
+                    .push_str("<div class=\"markdown-alert markdown-alert-");
+                self.out.push_str(kind.name());
+                self.out.push_str("\">\n<p class=\"markdown-alert-title\">");
+                self.out.push_str(kind.title());
+                self.out.push_str("</p>\n");
+                self.buf.clear();
+                if let Some(m) = &c.marker {
+                    self.text.copy_range(m.clone(), &mut self.buf);
+                }
+                state = OpenState::Alert {
+                    start,
+                    header_end: self.out.len(),
+                    marker: String::from_utf8_lossy(&self.buf).into_owned(),
+                };
+            }
+            ContainerKind::FootnoteDefinition => {
+                self.buf.clear();
+                if let Some(l) = c.footnote_label() {
+                    self.text.copy_range(l, &mut self.buf);
+                }
+                let written = String::from_utf8_lossy(&self.buf).into_owned();
+                let normalized = crate::inline::normalize_label(&written);
+                state = OpenState::Footnote {
+                    saved: std::mem::take(&mut self.out),
+                    name: self
+                        .refs
+                        .footnote(&normalized)
+                        .unwrap_or(written.trim())
+                        .to_owned(),
+                    normalized,
+                    para_close: None,
+                };
             }
             ContainerKind::BulletList { .. } => {
                 self.cr();
@@ -316,17 +518,69 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
             ContainerKind::Item => {
                 self.cr();
                 self.out.push_str("<li>");
+                if let Some(m) = &c.marker {
+                    // comrak's task item markup.
+                    self.buf.clear();
+                    self.text.copy_range(m.clone(), &mut self.buf);
+                    let checked = self.buf.get(1).is_some_and(|&b| b != b' ');
+                    self.out.push_str("<input type=\"checkbox\"");
+                    if checked {
+                        self.out.push_str(" checked=\"\"");
+                    }
+                    self.out.push_str(" disabled=\"\" /> ");
+                }
             }
         }
         self.stack.push(c.kind);
+        self.open.push(state);
     }
 
     fn exit(&mut self, c: &Container) {
         self.stack.pop();
+        let state = self.open.pop().unwrap_or(OpenState::None);
         match c.kind {
             ContainerKind::BlockQuote => {
                 self.cr();
                 self.out.push_str("</blockquote>\n");
+            }
+            ContainerKind::Alert { .. } => {
+                if let OpenState::Alert {
+                    start,
+                    header_end,
+                    marker,
+                } = state
+                    && self.out.len() == header_end
+                {
+                    // An alert needs a body (GitHub): this is a block quote
+                    // holding the marker.
+                    self.out.truncate(start);
+                    self.out.push_str("<blockquote>\n<p>");
+                    escape_html(&mut self.out, &marker);
+                    self.out.push_str("</p>\n</blockquote>\n");
+                } else {
+                    self.cr();
+                    self.out.push_str("</div>\n");
+                }
+            }
+            ContainerKind::FootnoteDefinition => {
+                if let OpenState::Footnote {
+                    saved,
+                    normalized,
+                    name,
+                    para_close,
+                } = state
+                {
+                    let html = std::mem::replace(&mut self.out, saved);
+                    // The first definition of a label wins.
+                    if self.def_labels.insert(normalized.clone()) {
+                        self.defs.push(Def {
+                            normalized,
+                            name,
+                            html,
+                            para_close,
+                        });
+                    }
+                }
             }
             ContainerKind::BulletList { .. } => self.out.push_str("</ul>\n"),
             ContainerKind::OrderedList { .. } => self.out.push_str("</ol>\n"),
@@ -335,6 +589,9 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
     }
 
     fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if !matches!(leaf.kind, LeafKind::LinkRefDef) {
+            self.child_started();
+        }
         match leaf.kind {
             LeafKind::Paragraph => {
                 let n = self.stack.len();
@@ -351,7 +608,11 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                     self.cr();
                     self.out.push_str("<p>");
                     self.inlines(leaf);
+                    let close = self.out.len();
                     self.out.push_str("</p>\n");
+                    if let Some(OpenState::Footnote { para_close, .. }) = self.open.last_mut() {
+                        *para_close = Some(close);
+                    }
                 }
             }
             LeafKind::Heading { level, .. } => {

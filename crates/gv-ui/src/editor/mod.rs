@@ -121,6 +121,7 @@ mod paste;
 mod rows;
 mod stats;
 mod syntax;
+mod task_toggle;
 #[cfg(test)]
 mod tests;
 mod wrap;

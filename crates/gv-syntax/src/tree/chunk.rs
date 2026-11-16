@@ -91,6 +91,11 @@ impl DepthScan {
             self.min_depth = self.min_depth.min(self.depth);
         } else if e.is_open() {
             self.depth += 1;
+            // A footnote definition defines a label, like a reference
+            // definition.
+            if e.is_footnote_open() {
+                self.refdefs += 1;
+            }
         } else if e.is_refdef() {
             self.refdefs += 1;
         } else if let Some(up) = e.loosen_up() {

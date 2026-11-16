@@ -53,7 +53,11 @@ pub(crate) enum RefMode {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Kind {
     Document,
+    /// A block quote, or a GitHub alert (the same continuation rule).
     BlockQuote,
+    /// A footnote definition: continues on lines indented by the profile's
+    /// footnote indent and on empty lines.
+    FootnoteDefinition,
     /// `ch`: bullet character or ordered delimiter; decides whether a new
     /// item continues the list.
     List {
@@ -129,7 +133,7 @@ impl Kind {
     #[inline]
     pub(crate) fn can_contain(self, child: Kind) -> bool {
         match self {
-            Kind::Document | Kind::BlockQuote | Kind::Item { .. } => {
+            Kind::Document | Kind::BlockQuote | Kind::Item { .. } | Kind::FootnoteDefinition => {
                 !matches!(child, Kind::Item { .. })
             }
             Kind::List { .. } => matches!(child, Kind::Item { .. }),
@@ -217,7 +221,9 @@ impl Entry {
     #[inline]
     pub(crate) fn blank_transparent(self) -> bool {
         match self.kind {
-            Kind::List { .. } => true,
+            // A footnote definition continues over a line with nothing
+            // left (see the block parser).
+            Kind::List { .. } | Kind::FootnoteDefinition => true,
             Kind::Item { .. } => self.has_child,
             _ => false,
         }

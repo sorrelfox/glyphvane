@@ -27,12 +27,15 @@
 //! | `extended_autolinks` | [`ParseOptions::autolinks`] |
 //! | `math` | [`ParseOptions::math`]: `github` is [`DollarMath::GitHub`] with `` $`…`$ ``, `obsidian` is [`DollarMath::Pandoc`]; `$$` blocks with either |
 //! | `math_brackets` | [`ParseOptions::math_brackets`] |
+//! | `task_lists` | [`ParseOptions::task_lists`] |
+//! | `footnotes`, `footnote_indent` | [`ParseOptions::footnotes`], [`ParseOptions::footnote_indent`] |
+//! | `admonitions = alerts` | [`ParseOptions::alerts`] (Obsidian callouts are not parsed yet: their `> [!x]` stays a block quote) |
 //!
 //! [`InlineOptions`]: crate::inline::InlineOptions
 //!
 //! [`SyntaxTree::options`]: crate::SyntaxTree::options
 
-use gv_profile::switches::{Math, TildeSingle};
+use gv_profile::switches::{Admonitions, Math, TaskLists as TaskListSwitch, TildeSingle};
 use gv_profile::{CompiledProfile, ProfileId, Switches};
 
 /// Which front matter syntaxes the parser recognizes at byte 0 (after an
@@ -91,6 +94,19 @@ pub enum DollarMath {
     Pandoc,
 }
 
+/// Which list items are task items (see
+/// [`ParseOptions::task_lists`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TaskLists {
+    /// No task items: `[ ]` is text.
+    #[default]
+    Off,
+    /// GFM: `[ ]`, `[x]` or `[X]`.
+    Standard,
+    /// Obsidian: any one character between the brackets.
+    AnyCharacter,
+}
+
 /// Parser switches (see the [module documentation](self)).
 ///
 /// The default parses CommonMark 0.31.2 exactly.
@@ -122,6 +138,22 @@ pub struct ParseOptions {
     pub math_code: bool,
     /// `\(…\)` inline and `\[…\]` display math.
     pub math_brackets: bool,
+    /// Task list items: a list item whose first line starts with `[ ]`,
+    /// `[x]` or `[X]` (any one character with
+    /// [`TaskLists::AnyCharacter`]) followed by a space, a tab or the end
+    /// of the line. The brackets become an
+    /// [`ExtMarker`](crate::TokenKind::ExtMarker) token of the item
+    /// ([`Container::marker`](crate::Container::marker)).
+    pub task_lists: TaskLists,
+    /// GFM footnotes: `[^label]:` definitions
+    /// ([`BlockKind::FootnoteDefinition`](crate::BlockKind::FootnoteDefinition))
+    /// and `[^label]` references to a defined label.
+    pub footnotes: bool,
+    /// The indentation that continues a footnote definition (4, or 2 in
+    /// Obsidian).
+    pub footnote_indent: u8,
+    /// GitHub alerts ([`BlockKind::Alert`](crate::BlockKind::Alert)).
+    pub alerts: bool,
 }
 
 impl Default for ParseOptions {
@@ -142,6 +174,10 @@ impl ParseOptions {
         math: DollarMath::Off,
         math_code: false,
         math_brackets: false,
+        task_lists: TaskLists::Off,
+        footnotes: false,
+        footnote_indent: 4,
+        alerts: false,
     };
 
     /// The GFM extensions of the GFM spec (tables, strikethrough, extended
@@ -187,6 +223,14 @@ impl ParseOptions {
             math,
             math_code,
             math_brackets: s.math_brackets,
+            task_lists: match s.task_lists {
+                TaskListSwitch::Off => TaskLists::Off,
+                TaskListSwitch::Standard => TaskLists::Standard,
+                TaskListSwitch::AnyCharacter => TaskLists::AnyCharacter,
+            },
+            footnotes: s.footnotes,
+            footnote_indent: if s.footnote_indent == 2 { 2 } else { 4 },
+            alerts: s.admonitions == Admonitions::Alerts,
         }
     }
 
@@ -199,6 +243,7 @@ impl ParseOptions {
             math: self.math,
             math_code: self.math_code,
             math_brackets: self.math_brackets,
+            footnotes: self.footnotes,
         }
     }
 
@@ -232,15 +277,23 @@ mod tests {
                 front_matter: FrontMatterOptions::NONE,
                 math: DollarMath::Off,
                 math_code: false,
+                task_lists: TaskLists::Off,
+                footnotes: false,
+                alerts: false,
                 ..gfm
             },
             ParseOptions::GFM
         );
+        assert_eq!(gfm.task_lists, TaskLists::Standard);
+        assert!(gfm.footnotes && gfm.alerts && gfm.footnote_indent == 4);
         assert_eq!(ParseOptions::builtin(ProfileId::GfmComment), gfm);
         let ob = ParseOptions::builtin(ProfileId::Obsidian);
         assert!(ob.tables && ob.table_min_dashes == 2);
         assert!(ob.strikethrough && !ob.strikethrough_single && ob.autolinks);
         assert_eq!((ob.math, ob.math_code), (DollarMath::Pandoc, false));
+        assert_eq!(ob.task_lists, TaskLists::AnyCharacter);
+        assert!(ob.footnotes && ob.footnote_indent == 2 && !ob.alerts);
+        assert!(ext.alerts && ext.footnotes);
         let cm = ParseOptions::COMMONMARK;
         assert!(!cm.tables && !cm.strikethrough && !cm.autolinks && !cm.math_blocks());
     }

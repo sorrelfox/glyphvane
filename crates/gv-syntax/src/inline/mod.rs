@@ -52,7 +52,7 @@
 pub mod api;
 mod dump;
 mod entities;
-mod html;
+pub(crate) mod html;
 mod parse;
 mod scan;
 mod tree;

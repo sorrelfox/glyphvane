@@ -34,10 +34,13 @@ use event::{BlockId, BlockKind, Ev, Event, TokenKind};
 use index::BlockIndex;
 
 /// The link reference definitions of a document: normalized label to
-/// definition, first definition wins.
+/// definition, first definition wins. With footnotes, also the labels of
+/// the footnote definitions (first definition wins too).
 #[derive(Debug, Default)]
 pub struct RefMap {
     map: HashMap<String, RefDef>,
+    /// Normalized footnote label to the label as written (trimmed).
+    footnotes: HashMap<String, String>,
 }
 
 impl RefMap {
@@ -50,11 +53,26 @@ impl RefMap {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// The footnote definition of a normalized label: its label as written
+    /// (what GitHub puts in the `fn-` and `fnref-` ids).
+    pub fn footnote(&self, normalized_label: &str) -> Option<&str> {
+        self.footnotes.get(normalized_label).map(String::as_str)
+    }
+
+    /// Number of distinct footnote labels.
+    pub fn footnote_count(&self) -> usize {
+        self.footnotes.len()
+    }
 }
 
 impl RefLookup for RefMap {
     fn lookup(&self, normalized_label: &str) -> Option<&RefDef> {
         self.map.get(normalized_label)
+    }
+
+    fn has_footnote(&self, normalized_label: &str) -> bool {
+        self.footnotes.contains_key(normalized_label)
     }
 }
 
@@ -439,22 +457,42 @@ impl SyntaxTree {
     }
 
     fn build_ref_map<S: TextSource + ?Sized>(&self, text: &S) -> RefMap {
-        let mut map = RefMap::default();
-        if self.0.chunks.summary().refdefs == 0 {
-            return map;
+        struct Defs<'t, S: TextSource + ?Sized> {
+            text: &'t S,
+            map: RefMap,
+            buf: Vec<u8>,
         }
-        walk::walk(
-            self,
-            &mut walk::LeafFn(|leaf: &walk::Leaf<'_>| {
+        impl<S: TextSource + ?Sized> walk::Visitor for Defs<'_, S> {
+            fn enter(&mut self, c: &walk::Container) {
+                if let Some(label) = c.footnote_label() {
+                    self.buf.clear();
+                    self.text.copy_range(label, &mut self.buf);
+                    let written = String::from_utf8_lossy(&self.buf).trim().to_owned();
+                    let key = crate::inline::normalize_label(&written);
+                    if !key.is_empty() {
+                        self.map.footnotes.entry(key).or_insert(written);
+                    }
+                }
+            }
+            fn leaf(&mut self, leaf: &walk::Leaf<'_>) {
                 if leaf.kind != walk::LeafKind::LinkRefDef {
                     return;
                 }
-                if let Some(d) = leaf.link_ref_def(text) {
-                    map.map.entry(d.label).or_insert(d.def);
+                if let Some(d) = leaf.link_ref_def(self.text) {
+                    self.map.map.entry(d.label).or_insert(d.def);
                 }
-            }),
-        );
-        map
+            }
+        }
+        if self.0.chunks.summary().refdefs == 0 {
+            return RefMap::default();
+        }
+        let mut defs = Defs {
+            text,
+            map: RefMap::default(),
+            buf: Vec::new(),
+        };
+        walk::walk(self, &mut defs);
+        defs.map
     }
 
     /// The inline tree of a paragraph or heading (with the inline switches
@@ -595,6 +633,12 @@ impl SyntaxTree {
                         }
                         TokenKind::InfoString | TokenKind::Content => {
                             !s.contains(&b'\n') && !s.contains(&b'\r')
+                        }
+                        TokenKind::ExtMarker => {
+                            s.first() == Some(&b'[')
+                                && (s.ends_with(b"]") || s.ends_with(b"]:"))
+                                && !s.contains(&b'\n')
+                                && !s.contains(&b'\r')
                         }
                         TokenKind::LineEnding => {
                             seen_le = true;

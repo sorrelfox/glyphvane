@@ -33,12 +33,14 @@
 //!   `paragraph table`, or `empty` when it holds only link reference
 //!   definitions); `atx-heading N`;
 //!   `thematic-break`; `fenced-code`; `indented-code`; `html N` (the start
-//!   condition); `front-matter yaml|toml`.
+//!   condition); `front-matter yaml|toml`; `math-block`; `alert TYPE`;
+//!   `footnote-definition`.
 //! - **Tokens** are `(kind start..end "bytes")`, with `+N` before the bytes
 //!   when the token has N virtual spaces (a partially consumed tab). Kinds:
 //!   `bom`, `ws`, `prefix` (container prefixes of the line), `quote-marker`,
 //!   `list-marker`, `code-indent`, `marker`, `info`, `content`,
-//!   `line-ending`. Bytes are written as a Rust string literal (`{:?}`).
+//!   `line-ending`, `ext-marker` (a task checkbox, footnote label or alert
+//!   type). Bytes are written as a Rust string literal (`{:?}`).
 //! - **Markers** are `(refdef N)` (the next N content lines of the text
 //!   block are one link reference definition), `(setext N)`, `(loosen)` and
 //!   `(table-header)`.
@@ -155,6 +157,8 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
                     BlockKind::Html { kind } => format!("html {kind}"),
                     BlockKind::FrontMatter { kind } => format!("front-matter {}", kind.name()),
                     BlockKind::MathBlock => String::from("math-block"),
+                    BlockKind::Alert { kind } => format!("alert {}", kind.name()),
+                    BlockKind::FootnoteDefinition => String::from("footnote-definition"),
                 };
                 let _ = writeln!(out, "{indent}({head} {off}..{}", ends[i]);
                 stack.push(id);

@@ -173,6 +173,11 @@ fn frame(f: &Frame) -> String {
                 m => m.text(),
             }
         ),
+        FrameKind::Alert { kind } => format!("alert#{}({})", f.id.0, kind.name()),
+        FrameKind::Footnote { number, label } => {
+            format!("footnote#{}({number} {label:?})", f.id.0)
+        }
+        FrameKind::Details => format!("details#{}", f.id.0),
     }
 }
 
@@ -214,14 +219,30 @@ fn dump_node(node: &BlockNode, out: &mut String) {
                 code.lines.len()
             );
         }
-        NodeKind::Properties { kind, lines } => {
+        NodeKind::Properties { kind, lines, props } => {
             let _ = writeln!(out, "  front matter {kind:?} lines={}", lines.lines.len());
+            for p in props.iter() {
+                let _ = writeln!(out, "    {:?}: {:?}", p.key, p.values);
+            }
         }
         NodeKind::Math(code) => {
             let _ = writeln!(out, "  math lines={} tex={:?}", code.lines.len(), code.text);
         }
         NodeKind::Table(t) => {
             let _ = writeln!(out, "  table aligns={:?} rows={}", t.aligns, t.rows.len());
+        }
+        NodeKind::Details { summary, open } => {
+            let _ = writeln!(out, "  details open={open}");
+            dump_inline(summary, out);
+        }
+        NodeKind::Picture(p) => {
+            let _ = writeln!(
+                out,
+                "  picture alt={:?} light={:?} dark={:?}",
+                p.alt,
+                p.pick(false).unwrap_or(""),
+                p.pick(true).unwrap_or("")
+            );
         }
         NodeKind::ThematicBreak | NodeKind::EmptyItem | NodeKind::EmptyQuote => {}
     }
@@ -243,6 +264,8 @@ fn dump_inline(c: &InlineContent, out: &mut String) {
             InlineRole::LinkSuffix => "suffix".to_owned(),
             InlineRole::Math(i) => format!("math[{i}]"),
             InlineRole::CellGap(i) => format!("gap[{i}]"),
+            InlineRole::FootnoteRef(i) => format!("footnote[{i}]"),
+            InlineRole::FootnoteBackref(k) => format!("backref[{k}]"),
         };
         let link = span.link.map(|l| format!(" link[{l}]")).unwrap_or_default();
         let what = match it.kind() {

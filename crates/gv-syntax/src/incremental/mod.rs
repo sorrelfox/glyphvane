@@ -654,6 +654,7 @@ impl ReparseTask {
                             k: 0,
                         });
                         depth += 1;
+                        old_refdefs |= e.is_footnote_open();
                     } else if e.is_close() {
                         depth = depth.saturating_sub(1);
                     } else if e.is_refdef() {
@@ -773,7 +774,11 @@ impl ReparseTask {
         self.sink.ids = ids;
         self.changes.ids_kept = kept;
         self.changes.ids_new = fresh;
-        let new_refdefs = self.sink.events.iter().any(|e| e.is_refdef());
+        let new_refdefs = self
+            .sink
+            .events
+            .iter()
+            .any(|e| e.is_refdef() || e.is_footnote_open());
 
         let base = Arc::clone(&self.base.0);
         let restart = self.restart.global;
@@ -1009,6 +1014,7 @@ impl ReparseTask {
 fn phantom_kind(k: Kind) -> BlockKind {
     match k {
         Kind::BlockQuote => BlockKind::BlockQuote,
+        Kind::FootnoteDefinition => BlockKind::FootnoteDefinition,
         Kind::List { ordered: true, ch } => BlockKind::OrderedList {
             start: 1,
             delimiter: ch,

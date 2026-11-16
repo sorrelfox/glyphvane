@@ -23,16 +23,16 @@ impl Visitor for Rec {
     fn enter(&mut self, c: &Container) {
         assert!(c.range.is_empty(), "enter with a non-empty range: {c:?}");
         self.0.push(Visit::Enter(format!(
-            "{:?} {:?} start={} line={}",
-            c.id, c.kind, c.range.start, c.line
+            "{:?} {:?} start={} line={} marker={:?}",
+            c.id, c.kind, c.range.start, c.line, c.marker
         )));
     }
 
     fn exit(&mut self, c: &Container) {
         self.0.push(Visit::Exit(
             format!(
-                "{:?} {:?} start={} line={}",
-                c.id, c.kind, c.range.start, c.line
+                "{:?} {:?} start={} line={} marker={:?}",
+                c.id, c.kind, c.range.start, c.line, c.marker
             ),
             c.range.clone(),
         ));
