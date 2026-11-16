@@ -849,8 +849,9 @@ impl Element for ReaderElement {
                 }),
                 // A table row: the table's frame (1 px `border.default`,
                 // radius 6), the header on `surface.sunken`, a line above
-                // each body row. The table is as wide as its columns, at
-                // most the column; wider tables scroll sideways as a whole.
+                // each body row. The table is as wide as its columns, which
+                // are fitted to the column (cells wrap); a table whose
+                // words alone do not fit scrolls sideways as a whole.
                 ItemKind::TableRow { row, .. } => {
                     let (first, last) = chunk_ends(&item.kind);
                     let bw = m.table_border;
@@ -924,8 +925,8 @@ impl Element for ReaderElement {
                         });
                     }
                 }
-                // A diagram: centred, scrolling sideways when wider than the
-                // column. A card or note above the source: in a code block's
+                // A diagram: centred, scaled down to the column when wider
+                // (`fit_boxes`). A card or note above the source: in a code block's
                 // frame, with *Copy source* (and *Render anyway*) on its
                 // first line.
                 ItemKind::Diagram { .. } => {

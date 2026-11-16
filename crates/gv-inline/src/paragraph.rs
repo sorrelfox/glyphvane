@@ -9,7 +9,7 @@ use std::ops::Range;
 use unicode_linebreak::{BreakOpportunity, linebreaks};
 use unicode_segmentation::{GraphemeCursor, GraphemeIndices, UnicodeSegmentation};
 
-use crate::style::{InlineBox, ParagraphStyle, RunStyle};
+use crate::style::{Align, InlineBox, ParagraphStyle, RunStyle};
 
 /// The object replacement character stands for an atomic box in the logical
 /// text that line breaking sees.
@@ -186,6 +186,19 @@ impl Item {
     }
 }
 
+/// A column of a paragraph laid out side by side (a table row's cell):
+/// the logical text from `start` to the next column's start (or the end)
+/// wraps within `width` px, `x` px from the block's left edge, its lines
+/// aligned by `align` and stacked from the block's top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Column {
+    /// Logical offset where the column's text starts.
+    pub start: usize,
+    pub x: f32,
+    pub width: f32,
+    pub align: Align,
+}
+
 /// A break opportunity before `offset` in the logical text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Break {
@@ -213,6 +226,8 @@ pub struct Paragraph {
     items: Vec<Item>,
     breaks: Vec<Break>,
     source_anchor: usize,
+    /// Side-by-side columns; empty for ordinary flow.
+    columns: Box<[Column]>,
 }
 
 impl Paragraph {
@@ -251,6 +266,39 @@ impl Paragraph {
             }
             _ => false,
         }
+    }
+
+    /// The columns the paragraph is laid out in, side by side; empty for
+    /// ordinary flow.
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// Lays the paragraph out in `columns`, side by side (see [`Column`]):
+    /// each column wraps within its own width and the layout's width is
+    /// then ignored. Starts are sorted and clamped to the text; the first
+    /// column always starts at 0. An empty list restores ordinary flow.
+    pub fn set_columns(&mut self, columns: impl IntoIterator<Item = Column>) {
+        let len = self.len();
+        let mut columns: Vec<Column> = columns
+            .into_iter()
+            .map(|c| Column {
+                start: c.start.min(len),
+                x: if c.x.is_finite() { c.x } else { 0.0 },
+                width: if c.width.is_finite() {
+                    c.width.max(0.0)
+                } else {
+                    0.0
+                },
+                ..c
+            })
+            .collect();
+        columns.sort_by_key(|c| c.start);
+        columns.dedup_by_key(|c| c.start);
+        if let Some(first) = columns.first_mut() {
+            first.start = 0;
+        }
+        self.columns = columns.into_boxed_slice();
     }
 
     /// Logical text of item `ix` (U+FFFC for a box, `\n` for a hard break).
@@ -368,6 +416,7 @@ impl Paragraph {
                 .map(|it| it.anchors.len() * size_of::<Anchor>())
                 .sum::<usize>()
             + self.breaks.capacity() * size_of::<Break>()
+            + self.columns.len() * size_of::<Column>()
     }
 }
 
@@ -492,6 +541,7 @@ impl ParagraphBuilder {
             items: self.items,
             breaks,
             source_anchor: self.source_anchor,
+            columns: Box::default(),
         }
     }
 

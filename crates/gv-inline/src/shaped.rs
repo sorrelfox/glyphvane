@@ -5,6 +5,7 @@
 //! width. Built once per content and font change; any number of layouts at
 //! different widths share it.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::cache::RunCache;
@@ -309,18 +310,41 @@ impl<G> Shaped<G> {
         self.widest_segment(|_| true)
     }
 
+    /// [`Self::max_content_width`] of the logical range `range` only (a
+    /// table cell of a row paragraph), as if it ended with a forced break.
+    pub fn max_content_width_in(&self, range: Range<usize>) -> f32 {
+        self.widest_segment_in(range, |mandatory| mandatory)
+    }
+
+    /// [`Self::min_content_width`] of the logical range `range` only.
+    pub fn min_content_width_in(&self, range: Range<usize>) -> f32 {
+        self.widest_segment_in(range, |_| true)
+    }
+
     fn widest_segment(&self, ends_segment: impl Fn(bool) -> bool) -> f32 {
+        self.widest_segment_in(0..self.paragraph.len(), ends_segment)
+    }
+
+    fn widest_segment_in(&self, range: Range<usize>, ends_segment: impl Fn(bool) -> bool) -> f32 {
+        let end = range.end.min(self.paragraph.len());
         let mut widest = 0.0f32;
-        let mut start = 0;
+        let mut start = range.start.min(end);
         for b in self.paragraph.breaks() {
             let pos = b.offset as usize;
+            if pos <= start {
+                continue;
+            }
+            if pos >= end {
+                break;
+            }
             if ends_segment(b.mandatory) {
                 let trail = self.trim_hanging(start, pos);
                 widest = widest.max(self.width(start, trail));
                 start = pos;
             }
         }
-        widest
+        let trail = self.trim_hanging(start, end);
+        widest.max(self.width(start, trail))
     }
 
     /// Advance of the logical range `a..b`, including background padding

@@ -469,11 +469,18 @@ impl Painter<'_> {
             }
             Some(BoxContent::Blank) => {}
             Some(BoxContent::Diagram { diagram, scale }) => {
+                // A box scaled down to fit the column scales the drawing.
+                let natural = diagram.width * scale;
+                let scale = if natural > f32::from(bounds.size.width) && natural > 0.0 {
+                    scale * f32::from(bounds.size.width) / natural
+                } else {
+                    *scale
+                };
                 super::diagram::paint_diagram(
                     self.window,
                     diagram,
                     bounds.origin,
-                    *scale,
+                    scale,
                     self.palette,
                 );
             }
@@ -484,12 +491,19 @@ impl Painter<'_> {
                 text_font,
             }) => {
                 let current = self.palette.role(*color);
+                // A box scaled down to fit the column scales the formula.
+                let natural = layout.width * em;
+                let em = if natural > f32::from(bounds.size.width) && natural > 0.0 {
+                    em * f32::from(bounds.size.width) / natural
+                } else {
+                    *em
+                };
                 super::math::paint_math(
                     self.window,
                     self.cx,
                     layout,
                     bounds.origin,
-                    *em,
+                    em,
                     current,
                     text_font,
                 );

@@ -397,3 +397,77 @@ fn normal_and_tight_line_heights() {
     let l = f.layout(1000.0);
     assert_eq!((l.lines()[0].height, l.lines()[0].baseline), (8.0, 7.0));
 }
+
+#[test]
+fn columns_wrap_side_by_side_and_hit_test_per_column() {
+    // Two cells, each after a zero-width gap box: "aaa bbb ccc" (66 px
+    // unwrapped) in a 42 px column at x 10, "dd ee" right-aligned in a
+    // 20 px column at x 70.
+    let gap = || Piece::Box(InlineBox::new(BoxKind::Other, 0.0, 0.0, 0.0));
+    let mut p = build(
+        &[
+            gap(),
+            text("aaa bbb ccc", body()),
+            gap(),
+            text("dd ee", body()),
+            gap(),
+        ],
+        paragraph_style(),
+    );
+    let second = 3 + "aaa bbb ccc".len();
+    p.set_columns([
+        gv_inline::Column {
+            start: 0,
+            x: 10.0,
+            width: 42.0,
+            align: gv_inline::Align::Left,
+        },
+        gv_inline::Column {
+            start: second,
+            x: 70.0,
+            width: 20.0,
+            align: gv_inline::Align::Right,
+        },
+    ]);
+    let f = Fixture::from_paragraph(p, gv_inline::FakeMono::default());
+    // The width passed is ignored: each column wraps in its own.
+    let l = f.layout(1.0e5);
+    assert!(l.is_columnar());
+    let texts: Vec<String> = l
+        .lines()
+        .iter()
+        .map(|line| {
+            f.paragraph.text()[line.range.clone()]
+                .trim_end()
+                .replace(gv_inline::OBJECT, "")
+        })
+        .collect();
+    assert_eq!(texts, ["aaa bbb", "ccc", "dd", "ee"]);
+    // Each column's lines start at the top; the block is as tall as the
+    // tallest column.
+    assert_eq!(l.lines()[0].top, 0.0);
+    assert_eq!(l.lines()[2].top, 0.0);
+    assert_eq!(l.height(), 32.0);
+    // Left column at x 10; right column right-aligned: "dd" ends at 90.
+    assert_eq!(l.lines()[0].x, 10.0);
+    assert!((l.lines()[2].x + l.lines()[2].width - 90.0).abs() < 0.01);
+    assert!((l.width() - 90.0).abs() < 0.01);
+    // Hits pick the column by x, then the line by y.
+    let hit = l.hit(85.0, 20.0);
+    assert_eq!(hit.line, 3);
+    let hit = l.hit(12.0, 20.0);
+    assert_eq!(hit.line, 1);
+    assert_eq!(f.paragraph.source_offset(hit.offset, hit.affinity), 3 + 8);
+    // Carets and selection follow the columns.
+    let c = l.caret(second + 3, Affinity::Downstream);
+    assert_eq!(c.line, 2);
+    assert!(c.x >= 70.0);
+    let rects = l.selection_rects(3, second + 8);
+    assert!(rects.iter().any(|r| r.x >= 70.0 && r.y == 0.0), "{rects:?}");
+    assert_eq!(l.lines_between(20.0, 21.0), 0..4);
+    assert_eq!(l.item_at_point(85.0, 20.0), Some(3));
+    // The cells' own content widths.
+    assert_eq!(f.shaped.max_content_width_in(3..second), 66.0);
+    assert_eq!(f.shaped.min_content_width_in(3..second), 18.0);
+    assert_eq!(f.shaped.min_content_width_in(second + 3..second + 8), 12.0);
+}

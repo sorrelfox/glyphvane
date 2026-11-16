@@ -18,12 +18,18 @@
 //! - Inline formulas are typeset the same way and their boxes resized; one
 //!   that does not render keeps its estimated box, drawn as a placeholder
 //!   (not designed).
-//! - A table row is one paragraph laid out without wrapping: its gap boxes
-//!   are set from the table's column widths, measured from the cells of
-//!   its first rows ([`TABLE_SAMPLE`]) and widened when a later row is
-//!   wider (a one-time reflow of the rows laid out). Columns align per
-//!   the delimiter row.
+//! - A table row is one paragraph laid out in columns side by side
+//!   ([`gv_inline::Column`]), one per cell, each wrapping within its
+//!   column. Column widths come from the cells of the table's first rows
+//!   ([`TABLE_SAMPLE`], widened when a later row is wider): every column
+//!   gets its widest cell when the table fits the text column, else the
+//!   room is shared out between the columns' widest words and widest
+//!   cells, so long cells wrap. Only when even the widest words do not fit
+//!   is the table wider than the text column (it then scrolls sideways).
+//!   Columns align per the delimiter row.
 //! - Thematic breaks, empty list items and empty quotes have fixed heights.
+//! - Images, display formulas and diagrams wider than the text column are
+//!   scaled down to it ([`InlineBlock::fit_boxes`]).
 //! - A Mermaid diagram is one box of the diagram's size, painted from the
 //!   engine's theme-agnostic display list ([`super::diagram`]); it keeps
 //!   its estimated height, blank, until its job lands. A fallback card or
@@ -191,6 +197,15 @@ pub(crate) fn text_width(item: &Item, column: f32, m: &Metrics, wrapped: bool) -
         }
     } else {
         content
+    }
+}
+
+/// Scales the images, formulas and diagrams of item `item`'s `block`
+/// that are wider than its text width `w` down to it (table cells keep
+/// theirs: their columns size to them).
+pub(crate) fn fit_boxes(item: &Item, block: &RefCell<InlineBlock>, w: f32) {
+    if !matches!(item.kind, ItemKind::TableRow { .. }) && w < NO_WRAP {
+        block.borrow_mut().fit_boxes(w);
     }
 }
 
@@ -591,37 +606,33 @@ fn typeset_math(
     Some((p, boxes))
 }
 
+/// A table row's columns: the table's column widths, its alignments and
+/// the cells' horizontal padding.
+#[derive(Clone, Copy)]
+struct RowColumns<'a> {
+    widths: &'a TableWidths,
+    aligns: &'a [Alignment],
+    pad: f32,
+}
+
 /// The block of inline content `content` (of node `node`, whose formulas
 /// before it number `first`): its paragraph with formulas typeset, the
-/// link status icons, and `gaps` (a table row's gap box widths by column)
-/// applied.
+/// link status icons, and `columns` (a table row's) applied.
 fn content_block(
     tree: &RenderTree,
     node: usize,
     first: usize,
     content: &InlineContent,
     role: TextRole,
-    gaps: Option<&[f32]>,
+    columns: Option<RowColumns<'_>>,
 ) -> InlineBlock {
     let math = typeset_math(tree, node, first, content, role);
     let mut block = inline_block(content);
     let mut paragraph = math.as_ref().map(|(p, _)| p.clone());
-    if let Some(gaps) = gaps {
+    if let Some(cols) = columns {
         let p = paragraph.get_or_insert_with(|| (*content.paragraph).clone());
-        for (ix, span) in content.spans.iter().enumerate() {
-            if let (InlineRole::CellGap(col), Some(old)) =
-                (span.role, content.paragraph.items()[ix].inline_box())
-                && let Some(&w) = gaps.get(col as usize)
-            {
-                p.replace_box(
-                    ix,
-                    InlineBox {
-                        width: w.max(0.0),
-                        ..*old
-                    },
-                );
-            }
-        }
+        let spec = cols.widths.row_columns(content, p, cols.aligns, cols.pad);
+        p.set_columns(spec);
     }
     if let Some(p) = paragraph {
         block.set_paragraph(Arc::new(p));
@@ -647,46 +658,112 @@ fn formulas_before(t: &TableBlock, row: usize) -> usize {
     t.rows.iter().take(row).map(|r| r.content.math.len()).sum()
 }
 
-/// Column widths of a table: the widest cell content per column, and the
-/// cell widths of the rows measured.
+/// Column widths of a table: per column the widest cell content
+/// unwrapped and the widest word, from the rows measured, and the widths
+/// the columns get in the room the text column leaves.
 #[derive(Debug, Default)]
 pub(crate) struct TableWidths {
+    /// The widest cell content per column, unwrapped (max-content).
     pub columns: Vec<f32>,
-    rows: HashMap<u32, Rc<[f32]>>,
+    /// The widest word per column (min-content).
+    pub min: Vec<f32>,
+    rows: std::collections::HashSet<u32>,
+    /// The room (inner table width) the columns were fitted to, and their
+    /// content widths there.
+    fit: Option<(f32, Vec<f32>)>,
 }
 
 impl TableWidths {
-    /// The gap box widths of a row with cell widths `cells`: padding, and
-    /// the room the column alignments leave.
-    fn gaps(&self, cells: &[f32], aligns: &[Alignment], pad: f32) -> Vec<f32> {
+    /// The content width of each column: fitted to the room, or unwrapped
+    /// before the first fit.
+    pub fn fitted(&self) -> &[f32] {
+        self.fit.as_ref().map_or(&self.columns[..], |(_, f)| &f[..])
+    }
+
+    /// Fits the columns to `room` px (the table's inner width), each
+    /// column `pad` px of padding on both sides: unwrapped when they fit;
+    /// else each column gets its widest word plus a share of the rest in
+    /// proportion to how much wider its widest cell is; the widest words
+    /// when even they do not fit (the table is then wider than `room`).
+    /// Returns whether the widths changed.
+    pub fn refit(&mut self, room: f32, pad: f32) -> bool {
         let n = self.columns.len();
-        let offset = |c: usize| {
-            let room = (self.columns[c] - cells.get(c).copied().unwrap_or(0.0)).max(0.0);
-            match aligns.get(c) {
-                Some(Alignment::Center) => room / 2.0,
-                Some(Alignment::Right) => room,
-                _ => 0.0,
-            }
+        let space = (room - 2.0 * pad * n as f32).max(0.0);
+        let max: f32 = self.columns.iter().sum();
+        let min: f32 = self.min.iter().take(n).sum();
+        let fitted: Vec<f32> = if max <= space + 0.01 {
+            self.columns.clone()
+        } else if min >= space || max - min <= 0.01 {
+            (0..n)
+                .map(|c| self.min.get(c).copied().unwrap_or(0.0))
+                .collect()
+        } else {
+            let share = (space - min) / (max - min);
+            (0..n)
+                .map(|c| {
+                    let lo = self.min.get(c).copied().unwrap_or(0.0);
+                    lo + (self.columns[c] - lo).max(0.0) * share
+                })
+                .collect()
         };
-        let rest = |c: usize| {
-            (self.columns[c] - cells.get(c).copied().unwrap_or(0.0)).max(0.0) - offset(c)
-        };
-        (0..=n)
-            .map(|c| {
-                if c == 0 {
-                    pad + if n > 0 { offset(0) } else { 0.0 }
-                } else if c < n {
-                    rest(c - 1) + 2.0 * pad + offset(c)
-                } else {
-                    rest(c - 1) + pad
-                }
-            })
-            .collect()
+        let changed = self.fit.as_ref().is_none_or(|(_, old)| {
+            old.len() != fitted.len() || old.iter().zip(&fitted).any(|(a, b)| (a - b).abs() > 0.01)
+        });
+        self.fit = Some((room, fitted));
+        changed
+    }
+
+    /// Whether the columns were fitted to `room` px.
+    fn fitted_to(&self, room: f32) -> bool {
+        self.fit
+            .as_ref()
+            .is_some_and(|(r, _)| (r - room).abs() < 0.01)
     }
 
     /// The table's width: its columns with their padding.
     pub fn width(&self, pad: f32) -> f32 {
-        self.columns.iter().map(|w| w + 2.0 * pad).sum()
+        self.fitted().iter().map(|w| w + 2.0 * pad).sum()
+    }
+
+    /// The columns of a row's paragraph `p` (of content `content`): each
+    /// cell from its gap box on, at its column's x (padding included),
+    /// as wide as its column, aligned per `aligns`.
+    fn row_columns(
+        &self,
+        content: &InlineContent,
+        p: &gv_inline::Paragraph,
+        aligns: &[Alignment],
+        pad: f32,
+    ) -> Vec<gv_inline::Column> {
+        let widths = self.fitted();
+        let n = widths.len();
+        let mut lefts = Vec::with_capacity(n);
+        let mut x = 0.0;
+        for w in widths {
+            lefts.push(x + pad);
+            x += w + 2.0 * pad;
+        }
+        content
+            .spans
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, span)| match span.role {
+                InlineRole::CellGap(col) if (col as usize) < n => {
+                    let c = col as usize;
+                    Some(gv_inline::Column {
+                        start: p.items().get(ix)?.range().start,
+                        x: lefts[c],
+                        width: widths[c],
+                        align: match aligns.get(c) {
+                            Some(Alignment::Center) => Align::Center,
+                            Some(Alignment::Right) => Align::Right,
+                            _ => Align::Left,
+                        },
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -1017,16 +1094,19 @@ impl ItemCache {
             (NodeKind::Table(t), ItemKind::TableRow { row, .. }) => {
                 let content = &t.rows.get(*row as usize)?.content;
                 let first = formulas_before(t, *row as usize);
-                let widths = self.tables.get(&item.id.block);
-                let cells = widths.and_then(|w| w.rows.get(row).cloned());
-                let gaps = widths.zip(cells).map(|(w, cells)| {
-                    let pad = tree.options().metrics.table_padding_x;
-                    w.gaps(&cells, &t.aligns, pad)
-                });
-                let mut block =
-                    content_block(tree, item.node, first, content, role, gaps.as_deref());
+                let columns = self
+                    .tables
+                    .get(&item.id.block)
+                    .filter(|w| w.rows.contains(row) && w.fit.is_some())
+                    .map(|widths| RowColumns {
+                        widths,
+                        aligns: &t.aligns,
+                        pad: tree.options().metrics.table_padding_x,
+                    });
+                let measured = columns.is_some();
+                let mut block = content_block(tree, item.node, first, content, role, columns);
                 self.place_images(item.id, content, &mut block, &mut pending);
-                if gaps.is_none() || pending {
+                if !measured || pending {
                     // Not measured yet: laid out without its column widths,
                     // and not kept.
                     return Some(Rc::new(RefCell::new(block)));
@@ -1372,12 +1452,13 @@ impl DocItems<'_> {
         self.tree.code_wrap(item.id.block)
     }
 
-    /// Measures what item `ix` needs before it is laid out: when it is a
-    /// table row, the cells of its row and, the first time, the column
-    /// widths of its table from the first [`TABLE_SAMPLE`] rows. A row
-    /// wider than the columns widens them, and the rows laid out before
-    /// are laid out again.
-    pub(crate) fn prepare(&mut self, ix: usize) {
+    /// Measures what item `ix` needs before it is laid out in a text
+    /// column `width` px wide: when it is a table row, the cells of its row
+    /// and, the first time, the column widths of its table from the first
+    /// [`TABLE_SAMPLE`] rows, fitted to the room the text column leaves. A
+    /// row wider than the columns widens them, and a new fit (a wider row,
+    /// another width) lays the rows laid out before out again.
+    pub(crate) fn prepare(&mut self, ix: usize, width: f32) {
         let tree = self.tree;
         let Some(item) = tree.items().get(ix) else {
             return;
@@ -1392,11 +1473,14 @@ impl DocItems<'_> {
             return;
         };
         let id = item.id.block;
+        let m = *self.metrics();
+        let room =
+            (width - item.content_x(&m) - item.content_right(&m)).max(1.0) - 2.0 * m.table_border;
         if self
             .cache
             .tables
             .get(&id)
-            .is_some_and(|w| w.rows.contains_key(&row))
+            .is_some_and(|w| w.rows.contains(&row) && w.fitted_to(room))
         {
             return;
         }
@@ -1404,6 +1488,7 @@ impl DocItems<'_> {
         let first_time = widths.rows.is_empty();
         let n = t.aligns.len();
         widths.columns.resize(n, 0.0);
+        widths.min.resize(n, 0.0);
         let sample = u32::try_from(TABLE_SAMPLE).unwrap_or(u32::MAX);
         let measure: Vec<u32> = if first_time {
             (0..rows.min(sample)).chain(std::iter::once(row)).collect()
@@ -1412,19 +1497,29 @@ impl DocItems<'_> {
         };
         let mut grew = false;
         for r in measure {
-            if widths.rows.contains_key(&r) {
+            if widths.rows.contains(&r) {
                 continue;
             }
-            let cells = self.cell_widths(t, item.node, r as usize);
-            for (c, &w) in cells.iter().enumerate().take(n) {
-                if w > widths.columns[c] + 0.01 {
-                    widths.columns[c] = w;
+            for (c, (max, min)) in self
+                .cell_widths(t, item.node, r as usize)
+                .into_iter()
+                .enumerate()
+                .take(n)
+            {
+                if max > widths.columns[c] + 0.01 {
+                    widths.columns[c] = max;
+                    grew = true;
+                }
+                if min > widths.min[c] + 0.01 {
+                    widths.min[c] = min;
                     grew = true;
                 }
             }
-            widths.rows.insert(r, cells.into());
+            widths.rows.insert(r);
         }
-        if grew && !first_time {
+        let pad = m.table_padding_x;
+        let refit = (grew || !widths.fitted_to(room)) && widths.refit(room, pad);
+        if refit && !first_time {
             self.cache
                 .items
                 .retain(|k, _| k.block != id || k.chunk == 0);
@@ -1433,8 +1528,9 @@ impl DocItems<'_> {
     }
 
     /// The content widths of the cells of row `row` of table `t` (of node
-    /// `node`), laid out without wrapping.
-    fn cell_widths(&mut self, t: &TableBlock, node: usize, row: usize) -> Vec<f32> {
+    /// `node`): unwrapped (max-content) and of the widest word
+    /// (min-content).
+    fn cell_widths(&mut self, t: &TableBlock, node: usize, row: usize) -> Vec<(f32, f32)> {
         let Some(r) = t.rows.get(row) else {
             return Vec::new();
         };
@@ -1447,18 +1543,25 @@ impl DocItems<'_> {
         let mut block = content_block(self.tree, node, first, &r.content, role, None);
         let layout = self.text.borrow_mut().layout(&mut block, NO_WRAP, self.ts);
         let items = layout.paragraph().items();
-        let xs: Vec<f32> = r
+        // A cell runs from the end of its gap box to the next one's start.
+        let gaps: Vec<Range<usize>> = r
             .content
             .spans
             .iter()
             .enumerate()
             .filter(|(_, s)| matches!(s.role, InlineRole::CellGap(_)))
-            .filter_map(|(ix, _)| {
-                let at = items.get(ix)?.range().start;
-                Some(layout.caret(at, Affinity::Downstream).x)
-            })
+            .filter_map(|(ix, _)| Some(items.get(ix)?.range()))
             .collect();
-        xs.windows(2).map(|w| (w[1] - w[0]).max(0.0)).collect()
+        let shaped = layout.shaped();
+        gaps.windows(2)
+            .map(|w| {
+                let cell = w[0].end..w[1].start.max(w[0].end);
+                (
+                    shaped.max_content_width_in(cell.clone()),
+                    shaped.min_content_width_in(cell),
+                )
+            })
+            .collect()
     }
 }
 
@@ -1486,12 +1589,13 @@ impl Items for DocItems<'_> {
         if self.cache.hidden(self.tree, ix) {
             return 0.0;
         }
-        self.prepare(ix);
+        self.prepare(ix, width);
         let item = &self.tree.items()[ix];
         let m = *self.metrics();
         let content = match self.cache.block(self.tree, ix) {
             Some(block) => {
                 let w = text_width(item, width, &m, self.is_wrapped(item));
+                fit_boxes(item, &block, w);
                 let layout = self
                     .text
                     .borrow_mut()
@@ -1525,12 +1629,13 @@ impl Items for DocItems<'_> {
     }
 
     fn offset_of(&mut self, ix: usize, anchor: &TextAnchor, width: f32) -> Option<f32> {
-        self.prepare(ix);
+        self.prepare(ix, width);
         let item = &self.tree.items()[ix];
         let node = self.tree.node_of(ix)?;
         let m = *self.metrics();
         let block = self.cache.block(self.tree, ix)?;
         let w = text_width(item, width, &m, self.is_wrapped(item));
+        fit_boxes(item, &block, w);
         let layout = self
             .text
             .borrow_mut()
@@ -1629,29 +1734,57 @@ mod tests {
     }
 
     #[test]
-    fn gaps_place_cells_in_their_columns() {
-        let w = TableWidths {
-            columns: vec![10.0, 20.0, 30.0],
-            rows: HashMap::new(),
+    fn columns_fit_the_room_by_sharing_it_between_words_and_cells() {
+        let mut w = TableWidths {
+            columns: vec![50.0, 300.0],
+            min: vec![40.0, 60.0],
+            ..TableWidths::default()
         };
-        let aligns = [Alignment::Left, Alignment::Center, Alignment::Right];
-        let gaps = w.gaps(&[4.0, 10.0, 6.0], &aligns, 2.0);
-        // Left: right after the padding; centred: 5 of 10 spare before;
-        // right-aligned: all 24 spare before.
-        assert_eq!(
-            gaps,
-            vec![2.0, 6.0 + 4.0 + 5.0, 5.0 + 4.0 + 24.0, 0.0 + 2.0]
+        // Unwrapped when there is room: 350 + 4 × 5 padding.
+        assert!(w.refit(400.0, 5.0));
+        assert_eq!(w.fitted(), &[50.0, 300.0]);
+        assert_eq!(w.width(5.0), 370.0);
+        assert!(!w.refit(400.0, 5.0), "same room, same widths");
+        // 200 px for content: the words take 100, the other 100 are shared
+        // in proportion to the room each column wants beyond its words
+        // (10 and 240).
+        assert!(w.refit(220.0, 5.0));
+        let f = w.fitted().to_vec();
+        assert!((f[0] - (40.0 + 10.0 * 100.0 / 250.0)).abs() < 0.01, "{f:?}");
+        assert!(
+            (f[1] - (60.0 + 240.0 * 100.0 / 250.0)).abs() < 0.01,
+            "{f:?}"
         );
-        // Cells end where their columns say.
-        let mut x = 0.0;
-        let cells = [4.0, 10.0, 6.0];
-        let mut ends = Vec::new();
-        for (g, c) in gaps.iter().zip(cells) {
-            x += g + c;
-            ends.push(x);
-        }
-        assert_eq!(ends, vec![6.0, 31.0, 70.0]);
-        assert_eq!(x + gaps[3], w.width(2.0));
+        assert!((w.width(5.0) - 220.0).abs() < 0.01);
+        // Not even the words fit: the words' widths, wider than the room.
+        assert!(w.refit(50.0, 5.0));
+        assert_eq!(w.fitted(), &[40.0, 60.0]);
+    }
+
+    #[test]
+    fn a_row_paragraph_gets_one_column_per_cell() {
+        let t = math_tree("| a | b |\n|---|--:|\n| c | d |\n");
+        let ix = t
+            .items()
+            .iter()
+            .position(|it| matches!(it.kind, ItemKind::TableRow { row: 1, .. }))
+            .expect("a body row");
+        let NodeKind::Table(table) = &t.node_of(ix).expect("node").kind else {
+            panic!("not a table");
+        };
+        let content = &table.rows[1].content;
+        let mut w = TableWidths {
+            columns: vec![10.0, 20.0],
+            min: vec![10.0, 20.0],
+            ..TableWidths::default()
+        };
+        w.refit(1000.0, 2.0);
+        let cols = w.row_columns(content, &content.paragraph, &table.aligns, 2.0);
+        assert_eq!(cols.len(), 2);
+        assert_eq!((cols[0].x, cols[0].width), (2.0, 10.0));
+        assert_eq!((cols[1].x, cols[1].width), (16.0, 20.0));
+        assert_eq!(cols[1].align, Align::Right);
+        assert!(cols[0].start < cols[1].start);
     }
 
     fn math_items(t: &RenderTree) -> Vec<Rc<RefCell<InlineBlock>>> {

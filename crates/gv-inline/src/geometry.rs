@@ -65,10 +65,31 @@ pub struct Decoration {
 impl<G> Layout<G> {
     // ----- lines ------------------------------------------------------------
 
-    /// The line at `y`, clamped to the first and last line.
+    /// The line at `y`, clamped to the first and last line. In a columnar
+    /// layout, the first column's line at `y` (clamped to its lines), or
+    /// the first line of any column at `y` below it.
     pub fn line_at_y(&self, y: f32) -> usize {
+        if self.is_columnar() {
+            let first = self.column_lines_at(f32::NEG_INFINITY);
+            let li = self.line_in(first.clone(), y);
+            if y < self.lines[li].bottom() {
+                return li;
+            }
+            return self
+                .lines
+                .iter()
+                .position(|l| l.top <= y && y < l.bottom())
+                .unwrap_or(li);
+        }
         let ix = self.lines.partition_point(|l| l.bottom() <= y);
         ix.min(self.lines.len() - 1)
+    }
+
+    /// The line at `y` among `lines` (top to bottom), clamped to them.
+    fn line_in(&self, lines: std::ops::Range<usize>, y: f32) -> usize {
+        let (start, end) = (lines.start, lines.end.max(lines.start + 1));
+        let ix = start + self.lines[start..end].partition_point(|l| l.bottom() <= y);
+        ix.min(end - 1)
     }
 
     /// The line that shows the caret for `offset`. At a soft wrap,
@@ -112,7 +133,11 @@ impl<G> Layout<G> {
     /// give the line's end (`Upstream`, so the caret stays on that line);
     /// points before its start give the line's start.
     pub fn hit(&self, x: f32, y: f32) -> Hit {
-        let li = self.line_at_y(y);
+        let li = if self.is_columnar() {
+            self.line_in(self.column_lines_at(x), y)
+        } else {
+            self.line_at_y(y)
+        };
         let line = &self.lines[li];
         let frags = &self.frags[line.frags.clone()];
         if frags.is_empty() {
@@ -186,6 +211,15 @@ impl<G> Layout<G> {
     /// The item whose fragment (padding and margins included) contains the
     /// point, if any: for hover regions of links, tags and boxes.
     pub fn item_at_point(&self, x: f32, y: f32) -> Option<usize> {
+        if self.is_columnar() {
+            return self
+                .lines
+                .iter()
+                .filter(|l| l.top <= y && y < l.bottom())
+                .flat_map(|l| &self.frags[l.frags.clone()])
+                .find(|f| f.outer_left() <= x && x < f.outer_right())
+                .map(|f| f.item);
+        }
         let li = self.lines.partition_point(|l| l.bottom() <= y);
         let line = self.lines.get(li).filter(|l| l.top <= y)?;
         self.frags[line.frags.clone()]

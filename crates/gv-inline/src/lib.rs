@@ -68,7 +68,8 @@ pub use geometry::{Caret, Decoration, DecorationKind, Hit};
 pub use layout::{Fragment, Layout, Line, Rect};
 pub use measure::{FakeMono, FontMetrics, Measure, ShapedRun, Stop};
 pub use paragraph::{
-    Affinity, Bias, HARD_BREAK, Item, ItemKind, OBJECT, OBJECT_LEN, Paragraph, ParagraphBuilder,
+    Affinity, Bias, Column, HARD_BREAK, Item, ItemKind, OBJECT, OBJECT_LEN, Paragraph,
+    ParagraphBuilder,
 };
 pub use shaped::{Shaped, Strut};
 pub use style::{

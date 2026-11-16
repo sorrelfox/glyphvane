@@ -258,6 +258,9 @@ pub struct InlineBlock {
     boxes: HashMap<u32, BoxContent>,
     generation: u64,
     painted: Option<Painted>,
+    /// The width boxes were last fitted to ([`Self::fit_boxes`]) and, while
+    /// some are scaled down, the paragraph with them at their own size.
+    fitted: Option<(f32, Option<Arc<Paragraph>>)>,
 }
 
 impl InlineBlock {
@@ -267,6 +270,7 @@ impl InlineBlock {
             boxes: HashMap::new(),
             generation: 0,
             painted: None,
+            fitted: None,
         }
     }
 
@@ -279,6 +283,67 @@ impl InlineBlock {
     pub fn set_paragraph(&mut self, paragraph: Arc<Paragraph>) {
         self.cache.set_paragraph(paragraph);
         self.painted = None;
+        self.fitted = None;
+    }
+
+    /// Scales images, formulas and diagrams wider than `width` (margins
+    /// included) down to it, keeping their aspect ratio; they get their own
+    /// size back when the width allows. Returns whether the paragraph
+    /// changed (its layouts are dropped then).
+    pub fn fit_boxes(&mut self, width: f32) -> bool {
+        if !width.is_finite() || width <= 0.0 {
+            return false;
+        }
+        if let Some((w, _)) = &self.fitted
+            && (w - width).abs() < 0.01
+        {
+            return false;
+        }
+        let unfitted = self.fitted.take().and_then(|(_, p)| p);
+        let base = unfitted
+            .clone()
+            .unwrap_or_else(|| self.cache.paragraph().clone());
+        let mut fitted: Option<Paragraph> = None;
+        for (ix, item) in base.items().iter().enumerate() {
+            let Some(b) = item.inline_box() else {
+                continue;
+            };
+            let scalable = matches!(b.kind, gv_inline::BoxKind::Image | gv_inline::BoxKind::Math)
+                || matches!(self.boxes.get(&b.id), Some(BoxContent::Diagram { .. }));
+            let room = width - b.margin_left - b.margin_right;
+            if !scalable || room <= 0.0 || b.width <= room + 0.01 {
+                continue;
+            }
+            let f = room / b.width;
+            fitted.get_or_insert_with(|| (*base).clone()).replace_box(
+                ix,
+                gv_inline::InlineBox {
+                    width: room,
+                    ascent: b.ascent * f,
+                    descent: b.descent * f,
+                    ..*b
+                },
+            );
+        }
+        let changed = match fitted {
+            Some(p) => {
+                self.cache.set_paragraph(Arc::new(p));
+                self.fitted = Some((width, Some(base)));
+                true
+            }
+            None => {
+                let was_fitted = unfitted.is_some();
+                if was_fitted {
+                    self.cache.set_paragraph(base);
+                }
+                self.fitted = Some((width, None));
+                was_fitted
+            }
+        };
+        if changed {
+            self.painted = None;
+        }
+        changed
     }
 
     /// Sets what the boxes with [`gv_inline::InlineBox::id`] `id` show.

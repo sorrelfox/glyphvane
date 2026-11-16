@@ -6,7 +6,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::breaking::break_lines;
+use crate::breaking::{LineBreak, break_lines, break_lines_in};
 use crate::paragraph::{ItemKind, OBJECT_LEN, Paragraph, is_break_char};
 use crate::shaped::Shaped;
 use crate::style::Align;
@@ -91,6 +91,10 @@ impl Line {
 }
 
 /// A paragraph laid out at one width. Immutable; queries take `&self`.
+///
+/// A paragraph with [`Paragraph::columns`] is laid out column by column:
+/// the lines stay in logical order (each column's lines top to bottom,
+/// then the next column's), so lines overlap in y across columns.
 #[derive(Debug)]
 pub struct Layout<G = ()> {
     pub(crate) shaped: Arc<Shaped<G>>,
@@ -99,24 +103,80 @@ pub struct Layout<G = ()> {
     pub(crate) frags: Vec<Fragment>,
     pub(crate) width: f32,
     pub(crate) height: f32,
+    /// Side-by-side columns: each one's x extent and lines; empty for
+    /// ordinary flow.
+    pub(crate) columns: Vec<ColumnLines>,
+}
+
+/// The lines of one column of a columnar layout.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ColumnLines {
+    pub(crate) x: f32,
+    pub(crate) width: f32,
+    pub(crate) lines: Range<usize>,
 }
 
 impl<G> Layout<G> {
     /// Breaks the shaped paragraph into lines no wider than `max_width`
     /// where possible, places fragments on a shared baseline per line and
     /// aligns the lines. `f32::INFINITY` gives the max-content layout.
-    /// Never shapes.
+    /// Never shapes. A paragraph with columns is laid out in them instead
+    /// (`max_width` is only recorded).
     pub fn new(shaped: Arc<Shaped<G>>, max_width: f32) -> Self {
         let max = sanitize_width(max_width);
-        let breaks = break_lines(&shaped, max);
+        let mut layout = Self {
+            shaped,
+            max_width: max,
+            lines: Vec::new(),
+            frags: Vec::new(),
+            width: 0.0,
+            height: 0.0,
+            columns: Vec::new(),
+        };
+        let shaped = layout.shaped.clone();
+        let paragraph = shaped.paragraph();
+        let columns = paragraph.columns();
+        if columns.is_empty() {
+            let align = paragraph.style().align;
+            let breaks = break_lines(&shaped, max);
+            let (h, w, _) = layout.place_lines(breaks, 0.0, max, align);
+            layout.height = h;
+            layout.width = w;
+            return layout;
+        }
+        let len = paragraph.text().len();
+        for (k, c) in columns.iter().enumerate() {
+            let end = columns.get(k + 1).map_or(len, |n| n.start);
+            let first = layout.lines.len();
+            let breaks = break_lines_in(&shaped, c.start..end, c.width);
+            let (h, _, right) = layout.place_lines(breaks, c.x, c.width, c.align);
+            layout.height = layout.height.max(h);
+            layout.width = layout.width.max(right);
+            layout.columns.push(ColumnLines {
+                x: c.x,
+                width: c.width,
+                lines: first..layout.lines.len(),
+            });
+        }
+        layout
+    }
+
+    /// Places the lines `breaks` from y 0 at `x0`, aligned by `align`
+    /// within `max`. Returns their height, the widest line's content width
+    /// and the rightmost content edge.
+    fn place_lines(
+        &mut self,
+        breaks: Vec<LineBreak>,
+        x0: f32,
+        max: f32,
+        align: Align,
+    ) -> (f32, f32, f32) {
+        let shaped = self.shaped.clone();
         let strut = *shaped.strut();
-        let align = shaped.paragraph().style().align;
         let items = shaped.paragraph().items();
-        let mut lines = Vec::with_capacity(breaks.len());
-        let mut frags = Vec::new();
-        let (mut y, mut widest) = (0.0f32, 0.0f32);
+        let (mut y, mut widest, mut right) = (0.0f32, 0.0f32, 0.0f32);
         for lb in breaks {
-            let first = frags.len();
+            let first = self.frags.len();
             let mut x = 0.0;
             let (mut ascent, mut descent) = (strut.ascent, strut.descent);
             // A forced break is not drawn: fragments stop before it.
@@ -168,21 +228,22 @@ impl<G> Layout<G> {
                 };
                 ascent = ascent.max(frag.ascent);
                 descent = descent.max(frag.descent);
-                frags.push(frag);
+                self.frags.push(frag);
             }
             let trimmed = shaped.trim_hanging(lb.range.start, lb.range.end);
             let content = shaped.width(lb.range.start, trimmed);
-            let offset = align_offset(align, max, content);
+            let offset = x0 + align_offset(align, max, content);
             if offset != 0.0 {
-                for f in &mut frags[first..] {
+                for f in &mut self.frags[first..] {
                     f.x += offset;
                 }
             }
             widest = widest.max(content);
+            right = right.max(offset + content);
             let height = ascent + descent;
-            lines.push(Line {
+            self.lines.push(Line {
                 range: lb.range,
-                frags: first..frags.len(),
+                frags: first..self.frags.len(),
                 x: offset,
                 width: content,
                 top: y,
@@ -192,14 +253,29 @@ impl<G> Layout<G> {
             });
             y += height;
         }
-        Self {
-            shaped,
-            max_width: max,
-            lines,
-            frags,
-            width: widest,
-            height: y,
-        }
+        (y, widest, right)
+    }
+
+    /// Whether the paragraph is laid out in side-by-side columns.
+    pub fn is_columnar(&self) -> bool {
+        !self.columns.is_empty()
+    }
+
+    /// The lines of the column nearest to x `x` (all lines without
+    /// columns).
+    pub(crate) fn column_lines_at(&self, x: f32) -> Range<usize> {
+        let distance = |c: &ColumnLines| {
+            if x < c.x {
+                c.x - x
+            } else {
+                (x - (c.x + c.width)).max(0.0)
+            }
+        };
+        self.columns
+            .iter()
+            .filter(|c| !c.lines.is_empty())
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+            .map_or(0..self.lines.len(), |c| c.lines.clone())
     }
 
     pub fn shaped(&self) -> &Arc<Shaped<G>> {
@@ -249,8 +325,12 @@ impl<G> Layout<G> {
         frag.x - self.shaped.x_at(frag.item, frag.range.start)
     }
 
-    /// Lines that overlap `y0..y1`, for culling.
+    /// Lines that overlap `y0..y1`, for culling (every line of a columnar
+    /// layout).
     pub fn lines_between(&self, y0: f32, y1: f32) -> Range<usize> {
+        if self.is_columnar() {
+            return 0..self.lines.len();
+        }
         let first = self.lines.partition_point(|l| l.bottom() <= y0);
         let last = self.lines.partition_point(|l| l.top < y1);
         first..last.max(first)
@@ -258,7 +338,9 @@ impl<G> Layout<G> {
 
     /// Approximate heap memory held by the layout itself.
     pub fn heap_bytes(&self) -> usize {
-        self.lines.capacity() * size_of::<Line>() + self.frags.capacity() * size_of::<Fragment>()
+        self.lines.capacity() * size_of::<Line>()
+            + self.frags.capacity() * size_of::<Fragment>()
+            + self.columns.capacity() * size_of::<ColumnLines>()
     }
 }
 

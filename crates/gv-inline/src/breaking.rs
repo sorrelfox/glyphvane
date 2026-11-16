@@ -27,17 +27,36 @@ pub(crate) struct LineBreak {
 ///   inside a box: CSS `overflow-wrap: anywhere`. At least one cluster goes
 ///   on every line, so there is no endless loop at tiny widths.
 pub(crate) fn break_lines<G>(shaped: &Shaped<G>, max: f32) -> Vec<LineBreak> {
+    break_lines_in(shaped, 0..shaped.paragraph().text().len(), max)
+}
+
+/// [`break_lines`] for the logical range `range` only (a column), which
+/// ends as if a break were allowed at its end.
+pub(crate) fn break_lines_in<G>(
+    shaped: &Shaped<G>,
+    range: Range<usize>,
+    max: f32,
+) -> Vec<LineBreak> {
     let text = shaped.paragraph().text();
-    let len = text.len();
+    let len = range.end.min(text.len());
+    let begin = range.start.min(len);
     let mut lines = Vec::new();
     let push = |lines: &mut Vec<LineBreak>, range: Range<usize>| {
         let hard = text[..range.end].ends_with(is_break_char);
         lines.push(LineBreak { range, hard });
     };
+    let inside = shaped
+        .paragraph()
+        .breaks()
+        .iter()
+        .map(|b| (b.offset as usize, b.mandatory))
+        .filter(|&(pos, _)| begin < pos && pos < len);
+    // The range's end is an opportunity (the paragraph's end is a
+    // mandatory one already).
+    let end = (len > begin).then_some((len, len == text.len()));
     // Line start, end of the last segment placed, width placed so far.
-    let (mut ls, mut cur, mut w) = (0usize, 0usize, 0.0f32);
-    for b in shaped.paragraph().breaks() {
-        let pos = b.offset as usize;
+    let (mut ls, mut cur, mut w) = (begin, begin, 0.0f32);
+    for (pos, mandatory) in inside.chain(end) {
         let trail = shaped.trim_hanging(cur, pos);
         let (seg, seg_full) = shaped.width_split(cur, trail, pos);
         if cur > ls && w + seg > max + EPS {
@@ -67,7 +86,7 @@ pub(crate) fn break_lines<G>(shaped: &Shaped<G>, max: f32) -> Vec<LineBreak> {
             w += seg_full;
         }
         cur = pos;
-        if b.mandatory && pos > ls {
+        if mandatory && pos > ls {
             push(&mut lines, ls..pos);
             ls = pos;
             w = 0.0;

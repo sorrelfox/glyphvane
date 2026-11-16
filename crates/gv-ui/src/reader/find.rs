@@ -555,6 +555,7 @@ pub(super) fn reveal_current(st: &mut State, column: f32, ts: &WindowTextSystem)
     let (offset, height) = match cache.block(tree, m.item) {
         Some(block) => {
             let w = text_width(item, column, &metrics, wrapped);
+            super::items::fit_boxes(item, &block, w);
             let layout = text.borrow_mut().layout(&mut block.borrow_mut(), w, ts);
             let start = layout.caret_for_source(local, Bias::Left);
             let sideways = matches!(item.kind, gv_render_tree::ItemKind::TableRow { .. })

@@ -157,6 +157,95 @@ fn a_diagram_renders_off_the_frame_and_repaints_in_a_new_theme(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_diagram_wider_than_the_column_is_scaled_down_to_fit(cx: &mut TestAppContext) {
+    let doc = "# D\n\n```mermaid\nflowchart LR\n  \
+               fit_a[A fairly long first label] --> fit_b[Another long label here] \
+               --> fit_c[Third long label in line] --> fit_d[Fourth long label in line] \
+               --> fit_e[Fifth and last long label]\n```\n\nafter\n";
+    let (_dir, file) = folder(doc, &[]);
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    settle(&mut vcx);
+    let st = state(&reader, &mut vcx);
+    let mut widths = Vec::new();
+    for width in [WIDTH, 600.0, WIDTH] {
+        vcx.simulate_resize(size(px(width), px(HEIGHT)));
+        settle(&mut vcx);
+        let s = st.borrow();
+        let (id, content) = diagram_block(&s);
+        let Some(BoxContent::Diagram { diagram, scale }) = content else {
+            panic!("the diagram box: {content:?}");
+        };
+        let doc = s.doc.as_ref().expect("loaded");
+        let ix = doc.tree.index_of(id).expect("item");
+        let item = &doc.tree.items()[ix];
+        let (_, column) = s.geometry.column;
+        let m = doc.tree.options().metrics;
+        let inner = crate::reader::items::text_width(item, column, &m, false);
+        let natural = (diagram.width * scale, diagram.height * scale);
+        assert!(natural.0 > inner, "the diagram is wider than the column");
+        let block = s.cache.cached(id).expect("cached");
+        let b = block.borrow();
+        let bx = *b.paragraph().items()[0].inline_box().expect("the box");
+        assert!(
+            (bx.width - inner).abs() < 0.5,
+            "width {width}: box {} in {inner}",
+            bx.width
+        );
+        // The aspect ratio is kept.
+        let h = bx.ascent + bx.descent;
+        assert!(
+            (h / bx.width - natural.1 / natural.0).abs() < 0.001,
+            "width {width}: {}x{h} for {natural:?}",
+            bx.width
+        );
+        // Its height is the item's: nothing is cut off below.
+        let g = s.geometry.items.iter().find(|g| g.ix == ix).expect("drawn");
+        assert!(g.bottom - g.top >= h, "the item holds the scaled diagram");
+        let code = g.code.expect("its clip");
+        assert!(code.overflow < 0.5, "nothing to scroll: {}", code.overflow);
+        widths.push(bx.width);
+    }
+    assert!(widths[1] < widths[0], "{widths:?}");
+    assert!((widths[2] - widths[0]).abs() < 0.5, "{widths:?}");
+}
+
+#[gpui::test]
+fn images_wider_than_a_narrow_column_are_scaled_down_to_fit(cx: &mut TestAppContext) {
+    let doc = "![big](big.png)\n\nafter\n";
+    let files = [("big.png", png(2000, 1000, None))];
+    let (_dir, file) = folder(doc, &files);
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    settle(&mut vcx);
+    let st = state(&reader, &mut vcx);
+    vcx.simulate_resize(size(px(480.0), px(HEIGHT)));
+    settle(&mut vcx);
+    {
+        let s = st.borrow();
+        let (_, column) = s.geometry.column;
+        let (w, h, _) = images(&s)[0];
+        assert!(w <= column + 0.5, "{w} in a column of {column}");
+        assert!((w - 2.0 * h).abs() < 0.5, "aspect ratio kept: {w}x{h}");
+    }
+    vcx.simulate_resize(size(px(WIDTH), px(HEIGHT)));
+    settle(&mut vcx);
+    let s = st.borrow();
+    let max = s
+        .doc
+        .as_ref()
+        .expect("loaded")
+        .tree
+        .options()
+        .metrics
+        .image_max_width;
+    let (w, _, _) = images(&s)[0];
+    assert!((w - max).abs() < 0.01, "back to its own size: {w}");
+}
+
+#[gpui::test]
 fn a_bad_diagram_shows_its_card_above_the_source(cx: &mut TestAppContext) {
     let src = "sequenceDiagram\n  Alice->>Bob: card_above_source\n  Bob-->>: \n  ??? !!!";
     let doc = format!("```mermaid\n{src}\n```\n\n```mermaid\nnot_a_diagram card_note\n```\n");

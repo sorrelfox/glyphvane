@@ -791,6 +791,101 @@ fn profile_changes_rerender_and_table_columns_line_up(cx: &mut TestAppContext) {
     }
 }
 
+/// Sets the reading profile of `file` and draws.
+fn set_profile(vcx: &mut VisualTestContext, file: &Path, profile: gv_profile::ProfileId) {
+    vcx.update(|_, cx| {
+        crate::profile::ProfileOverrides::set(cx, file, crate::profile::Scope::File, Some(profile));
+    });
+    draw(vcx);
+    draw(vcx);
+}
+
+#[gpui::test]
+fn a_table_wider_than_the_column_wraps_its_cells_to_fit(cx: &mut TestAppContext) {
+    let long = "words that go on and on ".repeat(12);
+    let md = format!(
+        "| Construct | Rendering |\n|---|---|\n| Short | {long}end_of_cell |\n| Two | x |\n\nafter\n"
+    );
+    let dir = temp(&[("t.md", &md)]);
+    let file = dir.path().join("t.md");
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    set_profile(&mut vcx, &file, gv_profile::ProfileId::GfmFile);
+    let st = state(&reader, &mut vcx);
+    // At each width: the table is no wider than the column, the long cell
+    // wraps onto several lines inside it, and the row's height (the one
+    // the scroll position uses) is the wrapped one.
+    let mut heights = Vec::new();
+    for width in [WIDTH, 700.0, 520.0, WIDTH] {
+        vcx.simulate_resize(size(px(width), px(HEIGHT)));
+        draw(&mut vcx);
+        draw(&mut vcx);
+        let s = st.borrow();
+        let doc = s.doc.as_ref().expect("loaded");
+        let (x0, column) = s.geometry.column;
+        let m = doc.tree.options().metrics;
+        let widths = s
+            .cache
+            .table(doc.tree.items()[0].id.block)
+            .expect("measured");
+        assert!(
+            widths.columns[1] > column,
+            "the long cell is wider than the column unwrapped"
+        );
+        let table_w = widths.width(m.table_padding_x) + 2.0 * m.table_border;
+        assert!(
+            table_w <= column + 0.5,
+            "width {width}: table {table_w} in a column of {column}"
+        );
+        let row = s
+            .geometry
+            .items
+            .iter()
+            .find(|g| {
+                matches!(
+                    doc.tree.items()[g.ix].kind,
+                    gv_render_tree::ItemKind::TableRow { row: 1, .. }
+                )
+            })
+            .expect("the long row is drawn");
+        let item = &doc.tree.items()[row.ix];
+        let node = doc.tree.node_of(row.ix).expect("node");
+        let block = row.text.as_ref().expect("a row block").borrow();
+        let at = item.source.start
+            + doc.text[item.source.clone()]
+                .find("end_of_cell")
+                .expect("cell text");
+        let end = block
+            .caret_bounds(at + "end_of_cell".len() - node.source.start, Bias::Right)
+            .expect("painted");
+        assert!(
+            f32::from(end.origin.x) <= x0 + column + 0.5,
+            "width {width}: the cell's end at {:?} is past the column's right edge {}",
+            end.origin.x,
+            x0 + column
+        );
+        let lines = block.layout().expect("laid out").lines().len();
+        assert!(lines > 3, "width {width}: {lines} lines");
+        let body = doc
+            .tree
+            .options()
+            .styles
+            .role(gv_render_tree::TextRole::TableCell)
+            .line_height;
+        let h = row.bottom - row.top;
+        assert!(h > 3.0 * body, "width {width}: row height {h}");
+        assert_eq!(
+            s.engine.height_of(row.ix),
+            Some(h),
+            "width {width}: the height index has the wrapped height"
+        );
+        heights.push(h);
+    }
+    assert!(heights[2] > heights[1], "narrower, taller: {heights:?}");
+    assert!((heights[3] - heights[0]).abs() < 0.5, "{heights:?}");
+}
+
 mod code_tests;
 mod constructs_tests;
 mod find_tests;
