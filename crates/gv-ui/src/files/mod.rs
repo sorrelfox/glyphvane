@@ -14,6 +14,7 @@
 //! | [`watch`] | Per window: open files changed on disk, the vault watcher |
 //! | [`notice`] | What the infobar says |
 //! | [`save_as`] | Where Save As writes: the save dialog, the suggested name, the `.md` extension |
+//! | [`open_dialog`] | Open file and Open folder: the open dialog |
 //! | The Source view ([`crate::editor`]) | A document's file, journal, autosave state and conflicts |
 //! | The window ([`crate::shell`]) | Save and close commands, the infobar, the unsaved dot, watcher events |
 //!
@@ -44,6 +45,7 @@
 //! tied to vault ids yet.
 
 pub mod notice;
+pub mod open_dialog;
 pub mod save_as;
 #[cfg(test)]
 mod tests;

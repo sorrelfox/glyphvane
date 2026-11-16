@@ -30,6 +30,7 @@ use super::tree::{RowKind, TreeModel};
 use super::vault::{VaultStatus, WindowVault};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
+use crate::keymap::actions::file::NewNote;
 use crate::metrics::spacing::{list, list_row, panel_head};
 use crate::metrics::{icon, radius, size, text};
 use crate::theme::Theme;
@@ -51,7 +52,7 @@ gpui::actions!(
 );
 
 /// The key context of the tree.
-const KEY_CONTEXT: &str = "FileTree";
+pub(super) const KEY_CONTEXT: &str = "FileTree";
 
 /// The tree's keys. They apply while the Files panel has the focus.
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
@@ -322,8 +323,10 @@ impl FilesPanel {
                             .child(Icon::ChevronDown.sized(icon::CHEVRON)),
                     ),
             )
-            // TODO(file-ops): new note, new folder and sort (FR-VAULT-06).
-            .child(action("new-note", Icon::NewNote))
+            // TODO(file-ops): new folder and sort (FR-VAULT-06).
+            .child(action("new-note", Icon::NewNote).on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(NewNote), cx);
+            }))
             .child(action("new-folder", Icon::NewFolder))
             .child(action("sort-files", Icon::Sort))
             .child(
@@ -433,6 +436,13 @@ impl FilesPanel {
             .collect()
     }
 
+    /// The selected row's file or folder.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        let tree = self.tree.as_ref()?;
+        let row = tree.rows().get(tree.selected_row()?)?;
+        tree.fs_path(row.id)
+    }
+
     /// The rows as `(depth, name)`, for tests.
     #[cfg(test)]
     pub fn visible_rows(&self) -> Vec<(usize, String)> {
@@ -481,7 +491,7 @@ impl Render for FilesPanel {
 /// A list row's frame, filling a slot inset 6 from the panel's sides:
 /// indented 14 per level; `accent.tint` and weight 500 when selected, the
 /// hover overlay otherwise.
-fn list_row_frame(
+pub(super) fn list_row_frame(
     id: impl Into<gpui::ElementId>,
     depth: usize,
     selected: bool,
@@ -510,7 +520,7 @@ fn list_row_frame(
 
 /// A quiet one-line state where the rows would be: indexing, empty, not
 /// indexed.
-fn message(note: impl Into<SharedString>, theme: &Theme) -> Div {
+pub(super) fn message(note: impl Into<SharedString>, theme: &Theme) -> Div {
     div()
         .debug_selector(|| "files-message".into())
         .h(px(size::LIST_ROW))

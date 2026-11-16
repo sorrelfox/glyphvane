@@ -1129,7 +1129,61 @@ impl EditorView {
             // a sync-conflict copy is the window's.
             // Switching the profile is the window's.
             NoticeAction::Compare | NoticeAction::OpenCopy(_) | NoticeAction::SwitchProfile => {}
+            NoticeAction::Revert => self.revert(cx),
+            // The window's questions.
+            NoticeAction::OpenUrl(_)
+            | NoticeAction::OpenExternally(_)
+            | NoticeAction::Reveal(_)
+            | NoticeAction::IndexAnyway
+            | NoticeAction::IndexFolder(_)
+            | NoticeAction::Cancel => {}
         }
+    }
+
+    /// `file.revert`: reads the file again (off the UI thread) and takes it
+    /// as one undoable edit, so Undo brings the dropped edits back. The
+    /// window asks first when there are unsaved edits. An untitled
+    /// document has nothing to revert to.
+    pub fn revert(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let Some(file) = doc.state.file.as_ref() else {
+            return;
+        };
+        let path = file.path().to_path_buf();
+        let encoding = file.format().encoding;
+        doc.state.disk_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move { DocumentFile::load_with_encoding(path, encoding) })
+                .await;
+            this.update(cx, |view, cx| view.reverted(loaded, cx)).ok();
+        }));
+    }
+
+    fn reverted(
+        &mut self,
+        loaded: Result<(DocumentFile, Decoded), LoadError>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        doc.state.disk_task = None;
+        let (file, decoded) = match loaded {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                doc.state
+                    .set_notice(Some(Notice::revert_failed(&err.to_string())));
+                self.notice_changed(cx);
+                return;
+            }
+        };
+        let Some(disk) = file.baseline().cloned() else {
+            return;
+        };
+        doc.state.conflict = None;
+        self.prepare_reload(decoded, disk, cx);
     }
 
     /// The infobar's dismiss button.

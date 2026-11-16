@@ -221,8 +221,8 @@ fn the_tab_menu_acts_on_the_clicked_tab(cx: &mut TestAppContext) {
     assert_eq!(menu.size.width, px(MENU_WIDTH));
     assert_eq!(menu.origin.x, tab.center().x);
     assert_eq!(menu.origin.y, tab.center().y);
-    // Commands without a handler are dimmed.
-    assert!(f.has("context-menu-disabled:file.reveal_in_file_manager"));
+    // Every item of the tab menu has a handler.
+    assert!(!f.has("context-menu-disabled:file.reveal_in_file_manager"));
     assert!(!f.has("context-menu-disabled:tabs.close_others"));
 
     // Copy path copies a.md's path although c.md is active.
@@ -263,12 +263,12 @@ fn the_menu_keys_move_run_and_close(cx: &mut TestAppContext) {
     f.keys("down");
     assert_eq!(f.highlighted(), Some("tabs.close"));
     f.keys("up");
-    // Reveal in file manager has no handler: Reveal in file tree is last.
-    assert_eq!(f.highlighted(), Some("workspace.reveal_in_tree"));
+    // Up from the first item wraps to the last.
+    assert_eq!(f.highlighted(), Some("file.reveal_in_file_manager"));
     f.keys("home");
     assert_eq!(f.highlighted(), Some("tabs.close"));
     f.keys("end");
-    assert_eq!(f.highlighted(), Some("workspace.reveal_in_tree"));
+    assert_eq!(f.highlighted(), Some("file.reveal_in_file_manager"));
     f.keys("escape");
     assert_eq!(f.menu(), None);
     assert!(f.reader_focused());

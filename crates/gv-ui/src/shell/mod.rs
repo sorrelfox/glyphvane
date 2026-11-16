@@ -5,6 +5,9 @@
 
 mod controls;
 mod document;
+mod file_ops;
+#[cfg(test)]
+mod file_ops_tests;
 mod files_panel;
 #[cfg(test)]
 mod files_panel_tests;
@@ -20,6 +23,7 @@ mod panels;
 mod profile_chip;
 #[cfg(test)]
 mod profile_chip_tests;
+mod recent_panel;
 mod saving;
 pub mod session;
 mod status_bar;
@@ -541,6 +545,11 @@ pub struct Workspace {
     menus: menus::ShellMenus,
     /// Which side panels show.
     panels: panels::Panels,
+    /// The Recent panel, created when first shown.
+    recent: Option<Entity<recent_panel::RecentPanel>>,
+    _recent_events: Option<Subscription>,
+    /// The vault's indexing question was asked in this window.
+    index_asked: bool,
     /// The profiles follow the overrides picked in any window.
     _profiles: Subscription,
 }
@@ -673,6 +682,9 @@ impl Workspace {
             profile_menu: profile_chip::ProfileMenu::default(),
             menus: menus::ShellMenus::new(window, cx),
             panels: panels::Panels::default(),
+            recent: None,
+            _recent_events: None,
+            index_asked: false,
             _profiles: profiles,
         };
         // The document takes the keyboard from the start (copy, scrolling).
@@ -967,12 +979,7 @@ impl Workspace {
             return;
         };
         let vault = cx.new(|cx| WindowVault::for_file(&path, cx));
-        self.vault = Some(vault.clone());
-        self._vault_changed = Some(cx.observe(&vault, |this, _, cx| this.vault_changed(cx)));
-        self.vault_changed(cx);
-        if let Some(files) = &self.files {
-            files.update(cx, |files, cx| files.set_vault(vault, cx));
-        }
+        self.set_vault(vault, cx);
     }
 
     /// The vault published a new index snapshot: link statuses follow it.
@@ -981,6 +988,7 @@ impl Workspace {
         let Some(vault) = self.vault.clone() else {
             return;
         };
+        self.ask_about_index(cx);
         let ready = vault.read(cx).status() == &vault::VaultStatus::Ready;
         if ready
             && !self.vault_watch_started
@@ -1276,7 +1284,17 @@ impl Workspace {
         tracing::debug!(?target, "follow link");
         let (path, fragment) = match target {
             Navigation::External(url) => {
-                cx.open_url(&url);
+                crate::platform::launcher(cx).open_url(&url, cx);
+                return;
+            }
+            Navigation::Confirm { url, why } => {
+                self.activate_tab(index, window, cx);
+                self.ask(Notice::confirm_url(&url, &why), cx);
+                return;
+            }
+            Navigation::OpenFile(path) => {
+                self.activate_tab(index, window, cx);
+                self.open_other_file(path, cx);
                 return;
             }
             Navigation::Refused(why) => {
@@ -1730,6 +1748,7 @@ impl Render for Workspace {
                 this.save_as_active(cx);
             }))
             .map(|root| self.menu_actions(root, cx))
+            .map(|root| self.file_actions(root, cx))
             .map(|root| self.panel_actions(root, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(

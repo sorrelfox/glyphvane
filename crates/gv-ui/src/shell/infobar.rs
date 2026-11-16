@@ -5,7 +5,9 @@
 //! (SPEC § Infobars), showing the active tab's notice: its document's
 //! (save errors, conflicts, recovery, a deleted file) or the tab's own (a
 //! file deleted or a sync-conflict copy seen while only the Reading view
-//! is open). One at a time; the document's comes first.
+//! is open). One at a time; the document's comes first, except the
+//! window's questions (a confirmation the user just asked for, a file not
+//! opened, the indexing question), which come before it.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -36,6 +38,9 @@ impl Workspace {
     /// The notice the active tab shows, and where it comes from.
     pub(super) fn active_notice(&self, cx: &App) -> Option<(Notice, NoticeSource)> {
         let tab = self.active_tab();
+        if tab.has_question() {
+            return tab.notice.clone().map(|n| (n, NoticeSource::Tab));
+        }
         if let Some(notice) = tab
             .editor
             .as_ref()
@@ -186,6 +191,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if source == NoticeSource::Tab && self.answer(action, cx) {
+            return;
+        }
         match action {
             NoticeAction::Close => {
                 self.close_tab(self.active, window, cx);
@@ -218,6 +226,9 @@ impl Workspace {
                 if let Some(editor) = self.active_tab().editor.clone() {
                     editor.update(cx, |e, cx| e.dismiss_notice(cx));
                 }
+            }
+            NoticeSource::Tab if self.active_tab().has_question() => {
+                self.question_dismissed(cx);
             }
             NoticeSource::Tab => {
                 let notice = self.tabs[self.active].notice.take();

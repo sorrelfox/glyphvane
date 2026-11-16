@@ -27,16 +27,9 @@ use gv_vault::{
     resolve_with_probe,
 };
 
-/// File extensions opened in the Reading view.
-const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdx"];
-
 /// Whether the Reading view opens `path`.
 pub(crate) fn is_markdown(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        MARKDOWN_EXTENSIONS
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(e))
-    })
+    crate::platform::is_markdown(path)
 }
 
 /// The resolver's kind of a render-tree link.
@@ -228,6 +221,13 @@ pub(crate) enum Navigation {
     Here { fragment: Option<Fragment> },
     /// Hand the URL to the operating system.
     External(String),
+    /// Hand the URL to the operating system once the user confirmed it:
+    /// `why` says where it goes, and the full URL is shown with it.
+    Confirm { url: String, why: String },
+    /// A file Glyphvane does not show: the window decides by its kind
+    /// (open with the default app after confirmation, or, for a program,
+    /// only reveal it).
+    OpenFile(PathBuf),
     /// Nothing happens, for this reason (logged).
     Refused(String),
 }
@@ -257,9 +257,21 @@ pub(crate) fn navigation(
             (Some(UrlClass::Web { url, .. } | UrlClass::Mailto(url)), Some(UrlPolicy::Allow)) => {
                 Navigation::External(url.clone())
             }
-            (_, Some(UrlPolicy::Confirm(reason))) => refused(&format!(
-                "needs confirmation ({reason:?}), not available yet"
-            )),
+            (Some(UrlClass::LocalFile { path, .. }), Some(UrlPolicy::Confirm(_))) => {
+                let path = PathBuf::from(path);
+                if is_markdown(&path) {
+                    Navigation::Open {
+                        path,
+                        fragment: res.fragment,
+                    }
+                } else {
+                    Navigation::OpenFile(path)
+                }
+            }
+            (Some(class), Some(UrlPolicy::Confirm(reason))) => match handed_off(class) {
+                Some((url, why)) => Navigation::Confirm { url, why },
+                None => refused(&format!("cannot be handed to the system ({reason:?})")),
+            },
             _ => refused("only http, https and mailto URLs are handed to the system"),
         },
         Status::Blocked => {
@@ -279,7 +291,8 @@ pub(crate) fn navigation(
                         fragment: res.fragment,
                     }
                 } else {
-                    refused("not a Markdown file; viewers for other files come later")
+                    // The built-in viewers come later (M4).
+                    Navigation::OpenFile(path)
                 }
             }
             (Some(_), Some(TargetKind::Directory)) => {
@@ -292,6 +305,28 @@ pub(crate) fn navigation(
         Status::OutsideRoot => refused("outside the vault root; following it comes later"),
         _ => refused("not followed"),
     }
+}
+
+/// The URL a confirmed link hands to the system, and the sentence that
+/// says where it goes.
+fn handed_off(class: &UrlClass) -> Option<(String, String)> {
+    let (url, why) = match class {
+        UrlClass::External { scheme, url } | UrlClass::Unknown { scheme, url } => (
+            url.clone(),
+            format!("It opens in the app your system uses for “{scheme}:” links:"),
+        ),
+        UrlClass::Obsidian(url) => (
+            url.clone(),
+            "It points to another Obsidian vault or action and opens in Obsidian:".to_owned(),
+        ),
+        UrlClass::Network { url, .. } => (
+            url.clone(),
+            "It points to a network share. Opening it can send your sign-in to that computer:"
+                .to_owned(),
+        ),
+        _ => return None,
+    };
+    Some((url, why))
 }
 
 /// The byte offset of 0-based line `line` (LF, CRLF and CR end lines).
@@ -413,9 +448,14 @@ mod tests {
             Navigation::External("https://example.com/x".into())
         );
         assert!(matches!(go("mailto:a@b.c"), Navigation::External(_)));
-        for refused in ["missing.md", "pic.png", "javascript:x", "ssh://host", "sub"] {
+        for refused in ["missing.md", "javascript:x", "sub"] {
             assert!(matches!(go(refused), Navigation::Refused(_)), "{refused}");
         }
+        // Other files and other schemes wait for the user.
+        assert!(matches!(go("pic.png"), Navigation::OpenFile(path) if path.ends_with("pic.png")));
+        assert!(matches!(go("ssh://host"), Navigation::Confirm { url, why }
+                if url == "ssh://host" && why.contains("“ssh:”")));
+        assert!(matches!(go("weird-scheme:x"), Navigation::Confirm { .. }));
     }
 
     #[test]

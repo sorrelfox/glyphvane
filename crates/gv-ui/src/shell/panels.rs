@@ -5,9 +5,10 @@
 //!
 //! - **Sidebar:** the switcher in its head picks Files, Search, Tags or
 //!   Bookmarks (SPEC § Sidebar); Recent and Sync conflicts open from the
-//!   View menu (`workspace.show_*`) and have no switcher button. Only the
-//!   Files panel is built; the others show their panel head and a one-line
-//!   empty state (empty states are not designed).
+//!   View menu (`workspace.show_*`) and have no switcher button; File ▸
+//!   Open recent… shows Recent too. The Files and Recent panels are built;
+//!   the others show their panel head and a one-line empty state (empty
+//!   states are not designed).
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks (head and empty state so far). *Links in this note* and the
 //!   Link checker join it once asked for, with an empty state.
@@ -136,6 +137,10 @@ impl Workspace {
             .map(|sidebar| match (panel, self.files.clone()) {
                 (SidebarPanel::Files, Some(files)) => sidebar.child(files),
                 (SidebarPanel::Files, None) => sidebar,
+                (SidebarPanel::Recent, _) => match self.recent.clone() {
+                    Some(recent) => sidebar.child(recent),
+                    None => sidebar,
+                },
                 (other, _) => sidebar.child(empty_panel(other, theme)),
             })
     }
@@ -185,9 +190,32 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // A panel that leaves the screen with the keyboard hands it to the
+        // document.
+        let leaving = self.panels.sidebar;
+        let focused = |p: Option<FocusHandle>| p.is_some_and(|h| h.contains_focused(window, cx));
+        let had_keyboard = leaving != panel
+            && match leaving {
+                SidebarPanel::Files => {
+                    focused(self.files.as_ref().map(|f| f.read(cx).focus_handle(cx)))
+                }
+                SidebarPanel::Recent => {
+                    focused(self.recent.as_ref().map(|r| r.read(cx).focus_handle(cx)))
+                }
+                _ => false,
+            };
         self.panels.sidebar = panel;
+        if had_keyboard && !(focus && matches!(panel, SidebarPanel::Files | SidebarPanel::Recent)) {
+            self.focus_document(window, cx);
+        }
         if !self.sidebar_open {
             self.set_sidebar_open(true, window, cx);
+        }
+        if panel == SidebarPanel::Recent {
+            let recent = self.ensure_recent_panel(window, cx);
+            if focus {
+                recent.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
         if focus && panel == SidebarPanel::Files {
             self.focus_files(window, cx);

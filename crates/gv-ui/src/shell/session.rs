@@ -674,6 +674,20 @@ pub fn note_recent_folder(cx: &mut App, path: &Path) {
     changed(cx);
 }
 
+/// Empties the recent files and folders (the Recent panel's *Clear*).
+pub fn clear_recent(cx: &mut App) {
+    if !cx.has_global::<SessionStore>() {
+        return;
+    }
+    let store = cx.global_mut::<SessionStore>();
+    if store.session.recent_files.is_empty() && store.session.recent_folders.is_empty() {
+        return;
+    }
+    store.session.recent_files.clear();
+    store.session.recent_folders.clear();
+    changed(cx);
+}
+
 /// Adds a window that was not created for a file to the session, when this
 /// process writes the window list. Returns whether it was added.
 pub(super) fn track(

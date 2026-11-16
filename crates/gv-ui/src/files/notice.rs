@@ -38,6 +38,14 @@ pub enum Topic {
     ProfileExplained,
     /// The document looks like another dialect (FR-PROF-05).
     DialectHint,
+    /// A question about something the user asked for: revert, follow a
+    /// link that leaves Glyphvane, open a file with another app.
+    Confirm,
+    /// A file or link was not opened (a program, a failed dialog).
+    NotOpened,
+    /// Whether to index a folder too large to index without asking
+    /// (FR-VAULT-02).
+    IndexAsk,
 }
 
 /// What an infobar button does.
@@ -65,6 +73,20 @@ pub enum NoticeAction {
     OpenCopy(PathBuf),
     /// Open the profile chip's menu.
     SwitchProfile,
+    /// Revert the document to the file on disk (confirmed).
+    Revert,
+    /// Hand a URL to the system (confirmed).
+    OpenUrl(String),
+    /// Open a file with the system's default app (confirmed).
+    OpenExternally(PathBuf),
+    /// Show a file in the system's file manager.
+    Reveal(PathBuf),
+    /// Index the window's folder although it is large.
+    IndexAnyway,
+    /// Index this smaller folder instead of the large one.
+    IndexFolder(PathBuf),
+    /// Close the question without doing anything.
+    Cancel,
 }
 
 /// A button of an infobar.
@@ -78,7 +100,7 @@ pub struct NoticeButton {
 }
 
 impl NoticeButton {
-    fn new(action: NoticeAction, label: &'static str) -> Self {
+    fn new(action: NoticeAction, label: impl Into<SharedString>) -> Self {
         Self {
             action,
             label: label.into(),
@@ -336,5 +358,225 @@ impl Notice {
             Some("The file is no longer text, so it was not reloaded.".to_owned()),
         )
         .with(NoticeButton::new(NoticeAction::Close, "Close"))
+    }
+
+    /// A notice with a title made at run time.
+    fn titled(topic: Topic, kind: NoticeKind, title: String, detail: Option<String>) -> Self {
+        Self {
+            topic,
+            kind,
+            title: title.into(),
+            detail: detail.map(Into::into),
+            buttons: Vec::new(),
+        }
+    }
+
+    /// Revert with unsaved edits asks first (not designed).
+    pub fn confirm_revert() -> Self {
+        Self::new(
+            Topic::Confirm,
+            NoticeKind::Warning,
+            "Revert to the saved file?",
+            Some(
+                "Your unsaved edits are replaced by the file on disk. Undo brings them back."
+                    .to_owned(),
+            ),
+        )
+        .with(NoticeButton::new(NoticeAction::Revert, "Revert"))
+        .with(NoticeButton::new(NoticeAction::Cancel, "Cancel"))
+    }
+
+    /// A link whose scheme needs confirmation: it is handed to another
+    /// app, so the full URL is shown first (not designed).
+    pub fn confirm_url(url: &str, why: &str) -> Self {
+        Self::titled(
+            Topic::Confirm,
+            NoticeKind::Warning,
+            "Open this link in another app?".to_owned(),
+            Some(format!("{why} {}", shown_url(url))),
+        )
+        .with(NoticeButton::new(
+            NoticeAction::OpenUrl(url.to_owned()),
+            "Open",
+        ))
+        .with(NoticeButton::new(NoticeAction::Cancel, "Cancel"))
+    }
+
+    /// A file Glyphvane does not show itself: opening it hands it to the
+    /// system's app for it, after confirmation (not designed). `html`
+    /// names the browser.
+    pub fn confirm_open_file(path: &Path, html: bool) -> Self {
+        let name = file_name(path);
+        let (title, detail) = if html {
+            (
+                format!("Open “{name}” in your browser?"),
+                "Web pages open in the system's default browser, where their scripts run.",
+            )
+        } else {
+            (
+                format!("Open “{name}” with another app?"),
+                "Glyphvane does not show this kind of file. It opens in the app your system uses for it.",
+            )
+        };
+        Self::titled(
+            Topic::Confirm,
+            NoticeKind::Warning,
+            title,
+            Some(detail.to_owned()),
+        )
+        .with(NoticeButton::new(
+            NoticeAction::OpenExternally(path.to_path_buf()),
+            "Open",
+        ))
+        .with(NoticeButton::new(
+            NoticeAction::Reveal(path.to_path_buf()),
+            "Reveal in file manager",
+        ))
+        .with(NoticeButton::new(NoticeAction::Cancel, "Cancel"))
+    }
+
+    /// A program or launcher: never started, only revealed (not
+    /// designed).
+    pub fn executable(path: &Path) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Information,
+            format!("“{}” is a program.", file_name(path)),
+            Some("Glyphvane never starts programs from notes or files.".to_owned()),
+        )
+        .with(NoticeButton::new(
+            NoticeAction::Reveal(path.to_path_buf()),
+            "Reveal in file manager",
+        ))
+    }
+
+    /// The open dialog could not be shown (not designed).
+    pub fn open_dialog_failed(reason: &str) -> Self {
+        let mut detail = format!("The open dialog could not be shown: {reason}");
+        if !detail.ends_with('.') {
+            detail.push('.');
+        }
+        Self::new(
+            Topic::NotOpened,
+            NoticeKind::Error,
+            "Not opened.",
+            Some(detail),
+        )
+    }
+
+    /// A new note could not be created (not designed).
+    pub fn new_note_failed(folder: &Path, reason: &str) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Error,
+            "No new note.".to_owned(),
+            Some(format!(
+                "A note could not be created in “{}”: {reason}.",
+                folder.display()
+            )),
+        )
+    }
+
+    /// Revert could not read the file (not designed).
+    pub fn revert_failed(reason: &str) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Error,
+            "Not reverted.".to_owned(),
+            Some(format!("The file could not be read: {reason}.")),
+        )
+    }
+
+    /// The window's folder is too large to index without asking
+    /// (FR-VAULT-02; the plan's wording, not designed as a screen).
+    /// `size` describes it ("more than 50,000 files", "your home
+    /// folder"); `smaller` is the folder "Only this folder" indexes.
+    pub fn index_ask(root: &Path, size: &str, smaller: Option<&Path>) -> Self {
+        let notice = Self::titled(
+            Topic::IndexAsk,
+            NoticeKind::Information,
+            format!("Index {} ({size})?", shown_folder(root)),
+            Some(
+                "The file tree and links need an index of the folder. A folder this large takes a while to index."
+                    .to_owned(),
+            ),
+        )
+        .with(NoticeButton::new(NoticeAction::IndexAnyway, "Index"));
+        let notice = match smaller {
+            Some(folder) => notice.with(NoticeButton::new(
+                NoticeAction::IndexFolder(folder.to_path_buf()),
+                "Only this folder",
+            )),
+            None => notice,
+        };
+        notice.with(NoticeButton::new(NoticeAction::Cancel, "Cancel"))
+    }
+}
+
+/// The last component of `path`, for messages.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// The longest URL a message shows in full.
+const URL_SHOWN_CHARS: usize = 200;
+
+/// `url` for a message: control and text-direction characters shown
+/// escaped (they could make the URL read as another), and a very long one
+/// shortened in the middle.
+fn shown_url(url: &str) -> String {
+    let clean: String = url
+        .chars()
+        .flat_map(|c| {
+            let direction = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if c.is_control() || direction {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    let count = clean.chars().count();
+    if count <= URL_SHOWN_CHARS {
+        return clean;
+    }
+    let half = URL_SHOWN_CHARS / 2;
+    let head: String = clean.chars().take(half).collect();
+    let tail: String = clean.chars().skip(count - half).collect();
+    format!("{head}\u{2026}{tail}")
+}
+
+/// A folder for messages, the home folder written `~`, with a trailing
+/// separator.
+pub(crate) fn shown_folder(folder: &Path) -> String {
+    let home = gv_vault::root::home_dir();
+    let shown = match home.as_deref().and_then(|h| folder.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
+        None => folder.display().to_string(),
+    };
+    if shown.ends_with(std::path::MAIN_SEPARATOR) {
+        shown
+    } else {
+        format!("{shown}{}", std::path::MAIN_SEPARATOR)
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::shown_url;
+
+    #[test]
+    fn urls_are_shown_safely() {
+        assert_eq!(shown_url("ssh://host"), "ssh://host");
+        assert_eq!(shown_url("tel:1\n2"), "tel:1\\n2");
+        assert_eq!(shown_url("x:a\u{202e}b"), "x:a\\u{202e}b");
+        let long = format!("ftp://{}", "a".repeat(400));
+        let shown = shown_url(&long);
+        assert_eq!(shown.chars().count(), 201);
+        assert!(shown.starts_with("ftp://"));
     }
 }
