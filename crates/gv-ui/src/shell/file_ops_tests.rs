@@ -438,6 +438,101 @@ fn open_folder_from_a_window_with_a_file_opens_a_new_window(cx: &mut TestAppCont
     assert_eq!(f.windows(), 2);
 }
 
+// ----- open_folder (command line, other instances) ------------------------------------
+
+impl Fixture {
+    /// Opens `folder` through [`crate::open_folder`], as a launch with a
+    /// folder argument does.
+    fn open_folder(
+        &mut self,
+        folder: &Path,
+        placement: crate::Placement,
+    ) -> super::WorkspaceWindow {
+        // Outside this window's update: the folder may go to this window.
+        let opened = self
+            .vcx
+            .cx
+            .update(|cx| crate::open_folder(cx, folder, placement))
+            .expect("the folder opens");
+        self.settle();
+        opened
+    }
+
+    /// The vault folder and whether the Files panel shows, in `window`.
+    fn folder_shown(&mut self, window: &super::WorkspaceWindow) -> (Option<PathBuf>, bool) {
+        self.vcx.update(|_, cx| {
+            let ws = window.workspace.upgrade().expect("open").read(cx);
+            let files = ws.panels_open().0 && ws.sidebar_panel() == SidebarPanel::Files;
+            (ws.vault_root(cx), files)
+        })
+    }
+}
+
+#[gpui::test]
+fn open_folder_api_uses_a_blank_window(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("vault/a.md", NOTE)], None);
+    let folder = f.path("vault");
+    let opened = f.open_folder(&folder, crate::Placement::RecentWindow);
+    assert_eq!(f.windows(), 1, "the blank window took it");
+    assert_eq!(opened.workspace, f.workspace.downgrade());
+    assert_eq!(f.vault(), Some((folder.clone(), VaultStatus::Ready)));
+    assert_eq!(f.folder_shown(&opened), (Some(folder.clone()), true));
+    assert_eq!(f.recent().1, std::slice::from_ref(&folder));
+
+    // The same folder again stays in that window.
+    let again = f.open_folder(&folder, crate::Placement::RecentWindow);
+    assert_eq!(f.windows(), 1);
+    assert_eq!(again.window, opened.window);
+
+    // Another folder: this window has a vault now, so a new window.
+    let other_folder = f.path("other");
+    std::fs::create_dir(&other_folder).expect("folder");
+    let other = f.open_folder(&other_folder, crate::Placement::RecentWindow);
+    assert_eq!(f.windows(), 2);
+    assert_eq!(f.folder_shown(&other), (Some(other_folder), true));
+    assert_eq!(f.vault(), Some((folder, VaultStatus::Ready)));
+}
+
+#[gpui::test]
+fn open_folder_api_opens_a_new_window_beside_documents(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("a.md", NOTE), ("vault/b.md", NOTE)], Some("a.md"));
+    let folder = f.path("vault");
+    let opened = f.open_folder(&folder, crate::Placement::RecentWindow);
+    assert_eq!(f.windows(), 2);
+    assert_ne!(opened.workspace, f.workspace.downgrade());
+    assert_eq!(f.vault(), None, "this window keeps its file and no vault");
+    assert_eq!(f.folder_shown(&opened), (Some(folder.clone()), true));
+    assert_eq!(f.recent().1, [folder]);
+}
+
+#[gpui::test]
+fn open_folder_api_new_window_and_missing_folders(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("vault/a.md", NOTE)], None);
+    let folder = f.path("vault");
+    let opened = f.open_folder(&folder, crate::Placement::NewWindow);
+    assert_eq!(f.windows(), 2, "--new-window passes over the blank window");
+    assert_eq!(f.folder_shown(&opened), (Some(folder), true));
+    assert_eq!(f.vault(), None);
+
+    let missing = f.path("missing");
+    let result = f
+        .vcx
+        .cx
+        .update(|cx| crate::open_folder(cx, &missing, crate::Placement::RecentWindow));
+    assert!(result.is_err());
+    assert_eq!(f.windows(), 2);
+}
+
+#[gpui::test]
+fn open_folder_api_still_asks_before_indexing_a_large_folder(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &many_files(), None);
+    f.vcx.update(|_, cx| cx.set_global(AutoIndexLimit(3)));
+    let big = f.path("big");
+    f.open_folder(&big, crate::Placement::RecentWindow);
+    assert!(matches!(f.vault(), Some((_, VaultStatus::NotIndexed(_)))));
+    assert_eq!(f.topic(), Some(Topic::IndexAsk));
+}
+
 // ----- New note, New window --------------------------------------------------------
 
 #[gpui::test]

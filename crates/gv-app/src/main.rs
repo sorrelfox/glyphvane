@@ -225,7 +225,7 @@ fn main() -> ExitCode {
             let opened = if waits {
                 wait::open(request, wait::Waiter::Local, cx)
             } else if restores_session(&request) {
-                restore(request, cx)
+                restore(cx)
             } else {
                 open(request, cx)
             };
@@ -369,35 +369,28 @@ fn report_gpu_failure(
 }
 
 /// Whether the first request of this run restores the session: a launch
-/// without files does. A launch with files opens only those, with the
-/// panels hidden, and leaves the stored session as it is (FR-VIEW-16).
+/// without paths does. A launch with files or folders opens only those, and
+/// leaves the stored session as it is (FR-VIEW-16).
 fn restores_session(request: &OpenRequest) -> bool {
-    request.files.is_empty()
+    request.files.is_empty() && request.folders.is_empty()
 }
 
-/// Restores the session for a launch without files; an empty window when
+/// Restores the session for a launch without paths; an empty window when
 /// there is nothing to restore.
-fn restore(request: OpenRequest, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
-    note_folders(&request, cx);
+fn restore(cx: &mut App) -> gpui::Result<AnyWindowHandle> {
     match ui_session::restore(cx)? {
         Some(window) => Ok(window),
         None => gv_ui::open(cx, Vec::new(), Placement::RecentWindow),
     }
 }
 
-fn note_folders(request: &OpenRequest, cx: &mut App) {
-    for folder in &request.folders {
-        // Vaults come later; the folder is only noted.
-        tracing::info!("folder requested: {}", folder.display());
-        ui_session::note_recent_folder(cx, folder);
-    }
-}
-
-/// Opens what `request` names, by the rules of [`gv_ui::open`]: files as
+/// Opens what `request` names. Each folder opens as a vault by the rules of
+/// [`gv_ui::open_folder`] (a blank window takes it, else a new window) and
+/// shows the Files panel. A file inside one of those folders opens as a tab
+/// in its window; the other files open by the rules of [`gv_ui::open`]: as
 /// tabs of the most recently focused window, or of a new window that starts
 /// with its panels hidden.
 fn open(request: OpenRequest, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
-    note_folders(&request, cx);
     for file in &request.files {
         match file.position {
             Some(at) => tracing::info!(
@@ -416,7 +409,51 @@ fn open(request: OpenRequest, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
     } else {
         Placement::RecentWindow
     };
-    gv_ui::open(cx, request.files, placement)
+    let mut vaults: Vec<(PathBuf, gv_ui::WorkspaceWindow)> = Vec::new();
+    for folder in &request.folders {
+        tracing::info!("open folder {}", folder.display());
+        match gv_ui::open_folder(cx, folder, placement) {
+            Ok(window) => vaults.push((folder.clone(), window)),
+            Err(err) => {
+                tracing::error!("cannot open the folder {}: {err:#}", folder.display());
+            }
+        }
+    }
+    let folders: Vec<PathBuf> = vaults.iter().map(|(folder, _)| folder.clone()).collect();
+    let (inside, loose) = route_files(request.files, &folders);
+    for (index, target) in inside {
+        vaults[index].1.open_tab(target, cx)?;
+    }
+    match vaults.last() {
+        Some((_, window)) if loose.is_empty() => {
+            window.activate(cx);
+            Ok(window.window)
+        }
+        _ => gv_ui::open(cx, loose, placement),
+    }
+}
+
+/// Splits `files` into those inside one of `folders`, each with the index
+/// of the innermost folder that holds it, and the others.
+fn route_files(
+    files: Vec<OpenTarget>,
+    folders: &[PathBuf],
+) -> (Vec<(usize, OpenTarget)>, Vec<OpenTarget>) {
+    let mut inside = Vec::new();
+    let mut loose = Vec::new();
+    for file in files {
+        let holder = folders
+            .iter()
+            .enumerate()
+            .filter(|(_, folder)| file.path.starts_with(folder))
+            .max_by_key(|(_, folder)| folder.components().count())
+            .map(|(index, _)| index);
+        match holder {
+            Some(index) => inside.push((index, file)),
+            None => loose.push(file),
+        }
+    }
+    (inside, loose)
 }
 
 /// The request for URLs the platform asked to open (macOS sends files
@@ -474,6 +511,172 @@ mod tests {
         assert!(restores_session(&request(&["glyphvane", "--new-window"])));
         assert!(!restores_session(&request(&["glyphvane", "a.md"])));
         assert!(!restores_session(&request(&["glyphvane", "a.md:3"])));
+    }
+
+    #[test]
+    fn a_launch_with_a_folder_opens_it_instead_of_the_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("vault")).expect("folder");
+        let cli = Cli::try_parse_from(["glyphvane", "vault"]).expect("arguments parse");
+        let request = OpenRequest::from_cli(&cli, dir.path());
+        assert_eq!(request.folders, [dir.path().join("vault")]);
+        assert!(request.files.is_empty());
+        assert!(!restores_session(&request));
+    }
+
+    #[test]
+    fn files_go_to_the_innermost_folder_that_holds_them() {
+        let folders = [PathBuf::from("/notes"), PathBuf::from("/notes/work")];
+        let files = vec![
+            OpenTarget::new("/notes/a.md"),
+            OpenTarget::new("/notes/work/b.md"),
+            OpenTarget::new("/notesx/c.md"),
+            OpenTarget::new("/elsewhere/d.md"),
+        ];
+        let (inside, loose) = route_files(files, &folders);
+        assert_eq!(
+            inside,
+            [
+                (0, OpenTarget::new("/notes/a.md")),
+                (1, OpenTarget::new("/notes/work/b.md")),
+            ]
+        );
+        assert_eq!(
+            loose,
+            [
+                OpenTarget::new("/notesx/c.md"),
+                OpenTarget::new("/elsewhere/d.md")
+            ]
+        );
+        let (inside, loose) = route_files(vec![OpenTarget::new("/a.md")], &[]);
+        assert!(inside.is_empty());
+        assert_eq!(loose, [OpenTarget::new("/a.md")]);
+    }
+
+    /// Folder requests in headless windows: at launch and when another
+    /// instance hands one over, which both go through [`open`].
+    mod folders {
+        use std::path::Path;
+
+        use gpui::TestAppContext;
+        use gv_ui::{ThemeChoice, WorkspaceWindow};
+
+        use super::*;
+
+        const NOTE: &str = "# Note\n";
+
+        fn request(folders: &[&Path], files: &[&Path], new_window: bool) -> OpenRequest {
+            OpenRequest {
+                cwd: std::env::temp_dir(),
+                files: files.iter().map(|f| OpenTarget::new(*f)).collect(),
+                folders: folders.iter().map(|f| f.to_path_buf()).collect(),
+                new_window,
+                wait: false,
+            }
+        }
+
+        fn setup(cx: &mut TestAppContext) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("temp dir");
+            for name in ["vault/a.md", "vault/sub/b.md", "other/c.md", "loose.md"] {
+                let path = dir.path().join(name);
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("folder");
+                std::fs::write(path, NOTE).expect("write");
+            }
+            cx.update(|cx| {
+                gv_ui::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+            });
+            dir
+        }
+
+        fn open_request(cx: &mut TestAppContext, request: OpenRequest) -> WorkspaceWindow {
+            cx.update(|cx| open(request, cx))
+                .expect("the request opens");
+            cx.run_until_parked();
+            cx.update(gv_ui::most_recent_window).expect("a window")
+        }
+
+        /// The window's vault folder and its tabs' files.
+        fn shown(
+            cx: &mut TestAppContext,
+            window: &WorkspaceWindow,
+        ) -> (Option<PathBuf>, Vec<PathBuf>) {
+            cx.update(|cx| {
+                let ws = window.workspace.upgrade().expect("open").read(cx);
+                let tabs = ws
+                    .tabs()
+                    .iter()
+                    .filter_map(|t| t.path().map(Path::to_path_buf))
+                    .collect();
+                (ws.vault_root(cx), tabs)
+            })
+        }
+
+        fn windows(cx: &mut TestAppContext) -> usize {
+            cx.update(|cx| cx.windows().len())
+        }
+
+        #[gpui::test]
+        fn a_folder_at_launch_opens_as_the_vault_of_one_window(cx: &mut TestAppContext) {
+            let dir = setup(cx);
+            let vault = dir.path().join("vault");
+            let window = open_request(cx, request(&[&vault], &[], false));
+            assert_eq!(windows(cx), 1);
+            assert_eq!(shown(cx, &window), (Some(vault), Vec::new()));
+        }
+
+        #[gpui::test]
+        fn files_inside_the_folder_open_in_its_window(cx: &mut TestAppContext) {
+            let dir = setup(cx);
+            let vault = dir.path().join("vault");
+            let (a, b) = (vault.join("a.md"), vault.join("sub/b.md"));
+            let window = open_request(cx, request(&[&vault], &[&a, &b], false));
+            assert_eq!(windows(cx), 1);
+            assert_eq!(shown(cx, &window), (Some(vault), vec![a, b]));
+        }
+
+        #[gpui::test]
+        fn a_loose_file_with_new_window_gets_its_own_window(cx: &mut TestAppContext) {
+            let dir = setup(cx);
+            let vault = dir.path().join("vault");
+            let (a, loose) = (vault.join("a.md"), dir.path().join("loose.md"));
+            let window = open_request(cx, request(&[&vault], &[&a, &loose], true));
+            assert_eq!(windows(cx), 2);
+            assert_eq!(shown(cx, &window), (None, vec![loose]));
+        }
+
+        #[gpui::test]
+        fn a_handed_over_folder_opens_beside_the_documents(cx: &mut TestAppContext) {
+            let dir = setup(cx);
+            let loose = dir.path().join("loose.md");
+            let first = open_request(cx, request(&[], &[&loose], false));
+            assert_eq!(windows(cx), 1);
+
+            // A second `glyphvane other` while this one runs.
+            let other = dir.path().join("other");
+            let window = open_request(cx, request(&[&other], &[], false));
+            assert_eq!(windows(cx), 2);
+            assert_ne!(window.window, first.window);
+            assert_eq!(shown(cx, &window), (Some(other.clone()), Vec::new()));
+            assert_eq!(shown(cx, &first), (None, vec![loose]));
+
+            // The same folder again comes back to its window.
+            let again = open_request(cx, request(&[&other], &[], false));
+            assert_eq!(windows(cx), 2);
+            assert_eq!(again.window, window.window);
+
+            // `--new-window` always opens one.
+            open_request(cx, request(&[&other], &[], true));
+            assert_eq!(windows(cx), 3);
+        }
+
+        #[gpui::test]
+        fn a_folder_that_is_gone_still_leaves_a_window(cx: &mut TestAppContext) {
+            let dir = setup(cx);
+            let gone = dir.path().join("gone");
+            let window = open_request(cx, request(&[&gone], &[], false));
+            assert_eq!(windows(cx), 1);
+            assert_eq!(shown(cx, &window), (None, Vec::new()));
+        }
     }
 
     #[cfg(unix)]

@@ -62,7 +62,8 @@ pub struct Cli {
 
     /// Files or folders to open. Files open in Preview; `PATH:LINE` and
     /// `PATH:LINE:COL` scroll to that line. When Glyphvane is already running,
-    /// they open as tabs in its most recently used window.
+    /// they open as tabs in its most recently used window. A folder opens as
+    /// a vault with the Files panel, and files inside it open in its window.
     #[arg(value_name = "PATH[:LINE[:COL]]")]
     pub paths: Vec<OsString>,
 }

@@ -82,8 +82,11 @@ struct Pending {
 /// A request without files is done at once and brings a window forward.
 pub fn open(request: OpenRequest, waiter: Waiter, cx: &mut App) -> gpui::Result<AnyWindowHandle> {
     for folder in &request.folders {
-        // Vaults come later; a folder is not waited for.
-        tracing::info!("folder requested: {}", folder.display());
+        // A folder opens as a vault, but is not waited for.
+        tracing::info!("open folder {}", folder.display());
+        if let Err(err) = gv_ui::open_folder(cx, folder, Placement::RecentWindow) {
+            tracing::error!("cannot open the folder {}: {err:#}", folder.display());
+        }
     }
     for file in &request.files {
         tracing::info!("open {} for editing (waiting)", file.path.display());

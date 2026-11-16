@@ -32,6 +32,8 @@ pub mod switcher;
 pub mod theme;
 pub mod zoom;
 
+use std::path::Path;
+
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Result, WindowBounds, WindowOptions, px, size,
 };
@@ -145,6 +147,46 @@ pub fn open(
     }
     window.activate(cx);
     Ok(window.window)
+}
+
+/// Opens `folder` as a vault, as File ▸ Open folder… does, for the command
+/// line, another instance or the platform.
+///
+/// The folder goes to the most recently focused main window when that
+/// window shows nothing yet or already has the folder as its vault;
+/// otherwise, or with [`Placement::NewWindow`], to a new window. The window
+/// shows the Files panel, is brought forward, and the folder becomes the
+/// most recent folder. The home folder, a filesystem root and very large
+/// folders still ask before they are indexed. Returns the window, so files
+/// inside the folder can open there as tabs.
+pub fn open_folder(cx: &mut App, folder: &Path, placement: Placement) -> Result<WorkspaceWindow> {
+    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    if !folder.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is not a folder", folder.display()),
+        )
+        .into());
+    }
+    let existing = match placement {
+        Placement::RecentWindow => most_recent_window(cx).filter(|window| {
+            window
+                .workspace
+                .upgrade()
+                .is_some_and(|ws| ws.read(cx).takes_folder(&folder, cx))
+        }),
+        Placement::NewWindow => None,
+    };
+    let window = match existing {
+        Some(window) => window,
+        None => open_workspace_window(cx, None)?,
+    };
+    let workspace = window.workspace.clone();
+    cx.update_window(window.window, |_, w, cx| {
+        workspace.update(cx, |ws, cx| ws.show_folder(folder, w, cx))
+    })??;
+    window.activate(cx);
+    Ok(window)
 }
 
 /// Opens files for an edit that someone waits for (`--wait`): as [`open`]

@@ -165,28 +165,38 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let folder = std::path::absolute(&folder).unwrap_or(folder);
-        if self.vault_root(cx).as_deref() == Some(folder.as_path()) {
-            session::note_recent_folder(cx, &folder);
-            self.show_sidebar_panel(SidebarPanel::Files, true, window, cx);
-            return;
-        }
-        if self.is_blank() {
-            self.adopt_folder(folder, window, cx);
+        if self.takes_folder(&folder, cx) {
+            self.show_folder(folder, window, cx);
             return;
         }
         cx.defer(move |cx| {
-            if let Err(err) = crate::open_file_window(cx, None) {
+            if let Err(err) = crate::open_folder(cx, &folder, crate::Placement::NewWindow) {
                 tracing::warn!("cannot open a window: {err:#}");
-                return;
             }
-            let Some(opened) = crate::most_recent_window(cx) else {
-                return;
-            };
-            let workspace = opened.workspace.clone();
-            let _ = cx.update_window(opened.window, |_, window, cx| {
-                workspace.update(cx, |ws, cx| ws.adopt_folder(folder, window, cx))
-            });
         });
+    }
+
+    /// Whether `folder` opens in this window rather than a new one: the
+    /// window shows nothing yet, or `folder` is already its vault.
+    pub(crate) fn takes_folder(&self, folder: &Path, cx: &gpui::App) -> bool {
+        self.is_blank() || self.vault_root(cx).as_deref() == Some(folder)
+    }
+
+    /// Shows `folder` in this window: its vault already, or made its vault
+    /// (see [`Self::adopt_folder`]). Either way the Files panel shows and
+    /// the folder becomes the most recent folder.
+    pub(crate) fn show_folder(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.vault_root(cx).as_deref() == Some(folder.as_path()) {
+            session::note_recent_folder(cx, &folder);
+            self.show_sidebar_panel(SidebarPanel::Files, true, window, cx);
+        } else {
+            self.adopt_folder(folder, window, cx);
+        }
     }
 
     /// Makes `folder` this window's vault and shows it in the Files panel.
@@ -198,7 +208,7 @@ impl Workspace {
     }
 
     /// The window's vault folder, if it has a vault.
-    fn vault_root(&self, cx: &gpui::App) -> Option<PathBuf> {
+    pub fn vault_root(&self, cx: &gpui::App) -> Option<PathBuf> {
         self.vault.as_ref().map(|v| v.read(cx).root().to_path_buf())
     }
 
