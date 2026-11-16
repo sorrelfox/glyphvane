@@ -375,6 +375,41 @@ fn the_editor_menu_opens_on_right_click_and_shift_f10(cx: &mut TestAppContext) {
     assert!(f.editor_focused());
 }
 
+/// The editor menu's table items run at the caret's cell, and are
+/// disabled outside a table (but Format table, which inserts one).
+#[gpui::test]
+fn the_editor_menu_runs_table_commands(cx: &mut TestAppContext) {
+    let text = "Words.\n\n| a | b |\n|---|---|\n| c | d |\n";
+    let mut f = fixture_sized(cx, text, WIDTH, HEIGHT);
+    f.dispatch(ToggleEditMode);
+    assert!(f.editor_focused());
+    f.keys("shift-f10");
+    assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    assert!(f.has("context-menu-disabled:editor.table_insert_row_below"));
+    assert!(!f.has("context-menu-disabled:editor.table"));
+    f.keys("escape");
+    // In the cell `c`.
+    let editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("an editor");
+    editor.update(&mut f.vcx, |e, cx| e.set_cursor(30, cx));
+    draw(&mut f.vcx);
+    f.keys("shift-f10");
+    assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    assert!(!f.has("context-menu-disabled:editor.table_insert_row_below"));
+    f.click("context-menu-item:editor.table_insert_row_below");
+    assert_eq!(f.menu(), None);
+    let now = editor.read_with(&f.vcx, |e, _| {
+        e.editor().map(|e| e.text().to_string()).unwrap_or_default()
+    });
+    assert_eq!(
+        now,
+        "Words.\n\n| a   | b   |\n| --- | --- |\n| c   | d   |\n|     |     |\n"
+    );
+    assert!(f.editor_focused());
+}
+
 /// In Preview a right-click on a link opens the link menu; elsewhere it
 /// opens nothing. The link commands have no handlers yet.
 #[gpui::test]

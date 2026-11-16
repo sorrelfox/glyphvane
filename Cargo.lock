@@ -3205,6 +3205,7 @@ dependencies = [
  "rand 0.9.5",
  "unicode-linebreak",
  "unicode-segmentation",
+ "unicode-width",
  "zed-test-util",
 ]
 

@@ -43,6 +43,15 @@ pub enum LinkStyle {
     Wikilink,
 }
 
+/// Where "Insert footnote" puts the definition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FootnotePlacement {
+    /// At the end of the document.
+    EndOfDocument,
+    /// After the top-level block (paragraph, list, quote) the caret is in.
+    AfterParagraph,
+}
+
 /// Settings of the Markdown commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CommandSettings {
@@ -58,11 +67,13 @@ pub struct CommandSettings {
     /// selection and are typed over
     /// ([`MarkdownCommands::type_text`](super::MarkdownCommands::type_text)).
     pub smart_pairs: bool,
+    /// Where "Insert footnote" puts the definition.
+    pub footnotes: FootnotePlacement,
 }
 
 impl Default for CommandSettings {
     /// A tab, asterisks, sequential numbering, Markdown links, smart
-    /// pairs on.
+    /// pairs on, footnote definitions at the end of the document.
     fn default() -> Self {
         Self {
             indent: IndentUnit::Tab,
@@ -70,6 +81,7 @@ impl Default for CommandSettings {
             numbering: Numbering::Sequential,
             link_style: LinkStyle::Markdown,
             smart_pairs: true,
+            footnotes: FootnotePlacement::EndOfDocument,
         }
     }
 }

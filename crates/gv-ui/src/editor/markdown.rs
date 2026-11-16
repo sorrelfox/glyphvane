@@ -4,7 +4,8 @@
 //! The Markdown commands in the Source view: Enter, Shift+Enter, Tab,
 //! Shift+Tab, inline formatting, headings, quotes, links, task boxes,
 //! renumbering, the line commands (move, duplicate, join, sort, change
-//! case) and toggle comment ([`gv_editor::commands`]).
+//! case), toggle comment, the table commands and insert footnote
+//! ([`gv_editor::commands`]).
 //!
 //! - **Dispatch.** Each command's keymap action runs
 //!   [`MarkdownCommands::run`] on every selection with the view's current
@@ -32,12 +33,18 @@
 //!   pairs) before plain insertion. Neither applies while composing.
 //! - **Insert link** reads the clipboard: an absolute URL there becomes the
 //!   link's destination.
+//! - **Tables.** Insert or format table and the row, column, alignment and
+//!   sort commands of the editor's context menu run at the carets' cells;
+//!   their handlers exist only with a caret in a table (Insert or format
+//!   table anywhere but in code), so the context menu disables them
+//!   elsewhere. Tab and Shift+Tab in a table move between cells.
 //! - **Viewer mode** ([`EditorView::set_read_only`]): no command has a
 //!   handler.
 
 use std::ops::Range;
 
 use gpui::{Action, Context, Div, InteractiveElement as _, Stateful, Window};
+use gv_editor::commands::TableOp;
 use gv_editor::{
     Availability, DeleteUnit, Editor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef,
 };
@@ -161,7 +168,9 @@ impl EditorView {
         let root = on::<actions::JoinLines>(root, MarkdownCommand::JoinLines, a, cx);
         let root = on::<actions::SortLines>(root, MarkdownCommand::SortLines, a, cx);
         let root = on::<actions::ChangeCase>(root, MarkdownCommand::ChangeCase, a, cx);
-        on::<actions::ToggleComment>(root, MarkdownCommand::ToggleComment, a, cx)
+        let root = on::<actions::ToggleComment>(root, MarkdownCommand::ToggleComment, a, cx);
+        let root = on::<actions::InsertFootnote>(root, MarkdownCommand::InsertFootnote, a, cx);
+        table_handlers(root, a, cx)
     }
 
     /// Runs `command` at every selection. A command that cannot run at the
@@ -266,6 +275,32 @@ impl EditorView {
             None => commands.type_text(&mut doc.editor, None, text),
         }
     }
+}
+
+/// Registers the handlers of the table commands that can run now.
+fn table_handlers(
+    root: Stateful<Div>,
+    a: &Availabilities,
+    cx: &mut Context<'_, EditorView>,
+) -> Stateful<Div> {
+    use MarkdownCommand::Table;
+    let root = on::<actions::Table>(root, Table(TableOp::Format), a, cx);
+    let root = on::<actions::TableInsertRowAbove>(root, Table(TableOp::InsertRowAbove), a, cx);
+    let root = on::<actions::TableInsertRowBelow>(root, Table(TableOp::InsertRowBelow), a, cx);
+    let root = on::<actions::TableInsertColumnLeft>(root, Table(TableOp::InsertColumnLeft), a, cx);
+    let root =
+        on::<actions::TableInsertColumnRight>(root, Table(TableOp::InsertColumnRight), a, cx);
+    let root = on::<actions::TableDeleteRow>(root, Table(TableOp::DeleteRow), a, cx);
+    let root = on::<actions::TableDeleteColumn>(root, Table(TableOp::DeleteColumn), a, cx);
+    let root = on::<actions::TableMoveRowUp>(root, Table(TableOp::MoveRowUp), a, cx);
+    let root = on::<actions::TableMoveRowDown>(root, Table(TableOp::MoveRowDown), a, cx);
+    let root = on::<actions::TableMoveColumnLeft>(root, Table(TableOp::MoveColumnLeft), a, cx);
+    let root = on::<actions::TableMoveColumnRight>(root, Table(TableOp::MoveColumnRight), a, cx);
+    let root = on::<actions::TableAlignLeft>(root, Table(TableOp::AlignLeft), a, cx);
+    let root = on::<actions::TableAlignCenter>(root, Table(TableOp::AlignCenter), a, cx);
+    let root = on::<actions::TableAlignRight>(root, Table(TableOp::AlignRight), a, cx);
+    let root = on::<actions::TableAlignNone>(root, Table(TableOp::AlignNone), a, cx);
+    on::<actions::TableSortByColumn>(root, Table(TableOp::SortByColumn), a, cx)
 }
 
 /// Runs `command` on `doc` if it can run at the carets; `None` if it

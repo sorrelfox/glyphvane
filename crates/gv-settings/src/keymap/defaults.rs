@@ -248,6 +248,10 @@ const BUILTIN: &[Row] = &[
     ("editor.table_move_row_down", "Move table row down", Category::Formatting, Some(EDITOR), &[]),
     ("editor.table_move_column_left", "Move table column left", Category::Formatting, Some(EDITOR), &[]),
     ("editor.table_move_column_right", "Move table column right", Category::Formatting, Some(EDITOR), &[]),
+    ("editor.table_align_left", "Align table column left", Category::Formatting, Some(EDITOR), &[]),
+    ("editor.table_align_center", "Center table column", Category::Formatting, Some(EDITOR), &[]),
+    ("editor.table_align_right", "Align table column right", Category::Formatting, Some(EDITOR), &[]),
+    ("editor.table_align_none", "Remove table column alignment", Category::Formatting, Some(EDITOR), &[]),
     ("editor.table_sort_by_column", "Sort table by column", Category::Formatting, Some(EDITOR), &[]),
 ];
 

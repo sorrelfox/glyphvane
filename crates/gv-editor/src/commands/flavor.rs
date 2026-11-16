@@ -10,13 +10,15 @@ use gv_syntax::ParseOptions;
 /// The flavor profile of a document, as far as editing commands are
 /// concerned: which inline and block syntax exists.
 ///
-/// | Flavor | Id | `~~strike~~` | `==highlight==` | Task items | Wikilinks |
-/// |---|---|---|---|---|---|
-/// | CommonMark | `commonmark` | — | — | — | — |
-/// | GFM (files) | `gfm-file` | yes | — | `[ ]` `[x]` | — |
-/// | GFM (comments) | `gfm-comment` | yes | — | `[ ]` `[x]` | — |
-/// | Obsidian | `obsidian` | yes | yes | any status character | yes |
-/// | Extended | `extended` | yes | yes | `[ ]` `[x]` | yes |
+/// | Flavor | Id | `~~strike~~` | `==highlight==` | Task items | Wikilinks | Tables, footnotes |
+/// |---|---|---|---|---|---|---|
+/// | CommonMark | `commonmark` | — | — | — | — | — |
+/// | GFM (files) | `gfm-file` | yes | — | `[ ]` `[x]` | — | yes |
+/// | GFM (comments) | `gfm-comment` | yes | — | `[ ]` `[x]` | — | yes |
+/// | Obsidian | `obsidian` | yes | yes | any status character | yes | yes |
+/// | Extended | `extended` | yes | yes | `[ ]` `[x]` | yes | yes |
+///
+/// Tables follow the profile's parser options ([`Flavor::has_tables`]).
 ///
 /// Extended reads a single `~` as subscript, so strikethrough is always
 /// written with two tildes.
@@ -94,6 +96,16 @@ impl Flavor {
     /// (Obsidian), not only a space, `x` or `X`.
     pub fn any_task_status(self) -> bool {
         self == Flavor::Obsidian
+    }
+
+    /// Whether pipe tables exist (the profile parses GFM tables).
+    pub fn has_tables(self) -> bool {
+        self.parse_options().tables
+    }
+
+    /// Whether `[^label]` footnotes exist.
+    pub fn has_footnotes(self) -> bool {
+        self != Flavor::CommonMark
     }
 
     /// Whether `[[target]]` is a wikilink.

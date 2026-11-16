@@ -72,6 +72,8 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 rayon = "1.8"
 simdutf8 = "0.1.5"
 unicode-segmentation = "1.10"
+# East Asian and emoji display widths (gv-editor: table formatting).
+unicode-width = "0.2.3"
 # Tests and benchmarks.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 ctor = "1.0.12"

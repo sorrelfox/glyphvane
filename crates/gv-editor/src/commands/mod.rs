@@ -38,6 +38,10 @@
 //! | [`ToggleComment`](MarkdownCommand::ToggleComment) (Mod+/) | `%%…%%` in Obsidian, `<!-- … -->` elsewhere: removes the comment around the selection, else wraps the selection (on one line) or the lines. |
 //! | [`MarkdownCommands::insert_callout`] | `> [!type]` around the covered blocks (Obsidian callouts, GitHub alerts); in a callout, changes its type. |
 //! | [`MarkdownCommands::expand_selection`], [`MarkdownCommands::shrink_selection`] | By syntax node: word → inline → block → section ([`SelectionHistory`]). |
+//! | [`Table`](MarkdownCommand::Table) ([`TableOp`]) | Insert or format table (`editor.table`): outside a table, a two-column table on its own lines with the caret in the first header cell; in one, the table is formatted (pipes aligned by display width, East Asian wide characters and emoji counting two columns, escaped `\|` kept, alignment colons kept). The row, column, alignment and sort commands act at the caret's cell and format the table too. Flavors with tables only. |
+//! | Tab / Shift+Tab in a table | [`Indent`](MarkdownCommand::Indent) and [`Outdent`](MarkdownCommand::Outdent) at a caret in a table move to the next or previous cell (selecting its text) and format the table; Tab in the last cell appends a row. |
+//! | [`InsertFootnote`](MarkdownCommand::InsertFootnote) | `[^n]` after each selection, with the next free number, and its definition `[^n]: ` at the end of the document or after the caret's top-level block ([`FootnotePlacement`]); the carets go to the definitions. Flavors with footnotes only. |
+//! | [`MarkdownCommands::footnote_target`] (Go to footnote) | From a `[^label]` reference to its definition and back. |
 //! | [`MarkdownCommands::type_text`] (typing) | Smart pairs: brackets, quotes and backticks pair at a caret, wrap a selection together with the emphasis delimiters, and a paired closer is typed over. Backspace between a pair deletes both. Never while an input method composes. |
 //!
 //! Continuation and renumbering keep the CommonMark structure exact: column
@@ -58,6 +62,7 @@ mod context;
 mod doc;
 mod expand;
 mod flavor;
+mod footnote;
 mod inline;
 mod line_ops;
 mod lines;
@@ -65,6 +70,7 @@ mod list;
 mod navigate;
 mod pairs;
 mod settings;
+mod table;
 
 use gv_syntax::{LeafKind, SyntaxTree};
 use gv_text::TextSnapshot;
@@ -79,7 +85,10 @@ pub use self::callout::{ALERTS, OBSIDIAN_CALLOUTS, callout_types};
 pub use self::expand::SelectionHistory;
 pub use self::flavor::Flavor;
 pub use self::navigate::{HeadingEntry, line_target_offset, parse_line_target};
-pub use self::settings::{CommandSettings, EmphasisStyle, IndentUnit, LinkStyle, Numbering};
+pub use self::settings::{
+    CommandSettings, EmphasisStyle, FootnotePlacement, IndentUnit, LinkStyle, Numbering,
+};
+pub use self::table::{TableOp, display_width};
 
 /// A syntax tree and the text it is the parse of.
 #[derive(Clone, Copy, Debug)]
@@ -155,11 +164,15 @@ pub enum MarkdownCommand {
     ChangeCase,
     /// Toggle a comment.
     ToggleComment,
+    /// A table command.
+    Table(TableOp),
+    /// Insert a footnote.
+    InsertFootnote,
 }
 
 impl MarkdownCommand {
     /// Every command.
-    pub const ALL: [MarkdownCommand; 27] = [
+    pub const ALL: [MarkdownCommand; 44] = [
         MarkdownCommand::Newline,
         MarkdownCommand::NewlinePlain,
         MarkdownCommand::Indent,
@@ -187,6 +200,23 @@ impl MarkdownCommand {
         MarkdownCommand::SortLines,
         MarkdownCommand::ChangeCase,
         MarkdownCommand::ToggleComment,
+        MarkdownCommand::Table(TableOp::Format),
+        MarkdownCommand::Table(TableOp::InsertRowAbove),
+        MarkdownCommand::Table(TableOp::InsertRowBelow),
+        MarkdownCommand::Table(TableOp::InsertColumnLeft),
+        MarkdownCommand::Table(TableOp::InsertColumnRight),
+        MarkdownCommand::Table(TableOp::DeleteRow),
+        MarkdownCommand::Table(TableOp::DeleteColumn),
+        MarkdownCommand::Table(TableOp::MoveRowUp),
+        MarkdownCommand::Table(TableOp::MoveRowDown),
+        MarkdownCommand::Table(TableOp::MoveColumnLeft),
+        MarkdownCommand::Table(TableOp::MoveColumnRight),
+        MarkdownCommand::Table(TableOp::AlignLeft),
+        MarkdownCommand::Table(TableOp::AlignCenter),
+        MarkdownCommand::Table(TableOp::AlignRight),
+        MarkdownCommand::Table(TableOp::AlignNone),
+        MarkdownCommand::Table(TableOp::SortByColumn),
+        MarkdownCommand::InsertFootnote,
     ];
 
     /// The command id (`editor.bold`, …). `editor.newline` is bound to
@@ -220,6 +250,8 @@ impl MarkdownCommand {
             MarkdownCommand::SortLines => "editor.sort_lines",
             MarkdownCommand::ChangeCase => "editor.change_case",
             MarkdownCommand::ToggleComment => "editor.toggle_comment",
+            MarkdownCommand::Table(op) => op.id(),
+            MarkdownCommand::InsertFootnote => "editor.insert_footnote",
         }
     }
 
@@ -288,6 +320,8 @@ impl MarkdownCommands {
             MarkdownCommand::Highlight => self.flavor.has_highlight(),
             MarkdownCommand::ToggleTask => self.flavor.has_tasks(),
             MarkdownCommand::Heading(level) => (1..=6).contains(&level),
+            MarkdownCommand::Table(_) => self.flavor.has_tables(),
+            MarkdownCommand::InsertFootnote => self.flavor.has_footnotes(),
             _ => true,
         }
     }
@@ -320,6 +354,11 @@ impl MarkdownCommands {
         match command {
             MarkdownCommand::Newline => list::newline(&mut doc, settings, false),
             MarkdownCommand::NewlinePlain => list::newline(&mut doc, settings, true),
+            MarkdownCommand::Indent | MarkdownCommand::Outdent
+                if self.flavor.has_tables() && table::any_in_table(&doc) =>
+            {
+                table::step(&mut doc, command == MarkdownCommand::Indent);
+            }
             MarkdownCommand::Indent => list::indent(&mut doc, settings),
             MarkdownCommand::Outdent => list::outdent(&mut doc, settings),
             MarkdownCommand::RenumberList => list::renumber_command(&mut doc, settings),
@@ -344,6 +383,10 @@ impl MarkdownCommands {
             MarkdownCommand::SortLines => line_ops::sort_lines(&mut doc),
             MarkdownCommand::ChangeCase => line_ops::change_case(&mut doc),
             MarkdownCommand::ToggleComment => comment::toggle_comment(&mut doc),
+            MarkdownCommand::Table(op) => table::table_command(&mut doc, op),
+            MarkdownCommand::InsertFootnote => {
+                footnote::insert_footnote(&mut doc, settings.footnotes);
+            }
         }
         outcome(doc.commit(editor))
     }
@@ -437,7 +480,7 @@ impl MarkdownCommands {
         syntax: Option<SyntaxRef<'_>>,
     ) -> Option<std::ops::Range<usize>> {
         let doc = Doc::new(editor, syntax, self.flavor);
-        navigate::footnote_target(&doc, editor.selections().primary().head())
+        footnote::target(&doc, editor.selections().primary().head())
     }
 
     /// Backspace at every selection, where a caret is right after a list
@@ -556,6 +599,15 @@ impl MarkdownCommands {
                 MarkdownCommand::Quote => {
                     !leaf.is_some_and(|leaf| matches!(leaf.kind, LeafKind::FrontMatter { .. }))
                 }
+                MarkdownCommand::Table(TableOp::Format) => leaf.is_none_or(|leaf| {
+                    leaf.kind == LeafKind::Table || !(leaf.is_verbatim() || code_like(leaf))
+                }),
+                MarkdownCommand::Table(_) => {
+                    leaf.is_some_and(|leaf| leaf.kind == LeafKind::Table && leaf.lines.len() >= 2)
+                }
+                MarkdownCommand::InsertFootnote => {
+                    !verbatim && !leaf.is_some_and(code_like) && !code_span
+                }
             }
         });
         if here {
@@ -564,6 +616,11 @@ impl MarkdownCommands {
             Availability::NotHere
         }
     }
+}
+
+/// Whether `leaf` holds code or math (no Markdown inside).
+fn code_like(leaf: &context::LeafInfo) -> bool {
+    matches!(leaf.kind, LeafKind::MathBlock | LeafKind::IndentedCode)
 }
 
 /// The largest text that the keystroke-level commands (Backspace at a

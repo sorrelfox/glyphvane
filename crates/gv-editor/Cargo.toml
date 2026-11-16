@@ -17,6 +17,8 @@ sum_tree.workspace = true
 # UAX #14 break opportunities for soft wrap.
 unicode-linebreak.workspace = true
 unicode-segmentation.workspace = true
+# Display widths of table cells (East Asian width, emoji).
+unicode-width.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

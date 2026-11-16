@@ -22,7 +22,11 @@
 //!   rearranging lines changes what they are; change case keeps the
 //!   structure exactly; insert callout is checked like Quote;
 //! - the editor's text is the command's own result (checked inside the
-//!   crate on every commit in debug builds).
+//!   crate on every commit in debug builds);
+//! - on documents of pipe tables (escaped pipes, East Asian and emoji
+//!   cells, tables in quotes and list items), the table commands, Tab,
+//!   Shift+Tab and insert footnote keep the properties above, and
+//!   formatting is idempotent and keeps every cell's text.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -76,6 +80,29 @@ const LINES: &[&str] = &[
     "> 1. quoted",
 ];
 
+/// Lines of the table documents.
+const TABLE_LINES: &[&str] = &[
+    "| a | b |",
+    "|---|:-:|",
+    "a | b | c",
+    "--|--:|:--",
+    "| c\\| | 日本語 |",
+    "| 😀 | 👩‍💻 x |",
+    "|x|",
+    "| `p\\|q` |  |",
+    "> | q | r |",
+    "> |-|-|",
+    "> | s |",
+    "- item",
+    "  | i | j |",
+    "  | - | - |",
+    "text [^1]",
+    "[^1]: note",
+    "",
+    "",
+    "```",
+];
+
 /// A transaction's replacements: old range and new length.
 type Replacements = Vec<(std::ops::Range<usize>, usize)>;
 
@@ -102,8 +129,12 @@ fn command(index: usize) -> Under {
 }
 
 fn document() -> impl Strategy<Value = String> {
+    document_of(LINES)
+}
+
+fn document_of(lines: &'static [&'static str]) -> impl Strategy<Value = String> {
     (
-        prop::collection::vec(prop::sample::select(LINES), 1..12),
+        prop::collection::vec(prop::sample::select(lines), 1..12),
         any::<bool>(),
         any::<bool>(),
     )
@@ -549,6 +580,121 @@ proptest! {
             .map(|(index, len)| (index.index(text.len() + 1), *len))
             .collect();
         run_case(&text, &picks, command_index, flavor)?;
+    }
+}
+
+/// The indices of the commands under test on table documents.
+fn table_command_indices() -> Vec<usize> {
+    MarkdownCommand::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| {
+            matches!(
+                command,
+                MarkdownCommand::Table(_)
+                    | MarkdownCommand::Indent
+                    | MarkdownCommand::Outdent
+                    | MarkdownCommand::InsertFootnote
+            )
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The cells of every table row of `text` (the delimiter row's alignments
+/// aside), trimmed, by the parser's rules.
+fn table_cells(text: &str, flavor: Flavor) -> Vec<Vec<String>> {
+    let tree = SyntaxTree::parse_with(text, flavor.parse_options());
+    struct Rows<'a>(&'a str, Vec<Vec<String>>);
+    impl gv_syntax::Visitor for Rows<'_> {
+        fn leaf(&mut self, leaf: &gv_syntax::Leaf<'_>) {
+            if leaf.kind != gv_syntax::LeafKind::Table {
+                return;
+            }
+            for (index, line) in leaf.lines.iter().enumerate() {
+                let end = self.0[line.content.start..]
+                    .find(['\r', '\n'])
+                    .map_or(self.0.len(), |i| line.content.start + i);
+                let row = &self.0[line.content.start..end];
+                if index == 1 {
+                    continue;
+                }
+                let cells = gv_syntax::table::row_cells(row.as_bytes()).unwrap_or_default();
+                self.1.push(
+                    cells
+                        .into_iter()
+                        .map(|r| row[r].to_owned())
+                        .filter(|cell| !cell.is_empty())
+                        .collect(),
+                );
+            }
+        }
+    }
+    let mut rows = Rows(text, Vec::new());
+    tree.walk(&mut rows);
+    rows.1
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 1000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn table_commands_are_patches_and_undo_exactly(
+        text in document_of(TABLE_LINES),
+        picks in prop::collection::vec((any::<Index>(), any::<u8>()), 1..4),
+        which in any::<Index>(),
+        flavor in prop::sample::select(vec![Flavor::GfmFile, Flavor::Obsidian, Flavor::CommonMark]),
+    ) {
+        let picks: Vec<(usize, u8)> = picks
+            .iter()
+            .map(|(index, len)| (index.index(text.len() + 1), *len))
+            .collect();
+        // Carets must not split a character.
+        let picks: Vec<(usize, u8)> = picks
+            .into_iter()
+            .map(|(mut at, len)| {
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                (at, len % 2)
+            })
+            .collect();
+        let indices = table_command_indices();
+        run_case(&text, &picks, indices[which.index(indices.len())], flavor)?;
+    }
+
+    #[test]
+    fn formatting_is_idempotent_and_keeps_cells(text in document_of(TABLE_LINES)) {
+        let flavor = Flavor::GfmFile;
+        let format = MarkdownCommand::Table(gv_editor::commands::TableOp::Format);
+        let commands = MarkdownCommands::new(flavor, CommandSettings::default());
+        let mut editor = Editor::new(Buffer::new(&text));
+        // A caret at every line start: every table is formatted at once.
+        let carets: Vec<SelectionSpec> = line_ranges(&text)
+            .map(|range| SelectionSpec::caret(range.start))
+            .collect();
+        editor.set_selections(&carets, 0);
+        let in_table = commands.availability(
+            MarkdownCommand::Table(gv_editor::commands::TableOp::DeleteRow),
+            &editor,
+            None,
+        ) == gv_editor::Availability::Available;
+        if in_table {
+            commands.run(format, &mut editor, None);
+            let once = editor.text().to_string();
+            prop_assert_eq!(table_cells(&once, flavor), table_cells(&text, flavor));
+            let carets: Vec<SelectionSpec> = line_ranges(&once)
+                .map(|range| SelectionSpec::caret(range.start))
+                .collect();
+            editor.set_selections(&carets, 0);
+            let outcome = commands.run(format, &mut editor, None);
+            prop_assert_eq!(outcome, gv_editor::Outcome::Unchanged, "{:?} gave {:?}", text, once);
+            prop_assert_eq!(editor.text().to_string(), once);
+        }
     }
 }
 

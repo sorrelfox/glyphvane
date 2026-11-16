@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! What the Go commands need from a document: its headings (Go to
-//! heading, sections for Expand selection), line targets (Go to line) and
-//! footnote references and definitions (Go to footnote).
+//! heading, sections for Expand selection) and line targets (Go to line).
+//! Go to footnote is in the footnote module.
 
 use std::ops::Range;
 
@@ -128,57 +128,6 @@ pub fn line_target_offset(text: &TextSnapshot, line: usize, column: Option<usize
         .nth(column - 1)
         .map_or(line_text.len(), |(i, _)| i);
     text.clip_offset(content.start + rel, Bias::Left)
-}
-
-/// The footnote label (`[^label]`) at `offset` on its line: the label's
-/// range (without brackets) and whether it is a definition (`[^label]:`
-/// at the start of the line's content).
-fn footnote_at(doc: &Doc, offset: usize) -> Option<(String, bool)> {
-    let line = doc.line_at(offset);
-    let rel = line.rel(offset);
-    let text = &line.text;
-    let mut from = 0;
-    while let Some(found) = text[from..].find("[^") {
-        let start = from + found;
-        let Some(close) = text[start + 2..].find(']') else {
-            break;
-        };
-        let end = start + 2 + close + 1;
-        let label = &text[start + 2..end - 1];
-        if !label.is_empty() && !label.contains(char::is_whitespace) && start <= rel && rel <= end {
-            let lead = text[..start]
-                .trim_start_matches([' ', '\t', '>'])
-                .is_empty();
-            let definition = lead && text[end..].starts_with(':');
-            return Some((label.to_owned(), definition));
-        }
-        from = end;
-    }
-    None
-}
-
-/// Where Go to footnote goes from the caret at `offset`: from a reference
-/// to its definition, from a definition to the first reference. The
-/// target's `[^label]` range.
-pub(crate) fn footnote_target(doc: &Doc, offset: usize) -> Option<Range<usize>> {
-    let (label, definition) = footnote_at(doc, offset)?;
-    let needle = format!("[^{label}]");
-    let text = doc.slice(0..doc.len());
-    let mut at = 0;
-    while let Some(found) = text[at..].find(&needle) {
-        let start = at + found;
-        let end = start + needle.len();
-        let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
-        let lead = text[line_start..start]
-            .trim_start_matches([' ', '\t', '>', '\r'])
-            .is_empty();
-        let is_definition = lead && text[end..].starts_with(':');
-        if is_definition != definition {
-            return Some(start..end);
-        }
-        at = end;
-    }
-    None
 }
 
 #[cfg(test)]

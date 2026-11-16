@@ -227,6 +227,10 @@ command_actions! {
         TableMoveRowDown = "editor.table_move_row_down",
         TableMoveColumnLeft = "editor.table_move_column_left",
         TableMoveColumnRight = "editor.table_move_column_right",
+        TableAlignLeft = "editor.table_align_left",
+        TableAlignCenter = "editor.table_align_center",
+        TableAlignRight = "editor.table_align_right",
+        TableAlignNone = "editor.table_align_none",
         TableSortByColumn = "editor.table_sort_by_column",
     }
     spell {
