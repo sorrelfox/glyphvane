@@ -36,6 +36,9 @@
 //!   that scroll sideways (with fades over their hidden sides), and the
 //!   keys of [`key_bindings`].
 //! - A code block's head copies the block and toggles its soft wrap.
+//! - A table whose cells wrap or that scrolls sideways shows an Expand
+//!   button while the pointer is over it; the window then shows the table
+//!   on its own over its content area ([`expanded`]).
 //! - Find in page ([`find`]): Mod+F opens the find popover at the top right
 //!   of the document area; matches are highlighted and the current one is
 //!   scrolled into view.
@@ -54,6 +57,7 @@ pub(crate) mod diagram;
 mod edited;
 mod element;
 mod engine;
+pub(crate) mod expanded;
 mod find;
 pub(crate) mod follow;
 mod heights;
@@ -105,6 +109,7 @@ pub(crate) use live::{Spot, SyncRequest};
 pub use state::ReaderLayout;
 
 pub use bench::DEBUG_READER_BENCH_ENV;
+pub use expanded::{ExpandedEvent, ExpandedTable};
 pub use find::DEBUG_FIND_ENV;
 pub(crate) use links::{Navigation, NewNote, Resolver, navigation, resolver_kind};
 
@@ -160,6 +165,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-end", ScrollToBottom, context),
         ]);
     }
+    keys.extend(expanded::key_bindings());
     keys
 }
 
@@ -193,6 +199,20 @@ pub enum ReaderEvent {
     /// A task checkbox was clicked: the document's owner writes the
     /// toggle back (one undoable edit) unless the document is read-only.
     ToggleTask(TaskToggle),
+    /// A table's Expand button was clicked: the window shows the table in
+    /// the expanded view ([`expanded::ExpandedTable`]).
+    ExpandTable(ExpandRequest),
+}
+
+/// A table to show in the expanded view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpandRequest {
+    /// The table's Markdown on its own (without the prefixes of the quotes
+    /// and lists around it).
+    pub markdown: Arc<str>,
+    /// What the view's header says: the heading the table is under, else
+    /// the document's file name.
+    pub title: SharedString,
 }
 
 /// A task item's status character to replace: `from` at byte `offset` of
@@ -254,6 +274,9 @@ pub struct Reader {
     /// The Appearance settings documents are shown with (zoom, fonts,
     /// readable width).
     typography: Typography,
+    /// Documents fill the view whatever the readable line width (the
+    /// expanded table's view).
+    fill: bool,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
     /// Remote images: the fetches, failures and sites waiting.
@@ -302,6 +325,7 @@ impl Reader {
             profile: Arc::new(gv_profile::compile_builtin(ProfileId::CommonMark)),
             live: live::Live::default(),
             typography,
+            fill: false,
             _load: None,
             _refresh: None,
             remote: remote::RemoteImages::default(),
@@ -336,11 +360,7 @@ impl Reader {
             return;
         }
         let old = std::mem::replace(&mut self.typography, new);
-        {
-            let mut st = self.state.borrow_mut();
-            st.column_max = self.typography.column_max();
-            st.wide_max = self.typography.wide_max();
-        }
+        self.apply_widths();
         let fonts_differ = old.fonts_differ(&self.typography);
         if fonts_differ {
             let families = self.typography.families(&cx.text_system().all_font_names());
@@ -351,6 +371,59 @@ impl Reader {
             self.rebuild(cx);
         }
         cx.notify();
+    }
+
+    /// Sets the text column's widest and how wide blocks too wide for it
+    /// get: from the settings, or the whole view in the expanded table's.
+    fn apply_widths(&mut self) {
+        let mut st = self.state.borrow_mut();
+        if self.fill {
+            st.column_max = f32::INFINITY;
+            st.wide_max = f32::INFINITY;
+        } else {
+            st.column_max = self.typography.column_max();
+            st.wide_max = self.typography.wide_max();
+        }
+    }
+
+    /// Makes this the expanded table's view: documents fill the view
+    /// whatever the readable line width, and tables get no Expand button.
+    pub(crate) fn fill_view(&mut self, cx: &mut Context<'_, Self>) {
+        self.fill = true;
+        self.apply_widths();
+        self.state.borrow_mut().expandable = false;
+        cx.notify();
+    }
+
+    /// Asks the window to show the table of node `node` in the expanded
+    /// view.
+    fn expand_table(&mut self, node: usize, cx: &mut Context<'_, Self>) {
+        let request = {
+            let st = self.state.borrow();
+            let Some(doc) = st.doc.as_ref() else {
+                return;
+            };
+            let Some(source) = doc.tree.nodes().get(node).map(|n| n.source.clone()) else {
+                return;
+            };
+            let title = doc
+                .model
+                .heading_at(source.start)
+                .and_then(|h| doc.model.headings().get(h))
+                .map(|h| h.text.to_string())
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| {
+                    doc.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                })
+                .unwrap_or_default();
+            ExpandRequest {
+                markdown: expanded::table_markdown(&doc.text, source).into(),
+                title: title.into(),
+            }
+        };
+        cx.emit(ReaderEvent::ExpandTable(request));
     }
 
     /// Whether the shown document was built at another scale than the one
@@ -423,6 +496,11 @@ impl Reader {
     /// The profile documents are read with.
     pub fn profile(&self) -> ProfileId {
         self.profile.id
+    }
+
+    /// The profile documents are read with, compiled.
+    pub(crate) fn compiled_profile(&self) -> Arc<CompiledProfile> {
+        Arc::clone(&self.profile)
     }
 
     /// Where the view puts its text column.

@@ -122,18 +122,20 @@ pub(crate) struct LinkHit {
     pub range: Option<std::ops::Range<usize>>,
 }
 
-/// A button in a code block's head.
+/// A button in a code block's head, or a table's Expand button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ButtonKind {
     Copy,
     Wrap,
+    /// Shows the table in the expanded view.
+    Expand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CodeButton {
     pub bounds: Bounds<Pixels>,
     pub block: BlockId,
-    /// Index of the code block's node.
+    /// Index of the code block's (or the table's) node.
     pub node: usize,
     pub kind: ButtonKind,
 }
@@ -336,6 +338,11 @@ pub(crate) struct State {
     /// The search a click on a tag asked for (`tag:#name`), handed to the
     /// vault search with the `search.vault` command.
     pub tag_search: Option<Arc<str>>,
+    /// Tables not at their natural width get an Expand button while the
+    /// pointer is over them (not in the expanded view itself).
+    pub expandable: bool,
+    /// The table under the pointer.
+    pub hover_table: Option<BlockId>,
 }
 
 impl std::fmt::Debug for State {
@@ -373,6 +380,8 @@ impl State {
             tag_search: None,
             column_max: document::COLUMN_MAX,
             wide_max: f32::INFINITY,
+            expandable: true,
+            hover_table: None,
         }
     }
 
@@ -401,6 +410,7 @@ impl State {
         self.selection = None;
         self.hscroll.clear();
         self.hover = Hover::None;
+        self.hover_table = None;
         self.press = Press::None;
         self.geometry = Geometry::default();
         self.stale.clear();
@@ -676,6 +686,19 @@ impl State {
             };
             engine.invalidate(&items, range);
         }
+    }
+
+    /// The table whose drawn rows hold a window position.
+    pub fn table_at(&self, position: Point<Pixels>) -> Option<BlockId> {
+        let doc = self.doc.as_ref()?;
+        self.geometry.items.iter().find_map(|g| {
+            let code = g.code?;
+            (matches!(
+                doc.tree.items().get(g.ix)?.kind,
+                gv_render_tree::ItemKind::TableRow { .. }
+            ) && code.clip.contains(&position))
+            .then_some(code.block)
+        })
     }
 
     /// The sideways scrollbar whose zone holds a window position.

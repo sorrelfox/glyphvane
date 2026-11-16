@@ -5,6 +5,7 @@
 
 mod controls;
 mod document;
+mod expanded_table;
 mod export;
 #[cfg(test)]
 mod export_tests;
@@ -579,6 +580,8 @@ pub struct Workspace {
     /// The link popover (create, candidates, trace) and the last ambiguous
     /// link followed.
     link_ux: link_actions::LinkUx,
+    /// The expanded table over the content area, while it is open.
+    expanded: Option<expanded_table::Expanded>,
 }
 
 impl fmt::Debug for Workspace {
@@ -718,6 +721,7 @@ impl Workspace {
             index_asked: false,
             _profiles: profiles,
             link_ux: link_actions::LinkUx::new(cx),
+            expanded: None,
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -1091,6 +1095,9 @@ impl Workspace {
                     this.follow_link(reader.clone(), request.clone(), window, cx);
                 }
                 ReaderEvent::ToggleTask(toggle) => this.toggle_task(reader, *toggle, cx),
+                ReaderEvent::ExpandTable(request) => {
+                    this.expand_table(reader.clone(), request, window, cx);
+                }
             },
         );
         let changes = cx.observe(&reader, |this, reader, cx| this.reader_changed(&reader, cx));
@@ -1715,6 +1722,7 @@ impl Render for Workspace {
         let editor_facts = self.editor_facts(cx);
         let profile_chip = self.render_profile_chip(theme, cx);
         let profile_menu = self.render_profile_menu(window, theme, cx);
+        let expanded = self.render_expanded(cx);
 
         // The window root (GPUI Component's `Root`) draws the frame of a
         // client-decorated window: shadow, border, rounded corners and resize
@@ -1798,10 +1806,13 @@ impl Render for Workspace {
                             .flex_col()
                             .child(self.render_title_row(radii, window, cx))
                             .child(
+                                // The content area: the expanded table
+                                // covers it.
                                 div()
                                     .flex_1()
                                     .min_h_0()
                                     .flex()
+                                    .relative()
                                     .child(
                                         // The infobar spans the document,
                                         // not the right panel.
@@ -1821,7 +1832,8 @@ impl Render for Workspace {
                                             self.links.clone(),
                                             &self.panels,
                                         ))
-                                    }),
+                                    })
+                                    .children(expanded),
                             ),
                     ),
             )

@@ -4,7 +4,7 @@
 //! The tooltip of the link under the pointer in the Reading view: after
 //! [`TOOLTIP_DELAY`] on a link whose status needs explaining (unresolved,
 //! ambiguous with its candidates, case-only or loose matches, pending,
-//! outside the root, blocked).
+//! outside the root, blocked). A table's Expand button gets one too.
 
 use gpui::{AnyElement, Context, Task, Window};
 use gv_render_tree::LinkStatus;
@@ -12,13 +12,24 @@ use gv_render_tree::LinkStatus;
 use super::Reader;
 use super::link_info::{TOOLTIP_DELAY, link_name, status_tooltip, tooltip};
 use super::links::{Resolver, resolver_kind};
-use super::state::Hover;
+use super::state::{ButtonKind, Hover};
+
+/// What the Expand button's tooltip says.
+pub(super) const EXPAND_TIP: &str = "Expand table";
+
+/// What the pointer rests on that has a tooltip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TipKey {
+    /// A link: the item and link index.
+    Link(usize, u32),
+    /// The Expand button of the table of a block.
+    Expand(gv_syntax::BlockId),
+}
 
 /// Which link the pointer rests on, and whether its tooltip is due.
 #[derive(Default)]
 pub(super) struct LinkTip {
-    /// The item and link index.
-    key: Option<(usize, u32)>,
+    key: Option<TipKey>,
     shown: bool,
     _timer: Option<Task<()>>,
 }
@@ -63,7 +74,8 @@ impl Reader {
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
         let key = match &self.state.borrow().hover {
-            Hover::Link(link) => Some((link.item, link.link)),
+            Hover::Link(link) => Some(TipKey::Link(link.item, link.link)),
+            Hover::Button(b) if b.kind == ButtonKind::Expand => Some(TipKey::Expand(b.block)),
             _ => None,
         };
         if key != self.link_tip.key {
@@ -85,7 +97,10 @@ impl Reader {
         if !self.link_tip.shown {
             return None;
         }
-        let (_, text) = self.hovered_link_tooltip()?;
+        let text = match key? {
+            TipKey::Link(..) => self.hovered_link_tooltip()?.1,
+            TipKey::Expand(_) => EXPAND_TIP.to_owned(),
+        };
         Some(tooltip(text, window.mouse_position(), cx))
     }
 }

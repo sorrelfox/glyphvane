@@ -843,6 +843,14 @@ impl TableWidths {
         2.0 * pad * self.columns.len() as f32
     }
 
+    /// Whether every column shows its widest cell unwrapped.
+    pub fn is_natural(&self) -> bool {
+        self.fitted()
+            .iter()
+            .zip(&self.columns)
+            .all(|(fitted, natural)| fitted + 0.5 >= *natural)
+    }
+
     /// The room the columns were last fitted to.
     pub fn fit_room(&self) -> Option<f32> {
         self.fit.as_ref().map(|(room, _)| *room)

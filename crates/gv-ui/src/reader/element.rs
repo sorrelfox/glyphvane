@@ -544,6 +544,8 @@ impl Element for ReaderElement {
             doc_version,
             sync,
             band,
+            expandable,
+            hover_table,
             ..
         } = st;
         let Some(doc) = doc.as_ref() else {
@@ -1175,6 +1177,7 @@ impl Element for ReaderElement {
                             let icon_name = match kind {
                                 ButtonKind::Copy => Icon::CopyCode,
                                 ButtonKind::Wrap => Icon::WrapCode,
+                                ButtonKind::Expand => Icon::ExpandTable,
                             };
                             out.over.push(Op::Icon {
                                 bounds: Bounds::centered_at(
@@ -1660,6 +1663,63 @@ impl Element for ReaderElement {
             start_images(self.reader.clone(), images, cx);
         }
 
+        // The Expand button of the table under the pointer when it is not at
+        // its natural width (its cells wrap or it scrolls sideways): a code
+        // block head's button, at the top right of the table's visible part.
+        if *expandable && let Some(block) = *hover_table {
+            let rows: Vec<(usize, CodeGeom)> = geometry
+                .items
+                .iter()
+                .filter_map(|g| Some((g.ix, g.code?)))
+                .filter(|(ix, c)| {
+                    c.block == block && matches!(tree.items()[*ix].kind, ItemKind::TableRow { .. })
+                })
+                .collect();
+            let natural = cache.table(block).is_some_and(|t| t.is_natural())
+                && rows.iter().all(|(_, c)| c.overflow <= 0.5);
+            if let Some((ix, first)) = rows.first().copied().filter(|_| !natural) {
+                let top = rows
+                    .iter()
+                    .map(|(_, c)| f32::from(c.clip.top()))
+                    .fold(f32::INFINITY, f32::min)
+                    .max(f32::from(bounds.top()));
+                let inset = code_head::PAD_RIGHT;
+                let button = CodeButton {
+                    bounds: bounds_of(
+                        f32::from(first.clip.right()) - inset - CODE_BUTTON,
+                        top + inset,
+                        CODE_BUTTON,
+                        CODE_BUTTON,
+                    ),
+                    block,
+                    node: tree.items()[ix].node,
+                    kind: ButtonKind::Expand,
+                };
+                // On the header's fill, so it reads over the cells.
+                out.over.push(Op::Rect {
+                    bounds: button.bounds,
+                    color: color(Token::SurfaceSunken),
+                    radius: px(radius::SMALL_CONTROL),
+                });
+                if *hover == Hover::Button(button) {
+                    out.over.push(Op::Rect {
+                        bounds: button.bounds,
+                        color: color(Token::StateHover),
+                        radius: px(radius::SMALL_CONTROL),
+                    });
+                }
+                out.over.push(Op::Icon {
+                    bounds: Bounds::centered_at(
+                        button.bounds.center(),
+                        size(px(icon::INLINE), px(icon::INLINE)),
+                    ),
+                    path: Icon::ExpandTable.name().path(),
+                    color: color(Token::TextSecondary),
+                });
+                geometry.buttons.push(button);
+            }
+        }
+
         // The sideways scrollbars of the tables and code blocks that scroll
         // sideways: a thumb like the scrollbar's, inside the block's bottom
         // edge, or the bottom of its visible part.
@@ -1741,6 +1801,17 @@ impl Element for ReaderElement {
                 window.set_cursor_style(cursor, &pre.hitbox);
             }
             st.hover = hover;
+            // A table that moved under a resting pointer shows its Expand
+            // button on the next frame.
+            let table = if pre.hitbox.is_hovered(window) {
+                st.table_at(window.mouse_position())
+            } else {
+                None
+            };
+            if table != st.hover_table {
+                st.hover_table = table;
+                window.request_animation_frame();
+            }
         }
         self.register_handlers(&pre.hitbox, window);
         self.finish_frame(window, cx);
@@ -1903,14 +1974,15 @@ impl ReaderElement {
                         moved
                     }
                     _ => {
-                        let hover = if hitbox.is_hovered(window) {
-                            st.hover_at(e.position)
+                        let (hover, table) = if hitbox.is_hovered(window) {
+                            (st.hover_at(e.position), st.table_at(e.position))
                         } else {
-                            Hover::None
+                            (Hover::None, None)
                         };
                         // Kept now, so the view's tooltip follows it.
-                        let changed = hover != st.hover;
+                        let changed = hover != st.hover || table != st.hover_table;
                         st.hover = hover;
+                        st.hover_table = table;
                         changed
                     }
                 };
@@ -1936,6 +2008,7 @@ impl ReaderElement {
                 let mut toggle = None;
                 let mut open_file = None;
                 let mut tag_search = false;
+                let mut expand = None;
                 match (press, e.button) {
                     (Press::None, _) => return,
                     (Press::Control(control), MouseButton::Left) => {
@@ -1983,6 +2056,7 @@ impl ReaderElement {
                                     let ts = window.text_system().clone();
                                     st.toggle_wrap(button.block, &ts);
                                 }
+                                ButtonKind::Expand => expand = Some(button.node),
                             }
                         }
                     }
@@ -2024,6 +2098,9 @@ impl ReaderElement {
                 }
                 if let Some(t) = toggle {
                     let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::ToggleTask(t)));
+                }
+                if let Some(node) = expand {
+                    let _ = reader.update(cx, |r, cx| r.expand_table(node, cx));
                 }
                 if tag_search {
                     window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);

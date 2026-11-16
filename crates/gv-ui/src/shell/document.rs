@@ -177,6 +177,17 @@ impl Workspace {
                 self.toggle_split_task(reader, toggle, cx);
                 return;
             }
+            ReaderEvent::ExpandTable(request) => {
+                let (window, reader) = (self.window_handle, reader.clone());
+                cx.spawn(async move |this, cx| {
+                    // Fails only when the window has closed.
+                    let _ = cx.update_window(window, |_, window, cx| {
+                        this.update(cx, |ws, cx| ws.expand_table(reader, &request, window, cx))
+                    });
+                })
+                .detach();
+                return;
+            }
         };
         let Some(preview) = self
             .tabs

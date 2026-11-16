@@ -39,6 +39,7 @@ gpui::assets::icon_assets!(
         Lock,
         List,
         LogOut,
+        Maximize2,
         PencilLine,
         Quote,
         SlidersHorizontal,
@@ -94,6 +95,8 @@ pub enum Icon {
     CopyCode,
     /// A code block's soft wrap toggle.
     WrapCode,
+    /// A table's Expand button (not in the design's inventory).
+    ExpandTable,
     /// Find in page: previous match, next match, close.
     FindPrevious,
     FindNext,
@@ -170,6 +173,8 @@ impl Icon {
             Self::WindowClose => IconName::WindowClose,
             Self::CopyCode => IconName::Copy,
             Self::WrapCode => IconName::TextWrap,
+            // Not in the design's inventory: Lucide's `maximize-2`.
+            Self::ExpandTable => IconName::Maximize2,
             Self::FindPrevious => IconName::ArrowUp,
             Self::FindNext => IconName::ArrowDown,
             Self::CloseFind => IconName::X,
@@ -320,7 +325,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 51] = [
+    const ALL: [Icon; 52] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -359,6 +364,7 @@ mod tests {
         Icon::WindowClose,
         Icon::CopyCode,
         Icon::WrapCode,
+        Icon::ExpandTable,
         Icon::FindPrevious,
         Icon::FindNext,
         Icon::CloseFind,
