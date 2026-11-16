@@ -177,6 +177,16 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
+# Local timing runs (latency log, start-up trace, wall-clock benches):
+# release optimisation without LTO and with parallel code generation, so it
+# builds several times faster. Good for before/after comparisons on one
+# machine; budget numbers of record come from `release` or `dist`.
+[profile.measure]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 # Release artifacts (`cargo xtask package`, .github/workflows/release.yml).
 # Fat LTO is about 6 % smaller than thin LTO but adds minutes to the link, so
 # day-to-day release builds keep the thin-LTO profile above.
