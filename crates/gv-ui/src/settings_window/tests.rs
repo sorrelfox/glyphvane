@@ -325,6 +325,59 @@ fn number_fields_are_validated_before_saving(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_wide_blocks_row_fills_or_sets_a_width(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, GLOBAL_TEXT);
+    const FILL: &str = "appearance.fill_wide_blocks";
+    const CHARS: &str = "appearance.wide_block_width_chars";
+    // Right below the readable line width, on by default.
+    let readable = f
+        .bounds("settings-row-appearance.readable_line_width")
+        .expect("the readable line width row");
+    let wide = f
+        .bounds(&format!("settings-row-{FILL}"))
+        .expect("the wide blocks row");
+    assert!(wide.top() >= readable.bottom() - px(1.0), "{wide:?}");
+    assert!(wide.top() <= readable.bottom() + px(1.0), "{wide:?}");
+    assert!(f.drawn(&format!("settings-field-{CHARS}")));
+    assert!(f.settings().appearance.fill_wide_blocks);
+
+    // While it fills the space, the width field does not take the
+    // keyboard: typing goes on into the search field.
+    f.click(&format!("settings-field-{CHARS}"));
+    f.vcx.simulate_input("200");
+    draw(&mut f.vcx);
+    assert_eq!(f.view.read_with(&f.vcx, |v, _| v.query().to_owned()), "200");
+    f.keys("escape");
+    assert_eq!(f.view.read_with(&f.vcx, |v, _| v.query().to_owned()), "");
+    assert_eq!(f.settings().appearance.wide_block_width_chars, 120);
+
+    // Off: the field sets the width, applied at once.
+    f.click(&format!("settings-switch-{FILL}"));
+    assert!(!f.settings().appearance.fill_wide_blocks);
+    assert!(f.global_text().contains("fill_wide_blocks = false"));
+    f.click(&format!("settings-field-{CHARS}"));
+    f.keys("secondary-a");
+    f.vcx.simulate_input("160");
+    f.keys("enter");
+    assert_eq!(f.error(CHARS), None);
+    assert_eq!(f.settings().appearance.wide_block_width_chars, 160);
+    assert!(f.global_text().contains("wide_block_width_chars = 160"));
+    f.commit(CHARS, "1000");
+    let error = f.error(CHARS).expect("an inline error");
+    assert!(error.contains("from 40 to 400"), "{error}");
+    assert_eq!(f.settings().appearance.wide_block_width_chars, 160);
+
+    // Without a readable line width the row is disabled.
+    f.click("settings-switch-appearance.readable_line_width");
+    assert!(!f.settings().appearance.readable_line_width);
+    f.click(&format!("settings-switch-{FILL}"));
+    assert!(!f.settings().appearance.fill_wide_blocks);
+    f.click("settings-switch-appearance.readable_line_width");
+    f.click(&format!("settings-switch-{FILL}"));
+    assert!(f.settings().appearance.fill_wide_blocks);
+}
+
+#[gpui::test]
 fn text_and_list_fields_save_strings(cx: &mut TestAppContext) {
     let mut f = fixture(cx, GLOBAL_TEXT);
     f.section(SectionId::Files);

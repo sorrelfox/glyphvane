@@ -281,6 +281,7 @@ impl Reader {
         let fonts = items::font_table(&StyleTable::preview(), &families);
         let mut state = State::new(InlineText::new(fonts));
         state.column_max = typography.column_max();
+        state.wide_max = typography.wide_max();
         if let Some(bench) = Bench::from_env()
             && !BENCH_TAKEN.swap(true, Ordering::Relaxed)
         {
@@ -324,14 +325,20 @@ impl Reader {
 
     /// Applies the Appearance settings in effect: a new zoom or font size
     /// builds the document again where the view is, new font families
-    /// replace the fonts, a new readable width moves the column.
+    /// replace the fonts, a new readable width moves the column, and a new
+    /// wide block width lays the tables and diagrams too wide for the
+    /// column out again (on the next frame).
     fn sync_typography(&mut self, cx: &mut Context<'_, Self>) {
         let new = Typography::from_app(cx);
         if new == self.typography {
             return;
         }
         let old = std::mem::replace(&mut self.typography, new);
-        self.state.borrow_mut().column_max = self.typography.column_max();
+        {
+            let mut st = self.state.borrow_mut();
+            st.column_max = self.typography.column_max();
+            st.wide_max = self.typography.wide_max();
+        }
         let fonts_differ = old.fonts_differ(&self.typography);
         if fonts_differ {
             let families = self.typography.families(&cx.text_system().all_font_names());

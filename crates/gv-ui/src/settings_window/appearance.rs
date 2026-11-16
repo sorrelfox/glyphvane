@@ -4,7 +4,8 @@
 //! The Appearance section, as designed (SPEC § Settings window, the
 //! `settings.*` screens): the theme picker, the light theme System uses,
 //! high contrast; the Text group (fonts and sizes, readable line width,
-//! zoom); the Code blocks group.
+//! how wide tables and diagrams too wide for the column get, zoom); the
+//! Code blocks group.
 //!
 //! The theme cards' previews are tiny windows drawn in each theme's own
 //! colours, taken from that theme's roles.
@@ -30,6 +31,8 @@ const PREFERRED_LIGHT: &str = "appearance.preferred_light_theme";
 const HIGH_CONTRAST: &str = "appearance.high_contrast";
 const READABLE: &str = "appearance.readable_line_width";
 const READABLE_CHARS: &str = "appearance.readable_line_width_chars";
+const WIDE_FILL: &str = "appearance.fill_wide_blocks";
+const WIDE_CHARS: &str = "appearance.wide_block_width_chars";
 const ZOOM: &str = "appearance.zoom_percent";
 const CODE_THEME: &str = "appearance.code_theme";
 /// The zoom stepper's step, in percent.
@@ -250,6 +253,50 @@ impl SettingsWindow {
                 theme,
             )
             .debug_selector(|| format!("settings-row-{READABLE}"))
+            .into_any_element(),
+        );
+
+        // Wide tables and diagrams: only with a readable line width (without
+        // one the column already fills the view). On, they fill the space
+        // beside the column; off, the field sets how wide they get.
+        let fill = settings.fill_wide_blocks;
+        let chars = self.text_field(
+            WIDE_CHARS,
+            Some(field::NUMBER_WIDTH),
+            Some("ch"),
+            readable && !fill,
+            self.error(WIDE_CHARS, cx).is_some(),
+            theme,
+            window,
+            cx,
+        );
+        let switch = controls::switch(
+            "wide-switch",
+            fill,
+            readable,
+            self.set_on_click(WIDE_FILL, Value::Boolean(!fill), cx),
+            theme,
+        )
+        .debug_selector(|| format!("settings-switch-{WIDE_FILL}"))
+        .into_any_element();
+        let error = self
+            .error(WIDE_CHARS, cx)
+            .or_else(|| self.error(WIDE_FILL, cx));
+        out.push(
+            controls::row(
+                "wide",
+                "Wide tables and diagrams",
+                Some(
+                    "When on, tables and diagrams too wide for the text column use all the \
+                     space beside it. When off, they grow up to the width you set."
+                        .into(),
+                ),
+                error.map(SharedString::from),
+                vec![control_pair(chars, switch)],
+                theme,
+            )
+            .debug_selector(|| format!("settings-row-{WIDE_FILL}"))
+            .when(!readable, |d| d.opacity(DISABLED_OPACITY))
             .into_any_element(),
         );
 

@@ -24,11 +24,16 @@
 //!   ([`TABLE_SAMPLE`], widened when a later row is wider): every column
 //!   gets its widest cell when the table fits the text column, else the
 //!   room is shared out between the columns' widest words and widest
-//!   cells, so long cells wrap. Only when even the widest words do not fit
-//!   is the table wider than the text column (it then scrolls sideways).
-//!   Columns align per the delimiter row.
+//!   cells, so long cells wrap. When even the widest words do not fit, the
+//!   table grows beside the column (outside quotes, alerts, callouts and
+//!   embeds): to its natural width, at most the limit the view sets from
+//!   the wide block setting and its width ([`ItemCache::limit`]), the room
+//!   then shared out the same way. A table too wide even for that scrolls
+//!   sideways. Columns align per the delimiter row.
 //! - Thematic breaks, empty list items and empty quotes have fixed heights.
-//! - Images, display formulas and diagrams wider than the text column are
+//! - A diagram wider than the text column grows beside it the same way, up
+//!   to its own width or the limit ([`box_width`]).
+//! - Images, display formulas and diagrams wider than their text width are
 //!   scaled down to it ([`InlineBlock::fit_boxes`]).
 //! - A Mermaid diagram is one box of the diagram's size, painted from the
 //!   engine's theme-agnostic display list ([`super::diagram`]); it keeps
@@ -61,8 +66,8 @@ use gv_inline::{
 };
 use gv_math::MathEngine;
 use gv_render_tree::{
-    BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, InlineRole, Item, ItemId, ItemKind,
-    LinkSuffix, MATH_DISPLAY_SCALE, Metrics, NodeKind, Property, RenderTree, StatusIcon,
+    BlockNode, BoxRef, CodeBlock, ColorToken, FrameKind, InlineContent, InlineRole, Item, ItemId,
+    ItemKind, LinkSuffix, MATH_DISPLAY_SCALE, Metrics, NodeKind, Property, RenderTree, StatusIcon,
     StyleTable, TableBlock, TextRole, Variant, link_decor,
 };
 use gv_syntax::BlockId;
@@ -176,9 +181,21 @@ pub(crate) fn code_inset(m: &Metrics) -> f32 {
     m.code_border + m.code_padding_x
 }
 
+/// The width of an item's content box in a column `column` wide: the
+/// column without its frames' indents.
+pub(crate) fn content_width(item: &Item, column: f32, m: &Metrics) -> f32 {
+    (column - item.content_x(m) - item.content_right(m)).max(1.0)
+}
+
 /// The width an item's text is laid out at, for a column `column` wide.
 pub(crate) fn text_width(item: &Item, column: f32, m: &Metrics, wrapped: bool) -> f32 {
-    let mut content = (column - item.content_x(m) - item.content_right(m)).max(1.0);
+    text_width_in(item, content_width(item, column, m), m, wrapped)
+}
+
+/// The width an item's text is laid out at in a content box `content`
+/// wide.
+pub(crate) fn text_width_in(item: &Item, content: f32, m: &Metrics, wrapped: bool) -> f32 {
+    let mut content = content.max(1.0);
     if let ItemKind::Properties { .. } = item.kind {
         // The keys' column.
         content = (content - m.property_key - m.property_gap).max(1.0);
@@ -207,6 +224,95 @@ pub(crate) fn fit_boxes(item: &Item, block: &RefCell<InlineBlock>, w: f32) {
     if !matches!(item.kind, ItemKind::TableRow { .. }) && w < NO_WRAP {
         block.borrow_mut().fit_boxes(w);
     }
+}
+
+/// Whether item `item` may grow beside the text column when it is too
+/// wide for it: a table row or a diagram, unless it is in a quote, an
+/// alert, a callout or an embed, whose bar or box it would cross.
+pub(crate) fn may_grow(item: &Item) -> bool {
+    matches!(
+        item.kind,
+        ItemKind::TableRow { .. } | ItemKind::Diagram { .. }
+    ) && !item.context.iter().any(|f| {
+        matches!(
+            f.kind,
+            FrameKind::Quote { .. }
+                | FrameKind::Alert { .. }
+                | FrameKind::Callout { .. }
+                | FrameKind::Embed { .. }
+        )
+    })
+}
+
+/// The width of item `item`'s content box (its `block` laid out) in a
+/// column `column` wide. A table whose widest words alone do not fit and a
+/// rendered diagram wider than the column grow beside it, up to the
+/// cache's [`ItemCache::limit`]: a table to the room its columns were
+/// fitted to ([`DocItems::prepare`]), a diagram to its own width.
+pub(crate) fn box_width(
+    item: &Item,
+    column: f32,
+    m: &Metrics,
+    cache: &ItemCache,
+    block: &RefCell<InlineBlock>,
+) -> f32 {
+    let content = content_width(item, column, m);
+    if !may_grow(item) {
+        return content;
+    }
+    match item.kind {
+        ItemKind::TableRow { .. } => cache
+            .table(item.id.block)
+            .and_then(TableWidths::fit_room)
+            .map_or(content, |room| (room + 2.0 * m.table_border).max(content)),
+        ItemKind::Diagram { .. } if !cache.diagram_frames.contains_key(&item.id) => {
+            let own = block.borrow().widest_box() + 2.0 * code_inset(m);
+            if own > content + 0.01 {
+                own.min(cache.limit).max(content)
+            } else {
+                content
+            }
+        }
+        _ => content,
+    }
+}
+
+/// Lays item `item`'s `block` out for a column `column` wide: its content
+/// box ([`box_width`]), its boxes fitted to its text width. Returns the
+/// box's width and the text width.
+pub(crate) fn fit_item(
+    item: &Item,
+    block: &RefCell<InlineBlock>,
+    column: f32,
+    m: &Metrics,
+    cache: &ItemCache,
+    wrapped: bool,
+) -> (f32, f32) {
+    let content = box_width(item, column, m, cache, block);
+    let w = text_width_in(item, content, m, wrapped);
+    fit_boxes(item, block, w);
+    (content, w)
+}
+
+/// The window x of a content box `w` wide that grows out of its place
+/// `left`..`left + slot` in the column: centred on it, inside the area
+/// `area` (the window x of its left and right edges).
+pub(crate) fn grown_left(left: f32, slot: f32, w: f32, area: (f32, f32)) -> f32 {
+    let x = (left + (slot - w) / 2.0).floor();
+    x.min(area.1 - w).max(area.0)
+}
+
+/// A table's width, borders included (`None` before it is measured), and
+/// the width of its frame in a content box `box_w` wide: narrower than the
+/// table when even its widest words do not fit (the table then scrolls
+/// sideways inside it).
+pub(crate) fn table_frame(
+    widths: Option<&TableWidths>,
+    box_w: f32,
+    m: &Metrics,
+) -> (Option<f32>, f32) {
+    let table_w = widths.map(|t| t.width(m.table_padding_x) + 2.0 * m.table_border);
+    (table_w, table_w.map_or(box_w, |w| w.min(box_w)))
 }
 
 /// The Lucide path of a link status icon.
@@ -713,6 +819,35 @@ impl TableWidths {
         changed
     }
 
+    /// The room (inner width) the table is fitted to, its columns `pad` px
+    /// of padding on both sides: the text column's `room`. A table whose
+    /// widest words alone do not fit there grows beside the column: to its
+    /// natural width (every cell unwrapped), at most `limit` (the widest a
+    /// grown table's inside gets), at least `room`.
+    pub fn room(&self, room: f32, limit: f32, pad: f32) -> f32 {
+        if !self.too_wide_for(room, pad) {
+            return room;
+        }
+        let max = self.columns.iter().sum::<f32>() + self.pads(pad);
+        max.min(limit).max(room)
+    }
+
+    /// Whether the table's widest words alone, with their padding, are
+    /// wider than `room`.
+    pub fn too_wide_for(&self, room: f32, pad: f32) -> bool {
+        self.min.iter().sum::<f32>() + self.pads(pad) > room + 0.01
+    }
+
+    /// The padding of all columns, `pad` px on both sides of each.
+    fn pads(&self, pad: f32) -> f32 {
+        2.0 * pad * self.columns.len() as f32
+    }
+
+    /// The room the columns were last fitted to.
+    pub fn fit_room(&self) -> Option<f32> {
+        self.fit.as_ref().map(|(room, _)| *room)
+    }
+
     /// Whether the columns were fitted to `room` px.
     fn fitted_to(&self, room: f32) -> bool {
         self.fit
@@ -839,6 +974,13 @@ pub(crate) struct ItemCache {
     remote: HashMap<String, super::remote::RemoteShown>,
     /// Items with a remote image's card.
     remote_items: std::collections::HashSet<ItemId>,
+    /// The widest a table or diagram too wide for the text column gets
+    /// (its content box), in px: at least the column. Set per frame by the
+    /// view ([`Self::set_limit`]).
+    pub limit: f32,
+    /// The tables and diagrams whose layout depends on [`Self::limit`]:
+    /// too wide for the text column, so grown or able to grow.
+    wide: std::collections::HashSet<BlockId>,
 }
 
 /// What the view shows images and pictures with.
@@ -975,6 +1117,7 @@ impl ItemCache {
     pub fn clear(&mut self) {
         self.items.clear();
         self.tables.clear();
+        self.wide.clear();
         self.scheme_items.clear();
         self.remote_items.clear();
         self.image_cards.clear();
@@ -1021,6 +1164,33 @@ impl ItemCache {
         ids
     }
 
+    /// Sets how wide tables and diagrams too wide for the text column
+    /// get. Returns whether that changed.
+    pub fn set_limit(&mut self, limit: f32) -> bool {
+        if (limit - self.limit).abs() < 0.01 {
+            return false;
+        }
+        self.limit = limit;
+        true
+    }
+
+    /// The items of `tree` whose layout depends on [`Self::limit`]: the
+    /// rows of the tables and the diagrams too wide for the text column.
+    pub fn wide_items(&self, tree: &RenderTree) -> Vec<usize> {
+        let items = tree.items();
+        let mut out = Vec::new();
+        for &block in &self.wide {
+            let first = tree
+                .index_of(ItemId { block, chunk: 0 })
+                .or_else(|| tree.index_of(ItemId { block, chunk: 1 }));
+            let Some(first) = first else {
+                continue;
+            };
+            out.extend((first..items.len()).take_while(|&ix| items[ix].id.block == block));
+        }
+        out
+    }
+
     /// Forgets the layouts of `ids` (their content changed), and the
     /// column widths of their tables.
     pub fn forget(&mut self, ids: impl IntoIterator<Item = ItemId>) {
@@ -1028,6 +1198,7 @@ impl ItemCache {
             self.items.remove(&id);
             self.image_cards.remove(&id);
             self.diagram_frames.remove(&id);
+            self.wide.remove(&id.block);
             if self.tables.remove(&id.block).is_some() {
                 self.items
                     .retain(|k, _| k.block != id.block || k.chunk == 0);
@@ -1452,12 +1623,31 @@ impl DocItems<'_> {
         self.tree.code_wrap(item.id.block)
     }
 
+    /// Fits item `item`'s `block` to a text column `width` wide
+    /// ([`fit_item`]) and returns the width its text is laid out at. A
+    /// diagram too wide for the column is noted: its layout depends on the
+    /// limit.
+    fn fit(&mut self, item: &Item, block: &RefCell<InlineBlock>, width: f32) -> f32 {
+        let m = *self.metrics();
+        if matches!(item.kind, ItemKind::Diagram { .. })
+            && may_grow(item)
+            && block.borrow().widest_box() + 2.0 * code_inset(&m)
+                > content_width(item, width, &m) + 0.01
+        {
+            self.cache.wide.insert(item.id.block);
+        }
+        let wrapped = self.is_wrapped(item);
+        fit_item(item, block, width, &m, self.cache, wrapped).1
+    }
+
     /// Measures what item `ix` needs before it is laid out in a text
     /// column `width` px wide: when it is a table row, the cells of its row
     /// and, the first time, the column widths of its table from the first
-    /// [`TABLE_SAMPLE`] rows, fitted to the room the text column leaves. A
-    /// row wider than the columns widens them, and a new fit (a wider row,
-    /// another width) lays the rows laid out before out again.
+    /// [`TABLE_SAMPLE`] rows, fitted to the room the text column leaves (or
+    /// more, up to the cache's limit, when even the widest words do not
+    /// fit: [`TableWidths::room`]). A row wider than the columns widens
+    /// them, and a new fit (a wider row, another width or limit) lays the
+    /// rows laid out before out again.
     pub(crate) fn prepare(&mut self, ix: usize, width: f32) {
         let tree = self.tree;
         let Some(item) = tree.items().get(ix) else {
@@ -1474,14 +1664,18 @@ impl DocItems<'_> {
         };
         let id = item.id.block;
         let m = *self.metrics();
-        let room =
-            (width - item.content_x(&m) - item.content_right(&m)).max(1.0) - 2.0 * m.table_border;
-        if self
-            .cache
-            .tables
-            .get(&id)
-            .is_some_and(|w| w.rows.contains(&row) && w.fitted_to(room))
-        {
+        let content = content_width(item, width, &m);
+        let column_room = content - 2.0 * m.table_border;
+        let grows = may_grow(item);
+        let limit_room = if grows {
+            self.cache.limit.max(content) - 2.0 * m.table_border
+        } else {
+            column_room
+        };
+        let pad = m.table_padding_x;
+        if self.cache.tables.get(&id).is_some_and(|w| {
+            w.rows.contains(&row) && w.fitted_to(w.room(column_room, limit_room, pad))
+        }) {
             return;
         }
         let mut widths = self.cache.tables.remove(&id).unwrap_or_default();
@@ -1517,7 +1711,10 @@ impl DocItems<'_> {
             }
             widths.rows.insert(r);
         }
-        let pad = m.table_padding_x;
+        if grows && widths.too_wide_for(column_room, pad) {
+            self.cache.wide.insert(id);
+        }
+        let room = widths.room(column_room, limit_room, pad);
         let refit = (grew || !widths.fitted_to(room)) && widths.refit(room, pad);
         if refit && !first_time {
             self.cache
@@ -1594,8 +1791,7 @@ impl Items for DocItems<'_> {
         let m = *self.metrics();
         let content = match self.cache.block(self.tree, ix) {
             Some(block) => {
-                let w = text_width(item, width, &m, self.is_wrapped(item));
-                fit_boxes(item, &block, w);
+                let w = self.fit(item, &block, width);
                 let layout = self
                     .text
                     .borrow_mut()
@@ -1634,8 +1830,7 @@ impl Items for DocItems<'_> {
         let node = self.tree.node_of(ix)?;
         let m = *self.metrics();
         let block = self.cache.block(self.tree, ix)?;
-        let w = text_width(item, width, &m, self.is_wrapped(item));
-        fit_boxes(item, &block, w);
+        let w = self.fit(item, &block, width);
         let layout = self
             .text
             .borrow_mut()

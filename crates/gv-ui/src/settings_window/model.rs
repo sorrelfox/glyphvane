@@ -327,6 +327,9 @@ pub fn appearance_label(path: &str) -> Option<&'static str> {
         "appearance.readable_line_width" | "appearance.readable_line_width_chars" => {
             "Readable line width"
         }
+        "appearance.fill_wide_blocks" | "appearance.wide_block_width_chars" => {
+            "Wide tables and diagrams"
+        }
         "appearance.zoom_percent" => "Zoom",
         "appearance.code_theme" => "Code theme",
         _ => return None,
@@ -340,6 +343,10 @@ pub fn row_label(spec: &Spec) -> String {
         // results) they say what they are.
         Some(label) if spec.key.ends_with("_size") => format!("{label} size"),
         Some(_) if spec.key == "readable_line_width_chars" => "Readable line width".to_owned(),
+        // The width shares the switch's row; alone it says what it is.
+        Some(_) if spec.key == "wide_block_width_chars" => {
+            "Width of wide tables and diagrams".to_owned()
+        }
         Some(label) => label.to_owned(),
         None => label(spec),
     }
@@ -433,6 +440,23 @@ mod tests {
             search("light appearance")
                 .iter()
                 .any(|h| h.path == "appearance.preferred_light_theme")
+        );
+        // Both wide block settings are found by their row's label.
+        let wide: Vec<&str> = search("wide tables").iter().map(|h| h.path).collect();
+        assert_eq!(
+            wide,
+            vec![
+                "appearance.fill_wide_blocks",
+                "appearance.wide_block_width_chars"
+            ]
+        );
+        assert_eq!(
+            row_label(spec("appearance.wide_block_width_chars")),
+            "Width of wide tables and diagrams"
+        );
+        assert_eq!(
+            row_label(spec("appearance.fill_wide_blocks")),
+            "Wide tables and diagrams"
         );
         assert!(search("   ").is_empty());
         assert!(search("no such setting anywhere").is_empty());

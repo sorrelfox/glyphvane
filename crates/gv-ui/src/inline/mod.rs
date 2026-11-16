@@ -346,6 +346,21 @@ impl InlineBlock {
         changed
     }
 
+    /// The width of the widest box at its own size (before
+    /// [`Self::fit_boxes`] scaled it down), margins included; 0 without
+    /// boxes.
+    pub fn widest_box(&self) -> f32 {
+        let own = match &self.fitted {
+            Some((_, Some(unfitted))) => unfitted,
+            _ => self.cache.paragraph(),
+        };
+        own.items()
+            .iter()
+            .filter_map(|item| item.inline_box())
+            .map(|b| b.width + b.margin_left + b.margin_right)
+            .fold(0.0, f32::max)
+    }
+
     /// Sets what the boxes with [`gv_inline::InlineBox::id`] `id` show.
     pub fn set_box_content(&mut self, id: u32, content: BoxContent) {
         self.boxes.insert(id, content);

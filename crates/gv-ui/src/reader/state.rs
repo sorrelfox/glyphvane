@@ -70,6 +70,30 @@ impl ReaderLayout {
             }
         }
     }
+
+    /// Where tables and diagrams too wide for the text column (`x0`,
+    /// `column`, from [`Self::column`]) may grow in `bounds`: the window x
+    /// of the area's left and right edges (the view without its side
+    /// padding), and the widest such a block gets, `wide_max` capped by the
+    /// area and never narrower than the column. The Split view's pane is
+    /// all column: nothing grows there.
+    pub(crate) fn wide(
+        self,
+        bounds: Bounds<Pixels>,
+        (x0, column): (f32, f32),
+        wide_max: f32,
+    ) -> ((f32, f32), f32) {
+        match self {
+            Self::Column => {
+                let left = f32::from(bounds.left()) + document::PAD_X;
+                let area = (f32::from(bounds.size.width) - 2.0 * document::PAD_X).floor();
+                let area = (left.min(x0), (left + area).max(x0 + column));
+                let limit = wide_max.min(area.1 - area.0).max(column).floor();
+                (area, limit)
+            }
+            Self::Pane => ((x0, x0 + column), column),
+        }
+    }
 }
 
 /// A selection in document source offsets.
@@ -200,6 +224,10 @@ pub(crate) struct PlacedGeom {
     pub ix: usize,
     pub top: f32,
     pub bottom: f32,
+    /// The window x and width of what it covers sideways: the text
+    /// column, and the content box of a table or diagram that grew beside
+    /// it.
+    pub span: (f32, f32),
     pub text: Option<Rc<RefCell<InlineBlock>>>,
     pub node_start: usize,
     pub code: Option<CodeGeom>,
@@ -211,6 +239,9 @@ pub(crate) struct Geometry {
     pub bounds: Bounds<Pixels>,
     /// Window x of the text column and its width.
     pub column: (f32, f32),
+    /// Window x of the left and right edges of the area tables and diagrams
+    /// too wide for the column may grow into.
+    pub area: (f32, f32),
     pub items: Vec<PlacedGeom>,
     pub buttons: Vec<CodeButton>,
     /// Task checkboxes, summary rows and card buttons.
@@ -268,6 +299,9 @@ pub(crate) struct State {
     /// The widest the Preview text column gets (the readable line width;
     /// infinite when it is off).
     pub column_max: f32,
+    /// The widest tables and diagrams too wide for the column get (the
+    /// wide block setting; infinite when they fill the space beside it).
+    pub wide_max: f32,
     /// The search a click on a tag asked for (`tag:#name`), handed to the
     /// vault search with the `search.vault` command.
     pub tag_search: Option<Arc<str>>,
@@ -307,6 +341,7 @@ impl State {
             sync: None,
             tag_search: None,
             column_max: document::COLUMN_MAX,
+            wide_max: f32::INFINITY,
         }
     }
 
@@ -565,13 +600,11 @@ impl State {
             return Hover::Link(link);
         }
         let y = f32::from(position.y);
-        let (x0, w) = self.geometry.column;
         let x = f32::from(position.x);
-        let over_text = self
-            .geometry
-            .items
-            .iter()
-            .any(|g| g.text.is_some() && g.top <= y && y < g.bottom && x >= x0 && x < x0 + w);
+        let over_text = self.geometry.items.iter().any(|g| {
+            let (x0, w) = g.span;
+            g.text.is_some() && g.top <= y && y < g.bottom && x >= x0 && x < x0 + w
+        });
         if over_text { Hover::Text } else { Hover::None }
     }
 

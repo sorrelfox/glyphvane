@@ -349,6 +349,13 @@ define_settings! {
         /// The readable column width in characters.
         @range(40, 240)
         readable_line_width_chars: u32 = 72,
+        /// With a readable line width, tables and diagrams too wide for the
+        /// text column use all the space beside it in the Reading view.
+        fill_wide_blocks: bool = true,
+        /// How wide, in characters, tables and diagrams too wide for the text
+        /// column get when they do not use all the space beside it.
+        @range(40, 400)
+        wide_block_width_chars: u32 = 120,
         /// The zoom level in percent.
         @range(50, 300)
         zoom_percent: u32 = 100,

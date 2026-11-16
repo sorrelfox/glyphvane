@@ -892,6 +892,7 @@ mod find_tests;
 mod media_tests;
 mod obsidian_tests;
 mod remote_tests;
+mod wide_tests;
 
 /// Timing runs with the platform's real text system (Linux), for the
 /// report: the CommonMark spec examples and a generated 10 MB document,

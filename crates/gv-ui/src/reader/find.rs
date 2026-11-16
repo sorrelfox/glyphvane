@@ -42,7 +42,7 @@ use gv_inline::Bias;
 use gv_render_tree::{FindIndex, FindMatch, Finder, RenderTree};
 
 use super::Reader;
-use super::items::{code_inset, is_code, text_top, text_width};
+use super::items::{code_inset, fit_item, is_code, table_frame, text_top};
 use super::state::State;
 use crate::find::{CloseFind, Find, FindBar, FindBarEvent, FindNext, FindPrevious, FindStatus};
 use crate::inline::Token;
@@ -513,9 +513,10 @@ impl Reader {
 }
 
 /// Scrolls the current match into view if it is asked for and not visible:
-/// centred vertically, and sideways in code that does not wrap. Runs at
-/// the start of a frame, before the engine places the items, with the text
-/// column `column` px wide.
+/// centred vertically, and sideways in code that does not wrap and in
+/// tables. Runs at the start of a frame, before the engine places the
+/// items, with the text column `column` px wide (tables and diagrams too
+/// wide for it as grown as the cache's limit lets them).
 pub(super) fn reveal_current(st: &mut State, column: f32, ts: &WindowTextSystem) {
     if !std::mem::take(&mut st.find.reveal) {
         return;
@@ -554,15 +555,20 @@ pub(super) fn reveal_current(st: &mut State, column: f32, ts: &WindowTextSystem)
         .line_height;
     let (offset, height) = match cache.block(tree, m.item) {
         Some(block) => {
-            let w = text_width(item, column, &metrics, wrapped);
-            super::items::fit_boxes(item, &block, w);
+            let (content, w) = fit_item(item, &block, column, &metrics, cache, wrapped);
             let layout = text.borrow_mut().layout(&mut block.borrow_mut(), w, ts);
             let start = layout.caret_for_source(local, Bias::Left);
-            let sideways = matches!(item.kind, gv_render_tree::ItemKind::TableRow { .. })
-                || (is_code(&item.kind) && !wrapped);
-            if sideways {
+            let table = matches!(item.kind, gv_render_tree::ItemKind::TableRow { .. });
+            if table || (is_code(&item.kind) && !wrapped) {
                 let end = layout.caret_for_source(local_end, Bias::Right);
-                let inner = (column - item.content_x(&metrics)) - 2.0 * code_inset(&metrics);
+                // What shows of the text: inside the table's frame, or the
+                // code block's padding.
+                let inner = if table {
+                    let (_, frame) = table_frame(cache.table(item.id.block), content, &metrics);
+                    frame - 2.0 * metrics.table_border
+                } else {
+                    content - 2.0 * code_inset(&metrics)
+                };
                 let x = hscroll.get(&item.id.block).copied().unwrap_or(0.0);
                 if start.x < x || end.x > x + inner {
                     hscroll.insert(item.id.block, (start.x - inner / 3.0).max(0.0));

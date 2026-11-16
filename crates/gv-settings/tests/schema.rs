@@ -174,3 +174,54 @@ fn security_relevant_settings_are_the_planned_ones() {
         ]
     );
 }
+
+#[test]
+fn wide_block_settings_round_trip() {
+    // The defaults: wide tables and diagrams fill the space; 120 ch when not.
+    let defaults = Settings::default().appearance;
+    assert!(defaults.fill_wide_blocks);
+    assert_eq!(defaults.wide_block_width_chars, 120);
+    match gv_settings::spec("appearance.wide_block_width_chars").map(|s| s.kind) {
+        Some(Kind::Integer { min, max }) => assert_eq!((min, max), (40, 400)),
+        other => panic!("{other:?}"),
+    }
+
+    // Written into a file, read back into the typed settings.
+    let text = "version = 1\n\n[appearance]\nreadable_line_width = true\n";
+    let text = gv_settings::set_value(
+        text,
+        "appearance.fill_wide_blocks",
+        &toml::Value::Boolean(false),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let text = gv_settings::set_value(
+        &text,
+        "appearance.wide_block_width_chars",
+        &toml::Value::Integer(160),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let layer = Layer::parse(LayerKind::Global, None, &text);
+    assert!(layer.diagnostics().is_empty(), "{:?}", layer.diagnostics());
+    let appearance = resolve([&layer]).settings().appearance.clone();
+    assert!(!appearance.fill_wide_blocks);
+    assert_eq!(appearance.wide_block_width_chars, 160);
+    // And serialised again.
+    let typed = toml::Value::try_from(&appearance).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(typed["fill_wide_blocks"], toml::Value::Boolean(false));
+    assert_eq!(typed["wide_block_width_chars"], toml::Value::Integer(160));
+
+    // Out of range: refused, and the default is used.
+    let layer = Layer::parse(
+        LayerKind::Global,
+        None,
+        "version = 1\n[appearance]\nwide_block_width_chars = 1000\n",
+    );
+    assert_eq!(layer.diagnostics().len(), 1, "{:?}", layer.diagnostics());
+    assert_eq!(
+        resolve([&layer])
+            .settings()
+            .appearance
+            .wide_block_width_chars,
+        120
+    );
+}

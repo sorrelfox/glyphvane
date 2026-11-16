@@ -157,7 +157,7 @@ fn a_diagram_renders_off_the_frame_and_repaints_in_a_new_theme(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn a_diagram_wider_than_the_column_is_scaled_down_to_fit(cx: &mut TestAppContext) {
+fn a_diagram_wider_than_the_column_grows_beside_it_before_it_is_scaled(cx: &mut TestAppContext) {
     let doc = "# D\n\n```mermaid\nflowchart LR\n  \
                fit_a[A fairly long first label] --> fit_b[Another long label here] \
                --> fit_c[Third long label in line] --> fit_d[Fourth long label in line] \
@@ -168,10 +168,10 @@ fn a_diagram_wider_than_the_column_is_scaled_down_to_fit(cx: &mut TestAppContext
     let reader = reader(&workspace, &mut vcx);
     settle(&mut vcx);
     let st = state(&reader, &mut vcx);
-    let mut widths = Vec::new();
-    for width in [WIDTH, 600.0, WIDTH] {
-        vcx.simulate_resize(size(px(width), px(HEIGHT)));
-        settle(&mut vcx);
+    // The diagram's box: its own width when the room beside the column
+    // holds it, else scaled down to that room, never narrower than the
+    // column. Returns its width and its own width.
+    let check = |case: &str, wide_max: f32| {
         let s = st.borrow();
         let (id, content) = diagram_block(&s);
         let Some(BoxContent::Diagram { diagram, scale }) = content else {
@@ -180,24 +180,32 @@ fn a_diagram_wider_than_the_column_is_scaled_down_to_fit(cx: &mut TestAppContext
         let doc = s.doc.as_ref().expect("loaded");
         let ix = doc.tree.index_of(id).expect("item");
         let item = &doc.tree.items()[ix];
-        let (_, column) = s.geometry.column;
+        let (x0, column) = s.geometry.column;
+        let area = s.geometry.area;
         let m = doc.tree.options().metrics;
+        let inset = 2.0 * crate::reader::items::code_inset(&m);
         let inner = crate::reader::items::text_width(item, column, &m, false);
         let natural = (diagram.width * scale, diagram.height * scale);
-        assert!(natural.0 > inner, "the diagram is wider than the column");
+        assert!(
+            natural.0 > inner,
+            "{case}: the diagram is wider than the column"
+        );
+        let room = wide_max.min(area.1 - area.0).max(column).floor() - inset;
+        let expected = natural.0.min(room).max(inner);
         let block = s.cache.cached(id).expect("cached");
         let b = block.borrow();
         let bx = *b.paragraph().items()[0].inline_box().expect("the box");
         assert!(
-            (bx.width - inner).abs() < 0.5,
-            "width {width}: box {} in {inner}",
-            bx.width
+            (bx.width - expected).abs() < 0.5,
+            "{case}: box {} for {expected} (own {}, room {room}, column {inner})",
+            bx.width,
+            natural.0
         );
         // The aspect ratio is kept.
         let h = bx.ascent + bx.descent;
         assert!(
             (h / bx.width - natural.1 / natural.0).abs() < 0.001,
-            "width {width}: {}x{h} for {natural:?}",
+            "{case}: {}x{h} for {natural:?}",
             bx.width
         );
         // Its height is the item's: nothing is cut off below.
@@ -205,10 +213,52 @@ fn a_diagram_wider_than_the_column_is_scaled_down_to_fit(cx: &mut TestAppContext
         assert!(g.bottom - g.top >= h, "the item holds the scaled diagram");
         let code = g.code.expect("its clip");
         assert!(code.overflow < 0.5, "nothing to scroll: {}", code.overflow);
-        widths.push(bx.width);
+        // Its box is centred on the column, inside the view's padding.
+        let (left, w) = (f32::from(code.clip.left()), f32::from(code.clip.size.width));
+        assert!(
+            (w - (bx.width.max(inner) + inset)).abs() < 0.5,
+            "{case}: {w}"
+        );
+        assert!(
+            ((left + w / 2.0) - (x0 + column / 2.0)).abs() <= 1.0,
+            "{case}"
+        );
+        assert!(left >= area.0 - 0.5 && left + w <= area.1 + 0.5, "{case}");
+        // Painted where its box is.
+        let painted = b.bounds().expect("painted");
+        assert!(f32::from(painted.left()) >= left - 0.5, "{case}");
+        (bx.width, natural.0)
+    };
+    let mut widths = Vec::new();
+    for width in [WIDTH, 600.0, 2400.0, WIDTH] {
+        vcx.simulate_resize(size(px(width), px(HEIGHT)));
+        settle(&mut vcx);
+        widths.push(check(&format!("width {width}"), f32::INFINITY));
     }
-    assert!(widths[1] < widths[0], "{widths:?}");
-    assert!((widths[2] - widths[0]).abs() < 0.5, "{widths:?}");
+    assert!(widths[1].0 < widths[0].0, "{widths:?}");
+    assert!(
+        (widths[2].0 - widths[2].1).abs() < 0.5,
+        "a wide view shows it at its own size: {widths:?}"
+    );
+    assert!((widths[3].0 - widths[0].0).abs() < 0.5, "{widths:?}");
+    // Not filling the space: it stops at the set width, scaled down to it.
+    vcx.simulate_resize(size(px(2400.0), px(HEIGHT)));
+    for (key, value) in [
+        ("appearance.fill_wide_blocks", toml::Value::Boolean(false)),
+        (
+            "appearance.wide_block_width_chars",
+            toml::Value::Integer(80),
+        ),
+    ] {
+        vcx.update(|_, cx| {
+            AppSettings::set_value(cx, crate::settings::Target::AllVaults, key, &value)
+                .expect("a valid setting");
+        });
+    }
+    settle(&mut vcx);
+    let set = (80.0 * document::COLUMN_MAX / 72.0).round();
+    let (w, own) = check("80 ch", set);
+    assert!(w < own, "{w} of {own}");
 }
 
 #[gpui::test]

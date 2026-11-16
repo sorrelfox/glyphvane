@@ -16,6 +16,10 @@
 //!   `readable_line_width_chars` characters of the body font wide (72 by
 //!   default, the design's 680 px at 15 px), scaled with the type; off, the
 //!   column fills the view between its side paddings.
+//! - **Wide tables and diagrams**: with a readable line width, a table or
+//!   diagram too wide for the column grows into the space beside it: all of
+//!   it (`fill_wide_blocks`), or up to `wide_block_width_chars` characters
+//!   of the body font, in the same unit as the column.
 
 use gpui::{App, SharedString};
 
@@ -44,6 +48,9 @@ pub(crate) struct Typography {
     pub mono_family: SharedString,
     /// The readable column in characters; `None` when the setting is off.
     pub readable_chars: Option<u32>,
+    /// The widest tables and diagrams too wide for the column get, in
+    /// characters; `None` when they fill the space beside the column.
+    pub wide_chars: Option<u32>,
 }
 
 impl Default for Typography {
@@ -75,6 +82,7 @@ impl Typography {
             readable_chars: appearance
                 .readable_line_width
                 .then_some(appearance.readable_line_width_chars),
+            wide_chars: (!appearance.fill_wide_blocks).then_some(appearance.wide_block_width_chars),
         }
     }
 
@@ -96,7 +104,19 @@ impl Typography {
     /// The widest the Preview text column gets, in px; infinite when the
     /// readable line width is off.
     pub fn column_max(&self) -> f32 {
-        match self.readable_chars {
+        self.chars_px(self.readable_chars)
+    }
+
+    /// The widest a table or diagram too wide for the column gets, in px
+    /// (capped by the view's width); infinite when it fills the space
+    /// beside the column.
+    pub fn wide_max(&self) -> f32 {
+        self.chars_px(self.wide_chars)
+    }
+
+    /// `chars` characters of the body text in px; infinite for `None`.
+    fn chars_px(&self, chars: Option<u32>) -> f32 {
+        match chars {
             Some(chars) => {
                 (chars as f32 * CHAR_EM * text::PREVIEW_BODY.size * self.scale()).round()
             }
@@ -168,6 +188,21 @@ mod tests {
             Typography::from_settings(&a, 1.0).column_max(),
             f32::INFINITY
         );
+    }
+
+    #[test]
+    fn wide_blocks_follow_the_settings_in_the_column_unit() {
+        let mut a = appearance();
+        assert_eq!(Typography::from_settings(&a, 1.0).wide_max(), f32::INFINITY);
+        a.fill_wide_blocks = false;
+        a.wide_block_width_chars = 144;
+        let t = Typography::from_settings(&a, 1.0);
+        assert_eq!(t.wide_max(), 2.0 * document::COLUMN_MAX);
+        // Scaled with the type, as the column is.
+        a.preview_font_size = 18.0;
+        let t = Typography::from_settings(&a, 1.5);
+        assert_eq!(t.wide_max(), (2.0 * document::COLUMN_MAX * 1.8).round());
+        assert_ne!(t, Typography::from_settings(&appearance(), 1.5));
     }
 
     #[test]

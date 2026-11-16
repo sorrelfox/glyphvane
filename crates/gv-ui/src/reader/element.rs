@@ -37,8 +37,8 @@ use super::bench::{load_line, percentiles};
 use super::engine::{Engine, Items as _};
 use super::follow::{Cause, begin as note_navigation};
 use super::items::{
-    DocItems, NO_WRAP, ViewFacts, chunk_ends, code_inset, is_code, status_icon_path, text_top,
-    text_width,
+    DocItems, NO_WRAP, ViewFacts, box_width, chunk_ends, code_inset, grown_left, is_code, may_grow,
+    status_icon_path, table_frame, text_top, text_width,
 };
 use super::live::{Spot, SyncRequest, block_items_at};
 use super::state::{
@@ -514,8 +514,12 @@ impl Element for ReaderElement {
             bounds,
             ..Geometry::default()
         };
-        // The text column: Preview's centred column, or the Split pane's.
+        // The text column: Preview's centred column, or the Split pane's;
+        // and the room beside it that tables and diagrams too wide for it
+        // may grow into.
         let (x0, column) = st.layout.column(bounds, st.column_max);
+        let (area, limit) = st.layout.wide(bounds, (x0, column), st.wide_max);
+        let limit_changed = st.cache.set_limit(limit);
         find::reveal_current(st, column, &ts);
         let State {
             doc,
@@ -547,16 +551,27 @@ impl Element for ReaderElement {
         };
 
         geometry.column = (x0, column);
+        geometry.area = area;
         // Find matches are painted while they belong to this document.
         let marks = (marks.version == *doc_version && !marks.matches.is_empty()).then_some(&*marks);
 
         {
+            // A new limit: the tables and diagrams that grew, or could, are
+            // measured again (the visible ones in this frame).
+            let wide = if limit_changed {
+                cache.wide_items(tree)
+            } else {
+                Vec::new()
+            };
             let mut items = DocItems {
                 tree,
                 cache,
                 text,
                 ts: &ts,
             };
+            if !wide.is_empty() {
+                engine.invalidate(&items, wide);
+            }
             if let Some(request) = sync.take() {
                 resolve_sync(engine, &mut items, request, column);
             }
@@ -829,10 +844,24 @@ impl Element for ReaderElement {
             }
 
             let block = cache.block(tree, p.ix);
+            // A table or diagram too wide for the column: its content box
+            // grows beside it, centred on its place, inside the area.
+            let grown = block
+                .as_ref()
+                .filter(|_| may_grow(item))
+                .map(|b| box_width(item, column, &m, cache, b))
+                .filter(|w| *w > content_w + 0.01);
+            let (left, content_w) = match grown {
+                Some(w) => (grown_left(left, content_w, w, area), w),
+                None => (left, content_w),
+            };
+            let span_left = left.min(x0);
+            let span = (span_left, (left + content_w).max(x0 + column) - span_left);
             let mut geom = PlacedGeom {
                 ix: p.ix,
                 top,
                 bottom: box_bottom,
+                span,
                 text: block.clone(),
                 node_start: node.source.start,
                 code: None,
@@ -849,16 +878,17 @@ impl Element for ReaderElement {
                 }),
                 // A table row: the table's frame (1 px `border.default`,
                 // radius 6), the header on `surface.sunken`, a line above
-                // each body row. The table is as wide as its columns, which
-                // are fitted to the column (cells wrap); a table whose
-                // words alone do not fit scrolls sideways as a whole.
+                // each body row. Each row is one item; the rows share their
+                // table's column widths ([`super::items::TableWidths`]). The
+                // table is as wide as its columns, which are fitted to the
+                // column (cells wrap). A table whose words alone do not fit
+                // grows beside the column (its wider content box comes from
+                // `box_width`, above); one too wide even for that scrolls
+                // sideways as a whole.
                 ItemKind::TableRow { row, .. } => {
                     let (first, last) = chunk_ends(&item.kind);
                     let bw = m.table_border;
-                    let table_w = cache
-                        .table(item.id.block)
-                        .map(|t| t.width(m.table_padding_x) + 2.0 * bw);
-                    let frame_w = table_w.map_or(content_w, |w| w.min(content_w));
+                    let (table_w, frame_w) = table_frame(cache.table(item.id.block), content_w, &m);
                     let (r, zero) = (px(radius::BLOCK), px(0.0));
                     let fill = if *row == 0 {
                         color(Token::SurfaceSunken)
@@ -925,10 +955,11 @@ impl Element for ReaderElement {
                         });
                     }
                 }
-                // A diagram: centred, scaled down to the column when wider
-                // (`fit_boxes`). A card or note above the source: in a code block's
-                // frame, with *Copy source* (and *Render anyway*) on its
-                // first line.
+                // A diagram: centred; one wider than the column grows beside
+                // it (`box_width`, above) and is scaled down (`fit_boxes`)
+                // only when it is wider than that too. A card or note
+                // above the source: in a code block's frame, with *Copy
+                // source* (and *Render anyway*) on its first line.
                 ItemKind::Diagram { .. } => {
                     let framed = cache.diagram_frames.get(&item.id).cloned();
                     let inner = (content_w - 2.0 * code_inset(&m)).max(1.0);
