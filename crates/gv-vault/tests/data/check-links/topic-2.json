@@ -1,0 +1,4 @@
+[
+  {"source": "Topic 2.md", "line": 3, "column": 1, "kind": "CaseFold", "severity": "info", "raw": "index", "status": "Exact", "target": "Index.md", "candidates": [], "message": "Letter case differs from “Index.md”: the profile ignores it"},
+  {"source": "Topic 2.md", "line": 3, "column": 38, "kind": "OutsideRoot", "severity": "warning", "raw": "../outside.md", "status": "OutsideRoot", "target": null, "candidates": [], "message": "Points outside the vault: ../outside.md"}
+]

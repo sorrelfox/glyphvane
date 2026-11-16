@@ -11,17 +11,18 @@
 //!   states are not designed).
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
-//!   checker joins it once asked for, with an empty state.
+//!   checker ([`super::link_checker`]) joins it once asked for.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Corners, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight,
     InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 
 use super::Workspace;
 use super::controls::{RowStart, icon_button};
+use super::link_checker::LinkChecker;
 use super::links_panel::LinksPanel;
 use super::outline_panel::OutlinePanel;
 use crate::appearance::Appearance;
@@ -91,11 +92,12 @@ pub(super) enum RightSection {
 }
 
 /// Which panels show.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Default)]
 pub(super) struct Panels {
     pub sidebar: SidebarPanel,
-    /// The Link checker was asked for.
-    pub link_checker: bool,
+    /// The Link checker, once asked for.
+    pub link_checker: Option<Entity<LinkChecker>>,
+    pub _checker_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -237,11 +239,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if section == RightSection::LinkChecker {
-            self.panels.link_checker = true;
-        }
         if !self.panel_open {
             self.set_panel_open(true, window, cx);
+        }
+        if section == RightSection::LinkChecker {
+            let checker = self.ensure_link_checker(cx);
+            checker.update(cx, |c, cx| c.expand(cx));
         }
         if section == RightSection::Outline
             && let Some(outline) = &self.outline
@@ -283,6 +286,7 @@ impl Workspace {
         let backlinks = right(RightSection::Backlinks);
         let outgoing = right(RightSection::OutgoingLinks);
         let checker = right(RightSection::LinkChecker);
+        let root = self.link_checker_actions(root, cx);
         root.on_action(
             cx.listener(move |this, _: &commands::ShowFiles, window, cx| {
                 files(this, window, cx);
@@ -391,20 +395,6 @@ pub(super) fn right_panel(
     links: Option<Entity<LinksPanel>>,
     panels: &Panels,
 ) -> Div {
-    let section = |id: &'static str, title: &'static str| {
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .child(
-                section_head(id, title, None, true, true, theme).debug_selector(move || id.into()),
-            )
-            .child(empty_state(
-                ElementId::Name(format!("empty-{id}").into()),
-                "Not available yet",
-                theme,
-            ))
-    };
     div()
         .w(px(size::PANEL_WIDTH))
         .flex_none()
@@ -417,8 +407,8 @@ pub(super) fn right_panel(
         .border_color(theme.border.default)
         .when_some(outline, |panel, outline| panel.child(outline))
         .when_some(links, |panel, links| panel.child(links))
-        .when(panels.link_checker, |panel| {
-            panel.child(section("link-checker-head", "Link checker"))
+        .when_some(panels.link_checker.clone(), |panel, checker| {
+            panel.child(checker)
         })
 }
 

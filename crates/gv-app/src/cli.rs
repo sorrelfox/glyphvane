@@ -78,6 +78,68 @@ pub enum Command {
     /// unsupported profile, 3 when the input does not decode exactly and
     /// `--strict` is given.
     Render(RenderArgs),
+    /// Check the links of a note, a folder or a vault, without opening a
+    /// window: unresolved and ambiguous links, missing headings and block
+    /// ids, letter case that differs, links outside the vault, blocked
+    /// links.
+    ///
+    /// Exit status: 0 when there are no errors, 1 when there are, 2 when
+    /// there are warnings and `--strict` is given, 3 for a usage error or a
+    /// path that cannot be read.
+    CheckLinks(CheckLinksArgs),
+}
+
+/// Arguments of `glyphvane check-links`.
+#[derive(Debug, clap::Args)]
+pub struct CheckLinksArgs {
+    /// A note (its links), a vault (every note) or a folder in a vault (its
+    /// notes). The vault is the nearest folder above with `.obsidian`,
+    /// `.glyphvane` or `.git`, else the folder itself.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+
+    /// The flavor profile whose link rules apply: `commonmark`,
+    /// `gfm-file`, `gfm-comment`, `obsidian` or `extended`. By default,
+    /// `obsidian` in an Obsidian vault, `gfm-file` in a git repository,
+    /// `extended` otherwise.
+    #[arg(long, value_name = "P")]
+    pub profile: Option<String>,
+
+    /// What to write: one line per finding, or a JSON array.
+    #[arg(long, value_enum, default_value_t = CheckLinksFormat::Text)]
+    pub format: CheckLinksFormat,
+
+    /// Fail (status 2) on warnings too.
+    #[arg(long)]
+    pub strict: bool,
+}
+
+/// Output formats of `glyphvane check-links`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CheckLinksFormat {
+    /// `path:line:column: severity: kind: link: message`, then a summary.
+    Text,
+    /// `[{source, line, column, kind, severity, raw, status, target,
+    /// candidates, message}]`.
+    Json,
+}
+
+impl Cli {
+    /// Parses the command line, exiting on a usage error: with status 2,
+    /// as clap does, except for `check-links`, whose status 2 means
+    /// warnings (there it is 3). Shadows [`Parser::parse`].
+    pub fn parse() -> Self {
+        Self::try_parse().unwrap_or_else(|err| {
+            let check_links = std::env::args_os()
+                .nth(1)
+                .is_some_and(|a| a == "check-links");
+            if check_links && err.use_stderr() {
+                let _ = err.print();
+                std::process::exit(i32::from(gv_vault::content::check::EXIT_USAGE));
+            }
+            err.exit()
+        })
+    }
 }
 
 /// Arguments of `glyphvane render`.
@@ -395,6 +457,36 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.paths, ["render", "a.md"]);
         assert!(Cli::try_parse_from(["glyphvane", "render"]).is_err());
+    }
+
+    #[test]
+    fn check_links_is_a_subcommand() {
+        let cli = parse(&["glyphvane", "check-links", "vault"]);
+        let Some(Command::CheckLinks(args)) = cli.command else {
+            panic!("check-links subcommand expected");
+        };
+        assert_eq!(args.path, PathBuf::from("vault"));
+        assert_eq!(args.format, CheckLinksFormat::Text);
+        assert_eq!(args.profile, None);
+        assert!(!args.strict);
+        let cli = parse(&[
+            "glyphvane",
+            "check-links",
+            "a.md",
+            "--format",
+            "json",
+            "--profile",
+            "gfm-file",
+            "--strict",
+        ]);
+        let Some(Command::CheckLinks(args)) = cli.command else {
+            panic!("check-links subcommand expected");
+        };
+        assert_eq!(args.format, CheckLinksFormat::Json);
+        assert_eq!(args.profile.as_deref(), Some("gfm-file"));
+        assert!(args.strict);
+        assert!(Cli::try_parse_from(["glyphvane", "check-links"]).is_err());
+        assert!(Cli::try_parse_from(["glyphvane", "check-links", "a", "--format", "xml"]).is_err());
     }
 
     #[test]

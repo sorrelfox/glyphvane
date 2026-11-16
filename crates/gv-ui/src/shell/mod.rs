@@ -13,6 +13,9 @@ mod files_panel;
 mod files_panel_tests;
 mod history;
 mod infobar;
+mod link_checker;
+#[cfg(test)]
+mod link_checker_tests;
 mod links_data;
 mod links_panel;
 #[cfg(test)]

@@ -1395,6 +1395,7 @@ impl Workspace {
         links.update(cx, |l, cx| {
             l.set_context(vault, file, visible, can_link, cx)
         });
+        self.sync_link_checker(cx);
     }
 
     fn links_event(

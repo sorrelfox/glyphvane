@@ -3,6 +3,7 @@
 
 //! The `glyphvane` binary.
 
+mod check_links;
 mod cli;
 mod clipboard;
 #[cfg(target_os = "linux")]
@@ -29,7 +30,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser as _;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{AnyWindowHandle, App};
@@ -65,6 +65,7 @@ fn main() -> ExitCode {
     if let Some(command) = &cli.command {
         return match command {
             Command::Render(args) => render::run(args),
+            Command::CheckLinks(args) => check_links::run(args),
         };
     }
     if cli.licenses {
@@ -433,6 +434,8 @@ fn request_from_urls(urls: &[String]) -> Option<OpenRequest> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use clap::Parser as _;
 
     use super::*;
 

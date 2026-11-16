@@ -1,0 +1,8 @@
+[
+  {"source": "Index.md", "line": 2, "column": 34, "kind": "Unresolved", "severity": "error", "raw": "Topic 3", "status": "Unresolved", "target": null, "candidates": [], "message": "No note or file “Topic 3”"},
+  {"source": "Index.md", "line": 2, "column": 46, "kind": "Ambiguous", "severity": "warning", "raw": "Leaf", "status": "Ambiguous(2)", "target": "sub/Leaf.md", "candidates": ["sub/Leaf.md", "deep/er/Leaf.md"], "message": "2 files match; “sub/Leaf.md” is used"},
+  {"source": "Topic 1.md", "line": 3, "column": 11, "kind": "MissingAnchor", "severity": "error", "raw": "Topic 2#Missing part", "status": "Exact", "target": "Topic 2.md", "candidates": [], "message": "“Topic 2.md” has no heading “Missing part”"},
+  {"source": "Topic 2.md", "line": 3, "column": 1, "kind": "CaseFold", "severity": "info", "raw": "index", "status": "Exact", "target": "Index.md", "candidates": [], "message": "Letter case differs from “Index.md”: the profile ignores it"},
+  {"source": "Topic 2.md", "line": 3, "column": 38, "kind": "OutsideRoot", "severity": "warning", "raw": "../outside.md", "status": "OutsideRoot", "target": null, "candidates": [], "message": "Points outside the vault: ../outside.md"},
+  {"source": "sub/Leaf.md", "line": 1, "column": 13, "kind": "Unresolved", "severity": "error", "raw": "../nowhere.md", "status": "Unresolved", "target": null, "candidates": [], "message": "No note or file “../nowhere.md”"}
+]

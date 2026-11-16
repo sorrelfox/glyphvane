@@ -23,6 +23,7 @@ gv-settings = { workspace = true }
 gv-syntax = { workspace = true }
 gv-text = { workspace = true }
 gv-ui = { workspace = true }
+gv-vault = { workspace = true }
 notify-debouncer-full = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

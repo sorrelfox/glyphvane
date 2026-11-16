@@ -13,6 +13,7 @@
 //! | [`ContentSnapshot`] | An immutable, `Send + Sync` snapshot with the resolved link graph and the queries: backlinks, outgoing links, unresolved links, tags, quick-switcher entries, sync-conflict copies, placeholders, unlinked mentions |
 //! | [`ContentIndexer`] | The background service: builds the index (from the cache when it is valid), follows path-index snapshots from the watcher and dirty-buffer overlays, persists the cache, and stops when the vault closes |
 //! | [`store`] | The versioned on-disk cache |
+//! | [`check`] | The link checker: findings by severity for a note, a folder or the vault, with fixes |
 //!
 //! # Sources of truth
 //!
@@ -38,6 +39,7 @@
 //!   [`ContentSnapshot::sync_conflicts`]. The resolver already leaves them
 //!   out of basename lookups.
 
+pub mod check;
 mod extract;
 mod frontmatter;
 mod query;
@@ -54,6 +56,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use check::{
+    CheckOptions, CheckProgress, CheckReport, CheckScope, Finding, FindingKind, Fix, FixAction,
+    Severity,
+};
 pub use extract::extract;
 pub use query::{
     Backlink, ContentSnapshot, Mention, OutgoingLink, SwitcherEntry, SyncConflictCopy, TagCount,

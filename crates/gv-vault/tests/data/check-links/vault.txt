@@ -1,0 +1,7 @@
+Index.md:2:34: error: Unresolved: Topic 3: No note or file “Topic 3”
+Index.md:2:46: warning: Ambiguous: Leaf: 2 files match; “sub/Leaf.md” is used
+Topic 1.md:3:11: error: MissingAnchor: Topic 2#Missing part: “Topic 2.md” has no heading “Missing part”
+Topic 2.md:3:1: info: CaseFold: index: Letter case differs from “Index.md”: the profile ignores it
+Topic 2.md:3:38: warning: OutsideRoot: ../outside.md: Points outside the vault: ../outside.md
+sub/Leaf.md:1:13: error: Unresolved: ../nowhere.md: No note or file “../nowhere.md”
+3 errors, 2 warnings, 1 info message in 6 files (11 links)

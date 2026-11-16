@@ -3278,6 +3278,7 @@ dependencies = [
  "gv-syntax",
  "gv-text",
  "gv-ui",
+ "gv-vault",
  "interprocess",
  "notify-debouncer-full",
  "raw-window-handle",
