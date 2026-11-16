@@ -7,7 +7,9 @@
 //! file deleted or a sync-conflict copy seen while only the Reading view
 //! is open). One at a time; the document's comes first, except the
 //! window's questions (a confirmation the user just asked for, a file not
-//! opened, the indexing question), which come before it.
+//! opened, the indexing question), which come before it. Last comes the
+//! Reading view's: remote content waiting for approval (FR-SET-08), in
+//! Preview and Split only.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -32,6 +34,8 @@ pub(super) enum NoticeSource {
     Document,
     /// The tab itself (no Source view, or none of its own notices).
     Tab,
+    /// The Reading view on screen (remote content).
+    Reader,
 }
 
 impl Workspace {
@@ -48,7 +52,29 @@ impl Workspace {
         {
             return Some((notice, NoticeSource::Document));
         }
-        tab.notice.clone().map(|n| (n, NoticeSource::Tab))
+        if let Some(notice) = tab.notice.clone() {
+            return Some((notice, NoticeSource::Tab));
+        }
+        self.visible_reader(cx)
+            .and_then(|r| r.read(cx).remote_notice(cx))
+            .map(|n| (n, NoticeSource::Reader))
+    }
+
+    /// What the infobar shows now, if anything.
+    #[cfg(test)]
+    pub(crate) fn infobar_notice(&self, cx: &App) -> Option<Notice> {
+        self.active_notice(cx).map(|(n, _)| n)
+    }
+
+    /// The active tab's Reading view on screen: Preview's, or the Split
+    /// view's preview pane; none in Edit.
+    fn visible_reader(&self, cx: &App) -> Option<gpui::Entity<crate::reader::Reader>> {
+        let tab = self.active_tab();
+        match tab.mode {
+            super::ViewMode::Preview => tab.reader.clone(),
+            super::ViewMode::Split => tab.split_reader(cx),
+            super::ViewMode::Edit => None,
+        }
     }
 
     /// The active tab's infobar, if it has a notice.
@@ -194,6 +220,13 @@ impl Workspace {
         if source == NoticeSource::Tab && self.answer(action, cx) {
             return;
         }
+        if source == NoticeSource::Reader {
+            if let Some(reader) = self.visible_reader(cx) {
+                reader.update(cx, |r, cx| r.answer_remote(action, cx));
+            }
+            cx.notify();
+            return;
+        }
         match action {
             NoticeAction::Close => {
                 self.close_tab(self.active, window, cx);
@@ -212,7 +245,7 @@ impl Workspace {
             action => {
                 let editor = match source {
                     NoticeSource::Document => self.active_tab().editor.clone(),
-                    NoticeSource::Tab => None,
+                    NoticeSource::Tab | NoticeSource::Reader => None,
                 };
                 if let Some(editor) = editor {
                     editor.update(cx, |e, cx| e.notice_action(action, cx));
@@ -228,6 +261,11 @@ impl Workspace {
             NoticeSource::Document => {
                 if let Some(editor) = self.active_tab().editor.clone() {
                     editor.update(cx, |e, cx| e.dismiss_notice(cx));
+                }
+            }
+            NoticeSource::Reader => {
+                if let Some(reader) = self.visible_reader(cx) {
+                    reader.update(cx, |r, cx| r.dismiss_remote(cx));
                 }
             }
             NoticeSource::Tab if self.active_tab().has_question() => {

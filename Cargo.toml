@@ -226,6 +226,14 @@ fast_image_resize = { version = "6.1.0", default-features = false, features = ["
 # gv-media tests: writing APNG test files (the png version `image` already
 # uses; MIT OR Apache-2.0).
 png = "0.18.1"
+# Remote images (gv-media `remote`): a blocking HTTP client over rustls with
+# the `ring` provider, verifying through the OS certificate store
+# (rustls-platform-verifier), so the Mozilla root list (webpki-roots,
+# CDLA-Permissive-2.0) stays out of the graph. No cookies feature. Exact pin:
+# the private-address guard implements ureq's `unversioned` resolver trait.
+# All MIT OR Apache-2.0 (ring: Apache-2.0 AND ISC).
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Spell check (gv-spell): spellbook, a pure-Rust Hunspell-compatible
 # checker (MPL-2.0; one maintainer, alpha). Exact pin: bump only after the
 # spell-check accuracy harness passes on the new version.

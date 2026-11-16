@@ -385,7 +385,7 @@ fn images_that_cannot_be_shown_get_a_card(cx: &mut TestAppContext) {
             .filter_map(|i| s.cache.image_cards.get(&i.id))
             .flatten()
             .collect();
-        assert_eq!(cards.len(), 2, "{cards:?}");
+        assert_eq!(cards.len(), 3, "{cards:?}");
         assert!(cards[0].message.starts_with("The image could not be read"));
         assert!(cards[0].open.is_none());
         assert_eq!(cards[1].message, "AVIF images cannot be shown here.");
@@ -395,7 +395,14 @@ fn images_that_cannot_be_shown_get_a_card(cx: &mut TestAppContext) {
                 .as_ref()
                 .is_some_and(|p| p.ends_with("photo.avif"))
         );
-        // Missing and remote images show their alt text.
+        // A remote image waits for approval (the default mode is Ask):
+        // its placeholder card; nothing is fetched.
+        assert_eq!(
+            cards[2].message,
+            "web: Remote image from example.org, not loaded."
+        );
+        assert!(cards[2].open.is_none());
+        // A missing image shows its alt text.
         let last = doc.tree.items().last().expect("an item");
         let text = s
             .cache
@@ -405,7 +412,7 @@ fn images_that_cannot_be_shown_get_a_card(cx: &mut TestAppContext) {
             .paragraph()
             .text()
             .to_owned();
-        assert!(text.contains("missing") && text.contains("web"), "{text:?}");
+        assert!(text.contains("missing"), "{text:?}");
         s.geometry
             .controls
             .iter()

@@ -56,6 +56,8 @@ pub enum Topic {
     /// The file may not be edited: its permissions, its size, or bytes
     /// its encoding cannot hold.
     ReadOnly,
+    /// Remote images wait for approval (FR-SET-08).
+    RemoteContent,
 }
 
 /// What an infobar button does.
@@ -106,6 +108,14 @@ pub enum NoticeAction {
     DiscardAndClose,
     /// Say what large-file mode turns off.
     Details,
+    /// Remote content: load the waiting images of this note, this session.
+    RemoteLoadOnce,
+    /// Remote content: add the waiting sites to the allow list.
+    RemoteAlwaysAllow,
+    /// Remote content: switch this vault to Allow.
+    RemoteAllowVault,
+    /// Remote content: add the waiting sites to the block list.
+    RemoteBlock,
 }
 
 /// A button of an infobar.
@@ -158,6 +168,54 @@ impl Notice {
     /// Whether the infobar shows a button for `action`.
     pub fn offers(&self, action: &NoticeAction) -> bool {
         self.buttons.iter().any(|b| &b.action == action)
+    }
+
+    /// The designed infobar: remote content waiting for approval
+    /// (FR-SET-08), for the sites in `hosts` (at least one). *Allow for
+    /// this vault* is offered when a vault is open.
+    pub fn remote_content(hosts: &[String], vault: bool) -> Self {
+        let (title, many) = match hosts {
+            [one] => (format!("This note references content from {one}."), false),
+            _ => (
+                format!("This note references content from {} sites.", hosts.len()),
+                true,
+            ),
+        };
+        let detail = if many {
+            format!("Nothing was loaded from {}.", hosts.join(", "))
+        } else {
+            "Nothing was loaded.".to_owned()
+        };
+        let mut notice = Self {
+            topic: Topic::RemoteContent,
+            kind: NoticeKind::Information,
+            title: title.into(),
+            detail: Some(detail.into()),
+            buttons: Vec::new(),
+        }
+        .with(NoticeButton::new(NoticeAction::RemoteLoadOnce, "Load once"))
+        .with(NoticeButton::new(
+            NoticeAction::RemoteAlwaysAllow,
+            if many {
+                "Always allow these sites"
+            } else {
+                "Always allow this site"
+            },
+        ));
+        if vault {
+            notice = notice.with(NoticeButton::new(
+                NoticeAction::RemoteAllowVault,
+                "Allow for this vault",
+            ));
+        }
+        notice.with(NoticeButton::new(
+            NoticeAction::RemoteBlock,
+            if many {
+                "Block these sites"
+            } else {
+                "Block this site"
+            },
+        ))
     }
 
     /// The designed infobar: the file changed on disk while the buffer has

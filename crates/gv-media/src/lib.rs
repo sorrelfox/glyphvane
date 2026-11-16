@@ -14,6 +14,9 @@
 //!   M8; the Reading view shows a card).
 //! - Our caps are checked from the header before any pixel buffer exists;
 //!   animations keep frames under a memory budget.
+//! - Remote images (the `remote` feature): [`remote::RemoteFetcher`]
+//!   downloads into a disk cache with caps; the caller applies the
+//!   remote-content policy.
 //! - Results are fitted to the display box with fast_image_resize and
 //!   delivered as straight RGBA8 frames.
 //!
@@ -39,6 +42,8 @@ mod error;
 mod format;
 mod limits;
 mod raster;
+#[cfg(feature = "remote")]
+pub mod remote;
 mod resize;
 mod svg;
 mod types;

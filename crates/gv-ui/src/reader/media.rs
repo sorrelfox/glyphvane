@@ -9,8 +9,9 @@
 //!   without a vault) and its header probed ([`probe`], cached by path,
 //!   time and size): the box gets the image's displayed size (EXIF
 //!   orientation applied). A local file that does not decode gets a card's
-//!   box; a missing file, a remote image (remote content comes with its
-//!   policy) and anything else get the alt text. What each destination
+//!   box; a missing file and anything else get the alt text. A remote
+//!   image gets a card's box until it is fetched ([`super::remote`]: the
+//!   remote-content policy decides), then its own size. What each destination
 //!   resolved to is kept with the document ([`ImageTargets`]) so the UI
 //!   thread never resolves.
 //! - **Pixels, while drawing**: the view computes the cache key of the box
@@ -50,6 +51,21 @@ pub(crate) const CARD_HEIGHT: f32 = 64.0;
 
 /// Media engines kept, one per allowed root.
 const ENGINES: usize = 4;
+
+/// The media engine of remote images: their SVGs may load no file at all.
+/// Making one may scan the system's fonts: only on a background thread.
+pub(crate) fn remote_engine() -> Arc<MediaEngine> {
+    static ENGINE: OnceLock<Arc<MediaEngine>> = OnceLock::new();
+    Arc::clone(ENGINE.get_or_init(|| {
+        Arc::new(MediaEngine::new(
+            Limits::default(),
+            SvgContext {
+                fontdb: super::diagram::font_db(),
+                allowed_root: None,
+            },
+        ))
+    }))
+}
 
 /// The media engine whose SVGs may load files below `root`. Making one
 /// may scan the system's fonts: only on a background thread.
@@ -119,8 +135,16 @@ pub(crate) enum ImageTarget {
         path: PathBuf,
         probe: Result<Probe, MediaError>,
     },
-    /// A remote image (not loaded here: remote content has its own policy).
+    /// A remote image not fetched (yet): the URL. The remote-content
+    /// policy decides what its card says ([`super::remote`]).
     Remote(String),
+    /// A remote image in the cache: its URL, the cached file and its
+    /// header facts.
+    Fetched {
+        url: String,
+        path: PathBuf,
+        probe: Result<Probe, MediaError>,
+    },
     /// Missing, outside the root, blocked or not an image URL: the alt text.
     None,
 }
@@ -174,6 +198,40 @@ impl ImageTargets {
             .cloned()
     }
 
+    /// The remote URLs asked for, with the destinations that name each.
+    pub fn remote_urls(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (dest, target) in self
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            if let ImageTarget::Remote(url) | ImageTarget::Fetched { url, .. } = target {
+                out.entry(url.clone()).or_default().push(dest.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether the image at `url` is shown from the cache.
+    pub fn is_fetched(&self, url: &str) -> bool {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|t| matches!(t, ImageTarget::Fetched { url: u, .. } if u == url))
+    }
+
+    /// Sets what `destination` resolves to (a remote image fetched, or
+    /// one that may no longer show).
+    pub fn set(&self, destination: &str, target: ImageTarget) {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(destination.to_owned(), target);
+    }
+
     /// Resolves `destination` with `resolver` and probes a local file
     /// (blocking; off the UI thread), once per destination.
     fn resolve(&self, destination: &str, resolver: &Resolver) -> ImageTarget {
@@ -196,7 +254,14 @@ fn image_target(destination: &str, resolver: &Resolver, root: &Path) -> ImageTar
         None => destination,
     };
     match gv_vault::url::classify(bare) {
-        UrlClass::Web { url, .. } => return ImageTarget::Remote(url),
+        UrlClass::Web { url, .. } => {
+            // Fetched before (this run): shown at its size at once; the
+            // view checks the policy before anything is drawn.
+            return match super::remote::fetched(&url) {
+                Some((path, probe)) => ImageTarget::Fetched { url, path, probe },
+                None => ImageTarget::Remote(url),
+            };
+        }
         UrlClass::Relative(_) | UrlClass::Fragment(_) | UrlClass::LocalFile { .. } => {}
         _ => return ImageTarget::None,
     }
@@ -232,7 +297,8 @@ pub(crate) struct ImageSizes<'a> {
 impl ImageSizeSource for ImageSizes<'_> {
     fn size(&self, image: &LinkTarget<'_>) -> ImageSize {
         match self.targets.resolve(image.destination, &self.resolver) {
-            ImageTarget::Local { probe: Ok(p), .. } if p.width > 0 && p.height > 0 =>
+            ImageTarget::Local { probe: Ok(p), .. } | ImageTarget::Fetched { probe: Ok(p), .. }
+                if p.width > 0 && p.height > 0 =>
             {
                 #[allow(clippy::cast_precision_loss)]
                 ImageSize::Known {
@@ -247,6 +313,12 @@ impl ImageSizeSource for ImageSizes<'_> {
                     height: CARD_HEIGHT,
                 }
             }
+            // A remote image not fetched or that cannot be shown: its
+            // placeholder card.
+            ImageTarget::Remote(_) | ImageTarget::Fetched { .. } => ImageSize::Known {
+                width: CARD_WIDTH,
+                height: CARD_HEIGHT,
+            },
             _ => ImageSize::Failed,
         }
     }
@@ -281,6 +353,8 @@ pub(crate) struct ImageRequest {
     pub root: PathBuf,
     pub request: DecodeRequest,
     pub cancel: CancelFlag,
+    /// A fetched remote image: decoded without access to any file.
+    pub remote: bool,
 }
 
 /// Decodes a request into a GPUI image (blocking: the background executor
@@ -288,7 +362,11 @@ pub(crate) struct ImageRequest {
 pub(crate) fn load(r: &ImageRequest) -> Result<Arc<RenderImage>, MediaError> {
     #[cfg(test)]
     tests::count_job();
-    let engine = media_engine(&r.root);
+    let engine = if r.remote {
+        remote_engine()
+    } else {
+        media_engine(&r.root)
+    };
     let decoded = engine.load_path(&r.path, r.request, &r.cancel)?;
     if r.cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
@@ -343,6 +421,7 @@ impl Images {
         root: &Path,
         request: DecodeRequest,
         item: ItemId,
+        remote: bool,
     ) -> ImageShown {
         let key = match MediaKey::for_path(path, request) {
             Ok(k) => k,
@@ -371,6 +450,7 @@ impl Images {
                     root: root.to_path_buf(),
                     request,
                     cancel,
+                    remote,
                 });
             }
         }

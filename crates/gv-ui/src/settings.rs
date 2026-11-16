@@ -437,6 +437,14 @@ impl AppSettings {
             .is_some_and(|layer| layer.get(key).is_some())
     }
 
+    /// The value `target`'s own layer gives `key`, if it sets it.
+    pub fn own_value(&self, target: Target, key: &str) -> Option<toml::Value> {
+        self.stack
+            .layer(target.layer())
+            .and_then(|layer| layer.get(key))
+            .map(|entry| entry.value.clone())
+    }
+
     /// The problems of `key` in the layers `target` shows: a value that is
     /// invalid or was ignored.
     pub fn problems(&self, target: Target, key: &str) -> Vec<Diagnostic> {

@@ -242,6 +242,7 @@ impl Reader {
             self.refresh_statuses(cx);
         }
         self.find_document_changed(cx);
+        self.sync_remote(cx);
         cx.notify();
     }
 

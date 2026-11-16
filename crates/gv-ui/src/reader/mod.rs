@@ -60,6 +60,7 @@ mod links;
 mod live;
 mod load;
 pub(crate) mod media;
+pub(crate) mod remote;
 pub mod startup;
 mod state;
 #[cfg(test)]
@@ -248,6 +249,8 @@ pub struct Reader {
     typography: Typography,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
+    /// Remote images: the fetches, failures and sites waiting.
+    remote: remote::RemoteImages,
     _settings: Subscription,
 }
 
@@ -291,7 +294,11 @@ impl Reader {
             typography,
             _load: None,
             _refresh: None,
-            _settings: cx.observe_global::<AppSettings>(|this, cx| this.sync_typography(cx)),
+            remote: remote::RemoteImages::default(),
+            _settings: cx.observe_global::<AppSettings>(|this, cx| {
+                this.sync_typography(cx);
+                this.sync_remote(cx);
+            }),
         }
     }
 
@@ -522,6 +529,7 @@ impl Reader {
                     self.refresh_statuses(cx);
                 }
                 self.find_document_changed(cx);
+                self.sync_remote(cx);
                 if self.typography_stale() {
                     self.rebuild(cx);
                 }

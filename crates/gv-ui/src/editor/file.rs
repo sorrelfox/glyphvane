@@ -1390,6 +1390,11 @@ impl EditorView {
             | NoticeAction::SaveAndClose
             | NoticeAction::DiscardAndClose
             | NoticeAction::Cancel => {}
+            // The Reading view's (remote content).
+            NoticeAction::RemoteLoadOnce
+            | NoticeAction::RemoteAlwaysAllow
+            | NoticeAction::RemoteAllowVault
+            | NoticeAction::RemoteBlock => {}
         }
     }
 

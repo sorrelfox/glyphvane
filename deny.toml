@@ -6,6 +6,18 @@
 [graph]
 # Check every feature combination, not only the default one.
 all-features = true
+# The targets Glyphvane ships for (Linux and Windows on x86-64 and ARM64,
+# macOS on both). Dependencies that only exist for other targets never end
+# up in a release, e.g. rustls-platform-verifier's wasm32-only
+# webpki-root-certs (CDLA-Permissive-2.0, not on the allow list below).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [output]
 feature-depth = 1

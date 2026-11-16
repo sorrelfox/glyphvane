@@ -757,6 +757,11 @@ pub(crate) struct ItemCache {
     /// The diagram items shown as a card or as their source, with their
     /// card (none for the "not recognised" note).
     pub diagram_frames: HashMap<ItemId, Option<Arc<gv_diagram::FallbackCard>>>,
+    /// What each remote image not shown says, by URL (the remote-content
+    /// policy's answer, set by the view).
+    remote: HashMap<String, super::remote::RemoteShown>,
+    /// Items with a remote image's card.
+    remote_items: std::collections::HashSet<ItemId>,
 }
 
 /// What the view shows images and pictures with.
@@ -894,6 +899,7 @@ impl ItemCache {
         self.items.clear();
         self.tables.clear();
         self.scheme_items.clear();
+        self.remote_items.clear();
         self.image_cards.clear();
         self.diagram_frames.clear();
     }
@@ -919,6 +925,21 @@ impl ItemCache {
                     .collect::<Vec<_>>(),
             );
         }
+        self.forget(ids.iter().copied());
+        ids
+    }
+
+    /// Sets what the remote images not shown say. When that changes, the
+    /// items with their cards are forgotten and returned (laid out again).
+    pub fn set_remote(
+        &mut self,
+        remote: HashMap<String, super::remote::RemoteShown>,
+    ) -> Vec<ItemId> {
+        if remote == self.remote {
+            return Vec::new();
+        }
+        self.remote = remote;
+        let ids: Vec<ItemId> = self.remote_items.drain().collect();
         self.forget(ids.iter().copied());
         ids
     }
@@ -1156,7 +1177,8 @@ impl ItemCache {
         );
         let mut block = InlineBlock::new(Arc::new(b.build()));
         let target = self.targets.as_ref().and_then(|t| t.get(url));
-        self.show_image(target, item.id, 0, (w, h), &mut block, pending);
+        let alt = p.alt.clone();
+        self.show_image(target, &alt, item.id, 0, (w, h), &mut block, pending);
         Some(block)
     }
 
@@ -1197,7 +1219,7 @@ impl ItemCache {
             }
             let target = self.targets.as_ref().and_then(|t| t.get(&info.destination));
             let size = (b.width, b.ascent + b.descent);
-            self.show_image(target, id, ix, size, block, pending);
+            self.show_image(target, &info.alt, id, ix, size, block, pending);
         }
         if !hidden.is_empty() {
             let mut p = (*paragraph).clone();
@@ -1218,11 +1240,13 @@ impl ItemCache {
         }
     }
 
-    /// Shows image `target` in the box of paragraph item `piece` of
-    /// `block` (`size` px).
+    /// Shows image `target` (described by `alt`) in the box of paragraph
+    /// item `piece` of `block` (`size` px).
+    #[allow(clippy::too_many_arguments)]
     fn show_image(
         &mut self,
         target: Option<ImageTarget>,
+        alt: &str,
         id: ItemId,
         piece: usize,
         (w, h): (f32, f32),
@@ -1240,7 +1264,26 @@ impl ItemCache {
             message,
             open,
         };
+        let (target, remote) = match target {
+            Some(ImageTarget::Fetched { path, probe, .. }) => {
+                (Some(ImageTarget::Local { path, probe }), true)
+            }
+            other => (other, false),
+        };
         match target {
+            Some(ImageTarget::Remote(url)) => {
+                // The placeholder: what the remote-content policy says.
+                block.set_box_content(box_id, BoxContent::Blank);
+                self.remote_items.insert(id);
+                let message = match self.remote.get(&url) {
+                    Some(shown) => shown.card_message(alt),
+                    None => super::remote::RemoteShown::unknown(&url).card_message(alt),
+                };
+                self.image_cards
+                    .entry(id)
+                    .or_default()
+                    .push(card(message, None));
+            }
             Some(ImageTarget::Local { path, probe: Ok(_) }) => {
                 let Some(root) = self.targets.as_ref().map(|t| t.root().to_path_buf()) else {
                     return;
@@ -1255,7 +1298,7 @@ impl ItemCache {
                     fit: Some((device(w), device(h))),
                     animate: !self.view.reduce_motion,
                 };
-                match self.images.shown(&path, &root, request, id) {
+                match self.images.shown(&path, &root, request, id, remote) {
                     ImageShown::Image(image) => block.set_box_content(
                         box_id,
                         BoxContent::Image(gpui::ImageSource::Render(image)),
@@ -1263,7 +1306,7 @@ impl ItemCache {
                     ImageShown::Pending => *pending = true,
                     ImageShown::Failed(e) => {
                         block.set_box_content(box_id, BoxContent::Blank);
-                        let open = e.offers_open_externally().then_some(path);
+                        let open = (e.offers_open_externally() && !remote).then_some(path);
                         self.image_cards
                             .entry(id)
                             .or_default()
@@ -1276,7 +1319,7 @@ impl ItemCache {
                 probe: Err(e),
             }) => {
                 block.set_box_content(box_id, BoxContent::Blank);
-                let open = e.offers_open_externally().then_some(path);
+                let open = (e.offers_open_externally() && !remote).then_some(path);
                 self.image_cards
                     .entry(id)
                     .or_default()

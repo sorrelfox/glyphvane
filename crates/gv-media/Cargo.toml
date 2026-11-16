@@ -13,6 +13,9 @@ default = []
 # TIFF (first page). Optional per ADR-019 (+0.33 MB); off until the
 # full-link size budget is settled.
 tiff = ["image/tiff"]
+# Remote images: the HTTP fetcher and its disk cache. Off for the helper
+# process, which never touches the network.
+remote = ["dep:ureq", "dep:rustls", "dep:url"]
 
 [dependencies]
 fast_image_resize = { workspace = true }
@@ -21,6 +24,9 @@ log = { workspace = true }
 miniz_oxide = { workspace = true }
 moxcms = { workspace = true }
 resvg = { workspace = true }
+rustls = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 crc32fast = { workspace = true }
@@ -30,3 +36,7 @@ tempfile = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "remote"
+required-features = ["remote"]

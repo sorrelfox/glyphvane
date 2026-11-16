@@ -18,7 +18,7 @@ gv-highlight = { workspace = true }
 gv-html = { workspace = true }
 gv-inline = { workspace = true }
 gv-math = { workspace = true }
-gv-media = { workspace = true }
+gv-media = { workspace = true, features = ["remote"] }
 gv-model = { workspace = true }
 gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
