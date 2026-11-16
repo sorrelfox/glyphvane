@@ -66,9 +66,9 @@
 //!
 //! | | Linux | macOS | Windows |
 //! |---|---|---|---|
-//! | Replace | rename | rename | `MoveFileExW` via the standard library, retried on sharing violations for up to 2 s |
-//! | Kept | mode, owner/group (where permitted), extended attributes | mode, owner/group, extended attributes (Finder tags, `com.apple.*`), creation time | read-only flag, hidden/system/archive/not-indexed attributes, creation time |
-//! | Not kept | — | — | ACLs set on the file itself (the directory's inherited ACL applies), alternate data streams, file id |
+//! | Replace | rename | rename | `ReplaceFileW` (a rename where it does not apply), retried on sharing violations for up to 2 s |
+//! | Kept | mode, owner/group (where permitted), extended attributes | mode, owner/group, extended attributes (Finder tags, `com.apple.*`), creation time | read-only flag, hidden/system/archive/not-indexed attributes, creation time, ACL, alternate data streams, short name, object id |
+//! | Not kept | — | — | file id; on file systems without `ReplaceFileW`, the ACL and alternate data streams |
 //! | Hardlinks | written in place | written in place | not detected (the link count needs an unstable API): replaced, which splits the link |
 //! | Network detection | `statfs` type (NFS, SMB/CIFS, 9P, …; FUSE) | `statfs` type name (smbfs, nfs, afpfs, webdav; macFUSE) | UNC paths; mapped drives are unknown and treated like shares |
 

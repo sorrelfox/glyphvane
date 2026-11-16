@@ -114,6 +114,10 @@ rustix = { version = "1.1.6", features = ["net", "process"] }
 # `MessageBoxW`, macOS `NSAlert`). Default features only add Linux backends,
 # which use zenity and kdialog directly instead.
 rfd = { version = "0.17.2", default-features = false }
+# Settings and save pipeline (gv-settings): `ReplaceFileW` for atomic saves on
+# Windows. The version the tree already has (tempfile, rustix and others use
+# it; MIT OR Apache-2.0).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 # Model (gv-model): Unicode general categories for the heading slug
 # algorithms (letters, marks, numbers, connector punctuation).
 unicode-properties = { version = "0.1.5", default-features = false, features = ["general-category"] }

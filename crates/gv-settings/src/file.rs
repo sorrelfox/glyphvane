@@ -294,9 +294,12 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// has them (Windows: hidden, system, archive and not-indexed attributes and
 /// the creation time; macOS: the creation time); call `before_rename` with
 /// the temporary file and the original's metadata (`None` for a new file);
-/// `fsync`; rename over the target (on Windows, retried with backoff for up
-/// to about 2 s while another process holds the file open, as antivirus
-/// scanners, indexers and sync clients do); `fsync` the directory.
+/// `fsync`; rename over the target; `fsync` the directory. On Windows the
+/// rename is `ReplaceFileW` when the target exists, which also keeps the
+/// original's ACL and alternate data streams (a plain rename where it does
+/// not apply), retried with backoff for up to about 2 s while another
+/// process holds the file open, as antivirus scanners, indexers and sync
+/// clients do.
 ///
 /// `before_rename` copies what only the caller knows how to copy (owner,
 /// extended attributes) or checks a last condition. If it or any step before
@@ -399,34 +402,209 @@ fn persist(temp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
     temp.persist(target).map(drop).map_err(|e| e.error)
 }
 
-/// Windows: retry on sharing violations (antivirus, indexers, sync clients)
-/// with backoff for up to about 2 s.
+/// Windows: `ReplaceFileW` swaps the temporary file in. Unlike a rename, it
+/// keeps what the original carries beyond its attributes: its ACL, creation
+/// time, short name, object id, encryption, compression and alternate data
+/// streams. Where it does not apply (a new file, or a file system that does
+/// not support it), the temporary file is renamed over the target instead.
+/// Both are retried with backoff for up to about 2 s while another process
+/// holds the file open (antivirus scanners, indexers, sync clients).
 #[cfg(windows)]
-fn persist(mut temp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
-    let mut delay = std::time::Duration::from_millis(20);
-    let mut waited = std::time::Duration::ZERO;
+fn persist(temp: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
+    use std::time::Duration;
+
+    // `ReplaceFileW` opens the replacement itself: close it first.
+    let mut temp = temp.into_temp_path();
+    let mut replace = fs::symlink_metadata(target).is_ok();
+    // Set when a failed `ReplaceFileW` removed the original: the new
+    // contents then exist only in the temporary file, which is kept.
+    let mut original_gone = false;
+    let mut delay = Duration::from_millis(20);
+    let mut waited = Duration::ZERO;
     loop {
-        match temp.persist(target) {
-            Ok(_) => return Ok(()),
-            Err(e)
-                if is_sharing_violation(&e.error) && waited < std::time::Duration::from_secs(2) =>
-            {
-                temp = e.file;
-                std::thread::sleep(delay);
-                waited += delay;
-                delay = (delay * 2).min(std::time::Duration::from_millis(400));
+        let result = if replace {
+            replace_file::replace(target, &temp)
+        } else {
+            fs::rename(&temp, target)
+        };
+        let error = match result {
+            Ok(()) => {
+                // The temporary name is gone (renamed or replaced).
+                temp.disable_cleanup(true);
+                return Ok(());
             }
-            Err(e) => return Err(e.error),
+            Err(error) => error,
+        };
+        if replace {
+            match replace_file::failure(&error) {
+                replace_file::Failure::NotApplicable => {
+                    replace = false;
+                    continue;
+                }
+                replace_file::Failure::OriginalRemoved => {
+                    original_gone = true;
+                    replace = false;
+                    continue;
+                }
+                replace_file::Failure::Other => {}
+            }
         }
+        if is_sharing_violation(&error) && waited < Duration::from_secs(2) {
+            std::thread::sleep(delay);
+            waited += delay;
+            delay = (delay * 2).min(Duration::from_millis(400));
+            continue;
+        }
+        if original_gone {
+            temp.disable_cleanup(true);
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the new contents are in {}",
+                    temp.to_path_buf().display()
+                ),
+            ));
+        }
+        return Err(error);
+    }
+}
+
+/// `ReplaceFileW`, the one call in this crate that needs `unsafe`: the
+/// standard library has no safe way to replace a file while keeping its
+/// ACL and streams.
+#[cfg(windows)]
+mod replace_file {
+    use std::ffi::OsString;
+    use std::io;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_CALL_NOT_IMPLEMENTED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION,
+        ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_UNABLE_TO_MOVE_REPLACEMENT,
+        ERROR_UNABLE_TO_REMOVE_REPLACED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+    };
+
+    /// How a failed [`replace`] left the two files.
+    pub(super) enum Failure {
+        /// Nothing changed and the call cannot work here (the file system
+        /// does not support it, or the original vanished): rename instead.
+        NotApplicable,
+        /// The original was removed but the replacement could not take its
+        /// name (`ERROR_UNABLE_TO_MOVE_REPLACEMENT` without a backup file):
+        /// a rename finishes the job.
+        OriginalRemoved,
+        /// Nothing changed: a sharing violation to retry, or an error to
+        /// report.
+        Other,
+    }
+
+    pub(super) fn failure(error: &io::Error) -> Failure {
+        let Some(code) = error.raw_os_error().and_then(|c| u32::try_from(c).ok()) else {
+            return Failure::Other;
+        };
+        match code {
+            ERROR_UNABLE_TO_MOVE_REPLACEMENT => Failure::OriginalRemoved,
+            ERROR_INVALID_FUNCTION
+            | ERROR_NOT_SUPPORTED
+            | ERROR_INVALID_PARAMETER
+            | ERROR_CALL_NOT_IMPLEMENTED
+            | ERROR_FILE_NOT_FOUND => Failure::NotApplicable,
+            // Including ERROR_UNABLE_TO_REMOVE_REPLACED: both files keep
+            // their names (see `is_busy`).
+            _ => Failure::Other,
+        }
+    }
+
+    /// Whether `error` is `ReplaceFileW`'s "the original could not be
+    /// removed", which another process holding the file open causes.
+    pub(super) fn is_busy(error: &io::Error) -> bool {
+        error
+            .raw_os_error()
+            .and_then(|c| u32::try_from(c).ok())
+            .is_some_and(|c| c == ERROR_UNABLE_TO_REMOVE_REPLACED)
+    }
+
+    /// Replaces `target` with `replacement` (both closed), keeping the
+    /// target's ACL, creation time and streams. Errors in merging
+    /// attributes or the ACL do not fail the call: the result then has the
+    /// replacement's own, as a rename would give it.
+    #[expect(
+        unsafe_code,
+        reason = "FFI call to ReplaceFileW; see the SAFETY comment"
+    )]
+    pub(super) fn replace(target: &Path, replacement: &Path) -> io::Result<()> {
+        let target = wide(target)?;
+        let replacement = wide(replacement)?;
+        // SAFETY: both names are valid, NUL-terminated UTF-16 strings that
+        // outlive the call; the backup name, exclude and reserved arguments
+        // are null, which the API allows. The call only reads its arguments.
+        let ok = unsafe {
+            ReplaceFileW(
+                target.as_ptr(),
+                replacement.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `path` as an absolute, NUL-terminated wide string in the `\\?\`
+    /// form, so paths longer than `MAX_PATH` work.
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let absolute = std::path::absolute(path)?;
+        let units: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+        let starts = |prefix: &str| {
+            let prefix: Vec<u16> = prefix.encode_utf16().collect();
+            units.starts_with(&prefix)
+        };
+        let mut out: Vec<u16> = if starts(r"\\?\") || starts(r"\\.\") {
+            units.clone()
+        } else if let Some(share) = units.strip_prefix(&[u16::from(b'\\'), u16::from(b'\\')][..]) {
+            r"\\?\UNC\"
+                .encode_utf16()
+                .chain(share.iter().copied())
+                .collect()
+        } else {
+            r"\\?\"
+                .encode_utf16()
+                .chain(units.iter().copied())
+                .collect()
+        };
+        if out.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{}: the path contains a NUL character",
+                    OsString::from_wide(&units).to_string_lossy()
+                ),
+            ));
+        }
+        out.push(0);
+        Ok(out)
     }
 }
 
 /// Access denied (a file open without delete sharing), sharing violation
 /// (`ERROR_SHARING_VIOLATION`, 32) or lock violation (`ERROR_LOCK_VIOLATION`,
 /// 33).
+/// `ReplaceFileW`'s "the original could not be removed"
+/// (`ERROR_UNABLE_TO_REMOVE_REPLACED`) counts as well.
 #[cfg(windows)]
 fn is_sharing_violation(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::PermissionDenied || matches!(error.raw_os_error(), Some(32 | 33))
+    error.kind() == io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(32 | 33))
+        || replace_file::is_busy(error)
 }
 
 #[cfg(unix)]

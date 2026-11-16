@@ -17,8 +17,11 @@
 //! owner and group where the process may set them, and extended attributes
 //! (Linux, macOS: Finder tags, `com.apple.*`, POSIX ACLs, SELinux labels
 //! when allowed); creation time (macOS, Windows); hidden, system, archive
-//! and not-indexed attributes (Windows). What could not be copied is listed
-//! in [`WriteReport::not_preserved`].
+//! and not-indexed attributes (Windows). On Windows the replace step is
+//! `ReplaceFileW`, which also keeps the original's ACL and alternate data
+//! streams. What could not be copied is listed in
+//! [`WriteReport::not_preserved`] (not for Windows, where the system does
+//! the copying).
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
