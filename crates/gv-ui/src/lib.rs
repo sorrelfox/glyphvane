@@ -6,6 +6,7 @@
 pub mod about;
 pub mod appearance;
 pub mod chrome;
+pub mod compare;
 pub mod editor;
 pub mod files;
 pub mod find;

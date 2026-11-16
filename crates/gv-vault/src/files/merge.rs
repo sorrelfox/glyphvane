@@ -283,13 +283,70 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> Merge {
         return single(MergeChunk::Ours(ours.to_owned()));
     }
 
+    let mut chunks = Vec::new();
+    for region in merge3_regions(base, ours, theirs) {
+        push(&mut chunks, region.chunk());
+    }
+    Merge { chunks }
+}
+
+/// One region of a 3-way merge with the text of all three sides: the
+/// stable runs (all three equal) between the regions that changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeRegion {
+    /// The base's lines.
+    pub base: String,
+    /// The buffer's lines.
+    pub ours: String,
+    /// The disk version's lines.
+    pub theirs: String,
+}
+
+impl MergeRegion {
+    /// What the region is in a merge: unchanged, one side's change, the
+    /// same change on both, or a conflict.
+    pub fn chunk(&self) -> MergeChunk {
+        if self.ours == self.theirs {
+            if self.ours == self.base {
+                MergeChunk::Unchanged(self.base.clone())
+            } else {
+                MergeChunk::Both(self.ours.clone())
+            }
+        } else if self.ours == self.base {
+            MergeChunk::Theirs(self.theirs.clone())
+        } else if self.theirs == self.base {
+            MergeChunk::Ours(self.ours.clone())
+        } else {
+            MergeChunk::Conflict {
+                base: self.base.clone(),
+                ours: self.ours.clone(),
+                theirs: self.theirs.clone(),
+            }
+        }
+    }
+
+    /// Whether all three sides are the same.
+    pub fn is_unchanged(&self) -> bool {
+        self.ours == self.base && self.theirs == self.base
+    }
+}
+
+/// The regions of a line-based 3-way merge (as in [`merge3`]), each with
+/// the text of the base, the buffer and the disk version, in order. Their
+/// texts concatenate to the three inputs. Unlike [`merge3`], a change is
+/// never taken as one region of the whole text: every changed run is its
+/// own region between stable lines, which is what a compare view shows.
+/// For a 2-way comparison pass the other side as the base too
+/// (`merge3_regions(theirs, ours, theirs)`): every region is then the
+/// buffer's change.
+pub fn merge3_regions(base: &str, ours: &str, theirs: &str) -> Vec<MergeRegion> {
     let b = split_lines(base);
     let o = split_lines(ours);
     let t = split_lines(theirs);
     let to_ours = matches(&b, &o);
     let to_theirs = matches(&b, &t);
 
-    let mut chunks = Vec::new();
+    let mut regions = Vec::new();
     let (mut i, mut j, mut k) = (0, 0, 0);
     loop {
         // The length of the stable run at (i, j, k).
@@ -301,7 +358,12 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> Merge {
             run += 1;
         }
         if run > 0 {
-            push(&mut chunks, MergeChunk::Unchanged(b[i..i + run].concat()));
+            let text = b[i..i + run].concat();
+            regions.push(MergeRegion {
+                base: text.clone(),
+                ours: text.clone(),
+                theirs: text,
+            });
             i += run;
             j += run;
             k += run;
@@ -317,26 +379,14 @@ pub fn merge3(base: &str, ours: &str, theirs: &str) -> Merge {
         if (ni, nj, nk) == (i, j, k) {
             break;
         }
-        let base_part = &b[i..ni];
-        let ours_part = &o[j..nj];
-        let theirs_part = &t[k..nk];
-        let chunk = if ours_part == base_part {
-            MergeChunk::Theirs(theirs_part.concat())
-        } else if theirs_part == base_part {
-            MergeChunk::Ours(ours_part.concat())
-        } else if ours_part == theirs_part {
-            MergeChunk::Both(ours_part.concat())
-        } else {
-            MergeChunk::Conflict {
-                base: base_part.concat(),
-                ours: ours_part.concat(),
-                theirs: theirs_part.concat(),
-            }
-        };
-        push(&mut chunks, chunk);
+        regions.push(MergeRegion {
+            base: b[i..ni].concat(),
+            ours: o[j..nj].concat(),
+            theirs: t[k..nk].concat(),
+        });
         (i, j, k) = (ni, nj, nk);
     }
-    Merge { chunks }
+    regions
 }
 
 /// Appends a chunk, dropping empty clean ones.
@@ -471,5 +521,53 @@ mod tests {
                 .as_deref(),
             Some("a\nX\nb\nc\nY\nd\n")
         );
+    }
+
+    #[test]
+    fn regions_carry_every_side_and_rebuild_the_inputs() {
+        let base = "one\ntwo\nthree\nfour\nfive\n";
+        let ours = "ONE\ntwo\nthree\nfour\nfive\n";
+        let theirs = "one\ntwo\nthree\nfour\nFIVE\nsix\n";
+        let regions = merge3_regions(base, ours, theirs);
+        let kinds: Vec<_> = regions.iter().map(MergeRegion::chunk).collect();
+        assert_eq!(
+            kinds,
+            [
+                MergeChunk::Ours("ONE\n".to_owned()),
+                MergeChunk::Unchanged("two\nthree\nfour\n".to_owned()),
+                MergeChunk::Theirs("FIVE\nsix\n".to_owned()),
+            ]
+        );
+        assert_eq!(regions[2].base, "five\n");
+        let join = |f: fn(&MergeRegion) -> &str| regions.iter().map(f).collect::<String>();
+        assert_eq!(join(|r| &r.base), base);
+        assert_eq!(join(|r| &r.ours), ours);
+        assert_eq!(join(|r| &r.theirs), theirs);
+    }
+
+    #[test]
+    fn two_way_regions_are_all_the_buffers_changes() {
+        // A whole-text change in `merge3` is one chunk; here every changed
+        // run is its own region.
+        let disk = "a\nb\nc\nd\n";
+        let mine = "a\nB\nc\nd\ne\n";
+        let regions = merge3_regions(disk, mine, disk);
+        let changed: Vec<_> = regions.iter().filter(|r| !r.is_unchanged()).collect();
+        assert_eq!(changed.len(), 2);
+        assert!(
+            changed
+                .iter()
+                .all(|r| matches!(r.chunk(), MergeChunk::Ours(_)))
+        );
+        assert_eq!(
+            (changed[0].ours.as_str(), changed[0].theirs.as_str()),
+            ("B\n", "b\n")
+        );
+        assert_eq!(
+            (changed[1].ours.as_str(), changed[1].theirs.as_str()),
+            ("e\n", "")
+        );
+        assert_eq!(merge3_regions("", "", ""), []);
+        assert_eq!(merge3_regions("x", "x", "x").len(), 1);
     }
 }

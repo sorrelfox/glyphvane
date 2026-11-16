@@ -57,7 +57,10 @@ const NEW_NOTE_NAME: &str = "Untitled";
 /// The topics of the window's own questions: they show before the
 /// document's notice, because the user just asked for them.
 pub(super) fn is_question(topic: Topic) -> bool {
-    matches!(topic, Topic::Confirm | Topic::NotOpened | Topic::IndexAsk)
+    matches!(
+        topic,
+        Topic::Confirm | Topic::NotOpened | Topic::IndexAsk | Topic::CloseUnsaved
+    )
 }
 
 impl Workspace {
@@ -425,6 +428,13 @@ impl Workspace {
     /// the indexing question keeps the folder unindexed in this window.
     pub(super) fn question_dismissed(&mut self, cx: &mut Context<'_, Self>) {
         let notice = self.tabs[self.active].notice.take();
+        if notice
+            .as_ref()
+            .is_some_and(|n| n.topic == Topic::CloseUnsaved)
+        {
+            self.close_cancelled(cx);
+            return;
+        }
         if notice.is_some_and(|n| n.topic == Topic::IndexAsk) {
             self.clear_index_questions();
             if let Some(vault) = self.vault.clone() {

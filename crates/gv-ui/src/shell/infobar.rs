@@ -201,6 +201,9 @@ impl Workspace {
             NoticeAction::SwitchProfile => {
                 self.toggle_profile_menu(cx);
             }
+            NoticeAction::SaveAndClose => self.close_answered(true, window, cx),
+            NoticeAction::DiscardAndClose => self.close_answered(false, window, cx),
+            NoticeAction::CompareCopy(path) => self.compare_copy(path.clone(), cx),
             NoticeAction::OpenCopy(path) => {
                 let path = path.clone();
                 self.tabs[self.active].notice = None;

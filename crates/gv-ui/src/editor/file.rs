@@ -22,8 +22,16 @@
 //! 4. **Changes on disk:** a clean buffer reloads the file as a minimal
 //!    diff ([`reload_transaction`]), one undoable edit, so anchors,
 //!    selections and the scroll position survive; a modified one gets the
-//!    conflict infobar (Keep mine, Take theirs; Compare is not designed).
-//!    A deleted file gets an infobar with Save, Save as and Close.
+//!    conflict infobar (Compare, Keep mine, Take theirs). A deleted file
+//!    gets an infobar with Save, Save as and Close. A file whose
+//!    permissions turn read-only gets the read-only infobar, and editing
+//!    is off until they allow writing again.
+//! 6. **Compare** ([`crate::compare`]): the conflict's, the recovery's or
+//!    a sync-conflict copy's compare view replaces the document on screen
+//!    until it is applied (one undoable, journaled edit) or cancelled.
+//! 7. **Closing:** the window asks before closing a document that would
+//!    not be saved on its own ([`EditorView::needs_close_answer`]); *Don't
+//!    save* drops its journal ([`EditorView::discard_changes`]).
 //! 5. **Save As** (and Save on an untitled document): the window asks for
 //!    a path ([`crate::files::save_as`]) and hands it to
 //!    [`EditorView::save_as`]. The worker writes the new file and moves the
@@ -37,12 +45,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use futures::channel::oneshot;
-use gpui::{AppContext as _, Context, Task};
+use gpui::{AppContext as _, Context, Entity, SharedString, Task};
 use gv_editor::{EditKind, SavePoint};
 use gv_syntax::{ParseOptions, SyntaxTree};
 use gv_text::{
-    Bom, Buffer, DecodeError, DecodeStatus, Decoded, Encoding, Revision, TextFormat, TextSnapshot,
-    Transaction,
+    Bom, Buffer, DecodeError, DecodeStatus, Decoded, Encoding, LineEnding, Revision, TextFormat,
+    TextSnapshot, Transaction,
 };
 use gv_vault::files::journal::{
     DiskComparison, DocumentJournal, DocumentKey, JournalError, JournalId, JournalPolicy,
@@ -55,6 +63,7 @@ use gv_vault::files::{
 };
 
 use super::EditorView;
+use crate::compare::{CompareView, Comparison, Sides};
 use crate::files::notice::{Notice, NoticeAction, Topic};
 use crate::files::worker::{Msg, SaveReply, Worker};
 use crate::files::{self, ExecutorClock};
@@ -80,6 +89,10 @@ pub enum DocEvent {
     SavedAs,
     /// The user closed the document from its infobar.
     CloseRequested,
+    /// The file stopped blocking edits (its permissions allow writing
+    /// again, or it was converted): the window decides again whether the
+    /// view may be edited (viewer mode).
+    EditableChanged,
 }
 
 /// A loaded document, before it gets an editor.
@@ -297,6 +310,25 @@ pub(crate) struct SaveAsTarget {
     pub overwrite: bool,
 }
 
+/// What a compare view compares the buffer with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComparePurpose {
+    /// The file on disk that changed while the buffer had unsaved edits.
+    Conflict,
+    /// The file on disk, against the text recovered from the journal.
+    Recovered,
+    /// A sync-conflict copy of the file.
+    Copy(PathBuf),
+}
+
+/// A compare view on screen.
+struct OpenCompare {
+    view: Entity<CompareView>,
+    purpose: ComparePurpose,
+    /// The text it was made from.
+    revision: Revision,
+}
+
 /// The file side of a document in a Source view.
 pub(crate) struct DocState {
     /// `None` for a text given directly (tests, scratch): never saved.
@@ -328,6 +360,14 @@ pub(crate) struct DocState {
     last_error: Option<Notice>,
     /// Whether the text was modified when last reported.
     modified: bool,
+    /// The file may not be edited (permissions, size, encoding): the view
+    /// is read-only whatever viewer mode says.
+    blocked: bool,
+    /// The compare view on screen.
+    compare: Option<OpenCompare>,
+    compare_task: Option<Task<()>>,
+    /// Told when no save is running any more.
+    save_waiters: Vec<oneshot::Sender<()>>,
     timer: Option<Task<()>>,
     save_task: Option<Task<()>>,
     disk_task: Option<Task<()>>,
@@ -372,6 +412,10 @@ impl DocState {
             notice: None,
             last_error: None,
             modified: false,
+            blocked: false,
+            compare: None,
+            compare_task: None,
+            save_waiters: Vec::new(),
             timer: None,
             save_task: None,
             disk_task: None,
@@ -483,8 +527,59 @@ impl EditorView {
                 && d.state.worker.is_some()
                 && !d.state.untitled()
                 && !d.state.held()
+                && !d.state.blocked
                 && d.state.autosave.settings().enabled
         })
+    }
+
+    /// Whether closing must ask first: the text is modified and would not
+    /// be saved on its own (untitled, autosave off or held back, a file
+    /// that may not be written, or a save that failed last time).
+    pub fn needs_close_answer(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| {
+            d.editor.is_modified() && (!self.saves_on_close() || d.state.last_error.is_some())
+        })
+    }
+
+    /// Fires once no save is running (at once when none is).
+    pub fn when_saved(&mut self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        match self.doc.as_mut() {
+            Some(doc) if doc.state.saving.is_some() => doc.state.save_waiters.push(tx),
+            _ => {
+                let _ = tx.send(());
+            }
+        }
+        rx
+    }
+
+    /// *Don't save* before closing: the unsaved text is dropped with its
+    /// journal and the text counts as saved, so closing writes nothing.
+    /// The receiver fires once the journal is gone.
+    pub fn discard_changes(&mut self, cx: &mut Context<'_, Self>) -> Option<oneshot::Receiver<()>> {
+        let doc = self.doc.as_mut()?;
+        doc.state.recovering = false;
+        doc.state.conflict = None;
+        doc.state.compare = None;
+        doc.editor.mark_saved();
+        doc.state.autosave.mark_clean();
+        let wait = doc.state.worker.as_ref().map(|worker| {
+            worker.send(Msg::Discard);
+            worker.flush()
+        });
+        self.report_modified(cx);
+        cx.notify();
+        wait
+    }
+
+    /// Whether the file blocks edits (permissions, size, encoding).
+    pub fn file_blocks_edits(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.state.blocked)
+    }
+
+    /// The compare view on screen, if one is open.
+    pub fn compare_view(&self) -> Option<Entity<CompareView>> {
+        Some(self.doc.as_ref()?.state.compare.as_ref()?.view.clone())
     }
 
     // ----- after every change ----------------------------------------------------
@@ -827,6 +922,8 @@ impl EditorView {
                 doc.state.file = Some(file);
                 doc.editor.mark_saved_at(saving.point);
                 doc.state.autosave.save_succeeded(saving.request);
+                // The base of a later 3-way merge.
+                doc.state.base = saving.text;
                 if let Some(watch) = &self.watch {
                     match baseline {
                         Some(state) => watch.expect_write(&saving.path, state),
@@ -837,6 +934,9 @@ impl EditorView {
                 doc.state.last_error = None;
                 doc.state.clear_notice(&[Topic::SaveFailed, Topic::Deleted]);
                 cx.emit(DocEvent::Saved);
+                // Saved as UTF-8, a file that was not valid in its
+                // encoding may be edited now.
+                self.check_file_blocks(cx);
                 self.notice_changed(cx);
             }
             Some(Err(err)) => {
@@ -866,6 +966,13 @@ impl EditorView {
         }
         if let Some(target) = self.doc.as_mut().and_then(|d| d.state.save_as_again.take()) {
             self.save_as(target, cx);
+        }
+        if let Some(doc) = self.doc.as_mut()
+            && doc.state.saving.is_none()
+        {
+            for waiter in std::mem::take(&mut doc.state.save_waiters) {
+                let _ = waiter.send(());
+            }
         }
         self.after_edit(cx);
         cx.notify();
@@ -930,6 +1037,12 @@ impl EditorView {
             state.deferred = Some(change);
             return;
         }
+        let writable = match &change {
+            ExternalChange::Touched(disk) | ExternalChange::Modified { state: disk, .. } => {
+                Some(!disk.read_only)
+            }
+            ExternalChange::Deleted | ExternalChange::Unchanged => None,
+        };
         match change {
             ExternalChange::Unchanged => {}
             ExternalChange::Touched(disk) => {
@@ -978,7 +1091,124 @@ impl EditorView {
                 }));
             }
         }
+        if let Some(writable) = writable {
+            self.permissions_changed(writable, cx);
+        }
         self.after_edit(cx);
+    }
+
+    /// The file's permissions as last seen on disk: read-only blocks
+    /// editing (plan 11 § External changes) until they allow writing
+    /// again.
+    fn permissions_changed(&mut self, writable: bool, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let reason = doc.state.file.as_ref().and_then(|f| {
+            let mut reason = f.read_only_reason();
+            if matches!(reason, Some(ReadOnlyReason::Permissions)) && writable {
+                reason = None;
+            }
+            if reason.is_none() && !writable {
+                reason = Some(ReadOnlyReason::Permissions);
+            }
+            reason
+        });
+        self.set_blocked(reason, cx);
+    }
+
+    /// Blocks editing for `reason`, with the read-only infobar, or stops
+    /// blocking it.
+    fn set_blocked(&mut self, reason: Option<ReadOnlyReason>, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let blocked = reason.is_some();
+        if doc.state.blocked == blocked {
+            return;
+        }
+        doc.state.blocked = blocked;
+        match reason {
+            Some(reason) => {
+                self.read_only = true;
+                let encoding = doc
+                    .state
+                    .file
+                    .as_ref()
+                    .map_or(Encoding::Utf8, |f| f.format().encoding);
+                // A question already open (recovery, a conflict) stays.
+                if doc.state.notice.is_none()
+                    || doc.state.shows(Topic::LargeFile)
+                    || doc.state.shows(Topic::SaveFailed)
+                {
+                    doc.state
+                        .set_notice(Some(Notice::read_only_file(&reason, encoding)));
+                }
+            }
+            None => {
+                doc.state.clear_notice(&[Topic::ReadOnly]);
+                // The window decides again (viewer mode).
+                self.read_only = false;
+                cx.emit(DocEvent::EditableChanged);
+            }
+        }
+        self.notice_changed(cx);
+    }
+
+    /// Blocks or unblocks editing for what the file is now.
+    fn check_file_blocks(&mut self, cx: &mut Context<'_, Self>) {
+        let reason = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.state.file.as_ref())
+            .and_then(DocumentFile::read_only_reason);
+        self.set_blocked(reason, cx);
+    }
+
+    /// The document finished loading: a file that may not be edited gets
+    /// the read-only infobar and blocks editing; a large one gets the
+    /// large-file infobar. A recovery question comes first: these follow
+    /// once it is answered.
+    pub fn show_file_state(&mut self, cx: &mut Context<'_, Self>) {
+        self.check_file_blocks(cx);
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        if doc.large_file && doc.state.notice.is_none() {
+            doc.state.set_notice(Some(Notice::large_file()));
+            self.notice_changed(cx);
+        }
+    }
+
+    /// Shows the read-only or large-file infobar again after a question
+    /// that hid it was answered.
+    fn restore_file_state_notice(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        if doc.state.notice.is_some() {
+            return;
+        }
+        let reason = doc
+            .state
+            .file
+            .as_ref()
+            .and_then(DocumentFile::read_only_reason);
+        let notice = match reason {
+            Some(reason) if doc.state.blocked => {
+                let encoding = doc
+                    .state
+                    .file
+                    .as_ref()
+                    .map_or(Encoding::Utf8, |f| f.format().encoding);
+                Some(Notice::read_only_file(&reason, encoding))
+            }
+            _ => doc.large_file.then(Notice::large_file),
+        };
+        if notice.is_some() {
+            doc.state.set_notice(notice);
+            self.notice_changed(cx);
+        }
     }
 
     /// The decoded file on disk is ready: reload a clean buffer, or open
@@ -997,6 +1227,15 @@ impl EditorView {
             }
         };
         if doc.editor.is_modified() || doc.state.saving.is_some() {
+            // A compare view of the older version is out of date.
+            if doc
+                .state
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.purpose == ComparePurpose::Conflict)
+            {
+                doc.state.compare = None;
+            }
             doc.state.conflict = Some(Theirs {
                 decoded,
                 state: disk,
@@ -1070,13 +1309,16 @@ impl EditorView {
         doc.state.autosave.mark_clean();
         doc.state.conflict = None;
         doc.state.deleted = false;
-        doc.state.recovering = false;
+        let was_recovering = std::mem::take(&mut doc.state.recovering);
         doc.state.clear_notice(&[
             Topic::Conflict,
             Topic::Deleted,
             Topic::Recovered,
             Topic::NotText,
         ]);
+        if was_recovering {
+            self.restore_file_state_notice(cx);
+        }
         cx.emit(DocEvent::Reloaded);
         self.notice_changed(cx);
         self.after_edit(cx);
@@ -1125,10 +1367,18 @@ impl EditorView {
             ),
             NoticeAction::SaveAs => cx.emit(DocEvent::SaveAsRequested),
             NoticeAction::Close => cx.emit(DocEvent::CloseRequested),
-            // Compare is not designed yet (its button is disabled); opening
-            // a sync-conflict copy is the window's.
-            // Switching the profile is the window's.
-            NoticeAction::Compare | NoticeAction::OpenCopy(_) | NoticeAction::SwitchProfile => {}
+            NoticeAction::Compare => self.compare_with_disk(cx),
+            NoticeAction::Details => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.state.set_notice(Some(Notice::large_file_details()));
+                }
+                self.notice_changed(cx);
+            }
+            // Opening or comparing a sync-conflict copy and switching the
+            // profile are the window's.
+            NoticeAction::CompareCopy(_)
+            | NoticeAction::OpenCopy(_)
+            | NoticeAction::SwitchProfile => {}
             NoticeAction::Revert => self.revert(cx),
             // The window's questions.
             NoticeAction::OpenUrl(_)
@@ -1136,8 +1386,184 @@ impl EditorView {
             | NoticeAction::Reveal(_)
             | NoticeAction::IndexAnyway
             | NoticeAction::IndexFolder(_)
+            | NoticeAction::SaveAndClose
+            | NoticeAction::DiscardAndClose
             | NoticeAction::Cancel => {}
         }
+    }
+
+    // ----- compare --------------------------------------------------------------------
+
+    /// The infobar's Compare: the conflict's version on disk (3-way,
+    /// against the text last loaded or saved), or, while the recovery
+    /// question is open, the file on disk against the recovered text.
+    fn compare_with_disk(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let sides = |left: &str, right: &str| Sides {
+            left: SharedString::from(left.to_owned()),
+            right: SharedString::from(right.to_owned()),
+        };
+        let mine = doc.editor.snapshot();
+        let ending = line_ending_of(doc.state.file.as_ref());
+        if let Some(theirs) = &doc.state.conflict {
+            let base = doc.state.base.clone();
+            let theirs = theirs.decoded.text.clone();
+            let sides = sides("Your version", "On disk");
+            self.open_compare(ComparePurpose::Conflict, cx, move || {
+                Comparison::three_way(&text_of(&base), &text_of(&mine), &theirs, sides, ending)
+            });
+        } else if doc.state.recovering {
+            let disk = doc.state.base.clone();
+            let sides = sides("Recovered", "On disk");
+            self.open_compare(ComparePurpose::Recovered, cx, move || {
+                Comparison::two_way(&text_of(&mine), &text_of(&disk), sides, ending)
+            });
+        }
+    }
+
+    /// Compares the buffer with the sync-conflict copy at `copy`, read off
+    /// the UI thread. The copy is only read.
+    pub fn compare_with_copy(&mut self, copy: PathBuf, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let mine = doc.editor.snapshot();
+        let ending = line_ending_of(doc.state.file.as_ref());
+        let sides = Sides {
+            left: "This file".into(),
+            right: file_name(&copy).into(),
+        };
+        let revision = mine.revision();
+        let purpose = ComparePurpose::Copy(copy.clone());
+        doc.state.compare_task = Some(cx.spawn(async move |this, cx| {
+            let made = cx
+                .background_spawn(async move {
+                    let (_, decoded) = DocumentFile::load(&copy).map_err(|e| e.to_string())?;
+                    Ok::<_, String>(Comparison::two_way(
+                        &text_of(&mine),
+                        &decoded.text,
+                        sides,
+                        ending,
+                    ))
+                })
+                .await;
+            this.update(cx, |view, cx| match made {
+                Ok(comparison) => view.show_compare(purpose, revision, comparison, cx),
+                Err(reason) => {
+                    if let Some(doc) = view.doc.as_mut() {
+                        doc.state.compare_task = None;
+                        doc.state.set_notice(Some(Notice::compare_failed(&reason)));
+                    }
+                    view.notice_changed(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Makes the comparison off the UI thread, then shows it.
+    fn open_compare(
+        &mut self,
+        purpose: ComparePurpose,
+        cx: &mut Context<'_, Self>,
+        make: impl FnOnce() -> Comparison + Send + 'static,
+    ) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let revision = doc.editor.text().revision();
+        doc.state.compare_task = Some(cx.spawn(async move |this, cx| {
+            let comparison = cx.background_spawn(async move { make() }).await;
+            this.update(cx, |view, cx| {
+                view.show_compare(purpose, revision, comparison, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn show_compare(
+        &mut self,
+        purpose: ComparePurpose,
+        revision: Revision,
+        comparison: Comparison,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let this = cx.weak_entity();
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        doc.state.compare_task = None;
+        let title = match &purpose {
+            ComparePurpose::Conflict => "Compare with the file on disk".to_owned(),
+            ComparePurpose::Recovered => "Compare the recovered text with the file".to_owned(),
+            ComparePurpose::Copy(copy) => format!("Compare with “{}”", file_name(copy)),
+        };
+        let view = cx.new(|_| CompareView::new(comparison, title.into(), this));
+        doc.state.compare = Some(OpenCompare {
+            view,
+            purpose,
+            revision,
+        });
+        self.notice_changed(cx);
+    }
+
+    /// The compare view closed: with `result`, the buffer takes it as one
+    /// undoable edit and the question that opened it is answered (a
+    /// conflict as with *Keep mine*: the next save overwrites the version
+    /// on disk; the recovery as with *Restore*). Without, nothing changes.
+    pub(crate) fn finish_compare(&mut self, result: Option<String>, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let Some(open) = doc.state.compare.take() else {
+            return;
+        };
+        let Some(result) = result else {
+            self.notice_changed(cx);
+            return;
+        };
+        if doc.editor.text().revision() != open.revision {
+            // The text changed under the view: compare again rather than
+            // drop that change.
+            match open.purpose {
+                ComparePurpose::Copy(copy) => self.compare_with_copy(copy, cx),
+                ComparePurpose::Conflict | ComparePurpose::Recovered => {
+                    self.compare_with_disk(cx);
+                }
+            }
+            return;
+        }
+        let current = text_of(&doc.editor.snapshot());
+        let transaction = reload_transaction(&current, &result);
+        self.apply_edit(&transaction, cx);
+        match open.purpose {
+            ComparePurpose::Conflict => self.keep_mine(cx),
+            ComparePurpose::Recovered => self.keep_recovered(cx),
+            ComparePurpose::Copy(_) => {}
+        }
+        self.notice_changed(cx);
+        self.after_edit(cx);
+    }
+
+    /// Applies `transaction` as one undoable, journaled command edit.
+    fn apply_edit(&mut self, transaction: &Transaction, cx: &mut Context<'_, Self>) {
+        if transaction.is_empty() {
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let edits: Vec<_> = transaction
+            .replacements()
+            .iter()
+            .map(|r| (r.range.clone(), r.text.clone()))
+            .collect();
+        if let Err(err) = doc.editor.edit(edits, EditKind::Command) {
+            tracing::warn!("cannot apply the compared text: {err}");
+        }
+        self.pump_syntax(cx);
     }
 
     /// `file.revert`: reads the file again (off the UI thread) and takes it
@@ -1235,6 +1661,8 @@ impl EditorView {
         if let Some(file) = doc.state.file.as_mut() {
             file.accept_metadata(theirs.state);
         }
+        // The version on disk is what both sides share from now on.
+        doc.state.base = Buffer::new(&theirs.decoded.text).snapshot();
         doc.state.clear_notice(&[Topic::Conflict]);
         self.notice_changed(cx);
         self.after_edit(cx);
@@ -1257,6 +1685,7 @@ impl EditorView {
         };
         doc.state.recovering = false;
         doc.state.clear_notice(&[Topic::Recovered]);
+        self.restore_file_state_notice(cx);
         self.notice_changed(cx);
         self.after_edit(cx);
     }
@@ -1311,10 +1740,11 @@ impl EditorView {
     // ----- closing ------------------------------------------------------------------------
 
     /// The tab or window is closing, or the app quitting: saves what
-    /// autosave may save and syncs the journal. Unsaved text that may not
-    /// be saved stays in the journal for the next start (closing with
-    /// unsaved changes has no designed dialog). The receiver fires once
-    /// the document's queue is done.
+    /// autosave may save and syncs the journal. The window asked about
+    /// unsaved text that would not be saved first
+    /// ([`Self::needs_close_answer`]); what is left stays in the journal
+    /// for the next start. The receiver fires once the document's queue
+    /// is done.
     pub fn prepare_close(&mut self, cx: &mut Context<'_, Self>) -> Option<oneshot::Receiver<()>> {
         self.after_edit(cx);
         let doc = self.doc.as_mut()?;
@@ -1332,6 +1762,11 @@ impl EditorView {
         }
         Some(worker.flush())
     }
+}
+
+/// The line ending a compare view writes for its markers: the file's.
+fn line_ending_of(file: Option<&DocumentFile>) -> LineEnding {
+    file.map_or(LineEnding::Lf, |f| f.format().line_ending)
 }
 
 /// The file name of `path`, for messages.
@@ -1368,5 +1803,15 @@ impl EditorView {
     /// The encoding the next save writes.
     pub(crate) fn disk_encoding_for_tests(&self) -> Option<Encoding> {
         Some(self.doc.as_ref()?.state.file.as_ref()?.format().encoding)
+    }
+
+    /// Undoes the last edit, as Mod+Z does.
+    pub(crate) fn undo_for_tests(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(doc) = self.doc.as_mut() {
+            doc.editor.undo();
+        }
+        self.pump_syntax(cx);
+        self.after_edit(cx);
+        cx.notify();
     }
 }

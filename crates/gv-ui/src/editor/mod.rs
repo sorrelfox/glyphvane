@@ -553,6 +553,7 @@ impl EditorView {
     /// commands cannot change the text (the carets still move, and copy
     /// still works). Edits made before stay and are saved as usual.
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<'_, Self>) {
+        let read_only = read_only || self.file_blocks_edits();
         if self.read_only != read_only {
             self.read_only = read_only;
             cx.notify();

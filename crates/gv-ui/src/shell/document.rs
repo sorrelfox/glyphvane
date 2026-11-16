@@ -50,7 +50,7 @@ use crate::split::{Side, SplitView};
 use crate::theme::Theme;
 
 impl Workspace {
-    pub(super) fn render_document(&self, theme: &Theme, _cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn render_document(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> AnyElement {
         let area = div()
             .flex_1()
             .min_h_0()
@@ -58,6 +58,11 @@ impl Workspace {
             .overflow_hidden()
             .bg(theme.surface.page);
         let tab = self.active_tab();
+        // A compare view takes the document's place while it is open (not
+        // designed; see `crate::compare`).
+        if let Some(compare) = tab.editor.as_ref().and_then(|e| e.read(cx).compare_view()) {
+            return area.child(compare).into_any_element();
+        }
         match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
             (ViewMode::Preview, Some(reader), _, _) => {
                 return area.child(reader.clone()).into_any_element();

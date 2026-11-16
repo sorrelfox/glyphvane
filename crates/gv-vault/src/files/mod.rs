@@ -27,7 +27,7 @@
 //! | [`journal`] | The crash journal and recovery |
 //! | [`Autosave`] | When to save, over a [`Clock`] |
 //! | [`check_external_change`], [`DiskState`] | Whether the file changed on disk since it was loaded or saved |
-//! | [`merge3`], [`reload_transaction`] | The 3-way merge for conflicts and the minimal reload diff |
+//! | [`merge3`], [`merge3_regions`], [`reload_transaction`] | The 3-way merge for conflicts, its regions for a compare view, and the minimal reload diff |
 //! | [`sync_conflict_copies`] | Conflict copies left by sync clients |
 //!
 //! # A document's life
@@ -93,7 +93,9 @@ pub use document::{
 };
 pub use fskind::{FsKind, filesystem_kind};
 pub use hash::ContentHash;
-pub use merge::{MarkerLabels, Merge, MergeChunk, merge3, reload_transaction};
+pub use merge::{
+    MarkerLabels, Merge, MergeChunk, MergeRegion, merge3, merge3_regions, reload_transaction,
+};
 #[doc(hidden)]
 pub use write::Fault;
 pub use write::{

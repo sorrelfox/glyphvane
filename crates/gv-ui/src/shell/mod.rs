@@ -42,8 +42,8 @@ pub(crate) use vault::VaultStatus;
 #[cfg(test)]
 pub(crate) use controls::ClientDecorationsForTests;
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
-pub(crate) use saving::prepare_quit;
 use saving::same_file;
+pub(crate) use saving::{ask_before_quit, discard_for_quit, prepare_quit};
 pub(crate) use status_bar::count_words;
 
 use std::cell::RefCell;
@@ -532,6 +532,8 @@ pub struct Workspace {
     editor_events: HashMap<EntityId, Subscription>,
     /// The window waits for saves before it closes.
     closing: bool,
+    /// Closing with unsaved changes, compare requests (see `saving`).
+    safety: saving::SafetyState,
     /// The pointer went down on a drag region of a client-decorated window
     /// and has not moved yet.
     drag_pending: bool,
@@ -676,6 +678,7 @@ impl Workspace {
             _watch_events: None,
             editor_events: HashMap::new(),
             closing: false,
+            safety: saving::SafetyState::default(),
             drag_pending: false,
             _appearance: appearance,
             _activation: activation,
@@ -1488,7 +1491,7 @@ impl Workspace {
     /// Closes tab `index`; it can be reopened with its history. Closing
     /// the last tab leaves an empty one.
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if index >= self.tabs.len() {
+        if index >= self.tabs.len() || self.hold_tab_close(index, window, cx) {
             return;
         }
         if let Some(place) = self.place(index, cx) {
@@ -2089,22 +2092,29 @@ mod close_hook_tests {
     }
 
     #[gpui::test]
-    fn without_autosave_the_change_stays_in_the_journal(cx: &mut TestAppContext) {
+    fn without_autosave_closing_asks_first(cx: &mut TestAppContext) {
         let mut f = fixture(cx, &["msg.md"], false);
         f.type_at_end("Done.");
         f.close_active_tab();
+        assert!(f.seen().is_empty(), "the tab asks before closing");
+        assert_eq!(f.journals(), 1, "the change is kept meanwhile");
+        // Don't save: reported closed with the file untouched.
+        f.workspace().update_in(&mut f.vcx, |ws, window, cx| {
+            ws.close_answered(false, window, cx);
+        });
+        draw(&mut f.vcx);
         assert_eq!(
             f.seen(),
             [(
                 FileClosed {
                     path: f.path("msg.md"),
-                    unsaved: true
+                    unsaved: false
                 },
                 NOTE.to_owned()
             )],
             "reported closed with the file untouched"
         );
-        assert_eq!(f.journals(), 1, "the change is kept for recovery");
+        assert_eq!(f.journals(), 0, "the change was dropped");
     }
 
     #[gpui::test]

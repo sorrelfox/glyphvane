@@ -3,11 +3,13 @@
 
 //! What the infobar says about a document's file (SPEC § Infobars).
 //!
-//! Only "Changed on disk with unsaved edits" is designed (an error infobar
-//! with Compare, Keep mine and Take theirs). The others are built from the
-//! same component and flagged where they are made: save errors use the
-//! error kind; recovery, a file deleted on disk, a sync-conflict copy and
-//! an untitled document that cannot be saved yet use the information kind.
+//! "Changed on disk with unsaved edits" (an error infobar with Compare,
+//! Keep mine and Take theirs) and "Large-file mode" (a neutral infobar
+//! with Details) are designed. The others are built from the same
+//! component and flagged where they are made: save errors use the error
+//! kind; recovery, a file deleted on disk, a sync-conflict copy and a
+//! read-only file use the information kind; the question before closing
+//! with unsaved changes uses the warning kind, like the other questions.
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +48,14 @@ pub enum Topic {
     /// Whether to index a folder too large to index without asking
     /// (FR-VAULT-02).
     IndexAsk,
+    /// Whether to save documents with unsaved changes before closing a
+    /// tab or a window, or quitting.
+    CloseUnsaved,
+    /// The document is in large-file mode (FR-EDIT-16).
+    LargeFile,
+    /// The file may not be edited: its permissions, its size, or bytes
+    /// its encoding cannot hold.
+    ReadOnly,
 }
 
 /// What an infobar button does.
@@ -53,8 +63,11 @@ pub enum Topic {
 pub enum NoticeAction {
     /// Save again, converting the text to UTF-8.
     SaveAsUtf8,
-    /// The conflict compare and merge view (not designed yet: disabled).
+    /// The compare and merge view: the changed file on disk, or the
+    /// recovered text against the file.
     Compare,
+    /// The compare and merge view against a sync-conflict copy.
+    CompareCopy(PathBuf),
     /// Keep the edits; the next save overwrites the version on disk.
     KeepMine,
     /// Reload the version on disk; the edits stay in the undo history.
@@ -87,6 +100,12 @@ pub enum NoticeAction {
     IndexFolder(PathBuf),
     /// Close the question without doing anything.
     Cancel,
+    /// Save the documents the close question lists, then close.
+    SaveAndClose,
+    /// Close without saving the documents the close question lists.
+    DiscardAndClose,
+    /// Say what large-file mode turns off.
+    Details,
 }
 
 /// A button of an infobar.
@@ -105,14 +124,6 @@ impl NoticeButton {
             action,
             label: label.into(),
             disabled: None,
-        }
-    }
-
-    fn disabled(action: NoticeAction, label: &'static str, why: &'static str) -> Self {
-        Self {
-            action,
-            label: label.into(),
-            disabled: Some(why.into()),
         }
     }
 }
@@ -158,11 +169,7 @@ impl Notice {
             "Changed on disk with unsaved edits.",
             Some("Another program changed this file while you were editing it.".to_owned()),
         )
-        .with(NoticeButton::disabled(
-            NoticeAction::Compare,
-            "Compare",
-            "Compare and merge is not available yet",
-        ))
+        .with(NoticeButton::new(NoticeAction::Compare, "Compare"))
         .with(NoticeButton::new(NoticeAction::KeepMine, "Keep mine"))
         .with(NoticeButton::new(NoticeAction::TakeTheirs, "Take theirs"))
     }
@@ -300,7 +307,9 @@ impl Notice {
         notice.with(NoticeButton::new(NoticeAction::Close, "Close"))
     }
 
-    /// Unsaved edits were rebuilt from the crash journal (not designed).
+    /// Unsaved edits were rebuilt from the crash journal (not designed):
+    /// Restore keeps them, Compare shows them against the file, Discard
+    /// goes back to the file.
     pub fn recovered(disk: DiskComparison) -> Self {
         let detail = match disk {
             DiskComparison::Changed => {
@@ -319,7 +328,8 @@ impl Notice {
             "Recovered unsaved changes.",
             Some(detail.to_owned()),
         )
-        .with(NoticeButton::new(NoticeAction::KeepRecovered, "Keep"))
+        .with(NoticeButton::new(NoticeAction::KeepRecovered, "Restore"))
+        .with(NoticeButton::new(NoticeAction::Compare, "Compare"))
         .with(NoticeButton::new(NoticeAction::DiscardRecovered, "Discard"))
     }
 
@@ -344,9 +354,116 @@ impl Notice {
             )),
         )
         .with(NoticeButton::new(
+            NoticeAction::CompareCopy(copy.to_path_buf()),
+            "Compare",
+        ))
+        .with(NoticeButton::new(
             NoticeAction::OpenCopy(copy.to_path_buf()),
             "Open copy",
         ))
+    }
+
+    /// The designed large-file infobar (FR-EDIT-16): neutral, with
+    /// Details.
+    pub fn large_file() -> Self {
+        Self::new(
+            Topic::LargeFile,
+            NoticeKind::Neutral,
+            "Large-file mode.",
+            Some(
+                "Some features are reduced to keep this file fast. Editing works as usual."
+                    .to_owned(),
+            ),
+        )
+        .with(NoticeButton::new(NoticeAction::Details, "Details"))
+    }
+
+    /// The large-file infobar after Details: what is reduced (the
+    /// wording is not designed).
+    pub fn large_file_details() -> Self {
+        Self::new(
+            Topic::LargeFile,
+            NoticeKind::Neutral,
+            "Large-file mode.",
+            Some(
+                "Soft wrap starts off, code is highlighted and folds are found only where you look, and spell check is off. Editing works as usual."
+                    .to_owned(),
+            ),
+        )
+    }
+
+    /// The file may not be edited (not designed): editing is off until
+    /// the reason goes away. Permissions offer Save as; bytes the encoding
+    /// cannot hold offer saving as UTF-8.
+    pub fn read_only_file(reason: &gv_vault::files::ReadOnlyReason, encoding: Encoding) -> Self {
+        use gv_vault::files::ReadOnlyReason;
+        match reason {
+            ReadOnlyReason::Permissions => Self::new(
+                Topic::ReadOnly,
+                NoticeKind::Information,
+                "Read-only.",
+                Some(
+                    "You do not have permission to change this file, so editing is off. Save as writes a copy you can edit."
+                        .to_owned(),
+                ),
+            )
+            .with(NoticeButton::new(NoticeAction::SaveAs, "Save as…")),
+            ReadOnlyReason::TooLarge { .. } => Self::new(
+                Topic::ReadOnly,
+                NoticeKind::Information,
+                "Read-only.",
+                Some("This file is too large to edit safely, so it opened read-only.".to_owned()),
+            ),
+            ReadOnlyReason::Lossy(_) => Self::new(
+                Topic::ReadOnly,
+                NoticeKind::Information,
+                "Read-only.",
+                Some(format!(
+                    "The file is not valid {encoding}, so editing is off: saving it in {encoding} would change bytes you did not edit."
+                )),
+            )
+            .with(NoticeButton::new(NoticeAction::SaveAsUtf8, "Save as UTF-8")),
+        }
+    }
+
+    /// The question before closing a tab or a window, or quitting, with
+    /// documents that are not saved on their own (untitled, autosave off
+    /// or held back, a failed save). Not designed: a warning infobar like
+    /// the other questions, naming every document.
+    pub fn close_unsaved(names: &[String]) -> Self {
+        let quoted: Vec<String> = names.iter().map(|n| format!("“{n}”")).collect();
+        let (title, detail) = match quoted.as_slice() {
+            [one] => (
+                format!("Save changes to {one}?"),
+                "Changes you do not save are lost.".to_owned(),
+            ),
+            _ => (
+                format!("Save changes to {} documents?", quoted.len()),
+                format!("{}. Changes you do not save are lost.", quoted.join(", ")),
+            ),
+        };
+        Self::titled(
+            Topic::CloseUnsaved,
+            NoticeKind::Warning,
+            title,
+            Some(detail),
+        )
+        .with(NoticeButton::new(NoticeAction::SaveAndClose, "Save"))
+        .with(NoticeButton::new(
+            NoticeAction::DiscardAndClose,
+            "Don't save",
+        ))
+        .with(NoticeButton::new(NoticeAction::Cancel, "Cancel"))
+    }
+
+    /// The compare view could not read the other version (not designed).
+    pub fn compare_failed(reason: &str) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Error,
+            "Not compared.".to_owned(),
+            Some(format!("The other version could not be read: {reason}.")),
+        )
     }
 
     /// The file on disk is no longer text (not designed).

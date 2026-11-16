@@ -30,15 +30,15 @@ use crate::keymap::actions::tabs as tab_commands;
 use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
 
-const NOTE: &str = "# Title\n\nFirst paragraph.\n";
+pub(super) const NOTE: &str = "# Title\n\nFirst paragraph.\n";
 
-struct Fixture {
-    dir: tempfile::TempDir,
-    workspace: Entity<Workspace>,
-    vcx: VisualTestContext,
+pub(super) struct Fixture {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) workspace: Entity<Workspace>,
+    pub(super) vcx: VisualTestContext,
 }
 
-fn options() -> WindowOptions {
+pub(super) fn options() -> WindowOptions {
     let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(800.0)));
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -49,7 +49,7 @@ fn options() -> WindowOptions {
 /// A temporary folder with `files`, the app with a journal store in the
 /// folder's `journal/` (watchers off unless `watch`), and a window showing
 /// `open` (in the folder).
-fn fixture(
+pub(super) fn fixture(
     cx: &mut TestAppContext,
     files: &[(&str, &[u8])],
     open: Option<&str>,
@@ -79,26 +79,26 @@ fn fixture(
     }
 }
 
-fn draw(vcx: &mut VisualTestContext) {
+pub(super) fn draw(vcx: &mut VisualTestContext) {
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
 impl Fixture {
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
-    fn read(&self, name: &str) -> Vec<u8> {
+    pub(super) fn read(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.path(name)).expect("read")
     }
 
-    fn draw(&mut self) {
+    pub(super) fn draw(&mut self) {
         draw(&mut self.vcx);
     }
 
     /// The journal files in the store (temporary files left out).
-    fn journals(&self) -> Vec<String> {
+    pub(super) fn journals(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.dir.path().join("journal"))
             .map(|entries| {
                 entries
@@ -113,13 +113,13 @@ impl Fixture {
     }
 
     /// Switches the active tab to Edit and returns its loaded Source view.
-    fn edit(&mut self) -> Entity<EditorView> {
+    pub(super) fn edit(&mut self) -> Entity<EditorView> {
         self.vcx.simulate_keystrokes("secondary-e");
         self.draw();
         self.editor()
     }
 
-    fn editor(&mut self) -> Entity<EditorView> {
+    pub(super) fn editor(&mut self) -> Entity<EditorView> {
         let editor = self
             .workspace
             .read_with(&self.vcx, |ws, _| ws.active_tab().editor().cloned())
@@ -132,38 +132,38 @@ impl Fixture {
         editor
     }
 
-    fn text(&self, editor: &Entity<EditorView>) -> String {
+    pub(super) fn text(&self, editor: &Entity<EditorView>) -> String {
         editor.read_with(&self.vcx, |e, _| {
             e.editor().expect("loaded").text().to_string()
         })
     }
 
-    fn modified(&self, editor: &Entity<EditorView>) -> bool {
+    pub(super) fn modified(&self, editor: &Entity<EditorView>) -> bool {
         editor.read_with(&self.vcx, |e, _| e.is_modified())
     }
 
-    fn topic(&self, editor: &Entity<EditorView>) -> Option<Topic> {
+    pub(super) fn topic(&self, editor: &Entity<EditorView>) -> Option<Topic> {
         editor.read_with(&self.vcx, |e, _| e.notice().map(|n| n.topic))
     }
 
     /// Types `text` at the end of the document.
-    fn type_at_end(&mut self, text: &str) {
+    pub(super) fn type_at_end(&mut self, text: &str) {
         self.vcx.simulate_keystrokes("secondary-end");
         self.vcx.simulate_input(text);
         self.draw();
     }
 
-    fn save(&mut self) {
+    pub(super) fn save(&mut self) {
         self.vcx.simulate_keystrokes("secondary-s");
         self.draw();
     }
 
-    fn drawn(&mut self, selector: &'static str) -> bool {
+    pub(super) fn drawn(&mut self, selector: &'static str) -> bool {
         self.draw();
         self.vcx.debug_bounds(selector).is_some()
     }
 
-    fn click(&mut self, selector: &'static str) {
+    pub(super) fn click(&mut self, selector: &'static str) {
         self.draw();
         let bounds = self
             .vcx
@@ -175,21 +175,21 @@ impl Fixture {
 
     /// What the watcher would report for `name` now, against the Source
     /// view's baseline.
-    fn change_of(&self, editor: &Entity<EditorView>, name: &str) -> ExternalChange {
+    pub(super) fn change_of(&self, editor: &Entity<EditorView>, name: &str) -> ExternalChange {
         let (_, baseline) = editor
             .read_with(&self.vcx, |e, _| e.disk_baseline())
             .expect("a baseline");
         check_external_change(&self.path(name), &baseline, CheckMode::Thorough).expect("check")
     }
 
-    fn report(&mut self, name: &str, change: ExternalChange) {
+    pub(super) fn report(&mut self, name: &str, change: ExternalChange) {
         let path = self.path(name);
         self.workspace
             .update(&mut self.vcx, |ws, cx| ws.file_changed(&path, change, cx));
         self.draw();
     }
 
-    fn act(&mut self, editor: &Entity<EditorView>, action: NoticeAction) {
+    pub(super) fn act(&mut self, editor: &Entity<EditorView>, action: NoticeAction) {
         editor.update(&mut self.vcx, |e, cx| e.notice_action(&action, cx));
         self.draw();
     }
@@ -286,8 +286,8 @@ fn closing_a_tab_saves_with_autosave_and_journals_without(cx: &mut TestAppContex
     assert_eq!(f.read("a.md"), format!("{NOTE}A").as_bytes());
     assert!(f.journals().is_empty());
 
-    // Autosave off: the file is left alone and the journal kept for the
-    // next start (no dialog is designed).
+    // Autosave off: closing asks first; until it is answered the file is
+    // left alone and the text stays in the journal.
     let target = OpenTarget::new(f.path("b.md"));
     f.workspace
         .update_in(&mut f.vcx, |ws, window, cx| ws.open_tab(target, window, cx));
@@ -297,21 +297,16 @@ fn closing_a_tab_saves_with_autosave_and_journals_without(cx: &mut TestAppContex
     f.type_at_end("B");
     f.vcx.simulate_keystrokes("secondary-w");
     f.draw();
+    let question = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().notice().map(|n| n.topic));
+    assert_eq!(question, Some(Topic::CloseUnsaved));
     assert_eq!(f.read("b.md"), NOTE.as_bytes());
     assert_eq!(
         f.journals().len(),
         1,
         "the unsaved text stays in the journal"
     );
-
-    // Opened again in this session, it comes back with the recovery bar.
-    let target = OpenTarget::new(f.path("b.md"));
-    f.workspace
-        .update_in(&mut f.vcx, |ws, window, cx| ws.open_tab(target, window, cx));
-    let editor = f.edit();
-    assert_eq!(f.text(&editor), format!("{NOTE}B"));
-    assert!(f.modified(&editor));
-    assert_eq!(f.topic(&editor), Some(Topic::Recovered));
 }
 
 #[gpui::test]
@@ -344,7 +339,7 @@ fn untitled_documents_live_in_the_journal(cx: &mut TestAppContext) {
 
 /// Writes a journal for `path` the way a crashed session leaves it: the
 /// file as loaded, then one edit appending `added`.
-fn crashed_session(store: &JournalStore, path: &Path, added: &str) {
+pub(super) fn crashed_session(store: &JournalStore, path: &Path, added: &str) {
     let (file, decoded) = DocumentFile::load(path).expect("load");
     let mut buffer = Buffer::from_decoded(&decoded);
     let mut journal = store
@@ -536,18 +531,13 @@ fn a_change_on_disk_with_unsaved_edits_asks_and_keep_mine_wins(cx: &mut TestAppC
             .collect::<Vec<_>>(),
         ["Compare", "Keep mine", "Take theirs"]
     );
-    assert!(
-        notice.buttons[0].disabled.is_some(),
-        "Compare is not designed yet"
-    );
+    assert!(notice.buttons.iter().all(|b| b.disabled.is_none()));
     // A save meanwhile does not overwrite the other version.
     f.save();
     assert_eq!(f.read("note.md"), b"Theirs.\n");
     assert_eq!(f.topic(&editor), Some(Topic::Conflict));
 
-    // Clicking the disabled Compare does nothing; Keep mine is the second.
-    f.click("infobar-action-0");
-    assert_eq!(f.topic(&editor), Some(Topic::Conflict));
+    // Keep mine is the second.
     f.click("infobar-action-1");
     assert_eq!(f.topic(&editor), None);
     assert!(f.modified(&editor));
@@ -659,7 +649,7 @@ fn an_unmappable_character_fails_the_save_with_its_position(cx: &mut TestAppCont
 }
 
 /// Waits for something done by the real file watcher's thread.
-fn wait_until(f: &mut Fixture, mut done: impl FnMut(&mut Fixture) -> bool) -> bool {
+pub(super) fn wait_until(f: &mut Fixture, mut done: impl FnMut(&mut Fixture) -> bool) -> bool {
     for _ in 0..500 {
         f.draw();
         if done(f) {
@@ -718,21 +708,22 @@ fn closing_the_window_saves_first(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn closing_the_window_without_autosave_keeps_the_journal(cx: &mut TestAppContext) {
+fn closing_the_window_without_autosave_asks_first(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
     f.vcx
         .update(|_, cx| super::override_autosave(cx, Some(false)));
     f.edit();
     f.type_at_end("A");
-    assert!(f.vcx.simulate_close(), "nothing to wait for");
+    assert!(!f.vcx.simulate_close(), "the window asks first");
     f.vcx.run_until_parked();
+    assert_eq!(f.vcx.windows().len(), 1);
     assert_eq!(f.read("note.md"), NOTE.as_bytes());
-    assert_eq!(f.journals().len(), 1, "recovered on the next start");
+    assert_eq!(f.journals().len(), 1, "the text stays in the journal");
 }
 
 /// Clicks the close button the application draws on a client-decorated
 /// Linux window.
-fn click_linux_close(f: &mut Fixture) {
+pub(super) fn click_linux_close(f: &mut Fixture) {
     f.vcx
         .update(|_, cx| cx.set_global(crate::shell::ClientDecorationsForTests));
     f.draw();
@@ -757,7 +748,7 @@ fn the_linux_close_button_saves_first(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_linux_close_button_without_autosave_keeps_the_journal(cx: &mut TestAppContext) {
+fn the_linux_close_button_without_autosave_asks_first(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
     f.vcx
         .update(|_, cx| super::override_autosave(cx, Some(false)));
@@ -765,9 +756,23 @@ fn the_linux_close_button_without_autosave_keeps_the_journal(cx: &mut TestAppCon
     f.type_at_end("A");
     click_linux_close(&mut f);
     f.vcx.run_until_parked();
-    assert!(f.vcx.windows().is_empty(), "it closes at once");
+    assert_eq!(f.vcx.windows().len(), 1, "the window asks first");
+    let question = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().notice().map(|n| n.topic));
+    assert_eq!(question, Some(Topic::CloseUnsaved));
+    // Don't save: it closes and the journal goes.
+    f.draw();
+    let dont_save = f
+        .vcx
+        .debug_bounds("infobar-action-1")
+        .expect("Don't save is drawn")
+        .center();
+    f.vcx.simulate_click(dont_save, Modifiers::none());
+    f.vcx.run_until_parked();
+    assert!(f.vcx.windows().is_empty(), "then it closes");
     assert_eq!(f.read("note.md"), NOTE.as_bytes());
-    assert_eq!(f.journals().len(), 1, "recovered on the next start");
+    assert!(f.journals().is_empty());
 }
 
 #[gpui::test]
@@ -807,7 +812,7 @@ fn a_file_shown_only_in_preview_reloads(cx: &mut TestAppContext) {
 
 /// A save dialog that answers from a list and remembers what it was asked.
 #[derive(Clone, Default)]
-struct FakeDialog {
+pub(super) struct FakeDialog {
     answers: Rc<RefCell<VecDeque<SaveAnswer>>>,
     prompts: Rc<RefCell<Vec<SavePrompt>>>,
 }
@@ -830,7 +835,7 @@ impl SavePathDialog for FakeDialog {
 }
 
 impl FakeDialog {
-    fn install(f: &mut Fixture, answers: impl IntoIterator<Item = SaveAnswer>) -> Self {
+    pub(super) fn install(f: &mut Fixture, answers: impl IntoIterator<Item = SaveAnswer>) -> Self {
         let dialog = Self::default();
         dialog.answers.borrow_mut().extend(answers);
         let installed = dialog.clone();
@@ -839,27 +844,27 @@ impl FakeDialog {
         dialog
     }
 
-    fn answer(&self, answer: SaveAnswer) {
+    pub(super) fn answer(&self, answer: SaveAnswer) {
         self.answers.borrow_mut().push_back(answer);
     }
 
-    fn asked(&self) -> usize {
+    pub(super) fn asked(&self) -> usize {
         self.prompts.borrow().len()
     }
 
-    fn last_prompt(&self) -> SavePrompt {
+    pub(super) fn last_prompt(&self) -> SavePrompt {
         self.prompts.borrow().last().cloned().expect("asked")
     }
 }
 
 impl Fixture {
-    fn tab_path(&self) -> Option<PathBuf> {
+    pub(super) fn tab_path(&self) -> Option<PathBuf> {
         self.workspace.read_with(&self.vcx, |ws, _| {
             ws.active_tab().path().map(Path::to_path_buf)
         })
     }
 
-    fn save_as(&mut self) {
+    pub(super) fn save_as(&mut self) {
         self.vcx.simulate_keystrokes("secondary-shift-s");
         self.draw();
     }

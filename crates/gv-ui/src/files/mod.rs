@@ -28,24 +28,39 @@
 //!   [`gv_vault::files::Autosave`]: 1 s after the last edit, on focus loss,
 //!   on tab switch and on quit; never during an input-method composition
 //!   or while a conflict, deleted-file or recovery infobar is open.
-//! - **Closing with unsaved changes** (a tab, a window, the application)
-//!   has no designed dialog. Nothing is lost either way: with autosave on,
-//!   the document is saved first (the window waits for it); otherwise, or
-//!   when the save may not run (a conflict), the journal is kept and the
-//!   text comes back with the recovery infobar the next time the file is
-//!   opened or the application starts.
+//! - **Closing with unsaved changes** (a tab, a window, the application):
+//!   with autosave on, the document is saved first (the window waits for
+//!   it). A document that would not be saved on its own (untitled,
+//!   autosave off, a conflict or recovery question open, a file that may
+//!   not be written, a failed save) is asked about first: *Save*, *Don't
+//!   save* or *Cancel* (not designed: a warning infobar; see
+//!   [`crate::shell`]'s `saving`). Cancel, a cancelled save dialog or a
+//!   failed save stops the whole close. Text the close could not save or
+//!   ask about (the application ended another way) stays in the journal
+//!   and comes back with the recovery infobar.
 //! - **Untitled documents** live in the journal until saved. Save on one
 //!   is Save As; after Save As (of any document) its tab, journal, watcher
 //!   and recent-files entry follow the new path.
 //! - **Crash recovery:** at start-up every journal left in the store
 //!   reopens its document in Edit mode with the recovered text, marked
-//!   modified, and the recovery infobar (Keep, Discard).
+//!   modified, and the recovery infobar (Restore, Compare, Discard). A
+//!   journal found when a file is opened is recovered the same way.
+//! - **Compare** ([`crate::compare`]): the conflict, recovery and
+//!   sync-conflict infobars open a compare and merge view; its result
+//!   replaces the text as one undoable edit, and nothing is written to
+//!   disk until the document is saved.
+//! - **Large and read-only files:** large-file mode shows its infobar; a
+//!   file that may not be written (permissions, also when they change on
+//!   disk), is too large to edit or is not valid in its encoding opens
+//!   read-only with an infobar.
 //!
 //! Journals live in `<data dir>/journal/no-vault/`: the documents are not
 //! tied to vault ids yet.
 
 pub mod notice;
 pub mod open_dialog;
+#[cfg(test)]
+mod safety_tests;
 pub mod save_as;
 #[cfg(test)]
 mod tests;
@@ -303,17 +318,40 @@ fn reopen(found: Vec<gv_vault::files::journal::RecoverableDocument>, cx: &mut Ap
     });
 }
 
-/// The `app.quit` command: saves what autosave may save, syncs every
-/// journal, waits for both (at most [`CLOSE_WAIT`]), then quits. Unsaved
-/// text that may not be saved stays in its journal for the next start.
+/// The `app.quit` command: first asks, window by window, about documents
+/// that would not be saved on their own (Save, Don't save, Cancel), then
+/// saves what autosave may save, syncs every journal, waits for both (at
+/// most [`CLOSE_WAIT`]) and quits. A save that fails stops quitting and
+/// asks about it.
 pub fn quit(cx: &mut App) {
+    if shell::ask_before_quit(cx) {
+        return;
+    }
     let waits = shell::prepare_quit(cx);
     if waits.is_empty() {
-        cx.quit();
+        finish_quit(cx);
         return;
     }
     cx.spawn(async move |cx| {
         wait_for(waits, cx).await;
+        cx.update(|cx| {
+            if !shell::ask_before_quit(cx) {
+                finish_quit(cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Drops the unsaved text answered with Don't save, then quits.
+fn finish_quit(cx: &mut App) {
+    let drops = shell::discard_for_quit(cx);
+    if drops.is_empty() {
+        cx.quit();
+        return;
+    }
+    cx.spawn(async move |cx| {
+        wait_for(drops, cx).await;
         cx.update(|cx| cx.quit());
     })
     .detach();
