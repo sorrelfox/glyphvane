@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Styled as _, div, px,
+    Styled as _, canvas, div, px,
 };
 
 use super::{TextPosition, ViewMode, Workspace};
@@ -45,7 +45,7 @@ use crate::editor::{EditorLayout, EditorView, Top};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
-use crate::reader::{Reader, ReaderEvent, ScrollTarget};
+use crate::reader::{Reader, ReaderEvent, ScrollTarget, startup};
 use crate::split::{Side, SplitView};
 use crate::theme::Theme;
 
@@ -63,7 +63,10 @@ impl Workspace {
                 return area.child(reader.clone()).into_any_element();
             }
             (ViewMode::Edit, _, Some(editor), _) => {
-                return area.child(editor.clone()).into_any_element();
+                return area
+                    .child(editor.clone())
+                    .children(startup::enabled().then(|| source_probe(&tab.label.name)))
+                    .into_any_element();
             }
             (ViewMode::Split, _, _, Some(split)) => {
                 return area.child(split.clone()).into_any_element();
@@ -102,6 +105,7 @@ impl Workspace {
                             .child(note),
                     ),
             )
+            .children(startup::enabled().then(empty_probe))
             .into_any_element()
     }
 
@@ -327,4 +331,25 @@ impl Workspace {
             _ => {}
         }
     }
+}
+
+/// For the start-up trace: an element drawn after a Source view, so that
+/// its first frame counts as the first frame with content (the Reading
+/// view marks its own).
+fn source_probe(name: &str) -> impl IntoElement {
+    let what = format!("{name}, Source view");
+    canvas(
+        |_, _, _| {},
+        move |_, (), window, cx| startup::first_content_painted(&what, window, cx),
+    )
+    .absolute()
+    .size_0()
+}
+
+/// For the start-up trace: an element drawn with the placeholder shown when
+/// there is no document view.
+fn empty_probe() -> impl IntoElement {
+    canvas(|_, _, _| {}, |_, (), _, cx| startup::empty_painted(cx))
+        .absolute()
+        .size_0()
 }

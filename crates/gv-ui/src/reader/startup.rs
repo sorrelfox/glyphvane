@@ -50,6 +50,13 @@
 //!      frame is presented, and other compositors may differ.
 //!      Without a probe it is the only end point the trace has.
 //!
+//! The first frame with content is that of the first document view drawn:
+//! the Reading view (Preview and Split mode) or the Source view (Edit mode,
+//! as for an untitled document recovered from the journal). A frame drawn
+//! with no document view (a window with nothing to show) is marked as such;
+//! when no document view follows within [`EMPTY_WAIT`], the trace ends
+//! there with a line that says so.
+//!
 //! The trace ends with the presented frame; later documents are not
 //! traced. With `GLYPHVANE_DEBUG_STARTUP=exit` the application then quits,
 //! so a script can also time exec → exit.
@@ -69,6 +76,15 @@ use crate::latency::PresentProbe;
 const PRESENT_WAIT: Duration = Duration::from_secs(2);
 /// How often it looks for that answer.
 const PRESENT_POLL: Duration = Duration::from_millis(1);
+/// How long the trace waits for a document view after a frame drawn
+/// without one (documents recovered from the journal open a little after
+/// the window).
+pub const EMPTY_WAIT: Duration = Duration::from_secs(2);
+
+/// Set by the first frame with content of the process.
+static PAINTED: AtomicBool = AtomicBool::new(false);
+/// Set by the first frame drawn with no document view.
+static EMPTY_PAINTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static PROBE: RefCell<Option<Box<dyn PresentProbe>>> = const { RefCell::new(None) };
@@ -217,7 +233,6 @@ pub(crate) fn first_content_painted(what: &str, window: &mut gpui::Window, cx: &
         return;
     };
     // Only the first content frame of the process.
-    static PAINTED: AtomicBool = AtomicBool::new(false);
     if PAINTED.swap(true, Ordering::Relaxed) {
         return;
     }
@@ -233,15 +248,10 @@ pub(crate) fn first_content_painted(what: &str, window: &mut gpui::Window, cx: &
     // The trace ends when the frame callback and the presentation answer
     // (when one is coming) are both in.
     let open = Rc::new(Cell::new(if probed { 2u8 } else { 1 }));
-    let mode = trace.mode;
     let done = Rc::new(move |cx: &mut gpui::App| {
         open.set(open.get().saturating_sub(1));
         if open.get() == 0 {
-            trace.finished.store(true, Ordering::Relaxed);
-            PROBE.with(|p| p.borrow_mut().take());
-            if mode == Mode::Exit {
-                cx.quit();
-            }
+            finish(trace, cx);
         }
     });
     // Deferred work runs when the update that draws the frame ends, which
@@ -289,6 +299,45 @@ pub(crate) fn first_content_painted(what: &str, window: &mut gpui::Window, cx: &
     });
 }
 
+/// Ends the trace, quitting in [`Mode::Exit`].
+fn finish(trace: &Trace, cx: &mut gpui::App) {
+    trace.finished.store(true, Ordering::Relaxed);
+    PROBE.with(|p| p.borrow_mut().take());
+    if trace.mode == Mode::Exit {
+        cx.quit();
+    }
+}
+
+/// A frame was painted with no document view (the window has nothing to
+/// show yet): marks it the first time, and ends the trace when no frame
+/// with content follows within [`EMPTY_WAIT`].
+pub(crate) fn empty_painted(cx: &mut gpui::App) {
+    if active().is_none()
+        || PAINTED.load(Ordering::Relaxed)
+        || EMPTY_PAINTED.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    mark("first frame painted with no document view (nothing to show)");
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(EMPTY_WAIT).await;
+        if let Some(trace) = active()
+            && !PAINTED.load(Ordering::Relaxed)
+        {
+            mark(&empty_end_what());
+            cx.update(|cx| finish(trace, cx));
+        }
+    })
+    .detach();
+}
+
+fn empty_end_what() -> String {
+    format!(
+        "no document view drawn within {} ms of the first frame: the trace ends without a frame with content",
+        EMPTY_WAIT.as_millis()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +353,11 @@ mod tests {
         assert_eq!(
             presented_what(Some(Duration::from_micros(6_944))),
             "first frame with content presented (wp_presentation, refresh 6.944 ms)"
+        );
+        assert_eq!(
+            empty_end_what(),
+            "no document view drawn within 2000 ms of the first frame: \
+             the trace ends without a frame with content"
         );
         assert_eq!(
             line(Duration::from_micros(104_733), "window created"),
