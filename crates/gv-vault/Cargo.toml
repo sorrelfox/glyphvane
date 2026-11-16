@@ -15,6 +15,8 @@ crc32fast.workspace = true
 gv-model.workspace = true
 gv-profile.workspace = true
 gv-settings.workspace = true
+# The content index parses notes with the views' parser.
+gv-syntax.workspace = true
 gv-text.workspace = true
 ignore.workspace = true
 # The vault watcher: debounced OS notifications (re-exports `notify`).
@@ -32,7 +34,6 @@ url.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
-gv-syntax.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

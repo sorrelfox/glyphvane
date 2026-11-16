@@ -99,6 +99,11 @@ impl<K: Hash + Eq + Clone, V: Clone> CowMap<K, V> {
         old
     }
 
+    /// Every entry, in no particular order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.shards.iter().flat_map(|s| s.iter())
+    }
+
     /// Mutable access to an existing value.
     pub(crate) fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where

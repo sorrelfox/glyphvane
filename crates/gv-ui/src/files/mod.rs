@@ -12,6 +12,7 @@
 //! | [`DataSafety`] | A global: the journal store, the journals in use, untitled numbers |
 //! | [`worker`] | One background task per edited document: it records every edit in the journal and runs the saves, in order |
 //! | [`watch`] | Per window: open files changed on disk, the vault watcher |
+//! | [`overlay`] | Unsaved buffers for the content index |
 //! | [`notice`] | What the infobar says |
 //! | [`save_as`] | Where Save As writes: the save dialog, the suggested name, the `.md` extension |
 //! | [`open_dialog`] | Open file and Open folder: the open dialog |
@@ -59,6 +60,7 @@
 
 pub mod notice;
 pub mod open_dialog;
+pub(crate) mod overlay;
 #[cfg(test)]
 mod safety_tests;
 pub mod save_as;

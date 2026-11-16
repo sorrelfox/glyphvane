@@ -26,6 +26,11 @@
 //! - [`files`]: the save pipeline. Loading and byte-preserving saving
 //!   (atomic replace, symlinks, hardlinks), the crash journal and recovery,
 //!   the autosave policy, external-change checks and the 3-way merge.
+//! - [`content`]: the content index. What every note contains (title,
+//!   headings, links, tags, properties, block ids, tasks), persisted per
+//!   vault, kept in step with the watcher's path-index snapshots and with
+//!   unsaved buffers, with backlinks, unresolved links, tags and the quick
+//!   switcher's entries as queries.
 //! - [`watch`]: the vault watcher. Keeps a [`SharedPathIndex`] in step with
 //!   the disk (OS notifications, polling on network file systems, rescans
 //!   when events were lost) and reports external changes to open documents
@@ -34,6 +39,7 @@
 //! The resolver itself only classifies fragments; matching headings and
 //! block ids is the document model's job, through [`FragmentResolver`].
 
+pub mod content;
 pub mod expect;
 pub mod files;
 pub mod fragment;

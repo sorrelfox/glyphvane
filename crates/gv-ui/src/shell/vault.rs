@@ -13,6 +13,13 @@
 //! (FR-VAULT-02): the vault stays [`VaultStatus::NotIndexed`] with an
 //! [`IndexQuestion`], which the window asks as an infobar. *Index* builds
 //! the index without the limit ([`WindowVault::index_anyway`]).
+//!
+//! Once the path index is built, the vault starts its **content index**
+//! ([`ContentIndexer`]) on a background thread, cached in the app's cache
+//! folder. Every path-index snapshot the vault publishes (from the
+//! watcher) goes to it, and so do the unsaved buffers of files in the
+//! vault ([`crate::files::overlay`]). Dropping the vault (closing the
+//! window, opening another folder) cancels it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -20,8 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Context, Global, SharedString, Task};
-use gv_vault::root::{self, RootDetection, RootReason};
-use gv_vault::{IndexConfig, IndexError, PathIndex, SharedPathIndex};
+use gv_vault::content::{ContentEvent, ContentIndexer, ContentOptions, ContentSnapshot};
+use gv_vault::root::{self, RootDetection, RootMarker, RootReason};
+use gv_vault::{IndexConfig, IndexError, PathIndex, ProfileId, SharedPathIndex};
 
 /// Where the path index is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +77,8 @@ pub(crate) struct WindowVault {
     question: Option<IndexQuestion>,
     build_time: Option<Duration>,
     _build: Option<Task<()>>,
+    /// The content index, once the path index is built.
+    content: Option<ContentIndexer>,
 }
 
 impl fmt::Debug for WindowVault {
@@ -122,6 +132,7 @@ impl WindowVault {
             question: None,
             build_time: None,
             _build: None,
+            content: None,
         };
         if let Some(reason) = root::is_refused_root(&detected.root, root::home_dir().as_deref()) {
             this.status = VaultStatus::NotIndexed(format!("Not indexed: {reason}").into());
@@ -194,6 +205,7 @@ impl WindowVault {
                     ?elapsed,
                     "path index built"
                 );
+                self.start_content(cx);
                 VaultStatus::Ready
             }
             Err(IndexError::TooManyEntries { limit }) => {
@@ -214,8 +226,63 @@ impl WindowVault {
     /// Publishes a newer snapshot (from the file watcher, or after a file
     /// operation) and tells the views.
     pub fn publish(&mut self, index: PathIndex, cx: &mut Context<'_, Self>) {
+        if let Some(content) = &self.content {
+            content.update_paths(index.clone());
+        }
         self.index.store(index);
         cx.notify();
+    }
+
+    /// Starts the content index on the built path index, replacing (and
+    /// so cancelling) a previous one.
+    fn start_content(&mut self, cx: &mut Context<'_, Self>) {
+        let profile = match self.reason {
+            RootReason::Marker(RootMarker::Obsidian) => ProfileId::Obsidian,
+            RootReason::Marker(RootMarker::Git) => ProfileId::GfmFile,
+            RootReason::Marker(RootMarker::Glyphvane) | RootReason::FileFolder => {
+                ProfileId::Extended
+            }
+        };
+        let mut options = ContentOptions::for_profile(profile);
+        if let Some(locations) = cx
+            .try_global::<crate::settings::AppSettings>()
+            .and_then(|s| s.locations())
+        {
+            options = options.with_cache(locations.cache_dir(), &self.root);
+        }
+        let root = self.root.clone();
+        let on_event = move |event: ContentEvent| match event {
+            ContentEvent::Ready { stats, .. } => tracing::info!(
+                root = %root.display(),
+                notes = stats.notes,
+                parsed = stats.parsed,
+                cache = ?stats.cache,
+                elapsed = ?stats.elapsed,
+                "content index built"
+            ),
+            ContentEvent::PersistFailed(err) => {
+                tracing::warn!(root = %root.display(), "content index cache: {err}");
+            }
+            ContentEvent::Updated { .. } | ContentEvent::Persisted { .. } => {}
+        };
+        self.content = None;
+        match ContentIndexer::start(self.index.load(), options, on_event) {
+            Ok(content) => {
+                crate::files::overlay::register(&self.root, content.handle());
+                self.content = Some(content);
+            }
+            Err(err) => tracing::warn!("cannot start the content index: {err}"),
+        }
+    }
+
+    /// The content index's current snapshot, once it is built (for the
+    /// backlinks, tags, switcher and link-checker panels).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the panels that read it come next")
+    )]
+    pub fn content(&self) -> Option<ContentSnapshot> {
+        self.content.as_ref().and_then(ContentIndexer::snapshot)
     }
 
     /// The root folder.
@@ -264,6 +331,60 @@ fn thousands(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use gv_vault::content::ContentSnapshot;
+    use gv_vault::{IndexConfig, PathIndex, VaultPath};
+
+    use super::WindowVault;
+
+    /// Waits (in real time: the index has its own thread) until the
+    /// vault's content index satisfies `f`.
+    fn until(
+        vault: &Entity<WindowVault>,
+        cx: &mut TestAppContext,
+        f: impl Fn(&ContentSnapshot) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            cx.run_until_parked();
+            if vault
+                .read_with(cx, |v, _| v.content())
+                .is_some_and(|s| f(&s))
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the content index did not get there in time");
+    }
+
+    #[gpui::test]
+    fn the_content_index_follows_the_vault(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::write(root.join("A.md"), "[[B]]\n").expect("write");
+        std::fs::write(root.join("B.md"), "b\n").expect("write");
+        let vault = cx.new(|cx| WindowVault::for_folder(root, cx));
+        let b = VaultPath::new("B.md").expect("path");
+        until(&vault, cx, |s| s.backlink_sources(&b).len() == 1);
+
+        // A newer path index (as the watcher publishes it).
+        std::fs::write(root.join("C.md"), "also [[B]]\n").expect("write");
+        let index = PathIndex::build(root, IndexConfig::default())
+            .expect("index")
+            .0;
+        vault.update(cx, |v, cx| v.publish(index, cx));
+        until(&vault, cx, |s| s.backlink_sources(&b).len() == 2);
+
+        // Unsaved text of a file in the vault.
+        crate::files::overlay::dirty(&root.join("A.md"), &gv_text::TextSnapshot::new("none\n"));
+        until(&vault, cx, |s| s.backlink_sources(&b).len() == 1);
+        crate::files::overlay::clean(&root.join("A.md"));
+        until(&vault, cx, |s| s.backlink_sources(&b).len() == 2);
+    }
+
     #[test]
     fn counts_have_thousands_separators() {
         assert_eq!(super::thousands(7), "7");

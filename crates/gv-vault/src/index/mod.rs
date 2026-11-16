@@ -32,7 +32,7 @@
 //! paths ([`crate::resolve()`]).
 
 pub mod conflict;
-mod cow;
+pub(crate) mod cow;
 mod shared;
 mod walk;
 

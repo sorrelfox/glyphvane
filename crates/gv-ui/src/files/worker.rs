@@ -142,6 +142,11 @@ async fn run(
     executor: BackgroundExecutor,
 ) {
     let mut retry_sync_at: Option<Instant> = None;
+    // The file the document is, for the content index's overlay.
+    let mut path: Option<PathBuf> = journal.as_ref().and_then(|j| match j.key() {
+        DocumentKey::Path(p) => Some(p.clone()),
+        DocumentKey::Untitled(_) => None,
+    });
     loop {
         let deadline = journal
             .as_ref()
@@ -189,8 +194,11 @@ async fn run(
                     if let Some(journal) = journal.as_mut() {
                         record(journal, &batch);
                     }
+                    if let (Some(path), Some((_, text))) = (&path, batch.last()) {
+                        super::overlay::dirty(path, text);
+                    }
                 }
-                other => handle(&mut journal, &mut claim, other),
+                other => handle(&mut journal, &mut claim, &mut path, other),
             }
         }
     }
@@ -198,6 +206,10 @@ async fn run(
         && let Err(err) = journal.sync()
     {
         tracing::warn!("journal {}: cannot sync: {err}", journal.id());
+    }
+    // Closed: the disk is what counts again.
+    if let Some(path) = &path {
+        super::overlay::clean(path);
     }
 }
 
@@ -213,14 +225,25 @@ fn sync_due(journal: &mut DocumentJournal) -> Option<Instant> {
     }
 }
 
-fn handle(journal: &mut Option<DocumentJournal>, claim: &mut Option<Claim>, msg: Msg) {
+fn handle(
+    journal: &mut Option<DocumentJournal>,
+    claim: &mut Option<Claim>,
+    current: &mut Option<PathBuf>,
+    msg: Msg,
+) {
     match msg {
         Msg::Record { summary, text } => {
+            if let Some(path) = current.as_deref() {
+                super::overlay::dirty(path, &text);
+            }
             if let Some(journal) = journal.as_mut() {
                 record(journal, &[(summary, text)]);
             }
         }
         Msg::Rebase { base, format, hash } => {
+            if let Some(path) = current.as_deref() {
+                super::overlay::clean(path);
+            }
             if let Some(journal) = journal.as_mut()
                 && let Err(err) = journal.saved(base, format, hash)
             {
@@ -245,8 +268,12 @@ fn handle(journal: &mut Option<DocumentJournal>, claim: &mut Option<Claim>, msg:
                 }
                 (file, outcome)
             });
-            if let Err(err) = &result {
-                tracing::info!("not saved: {err}");
+            match &result {
+                Ok((file, _)) => {
+                    super::overlay::clean(file.path());
+                    *current = Some(file.path().to_path_buf());
+                }
+                Err(err) => tracing::info!("not saved: {err}"),
             }
             // The view may be gone (a tab closed while its last save ran).
             let _ = reply.send(SaveReply { result });
@@ -263,6 +290,11 @@ fn handle(journal: &mut Option<DocumentJournal>, claim: &mut Option<Claim>, msg:
             let result = save_as(journal, file, &path, format, &text, &options);
             match &result {
                 Ok((file, _)) => {
+                    if let Some(old) = current.take() {
+                        super::overlay::clean(&old);
+                    }
+                    super::overlay::clean(&path);
+                    *current = Some(path.clone());
                     retarget_journal(journal, &path, file, text);
                     // The old key's claim is released here; without a
                     // journal the document claims no key.
@@ -283,6 +315,9 @@ fn handle(journal: &mut Option<DocumentJournal>, claim: &mut Option<Claim>, msg:
             }
         }
         Msg::Discard => {
+            if let Some(path) = current.as_deref() {
+                super::overlay::clean(path);
+            }
             if let Some(journal) = journal.take() {
                 let id = journal.id().clone();
                 if let Err(err) = journal.discard() {
