@@ -264,7 +264,7 @@ fn the_context_menus_hold_their_commands() {
     );
     let editor = context_items(ContextMenu::Editor);
     assert_eq!(
-        editor[..7],
+        editor[..8],
         [
             "editor.cut",
             "editor.copy",
@@ -272,6 +272,7 @@ fn the_context_menus_hold_their_commands() {
             "editor.paste",
             "editor.paste_plain",
             "spell.add_to_dictionary",
+            "spell.add_to_vault_dictionary",
             "spell.ignore",
         ]
     );
@@ -282,7 +283,7 @@ fn the_context_menus_hold_their_commands() {
         .map(|c| c.id().as_str())
         .filter(|id| id.starts_with("editor.table"))
         .collect();
-    assert_eq!(editor[7..], tables[..]);
+    assert_eq!(editor[8..], tables[..]);
     assert_eq!(
         context_items(ContextMenu::FileTree),
         [

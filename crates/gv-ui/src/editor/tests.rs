@@ -31,6 +31,7 @@ mod find;
 mod fold;
 mod paste;
 mod rows;
+mod spell;
 mod table;
 mod zoom;
 

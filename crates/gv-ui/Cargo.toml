@@ -20,6 +20,7 @@ gv-model = { workspace = true }
 gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
 gv-settings = { workspace = true }
+gv-spell = { workspace = true }
 gv-syntax = { workspace = true }
 gv-text = { workspace = true }
 gv-vault = { workspace = true }

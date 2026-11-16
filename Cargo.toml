@@ -226,6 +226,10 @@ fast_image_resize = { version = "6.1.0", default-features = false, features = ["
 # gv-media tests: writing APNG test files (the png version `image` already
 # uses; MIT OR Apache-2.0).
 png = "0.18.1"
+# Spell check (gv-spell): spellbook, a pure-Rust Hunspell-compatible
+# checker (MPL-2.0; one maintainer, alpha). Exact pin: bump only after the
+# spell-check accuracy harness passes on the new version.
+spellbook = "=0.4.2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

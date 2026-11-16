@@ -214,6 +214,7 @@ const BUILTIN: &[Row] = &[
     ("editor.toggle_comment", "Toggle comment", Category::Editing, Some(EDITOR), &[("secondary-/", ALL)]),
     ("editor.toggle_whitespace", "Show whitespace", Category::Editing, Some(EDITOR), &[]),
     ("spell.add_to_dictionary", "Add word to dictionary", Category::Editing, Some(EDITOR), &[]),
+    ("spell.add_to_vault_dictionary", "Add word to vault dictionary", Category::Editing, Some(EDITOR), &[]),
     ("spell.ignore", "Ignore word", Category::Editing, Some(EDITOR), &[]),
 
     // Formatting

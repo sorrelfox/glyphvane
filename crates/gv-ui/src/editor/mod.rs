@@ -99,6 +99,13 @@
 //! selected, the word count (counted as Preview counts, off the UI thread),
 //! the encoding and the line endings ([`EditorView::status_facts`]).
 //!
+//! # Spell check
+//!
+//! [`spell`]: misspelled prose gets a wavy underline, checked on the
+//! background executor after each reparse, block by block with a cache;
+//! the context menu offers suggestions, Add to dictionary and Ignore, and
+//! Next misspelling selects the next one.
+//!
 //! # The file
 //!
 //! [`file`] holds the document's file side: the crash journal every
@@ -119,6 +126,7 @@ mod markdown;
 mod metrics;
 mod paste;
 mod rows;
+mod spell;
 mod stats;
 mod syntax;
 mod task_toggle;
@@ -409,6 +417,8 @@ pub struct EditorView {
     read_only: bool,
     /// The caret's place and the word count, for the status bar.
     stats: stats::Stats,
+    /// Misspellings and the spelling menu.
+    spell: spell::SpellState,
     /// Vertical scroll in px from the top of the content (f64: a long
     /// file is millions of px tall).
     scroll_y: f64,
@@ -488,6 +498,7 @@ impl EditorView {
             paste_profile: paste_profile(gv_profile::ProfileId::CommonMark.as_str()),
             read_only: false,
             stats: stats::Stats::default(),
+            spell: spell::SpellState::default(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             wrap: SoftWrap::default(),
@@ -659,6 +670,7 @@ impl EditorView {
         let limits = wrap::large_file_limits(cx);
         self.install(buffer, tree, state, &limits);
         self.schedule_word_count(cx);
+        self.schedule_spell(cx);
         cx.notify();
     }
 
@@ -755,6 +767,7 @@ impl EditorView {
         self.refresh_foldable();
         self.availabilities.reset();
         self.stats.reset();
+        self.spell.reset();
         self.reset_find();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
@@ -952,6 +965,7 @@ impl EditorView {
     /// (IME spike, Problem 2).
     fn input_changed(&mut self, cx: &mut Context<'_, Self>) {
         crate::latency::handled();
+        self.spell_after_change();
         self.pump_syntax(cx);
         self.after_edit(cx);
         self.autoscroll = true;
@@ -982,6 +996,7 @@ impl EditorView {
             }));
         }
         self.schedule_foldable(cx);
+        self.schedule_spell(cx);
     }
 
     fn with_editor(
@@ -1437,6 +1452,7 @@ impl Render for EditorView {
             );
         let root = fold_handlers(root, cx);
         let root = self.go_handlers(root, cx);
+        let root = self.spell_handlers(root, cx);
         // Viewer mode: nothing that changes the text has a handler, so its
         // menu items are disabled and its keys do nothing.
         let root = if self.read_only {

@@ -235,6 +235,7 @@ command_actions! {
     }
     spell {
         AddToDictionary = "spell.add_to_dictionary",
+        AddToVaultDictionary = "spell.add_to_vault_dictionary",
         Ignore = "spell.ignore",
     }
 }

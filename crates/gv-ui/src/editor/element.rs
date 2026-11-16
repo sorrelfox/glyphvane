@@ -49,6 +49,9 @@ use crate::metrics::{HAIRLINE, icon, radius};
 /// adding a caret.
 const DRAG_THRESHOLD: f32 = 3.0;
 
+/// The height of a misspelling's tick on the scrollbar (not designed).
+const SPELL_TICK: f32 = 2.0;
+
 /// What the left button is doing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) enum Press {
@@ -129,6 +132,10 @@ pub(crate) struct Probe {
     pub matches: Vec<(Bounds<Pixels>, bool)>,
     /// Composition underlines: start, width.
     pub marked: Vec<(Point<Pixels>, Pixels)>,
+    /// Spelling squiggles: start, width.
+    pub squiggles: Vec<(Point<Pixels>, Pixels)>,
+    /// Spelling ticks on the scrollbar.
+    pub spell_ticks: usize,
     /// Fold chevrons: line, folded, bounds.
     pub chevrons: Vec<(usize, bool, Bounds<Pixels>)>,
     /// Fold placeholder chips and the text they hide.
@@ -162,6 +169,8 @@ pub(crate) struct Frame {
     /// Fold chevrons: bounds, SVG path and colour.
     icons: Vec<(Bounds<Pixels>, SharedString, Hsla)>,
     thumb: Option<PaintQuad>,
+    /// Misspellings on the scrollbar, under the thumb.
+    ticks: Vec<PaintQuad>,
     /// Where the pointer is an I-beam.
     text_area: Option<Bounds<Pixels>>,
     /// Where the pointer is a hand: chevrons and chips.
@@ -185,6 +194,7 @@ impl Frame {
             numbers: Vec::new(),
             icons: Vec::new(),
             thumb: None,
+            ticks: Vec::new(),
             text_area: None,
             pointers: Vec::new(),
         }
@@ -287,7 +297,11 @@ impl EditorView {
         let layout = self.layout;
         let fonts = self.fonts.clone();
         let Self {
-            doc, links, find, ..
+            doc,
+            links,
+            find,
+            spell,
+            ..
         } = self;
         let Some(doc) = doc.as_mut() else {
             return frame;
@@ -356,6 +370,7 @@ impl EditorView {
                 .collect()
         };
         let found = find.marks.touching(text.revision(), visible.clone());
+        let misspelled = spell.visible(&doc.editor, visible.clone());
         let marked = doc.editor.marked_ranges();
         let replace = tabs.replace_snapshot();
         let env = RowEnv {
@@ -407,6 +422,7 @@ impl EditorView {
                     .collect::<Vec<_>>()
             };
             let found_spans = spans_of(&mut found.iter().map(|(r, _)| r));
+            let spell_spans = spans_of(&mut misspelled.iter());
             let found_current: Vec<bool> = found
                 .iter()
                 .filter(|(r, _)| r.end >= range.start && r.start <= range.end)
@@ -557,6 +573,24 @@ impl EditorView {
                             off: 1.0,
                             color: c,
                         },
+                    });
+                }
+                // Misspellings: a wavy line, as selections are drawn.
+                for &(a, b, _) in &spell_spans {
+                    if b <= cols.start || a >= cols.end {
+                        continue;
+                    }
+                    let (a, b) = (a.max(cols.start), b.min(cols.end));
+                    let (x0, x1) = (row.x_in(k, a), row.x_in(k, b));
+                    let origin = point(px(origin_x + x0), px(base + inline::UNDERLINE_OFFSET));
+                    let width = px(x1 - x0);
+                    #[cfg(test)]
+                    probe.squiggles.push((origin, width));
+                    frame.lines.push(Line::Plain {
+                        origin,
+                        width,
+                        color: color(Token::StatusError),
+                        wavy: true,
                     });
                 }
                 // The composition: a thin underline.
@@ -730,6 +764,32 @@ impl EditorView {
             frame.thumb = Some(
                 fill(thumb, palette.color(Token::BorderStrong)).corner_radii(px(radius::SCROLLBAR)),
             );
+            // A tick per misspelled line, one per pixel row.
+            if let Some(doc) = &self.doc {
+                let mut last = f32::NEG_INFINITY;
+                for row in self.spell.rows(&doc.editor) {
+                    let y = (track_top
+                        + track_h * (row as f64 * f64::from(line_px) / content) as f32)
+                        .floor();
+                    if y <= last {
+                        continue;
+                    }
+                    last = y + SPELL_TICK - 1.0;
+                    frame.ticks.push(fill(
+                        bounds_of(
+                            right - scrollbar::INSET_X - SCROLLBAR_THUMB,
+                            y,
+                            SCROLLBAR_THUMB,
+                            SPELL_TICK,
+                        ),
+                        palette.color(Token::StatusError),
+                    ));
+                }
+                #[cfg(test)]
+                {
+                    self.probe.spell_ticks = frame.ticks.len();
+                }
+            }
             self.scrollbar = Some(Scrollbar {
                 thumb,
                 track: bounds_of(right - zone, track_top, zone, track_h),
@@ -1215,6 +1275,9 @@ impl Element for EditorElement {
                 let _ =
                     window.paint_svg(bounds, path, None, TransformationMatrix::unit(), color, cx);
             }
+            for tick in frame.ticks.drain(..) {
+                window.paint_quad(tick);
+            }
             if let Some(thumb) = frame.thumb.take() {
                 window.paint_quad(thumb);
             }
@@ -1265,6 +1328,10 @@ impl EditorElement {
                     window,
                     cx,
                 );
+                // On a misspelled word: its suggestions.
+                view.update(cx, |view, cx| {
+                    view.attach_spell_menu(Some(e.position), window, cx);
+                });
                 cx.stop_propagation();
             });
         }

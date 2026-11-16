@@ -24,6 +24,7 @@ pub mod reader;
 pub mod settings;
 pub mod settings_window;
 pub mod shell;
+pub mod spell;
 pub mod split;
 pub mod theme;
 pub mod zoom;

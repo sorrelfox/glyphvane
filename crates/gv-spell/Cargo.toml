@@ -9,6 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Dictionaries whose `SET` is not UTF-8 are decoded before loading.
+encoding_rs.workspace = true
+gv-syntax.workspace = true
+gv-text.workspace = true
+spellbook.workspace = true
+# Atomic writes of the user word lists.
+tempfile.workspace = true
+# UAX #29 word boundaries for the tokenizer.
+unicode-segmentation.workspace = true
 
 [lints]
 workspace = true

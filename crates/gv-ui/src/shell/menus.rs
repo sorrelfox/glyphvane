@@ -55,6 +55,8 @@ impl Workspace {
             can_go_forward: self.can_go_forward(),
             edit_locked: !self.can_edit(self.active, cx),
             has_file: self.tabs.get(index).is_some_and(|t| t.path.is_some()),
+            misspelled: false,
+            in_vault: false,
         }
     }
 
@@ -167,6 +169,8 @@ impl Workspace {
                 window,
                 cx,
             );
+            // With the caret in a misspelled word: its suggestions.
+            editor.update(cx, |e, cx| e.attach_spell_menu(None, window, cx));
         }
     }
 

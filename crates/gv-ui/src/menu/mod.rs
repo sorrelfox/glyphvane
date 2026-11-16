@@ -35,8 +35,8 @@ use gv_settings::keymap::Platform;
 
 use crate::keymap::action_for;
 pub use context::{
-    ContextMenuPopover, ContextTarget, Placement, context_menu_of, context_target,
-    show_context_menu,
+    ContextMenuPopover, ContextTarget, MAX_SUGGESTIONS, Placement, SpellMenu, context_menu_of,
+    context_target, show_context_menu,
 };
 pub use model::{ContextMenu, Item, Menu, MenuState};
 use model::{Entry, Role, SystemEntry};
@@ -120,6 +120,7 @@ pub fn native_menus(platform: Platform) -> Vec<gpui::Menu> {
 fn native_item(entry: &Entry) -> Option<gpui::MenuItem> {
     Some(match *entry {
         Entry::Separator => gpui::MenuItem::separator(),
+        Entry::Suggestion(_) => return None,
         Entry::Command(item) => gpui::MenuItem::Action {
             name: item.title.into(),
             action: action_for(item.command)?,

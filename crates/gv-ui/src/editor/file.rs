@@ -607,6 +607,7 @@ impl EditorView {
         self.report_modified(cx);
         self.find_after_edit(cx);
         self.schedule_word_count(cx);
+        self.schedule_spell(cx);
     }
 
     /// Tells the window when the text went from saved to modified or back.

@@ -439,7 +439,7 @@ pub(crate) fn panel_height(entries: &[Entry]) -> f32 {
     entries
         .iter()
         .map(|entry| match entry {
-            Entry::Command(_) => MENU_ROW,
+            Entry::Command(_) | Entry::Suggestion(_) => MENU_ROW,
             Entry::Separator => separator,
             Entry::System(_) => 0.0,
         })
@@ -685,7 +685,7 @@ impl MenuPopover {
             .filter_map(|(index, entry)| match *entry {
                 Entry::Separator => Some(separator(theme).into_any_element()),
                 Entry::Command(item) => Some(self.item_row(index, item, checks, theme, window, cx)),
-                Entry::System(_) => None,
+                Entry::System(_) | Entry::Suggestion(_) => None,
             })
             .collect();
         let origin = f32::from(origin);

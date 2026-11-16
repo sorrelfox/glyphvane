@@ -19,21 +19,28 @@
 //! - **Keys:** Up, Down, Home and End move, Enter runs, Esc closes; a click
 //!   outside closes without doing more.
 //!
+//! - **Spelling:** the editor's menu opened on a misspelled word starts
+//!   with the word's suggestions ([`SpellMenu`]): the fast ones at once,
+//!   the full list when it arrives ([`ContextMenuPopover::set_suggestions`]).
+//!   Choosing one replaces the word.
+//!
 //! Each main window has one context menu ([`ContextMenuPopover`]), drawn by
 //! the window. Views open it with [`show_context_menu`].
 
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Global,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, ElementId, Entity, FocusHandle, Global,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, anchored,
-    deferred, div, point, px,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window,
+    anchored, deferred, div, point, px,
 };
 
 use super::model::{ContextMenu, Entry, Menu, MenuState, context_menu};
 use super::popover::{
     ItemLook, child_index, fit_horizontally, fit_vertically, item_enabled, item_row, panel,
-    panel_height, separator,
+    panel_height, row, separator,
 };
 use super::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use crate::appearance::Appearance;
@@ -60,6 +67,37 @@ pub enum ContextTarget {
     /// Tab `n` of the window.
     Tab(usize),
 }
+
+/// Replaces the misspelled word with the suggestion given.
+pub type ApplySuggestion = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// The spelling part of the editor's menu: the misspelled word it was
+/// opened on and its suggestions.
+#[derive(Clone)]
+pub struct SpellMenu {
+    pub word: SharedString,
+    /// Best first; at most [`MAX_SUGGESTIONS`] are shown.
+    pub suggestions: Vec<SharedString>,
+    /// A vault is open: Add to vault dictionary applies.
+    pub in_vault: bool,
+    /// The text cannot be changed: the suggestions are disabled.
+    pub read_only: bool,
+    pub apply: ApplySuggestion,
+}
+
+impl std::fmt::Debug for SpellMenu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpellMenu")
+            .field("word", &self.word)
+            .field("suggestions", &self.suggestions)
+            .field("in_vault", &self.in_vault)
+            .field("read_only", &self.read_only)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Suggestions shown in the menu.
+pub const MAX_SUGGESTIONS: usize = 6;
 
 /// What the item running now was opened on.
 #[derive(Debug, Default)]
@@ -127,6 +165,32 @@ struct Open {
     restore: Option<FocusHandle>,
     /// The highlighted entry.
     item: Option<usize>,
+    /// The spelling part (the editor's menu on a misspelled word).
+    spell: Option<SpellMenu>,
+}
+
+impl Open {
+    fn suggestion_enabled(&self, n: usize) -> bool {
+        self.spell
+            .as_ref()
+            .is_some_and(|s| !s.read_only && n < s.suggestions.len())
+    }
+
+    /// The menu's entries: the suggestions and a separator before the
+    /// menu's own.
+    fn rebuild(&mut self) {
+        let mut menu = context_menu(self.kind);
+        if let Some(spell) = &self.spell {
+            let n = spell.suggestions.len().min(MAX_SUGGESTIONS);
+            if n > 0 {
+                let mut entries: Vec<Entry> = (0..n).map(Entry::Suggestion).collect();
+                entries.push(Entry::Separator);
+                entries.append(&mut menu.entries);
+                menu.entries = entries;
+            }
+        }
+        self.menu = menu;
+    }
 }
 
 /// A window's context menu.
@@ -172,8 +236,84 @@ impl ContextMenuPopover {
         let open = self.open.as_ref()?;
         match open.menu.entries.get(open.item?)? {
             Entry::Command(item) => Some(item.command),
-            Entry::Separator | Entry::System(_) => None,
+            Entry::Separator | Entry::System(_) | Entry::Suggestion(_) => None,
         }
+    }
+
+    /// The spelling suggestions shown.
+    pub fn suggestions(&self) -> Vec<SharedString> {
+        self.open
+            .as_ref()
+            .and_then(|o| o.spell.as_ref())
+            .map(|s| {
+                s.suggestions
+                    .iter()
+                    .take(MAX_SUGGESTIONS)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Makes the open editor menu about the misspelled word `spell`: its
+    /// suggestions first, and the spelling items enabled. A menu opened
+    /// from the keyboard highlights the first suggestion.
+    pub fn set_spell(&mut self, spell: SpellMenu, window: &Window, cx: &mut Context<'_, Self>) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        if open.kind != ContextMenu::Editor {
+            return;
+        }
+        open.state.misspelled = true;
+        open.state.in_vault = spell.in_vault;
+        let keyboard = open.item.is_some();
+        open.spell = Some(spell);
+        open.rebuild();
+        open.item = None;
+        if keyboard {
+            let first = self.enabled_entries(window).first().copied();
+            if let Some(open) = &mut self.open {
+                open.item = first;
+            }
+            self.reveal();
+        }
+        cx.notify();
+    }
+
+    /// The full list of suggestions for `word`, once it arrives. Ignored
+    /// when the menu is no longer about `word`.
+    pub fn set_suggestions(
+        &mut self,
+        word: &str,
+        suggestions: Vec<SharedString>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let Some(spell) = open.spell.as_mut().filter(|s| s.word == word) else {
+            return;
+        };
+        let before = open.menu.entries.len();
+        let on_suggestion = open
+            .item
+            .is_some_and(|i| matches!(open.menu.entries.get(i), Some(Entry::Suggestion(_))));
+        spell.suggestions = suggestions;
+        open.rebuild();
+        // Keep the highlight on the same command, or on the first
+        // suggestion.
+        let after = open.menu.entries.len();
+        open.item = open.item.map(|i| {
+            if on_suggestion {
+                0
+            } else {
+                (i + after)
+                    .saturating_sub(before)
+                    .min(after.saturating_sub(1))
+            }
+        });
+        cx.notify();
     }
 
     /// Opens menu `kind` and takes the keyboard. `state` decides the items'
@@ -204,6 +344,7 @@ impl ContextMenuPopover {
             target,
             restore,
             item: None,
+            spell: None,
         });
         self.scroll.set_offset(point(px(0.0), px(0.0)));
         if keyboard {
@@ -242,6 +383,7 @@ impl ContextMenuPopover {
                 {
                     Some(i)
                 }
+                Entry::Suggestion(n) if open.suggestion_enabled(*n) => Some(i),
                 _ => None,
             })
             .collect()
@@ -303,6 +445,10 @@ impl ContextMenuPopover {
         let Some(open) = &self.open else {
             return;
         };
+        if let Some(Entry::Suggestion(n)) = open.menu.entries.get(index).copied() {
+            self.apply_suggestion(n, window, cx);
+            return;
+        }
         let Some(Entry::Command(item)) = open.menu.entries.get(index).copied() else {
             return;
         };
@@ -323,6 +469,22 @@ impl ContextMenuPopover {
             }
             cx.set_global(RunningTarget(ContextTarget::Active));
         });
+    }
+
+    /// Replaces the word with suggestion `n` and closes the menu.
+    fn apply_suggestion(&mut self, n: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        if !open.suggestion_enabled(n) {
+            return;
+        }
+        let Some(spell) = &open.spell else {
+            return;
+        };
+        let (apply, text) = (Rc::clone(&spell.apply), spell.suggestions[n].clone());
+        self.close(window, cx);
+        window.defer(cx, move |window, cx| apply(&text, window, cx));
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -407,6 +569,36 @@ impl Render for ContextMenuPopover {
                         .into_any_element(),
                     )
                 }
+                Entry::Suggestion(n) => {
+                    let title = open.spell.as_ref()?.suggestions.get(n)?.clone();
+                    let enabled = open.suggestion_enabled(n);
+                    Some(
+                        suggestion_row(
+                            index,
+                            title,
+                            enabled,
+                            enabled && open.item == Some(index),
+                            theme,
+                        )
+                        .when(enabled, |row| {
+                            row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if let Some(open) = &mut this.open
+                                    && *hovered
+                                    && open.item != Some(index)
+                                {
+                                    open.item = Some(index);
+                                    cx.notify();
+                                }
+                            }))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.run(index, window, cx);
+                                },
+                            ))
+                        })
+                        .into_any_element(),
+                    )
+                }
                 Entry::System(_) => None,
             })
             .collect();
@@ -456,4 +648,33 @@ impl Render for ContextMenuPopover {
             .with_priority(1)
             .into_any_element()
     }
+}
+
+/// A suggestion's row: the replacement in bold, dimmed when the text
+/// cannot be changed.
+fn suggestion_row(
+    index: usize,
+    title: SharedString,
+    enabled: bool,
+    highlighted: bool,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = format!("context-menu-suggestion:{title}");
+    row(theme, highlighted)
+        .id(ElementId::NamedInteger(
+            "context-menu-suggestion".into(),
+            index as u64,
+        ))
+        .debug_selector(move || selector.clone())
+        .when(!enabled, |row| {
+            row.opacity(crate::metrics::DISABLED_OPACITY)
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        )
 }

@@ -40,7 +40,7 @@ impl Menu {
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         self.entries.iter().filter_map(|e| match e {
             Entry::Command(item) => Some(item),
-            Entry::Separator | Entry::System(_) => None,
+            Entry::Separator | Entry::System(_) | Entry::Suggestion(_) => None,
         })
     }
 
@@ -58,6 +58,9 @@ pub enum Entry {
     Separator,
     /// An entry of the system's own (macOS).
     System(SystemEntry),
+    /// Spelling suggestion `n` of the word the editor's menu was opened on
+    /// (only in that menu: the suggestions come with it).
+    Suggestion(usize),
 }
 
 /// A menu item that runs a command.
@@ -87,6 +90,10 @@ pub enum Requirement {
     /// The tab the menu is about shows a file (not an untitled document or
     /// an empty tab).
     HasFile,
+    /// The editor's menu was opened on a misspelled word.
+    Misspelled,
+    /// The same, in a vault (for the vault's dictionary).
+    MisspelledInVault,
 }
 
 /// A standard edit item the system recognises.
@@ -130,6 +137,10 @@ pub struct MenuState {
     pub edit_locked: bool,
     /// The tab the menu is about shows a file.
     pub has_file: bool,
+    /// The editor's menu is about a misspelled word.
+    pub misspelled: bool,
+    /// A vault is open (it has a dictionary of its own).
+    pub in_vault: bool,
 }
 
 impl MenuState {
@@ -139,6 +150,8 @@ impl MenuState {
             Requirement::CanGoForward => self.can_go_forward,
             Requirement::CanEdit => !self.edit_locked,
             Requirement::HasFile => self.has_file,
+            Requirement::Misspelled => self.misspelled,
+            Requirement::MisspelledInVault => self.misspelled && self.in_vault,
         }
     }
 }
@@ -427,8 +440,8 @@ pub enum ContextMenu {
     /// On a link, in Preview and in the editor.
     Link,
     /// In the editor, off a link. The spelling items apply to a misspelled
-    /// word and the table items inside a table; the view that shows the
-    /// menu may leave them out elsewhere.
+    /// word (its suggestions come first, added when the menu opens on one)
+    /// and the table items inside a table.
     Editor,
     /// On an entry of the file tree.
     FileTree,
@@ -471,8 +484,17 @@ pub fn context_menu(kind: ContextMenu) -> Menu {
                 with_role("editor.paste", "Paste", Role::Paste),
                 item("editor.paste_plain", "Paste as plain text"),
                 SEPARATOR,
-                item("spell.add_to_dictionary", "Add to dictionary"),
-                item("spell.ignore", "Ignore"),
+                requiring(
+                    "spell.add_to_dictionary",
+                    "Add to dictionary",
+                    Requirement::Misspelled,
+                ),
+                requiring(
+                    "spell.add_to_vault_dictionary",
+                    "Add to vault dictionary",
+                    Requirement::MisspelledInVault,
+                ),
+                requiring("spell.ignore", "Ignore", Requirement::Misspelled),
                 SEPARATOR,
                 item("editor.table", "Format table"),
                 item("editor.table_insert_row_above", "Insert row above"),
