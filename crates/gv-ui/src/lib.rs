@@ -3,6 +3,7 @@
 
 //! GPUI views: workspace, panes, editor and reader elements, panels, theming.
 
+pub mod about;
 pub mod appearance;
 pub mod chrome;
 pub mod editor;
@@ -24,6 +25,7 @@ pub mod settings_window;
 pub mod shell;
 pub mod split;
 pub mod theme;
+pub mod zoom;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Result, WindowBounds, WindowOptions, px, size,

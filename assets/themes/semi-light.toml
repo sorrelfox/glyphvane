@@ -17,6 +17,8 @@ sunken = "#F0E6D3"
 [state]
 hover = "#46321412"   # #463214 at 7%, drawn over any surface
 press = "#4632141F"   # #463214 at 12%, drawn over any surface
+close_hover = "#C42B1C"   # Windows caption close button only
+close_hover_fg = "#FFFFFF"
 
 [border]
 default = "#DCD1BB"
@@ -67,3 +69,10 @@ y = 1
 blur = 3
 spread = 0
 color = "#46321424"
+
+[[shadow.tab]]
+x = 0
+y = 1
+blur = 2
+spread = 0
+color = "#0000000F"   # black at 6%

@@ -33,7 +33,8 @@ pub(crate) const OVERDRAW: f32 = 200.0;
 /// Where the view puts its text column.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReaderLayout {
-    /// Preview: at most 680 wide, centred, 40 px side padding, 22 above.
+    /// Preview: at most 680 wide (the readable line width), centred, 40 px
+    /// side padding, 22 above.
     #[default]
     Column,
     /// The Split view's preview pane: padding `20 28 0`, the column fills
@@ -51,13 +52,15 @@ impl ReaderLayout {
     }
 
     /// The window x of the text column and its width, in `bounds`.
-    pub(crate) fn column(self, bounds: Bounds<Pixels>) -> (f32, f32) {
+    /// `column_max` is the widest Preview's column gets.
+    pub(crate) fn column(self, bounds: Bounds<Pixels>, column_max: f32) -> (f32, f32) {
         let width = f32::from(bounds.size.width);
         let left = f32::from(bounds.left());
         match self {
             Self::Column => {
                 let column = (width - 2.0 * document::PAD_X)
-                    .clamp(1.0, document::COLUMN_MAX)
+                    .min(column_max)
+                    .max(1.0)
                     .floor();
                 (left + ((width - column) / 2.0).max(0.0).floor(), column)
             }
@@ -215,6 +218,9 @@ pub(crate) struct State {
     pub band: Option<usize>,
     /// Scroll sync's request for the next frame.
     pub sync: Option<SyncRequest>,
+    /// The widest the Preview text column gets (the readable line width;
+    /// infinite when it is off).
+    pub column_max: f32,
 }
 
 impl std::fmt::Debug for State {
@@ -249,6 +255,7 @@ impl State {
             layout: ReaderLayout::Column,
             band: None,
             sync: None,
+            column_max: document::COLUMN_MAX,
         }
     }
 

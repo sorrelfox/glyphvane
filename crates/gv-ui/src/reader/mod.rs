@@ -61,6 +61,7 @@ pub mod startup;
 mod state;
 #[cfg(test)]
 mod tests;
+mod typography;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -72,23 +73,25 @@ use std::time::Instant;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, div, px,
+    Styled as _, Subscription, Task, Window, div, px,
 };
 use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{CopyOptions, RenderOptions, StyleTable};
 use gv_vault::{Fragment, PathIndex, ProfileParams};
 
 use crate::appearance::Appearance;
-use crate::inline::{FontFamilies, InlineText, Palette};
+use crate::inline::{InlineText, Palette};
 use crate::metrics::size::document;
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::spacing::find as find_spacing;
 use crate::metrics::text;
+use crate::settings::AppSettings;
 use crate::theme::Theme;
 use bench::Bench;
 use element::ReaderElement;
 use load::Loaded;
 use state::{Selection, State};
+use typography::Typography;
 
 pub(crate) use live::{Spot, SyncRequest};
 pub use state::ReaderLayout;
@@ -225,8 +228,12 @@ pub struct Reader {
     profile: Arc<CompiledProfile>,
     /// Following an editor's text (the Split view's preview).
     live: live::Live,
+    /// The Appearance settings documents are shown with (zoom, fonts,
+    /// readable width).
+    typography: Typography,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
+    _settings: Subscription,
 }
 
 impl std::fmt::Debug for Reader {
@@ -244,9 +251,11 @@ fn index_key(index: Option<&PathIndex>) -> Option<(u64, bool)> {
 
 impl Reader {
     pub fn new(cx: &mut Context<'_, Self>) -> Self {
-        let families = FontFamilies::from_app(cx);
+        let typography = Typography::from_app(cx);
+        let families = typography.families(&cx.text_system().all_font_names());
         let fonts = items::font_table(&StyleTable::preview(), &families);
         let mut state = State::new(InlineText::new(fonts));
+        state.column_max = typography.column_max();
         if let Some(bench) = Bench::from_env()
             && !BENCH_TAKEN.swap(true, Ordering::Relaxed)
         {
@@ -264,8 +273,88 @@ impl Reader {
             options: RenderOptions::commonmark(),
             profile: Arc::new(gv_profile::compile_builtin(ProfileId::CommonMark)),
             live: live::Live::default(),
+            typography,
             _load: None,
             _refresh: None,
+            _settings: cx.observe_global::<AppSettings>(|this, cx| this.sync_typography(cx)),
+        }
+    }
+
+    /// The options documents are built with: the type scale and metrics
+    /// at the zoom and preview font size in effect.
+    fn build_options(&self) -> RenderOptions {
+        self.options.clone().zoomed(self.typography.scale())
+    }
+
+    /// The zoom in effect, as a factor of the designed sizes (zoom times
+    /// the preview font size over 15).
+    pub fn scale(&self) -> f32 {
+        self.typography.scale()
+    }
+
+    /// Applies the Appearance settings in effect: a new zoom or font size
+    /// builds the document again where the view is, new font families
+    /// replace the fonts, a new readable width moves the column.
+    fn sync_typography(&mut self, cx: &mut Context<'_, Self>) {
+        let new = Typography::from_app(cx);
+        if new == self.typography {
+            return;
+        }
+        let old = std::mem::replace(&mut self.typography, new);
+        self.state.borrow_mut().column_max = self.typography.column_max();
+        let fonts_differ = old.fonts_differ(&self.typography);
+        if fonts_differ {
+            let families = self.typography.families(&cx.text_system().all_font_names());
+            let fonts = items::font_table(&StyleTable::preview(), &families);
+            self.state.borrow().text.borrow_mut().set_fonts(fonts);
+        }
+        if fonts_differ || old.scale() != self.typography.scale() {
+            self.rebuild(cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the shown document was built at another scale than the one
+    /// in effect (the zoom changed while it was being built).
+    fn typography_stale(&self) -> bool {
+        self.state
+            .borrow()
+            .doc
+            .as_ref()
+            .is_some_and(|doc| doc.tree.options().styles.zoom() != self.typography.scale())
+    }
+
+    /// Builds the shown document again with the options in effect, where
+    /// the view is. While a build runs, its result is checked when it
+    /// arrives instead ([`Self::typography_stale`]).
+    fn rebuild(&mut self, cx: &mut Context<'_, Self>) {
+        if self._load.is_some() || self.is_building() || self.status != LoadStatus::Ready {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if let Some(stamp) = self.live.shown_stamp() {
+            let handoff = {
+                let st = self.state.borrow();
+                st.doc.as_ref().and_then(|doc| {
+                    Some(crate::editor::SyntaxHandoff {
+                        tree: doc.syntax.clone(),
+                        text: doc.lines.clone()?,
+                        stamp,
+                        since: None,
+                    })
+                })
+            };
+            if let Some(handoff) = handoff {
+                self.follow(path, handoff, None, cx);
+            }
+            return;
+        }
+        let text = self.state.borrow().doc.as_ref().map(|d| d.text.clone());
+        if let Some(text) = text {
+            let at = self.position();
+            self.open_text(path, text, at, cx);
         }
     }
 
@@ -333,7 +422,7 @@ impl Reader {
         self.live.forget();
         let resolver = Resolver::statuses(&path, self.index.as_ref(), self.profile.id);
         self.statuses_from = index_key(self.index.as_ref());
-        let options = self.options.clone();
+        let options = self.build_options();
         let profile = Arc::clone(&self.profile);
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -370,7 +459,7 @@ impl Reader {
         self.live.forget();
         let resolver = Resolver::statuses(&path, self.index.as_ref(), self.profile.id);
         self.statuses_from = index_key(self.index.as_ref());
-        let options = self.options.clone();
+        let options = self.build_options();
         let profile = Arc::clone(&self.profile);
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -418,6 +507,9 @@ impl Reader {
                     self.refresh_statuses(cx);
                 }
                 self.find_document_changed(cx);
+                if self.typography_stale() {
+                    self.rebuild(cx);
+                }
             }
             Err(err) => {
                 let name = self
@@ -714,7 +806,7 @@ impl Render for Reader {
             self.debug_find(window, cx);
         }
         self.state.borrow_mut().timing.frame_start = Some(Instant::now());
-        let line = text::PREVIEW_BODY.line;
+        let line = text::PREVIEW_BODY.line * self.typography.scale();
         let root = div()
             .id("reader")
             .key_context(KEY_CONTEXT)

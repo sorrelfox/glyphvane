@@ -42,11 +42,12 @@ use crate::instance::{Claim, Reporter, WaitEvent, Waiting};
 use crate::no_gpu_dialog::Choice;
 use crate::safe_mode::{Platform, Start};
 
-/// Logs go to standard error, warnings and errors by default. `RUST_LOG`
-/// picks other levels, for example `RUST_LOG=info` to see which GPU adapter
-/// GPUI selects.
-fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+/// Logs go to standard error, warnings and errors by default, more with
+/// `--verbose` ([`cli::log_filter`]). `RUST_LOG` picks other levels, for
+/// example `RUST_LOG=info` to see which GPU adapter GPUI selects.
+fn init_logging(verbose: bool) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(cli::log_filter(verbose)));
     // Fails only if a logger is installed already, which leaves logging working.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -66,7 +67,12 @@ fn main() -> ExitCode {
             Command::Render(args) => render::run(args),
         };
     }
-    init_logging();
+    if cli.licenses {
+        // A closed pipe (`glyphvane --licenses | head`) is not an error.
+        let _ = cli::print_licenses(&mut std::io::stdout().lock());
+        return ExitCode::SUCCESS;
+    }
+    init_logging(cli.verbose);
     let platform = Platform::current();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let marker = std::env::var_os(safe_mode::CHILD_MARKER);

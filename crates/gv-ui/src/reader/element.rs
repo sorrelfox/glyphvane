@@ -368,7 +368,7 @@ impl Element for ReaderElement {
             ..Geometry::default()
         };
         // The text column: Preview's centred column, or the Split pane's.
-        let (x0, column) = st.layout.column(bounds);
+        let (x0, column) = st.layout.column(bounds, st.column_max);
         find::reveal_current(st, column, &ts);
         let State {
             doc,

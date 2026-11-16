@@ -4,11 +4,15 @@
 //! The status bar: where the document is at the left (folder, file, the
 //! heading being read), facts about it at the right: in Preview words and
 //! reading time; in Edit and Split the caret's line and column, words, the
-//! encoding and the line endings ([`EditorFacts`]); the profile chip
-//! ([`super::profile_chip`]).
+//! encoding and the line endings ([`EditorFacts`]); in Preview the zoom
+//! ([`crate::zoom`]); the profile chip ([`super::profile_chip`]).
+//!
+//! Not designed: what a click on the zoom does. It resets the zoom to 100 %.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Corners, Div, ParentElement as _, Pixels, SharedString, Styled as _, div, px,
+    AnyElement, Corners, Div, InteractiveElement as _, ParentElement as _, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gv_profile::ProfileId;
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -16,6 +20,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use super::{DocFacts, Tab, ViewMode};
 use crate::editor::EditorFacts;
 use crate::icons::Icon;
+use crate::keymap::actions::view::ZoomReset;
 use crate::metrics::spacing::status_bar as spacing;
 use crate::metrics::{icon, size, text};
 use crate::theme::Theme;
@@ -27,10 +32,12 @@ pub(super) fn status_bar(
     tab: &Tab,
     doc: Option<&DocFacts>,
     editor: Option<&EditorFacts>,
+    zoom_percent: u32,
     profile_chip: AnyElement,
     theme: &Theme,
     radii: Corners<Pixels>,
 ) -> Div {
+    let zoom = zoom_label(tab.mode(), zoom_percent);
     div()
         .h(px(size::STATUS_BAR))
         .flex_none()
@@ -65,6 +72,20 @@ pub(super) fn status_bar(
                 .items_center()
                 .gap(px(spacing::GAP))
                 .children(facts(tab, doc, editor))
+                .when_some(zoom, |row, label| {
+                    let hover = theme.text.primary;
+                    row.child(
+                        div()
+                            .id("status-zoom")
+                            .debug_selector(|| "status-zoom".into())
+                            .flex_none()
+                            .hover(move |style| style.text_color(hover))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ZoomReset), cx);
+                            })
+                            .child(label),
+                    )
+                })
                 .child(profile_chip),
         )
 }
@@ -112,6 +133,11 @@ pub(super) fn facts(
         }
     }
     out
+}
+
+/// The zoom as the status bar shows it ("110%"): in Preview only.
+pub(super) fn zoom_label(mode: ViewMode, percent: u32) -> Option<SharedString> {
+    (mode == ViewMode::Preview).then(|| format!("{percent}%").into())
 }
 
 /// "Ln L, Col C", with "(N selected)" while characters are selected.
@@ -258,6 +284,14 @@ mod tests {
         assert_eq!(caret_place(&facts), "Ln 12, Col 1,005");
         facts.selected = 42;
         assert_eq!(caret_place(&facts), "Ln 12, Col 1,005 (42 selected)");
+    }
+
+    #[test]
+    fn the_zoom_shows_in_preview_only() {
+        assert_eq!(zoom_label(ViewMode::Preview, 100).as_deref(), Some("100%"));
+        assert_eq!(zoom_label(ViewMode::Preview, 250).as_deref(), Some("250%"));
+        assert_eq!(zoom_label(ViewMode::Edit, 120), None);
+        assert_eq!(zoom_label(ViewMode::Split, 120), None);
     }
 
     #[test]

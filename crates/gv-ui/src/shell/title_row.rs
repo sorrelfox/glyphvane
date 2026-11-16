@@ -6,9 +6,10 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, Corners, Div, FontWeight, InteractiveElement as _, IntoElement as _,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px, transparent_black,
+    AnyElement, App, BoxShadow, Context, Corners, Div, FontWeight, InteractiveElement as _,
+    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
+    transparent_black,
 };
 
 use super::controls::{
@@ -98,7 +99,7 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
             )
             .when(caption_buttons, |row| {
-                row.child(windows_caption_buttons(window, theme))
+                row.child(windows_caption_buttons(window, self.chrome, theme))
             })
             .when(draws_linux_controls, |row| {
                 let workspace = cx.weak_entity();
@@ -315,6 +316,7 @@ impl Workspace {
                     .map(|el| {
                         if active {
                             el.bg(theme.surface.page)
+                                .shadow(tab_shadow(theme))
                                 .border_color(theme.border.default)
                                 .text_color(theme.text.primary)
                                 .font_weight(FontWeight(text::weight::ACTIVE))
@@ -341,4 +343,20 @@ impl Workspace {
                     .child(trailing)
             }))
     }
+}
+
+/// `shadow.tab`, the active tab's lift.
+pub(super) fn tab_shadow(theme: &Theme) -> Vec<BoxShadow> {
+    theme
+        .shadow
+        .tab
+        .iter()
+        .map(|l| BoxShadow {
+            color: l.color.into(),
+            offset: point(px(l.x), px(l.y)),
+            blur_radius: px(l.blur),
+            spread_radius: px(l.spread),
+            inset: false,
+        })
+        .collect()
 }

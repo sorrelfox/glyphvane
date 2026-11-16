@@ -64,12 +64,18 @@ const COMMAND_BINDING: KeyBindingMetaIndex = KeyBindingMetaIndex(0x676b);
 pub const APP_COMMANDS: &[&str] = &[
     "app.quit",
     "app.settings",
+    "app.about",
+    "app.licenses",
+    "app.copy_debug_info",
     "app.open_menu",
     "workspace.command_palette",
     "view.cycle_theme",
     "view.preview",
     "view.edit",
     "view.split",
+    "view.zoom_in",
+    "view.zoom_out",
+    "view.zoom_reset",
 ];
 
 /// One binding of the model, as it is handed to GPUI.
@@ -182,6 +188,8 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &actions::view::Preview, cx| show_mode(ViewMode::Preview, cx));
     cx.on_action(|_: &actions::view::Edit, cx| show_mode(ViewMode::Edit, cx));
     cx.on_action(|_: &actions::view::Split, cx| show_mode(ViewMode::Split, cx));
+    crate::zoom::init(cx);
+    crate::about::init(cx);
     apply(cx, &UserKeymap::empty(Platform::current()));
 }
 

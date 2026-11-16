@@ -4,6 +4,7 @@
 //! The command line, and turning its paths into an open request.
 
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -48,6 +49,16 @@ pub struct Cli {
     /// and it quits once the files are closed.
     #[arg(long)]
     pub wait: bool,
+
+    /// Log more on standard error: informational messages, and Glyphvane's
+    /// own debug messages. `RUST_LOG`, when set, takes precedence.
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Print the third-party notices (the licences and copyright notices
+    /// of the components Glyphvane includes) and exit.
+    #[arg(long)]
+    pub licenses: bool,
 
     /// Files or folders to open. Files open in Preview; `PATH:LINE` and
     /// `PATH:LINE:COL` scroll to that line. When Glyphvane is already running,
@@ -164,6 +175,23 @@ impl OpenRequest {
         }
         request
     }
+}
+
+/// The log filter without `RUST_LOG`: warnings and errors, or with
+/// `--verbose` informational messages and the debug messages of
+/// Glyphvane's own crates.
+pub fn log_filter(verbose: bool) -> &'static str {
+    if verbose {
+        "info,glyphvane=debug,gv_=debug"
+    } else {
+        "warn"
+    }
+}
+
+/// Writes the third-party notices (`--licenses`).
+pub fn print_licenses(out: &mut impl Write) -> io::Result<()> {
+    out.write_all(gv_ui::about::THIRD_PARTY_NOTICES.as_bytes())?;
+    out.flush()
 }
 
 /// `path` resolved against `cwd`, lexically: symbolic links are kept as given.
@@ -377,6 +405,36 @@ mod tests {
         let waiting = request(&["glyphvane", "--wait", "COMMIT_EDITMSG"]);
         assert!(waiting.wait);
         assert_eq!(waiting.files, [OpenTarget::new(cwd.join("COMMIT_EDITMSG"))]);
+    }
+
+    #[test]
+    fn licenses_prints_the_notices() {
+        assert!(!parse(&["glyphvane"]).licenses);
+        let cli = parse(&["glyphvane", "--licenses"]);
+        assert!(cli.licenses);
+        let mut out = Vec::new();
+        print_licenses(&mut out).expect("written");
+        let text = String::from_utf8(out).expect("UTF-8");
+        assert!(text.starts_with("Third-party notices for Glyphvane"));
+        assert_eq!(text, gv_ui::about::THIRD_PARTY_NOTICES);
+        // It is an option of the GUI command, not of `render`.
+        assert!(Cli::try_parse_from(["glyphvane", "render", "a.md", "--licenses"]).is_err());
+    }
+
+    #[test]
+    fn verbose_raises_the_log_level() {
+        assert!(!parse(&["glyphvane"]).verbose);
+        assert!(parse(&["glyphvane", "--verbose", "a.md"]).verbose);
+        assert_eq!(log_filter(false), "warn");
+        let verbose = log_filter(true);
+        for directive in verbose.split(',') {
+            assert!(
+                tracing_subscriber::EnvFilter::try_new(directive).is_ok(),
+                "{directive}"
+            );
+        }
+        assert!(verbose.starts_with("info,"));
+        assert!(verbose.contains("gv_=debug"));
     }
 
     #[test]

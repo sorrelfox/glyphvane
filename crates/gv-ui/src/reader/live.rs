@@ -170,7 +170,7 @@ impl Reader {
         let profile = self.profile.id;
         let resolver = Resolver::statuses(&path, self.index.as_ref(), profile);
         self.statuses_from = index_key(self.index.as_ref());
-        let options = self.options.clone();
+        let options = self.build_options();
         self.live.task = Some(cx.spawn(async move |this, cx| {
             let built = cx
                 .background_spawn(async move {
@@ -235,6 +235,9 @@ impl Reader {
         }
         self.live.shown = Some(stamp);
         self.status = LoadStatus::Ready;
+        if self.typography_stale() {
+            self.rebuild(cx);
+        }
         if index_key(self.index.as_ref()) != self.statuses_from {
             self.refresh_statuses(cx);
         }

@@ -19,7 +19,7 @@ use crate::metrics::spacing::{
     linux_controls, macos_controls, sidebar_head, title_row, windows_controls,
 };
 use crate::metrics::{DISABLED_OPACITY, icon, radius};
-use crate::theme::Theme;
+use crate::theme::{Color, Theme};
 
 /// An icon button: `text.secondary`, no fill at rest, the hover overlay on
 /// hover and the press overlay while pressed.
@@ -193,7 +193,7 @@ impl Workspace {
 /// Windows. The buttons only mark their area: Windows hit-tests it and
 /// handles the click itself, which also gives the maximise button its Snap
 /// Layouts flyout.
-pub(super) fn windows_caption_buttons(window: &Window, theme: &Theme) -> Div {
+pub(super) fn windows_caption_buttons(window: &Window, chrome: WindowChrome, theme: &Theme) -> Div {
     let maximize = if window.is_maximized() {
         CaptionGlyph::Restore
     } else {
@@ -208,31 +208,51 @@ pub(super) fn windows_caption_buttons(window: &Window, theme: &Theme) -> Div {
             "caption-minimize",
             CaptionGlyph::Minimize,
             WindowControlArea::Min,
+            neutral_hover(theme),
             theme,
         ))
         .child(caption_button(
             "caption-maximize",
             maximize,
             WindowControlArea::Max,
+            neutral_hover(theme),
             theme,
         ))
         .child(caption_button(
             "caption-close",
             CaptionGlyph::Close,
             WindowControlArea::Close,
+            close_hover(chrome, theme),
             theme,
         ))
 }
 
-/// One caption button. Hover and press are the usual overlays; the design
-/// has no separate close-button colour.
+/// The hover fill and glyph colour of a window button other than close.
+fn neutral_hover(theme: &Theme) -> (Color, Color) {
+    (theme.state.hover, theme.text.primary)
+}
+
+/// The hover fill and glyph colour of the close button: Windows' red
+/// (`state.close_hover`, `state.close_hover_fg`) with the Windows chrome,
+/// where users expect it; the neutral hover on macOS (whose traffic lights
+/// the system draws) and Linux.
+pub(super) fn close_hover(chrome: WindowChrome, theme: &Theme) -> (Color, Color) {
+    match chrome {
+        WindowChrome::Windows => (theme.state.close_hover, theme.state.close_hover_fg),
+        WindowChrome::MacOs | WindowChrome::Linux => neutral_hover(theme),
+    }
+}
+
+/// One caption button. Press is the usual overlay; hover is `hover`'s fill
+/// and glyph colour.
 fn caption_button(
     id: &'static str,
     glyph: CaptionGlyph,
     area: WindowControlArea,
+    (hover, hover_fg): (Color, Color),
     theme: &Theme,
 ) -> Stateful<Div> {
-    let (hover, press) = (theme.state.hover, theme.state.press);
+    let press = theme.state.press;
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -243,7 +263,7 @@ fn caption_button(
         .items_center()
         .justify_center()
         .text_color(theme.text.primary)
-        .hover(move |style| style.bg(hover))
+        .hover(move |style| style.bg(hover).text_color(hover_fg))
         .active(move |style| style.bg(press))
         .window_control_area(area)
         .child(glyph.sized(windows_controls::GLYPH))
@@ -291,25 +311,36 @@ pub(super) fn linux_window_controls(
             row.child(window_control(
                 "minimize",
                 Icon::WindowMinimize,
+                neutral_hover(theme),
                 theme,
                 |w, _| w.minimize_window(),
             ))
         })
         .when(supported.maximize, |row| {
-            row.child(window_control("maximize", maximize_icon, theme, |w, _| {
-                w.zoom_window()
-            }))
+            row.child(window_control(
+                "maximize",
+                maximize_icon,
+                neutral_hover(theme),
+                theme,
+                |w, _| w.zoom_window(),
+            ))
         })
-        .child(window_control("close", Icon::WindowClose, theme, on_close))
+        .child(window_control(
+            "close",
+            Icon::WindowClose,
+            close_hover(WindowChrome::Linux, theme),
+            theme,
+            on_close,
+        ))
 }
 
 fn window_control(
     id: &'static str,
     icon: Icon,
+    (hover, hover_fg): (Color, Color),
     theme: &Theme,
     action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let hover = theme.state.hover;
     // The hover overlay is drawn on top of the press fill.
     let face = div()
         .size_full()
@@ -317,7 +348,7 @@ fn window_control(
         .flex()
         .items_center()
         .justify_center()
-        .hover(move |style| style.bg(hover))
+        .hover(move |style| style.bg(hover).text_color(hover_fg))
         .child(icon.sized(linux_controls::GLYPH));
     div()
         .id(id)
@@ -329,4 +360,34 @@ fn window_control(
         .text_color(theme.text.primary)
         .child(face)
         .on_click(move |_, window, cx| action(window, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeId;
+
+    #[test]
+    fn only_the_windows_close_button_turns_red() {
+        for id in ThemeId::ALL {
+            let theme = id.theme();
+            assert_eq!(
+                close_hover(WindowChrome::Windows, theme),
+                (theme.state.close_hover, theme.state.close_hover_fg),
+                "{id:?}"
+            );
+            for chrome in [WindowChrome::MacOs, WindowChrome::Linux] {
+                assert_eq!(
+                    close_hover(chrome, theme),
+                    (theme.state.hover, theme.text.primary),
+                    "{id:?} {chrome:?}"
+                );
+            }
+            // Minimise and maximise keep the neutral hover on Windows too.
+            assert_eq!(
+                neutral_hover(theme),
+                (theme.state.hover, theme.text.primary)
+            );
+        }
+    }
 }

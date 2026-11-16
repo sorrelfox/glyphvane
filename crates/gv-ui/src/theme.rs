@@ -235,6 +235,11 @@ pub struct State {
     pub hover: Color,
     /// Pressed controls, and the round window buttons on Linux.
     pub press: Color,
+    /// Hover fill of the Windows caption close button, and nothing else:
+    /// Windows' red. macOS and Linux keep the neutral hover.
+    pub close_hover: Color,
+    /// The close glyph on [`State::close_hover`].
+    pub close_hover_fg: Color,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -305,8 +310,10 @@ pub struct Syntax {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Shadows {
-    /// The only shadow in the application: popovers, menus, switcher.
+    /// Popovers, menus, switcher.
     pub popover: Vec<ShadowLayer>,
+    /// The active tab's lift.
+    pub tab: Vec<ShadowLayer>,
 }
 
 /// One layer of a box shadow, in logical pixels.
@@ -343,6 +350,37 @@ mod tests {
             assert!(
                 theme.state.press.a < 0xFF,
                 "{id:?} press must be an overlay"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_has_the_tab_shadow_and_close_hover() {
+        for id in ThemeId::ALL {
+            let theme = id.theme();
+            // The design's value: 0 1 2 at 6 % black.
+            let expected = ShadowLayer {
+                x: 0.0,
+                y: 1.0,
+                blur: 2.0,
+                spread: 0.0,
+                color: Color::from_hex("#0000000F").expect("valid"),
+            };
+            assert_eq!(theme.shadow.tab, [expected], "{id:?} shadow.tab");
+            let state = theme.state;
+            assert_eq!(state.close_hover.a, 0xFF, "{id:?} close hover is opaque");
+            let ratio = state.close_hover_fg.contrast_ratio(state.close_hover);
+            assert!(ratio >= 4.5, "{id:?} close glyph contrast {ratio:.2}:1");
+        }
+        // Windows 11's red with a white glyph in the designed themes.
+        for id in [ThemeId::Light, ThemeId::Dark] {
+            assert_eq!(
+                id.theme().state.close_hover,
+                Color::from_hex("#C42B1C").expect("valid")
+            );
+            assert_eq!(
+                id.theme().state.close_hover_fg,
+                Color::from_hex("#FFFFFF").expect("valid")
             );
         }
     }

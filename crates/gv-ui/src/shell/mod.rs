@@ -1824,6 +1824,7 @@ impl Render for Workspace {
                 self.active_tab(),
                 self.active_doc(),
                 editor_facts.as_ref(),
+                crate::zoom::percent(cx),
                 profile_chip,
                 theme,
                 radii,
