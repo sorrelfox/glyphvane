@@ -345,6 +345,9 @@ pub mod spacing {
         pub const SHORTCUT_GAP: f32 = 16.0;
         pub const OFFSET_Y: f32 = 4.0;
         pub const SUBMENU_GAP: f32 = 2.0;
+        /// The least room left between a menu and the window's edges (not
+        /// designed).
+        pub const EDGE: f32 = 8.0;
     }
 
     /// The quick switcher, and the command palette drawn like it: the input

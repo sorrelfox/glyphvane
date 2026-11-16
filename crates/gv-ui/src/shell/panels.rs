@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The side panels. The sidebar holds the Files panel; the right panel
-//! holds the Outline and the head of Backlinks.
+//! The side panels.
+//!
+//! - **Sidebar:** the switcher in its head picks Files, Search, Tags or
+//!   Bookmarks (SPEC § Sidebar); Recent and Sync conflicts open from the
+//!   View menu (`workspace.show_*`) and have no switcher button. Only the
+//!   Files panel is built; the others show their panel head and a one-line
+//!   empty state (empty states are not designed).
+//! - **Right panel:** collapsible sections, the Outline first, then
+//!   Backlinks (head and empty state so far). *Links in this note* and the
+//!   Link checker join it once asked for, with an empty state.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Corners, Div, ElementId, Entity, FontWeight, InteractiveElement as _,
-    ParentElement as _, Pixels, Stateful, Styled as _, Window, div, px,
+    AnyElement, Context, Corners, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 use super::Workspace;
@@ -15,10 +24,79 @@ use super::controls::{RowStart, icon_button};
 use super::outline_panel::OutlinePanel;
 use crate::appearance::Appearance;
 use crate::icons::Icon;
+use crate::keymap::actions::workspace as commands;
 use crate::metrics::size::icon_button as button;
-use crate::metrics::spacing::{section_head, sidebar_head};
+use crate::metrics::spacing::{list, list_row, panel_head, section_head, sidebar_head};
 use crate::metrics::{HAIRLINE, icon, size, text};
 use crate::theme::Theme;
+
+/// The sidebar's panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarPanel {
+    #[default]
+    Files,
+    Search,
+    Tags,
+    Bookmarks,
+    Recent,
+    SyncConflicts,
+}
+
+impl SidebarPanel {
+    /// The panels of the switcher, in order.
+    pub const SWITCHER: [Self; 4] = [Self::Files, Self::Search, Self::Tags, Self::Bookmarks];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Search => "Search",
+            Self::Tags => "Tags",
+            Self::Bookmarks => "Bookmarks",
+            Self::Recent => "Recent",
+            Self::SyncConflicts => "Sync conflicts",
+        }
+    }
+
+    /// The name in debug selectors.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Search => "search",
+            Self::Tags => "tags",
+            Self::Bookmarks => "bookmarks",
+            Self::Recent => "recent",
+            Self::SyncConflicts => "sync-conflicts",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Files | Self::Recent | Self::SyncConflicts => Icon::Files,
+            Self::Search => Icon::Search,
+            Self::Tags => Icon::Tags,
+            Self::Bookmarks => Icon::Bookmarks,
+        }
+    }
+}
+
+/// A right panel section that is drawn only once asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RightSection {
+    Outline,
+    Backlinks,
+    OutgoingLinks,
+    LinkChecker,
+}
+
+/// Which panels show.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Panels {
+    pub sidebar: SidebarPanel,
+    /// *Links in this note* was asked for.
+    pub outgoing_links: bool,
+    /// The Link checker was asked for.
+    pub link_checker: bool,
+}
 
 impl Workspace {
     /// The sidebar: full height above the status bar, with the panel
@@ -30,6 +108,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) -> Stateful<Div> {
         let theme = Appearance::theme(cx);
+        let panel = self.panels.sidebar;
         div()
             .id("sidebar")
             .debug_selector(|| "sidebar".into())
@@ -52,33 +131,246 @@ impl Workspace {
                     .px(px(sidebar_head::PAD_X))
                     .children(self.row_start(RowStart::SidebarHead, theme, window, cx))
                     .child(self.drag_region("sidebar-drag", window, cx).flex_1())
-                    .child(panel_switcher(theme)),
+                    .child(self.panel_switcher(theme, cx)),
             )
-            .when_some(self.files.clone(), |sidebar, files| sidebar.child(files))
+            .map(|sidebar| match (panel, self.files.clone()) {
+                (SidebarPanel::Files, Some(files)) => sidebar.child(files),
+                (SidebarPanel::Files, None) => sidebar,
+                (other, _) => sidebar.child(empty_panel(other, theme)),
+            })
+    }
+
+    /// Files, Search, Tags and Bookmarks; the active one has an
+    /// `accent.tint` fill and `text.primary`.
+    fn panel_switcher(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+        let size = (button::WIDTH, button::HEIGHT);
+        div()
+            .flex()
+            .flex_none()
+            .gap(px(sidebar_head::SWITCHER_GAP))
+            .children(SidebarPanel::SWITCHER.into_iter().map(|panel| {
+                let id = panel.id();
+                let button = icon_button(
+                    ElementId::Name(format!("panel-{id}").into()),
+                    panel.icon(),
+                    icon::TOOLBAR,
+                    size,
+                    theme,
+                )
+                .debug_selector(move || format!("panel-switch:{id}"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.show_sidebar_panel(panel, false, window, cx);
+                }));
+                if panel == self.panels.sidebar {
+                    button.bg(theme.accent.tint).text_color(theme.text.primary)
+                } else {
+                    button
+                }
+            }))
+    }
+
+    /// The sidebar's panel.
+    #[cfg(test)]
+    pub(crate) fn sidebar_panel(&self) -> SidebarPanel {
+        self.panels.sidebar
+    }
+
+    /// Shows `panel` in the sidebar, showing the sidebar if hidden.
+    /// `focus` gives the Files panel the keyboard (the View menu's
+    /// commands; the switcher's buttons leave it where it is).
+    pub(crate) fn show_sidebar_panel(
+        &mut self,
+        panel: SidebarPanel,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.panels.sidebar = panel;
+        if !self.sidebar_open {
+            self.set_sidebar_open(true, window, cx);
+        }
+        if focus && panel == SidebarPanel::Files {
+            self.focus_files(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Gives the Files panel the keyboard.
+    pub(super) fn focus_files(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let focus: Option<FocusHandle> = self.files.as_ref().map(|f| f.read(cx).focus_handle(cx));
+        if let Some(focus) = focus {
+            focus.focus(window, cx);
+        }
+    }
+
+    /// Shows the right panel with `section` in it, expanded.
+    pub(super) fn show_right_section(
+        &mut self,
+        section: RightSection,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match section {
+            RightSection::Outline | RightSection::Backlinks => {}
+            RightSection::OutgoingLinks => self.panels.outgoing_links = true,
+            RightSection::LinkChecker => self.panels.link_checker = true,
+        }
+        if !self.panel_open {
+            self.set_panel_open(true, window, cx);
+        }
+        if section == RightSection::Outline
+            && let Some(outline) = &self.outline
+        {
+            outline.update(cx, |o, cx| o.expand(cx));
+        }
+        cx.notify();
+    }
+
+    /// The `workspace.show_*` commands: each shows its panel.
+    pub(super) fn panel_actions(
+        &self,
+        root: Stateful<Div>,
+        cx: &mut Context<'_, Self>,
+    ) -> Stateful<Div> {
+        let sidebar = |panel: SidebarPanel| {
+            move |this: &mut Self, window: &mut Window, cx: &mut Context<'_, Self>| {
+                this.show_sidebar_panel(panel, true, window, cx);
+            }
+        };
+        let right = |section: RightSection| {
+            move |this: &mut Self, window: &mut Window, cx: &mut Context<'_, Self>| {
+                this.show_right_section(section, window, cx);
+            }
+        };
+        let files = sidebar(SidebarPanel::Files);
+        let tags = sidebar(SidebarPanel::Tags);
+        let bookmarks = sidebar(SidebarPanel::Bookmarks);
+        let recent = sidebar(SidebarPanel::Recent);
+        let conflicts = sidebar(SidebarPanel::SyncConflicts);
+        let outline = right(RightSection::Outline);
+        let backlinks = right(RightSection::Backlinks);
+        let outgoing = right(RightSection::OutgoingLinks);
+        let checker = right(RightSection::LinkChecker);
+        root.on_action(
+            cx.listener(move |this, _: &commands::ShowFiles, window, cx| {
+                files(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowTags, window, cx| {
+                tags(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowBookmarks, window, cx| {
+                bookmarks(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowRecent, window, cx| {
+                recent(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowSyncConflicts, window, cx| {
+                conflicts(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowOutline, window, cx| {
+                outline(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowBacklinks, window, cx| {
+                backlinks(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowOutgoingLinks, window, cx| {
+                outgoing(this, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowLinkChecker, window, cx| {
+                checker(this, window, cx);
+            }),
+        )
     }
 }
 
-/// Files, Search, Tags and Bookmarks. Files is the active panel.
-fn panel_switcher(theme: &Theme) -> Div {
-    let panels = [Icon::Files, Icon::Search, Icon::Tags, Icon::Bookmarks];
-    let size = (button::WIDTH, button::HEIGHT);
+/// A panel that is not built yet: its head and a one-line empty state
+/// (not designed).
+fn empty_panel(panel: SidebarPanel, theme: &Theme) -> Div {
+    let id = panel.id();
     div()
+        .debug_selector(move || format!("sidebar-panel:{id}"))
+        .flex_1()
+        .min_h_0()
         .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(size::PANEL_HEADER))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(panel_head::GAP))
+                .pl(px(panel_head::PAD_LEFT))
+                .pr(px(panel_head::PAD_RIGHT))
+                .font_weight(FontWeight(text::weight::STRONG))
+                .child(div().min_w_0().truncate().child(panel.title())),
+        )
+        .child(empty_state(
+            ElementId::Name(format!("empty-{id}").into()),
+            "Not available yet",
+            theme,
+        ))
+}
+
+/// The one-line empty state of a panel or section that is not built yet,
+/// where its rows would be: `text.secondary`, lined up with list rows.
+fn empty_state(id: ElementId, note: &'static str, theme: &Theme) -> AnyElement {
+    let selector: SharedString = match &id {
+        ElementId::Name(name) => name.clone(),
+        _ => "empty".into(),
+    };
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .h(px(size::LIST_ROW))
         .flex_none()
-        .gap(px(sidebar_head::SWITCHER_GAP))
-        .children(panels.into_iter().enumerate().map(|(index, panel)| {
-            let button = icon_button(("panel", index), panel, icon::TOOLBAR, size, theme);
-            if index == 0 {
-                button.bg(theme.accent.tint).text_color(theme.text.primary)
-            } else {
-                button
-            }
-        }))
+        .mt(px(list::PAD_Y))
+        .mx(px(size::LIST_ROW_INSET))
+        .pl(px(list_row::PAD_LEFT))
+        .flex()
+        .items_center()
+        .text_color(theme.text.secondary)
+        .child(note)
+        .into_any_element()
 }
 
 /// The right panel: collapsible sections stacked from the top. The Outline
-/// comes first; Backlinks has only its head so far.
-pub(super) fn right_panel(theme: &Theme, outline: Option<Entity<OutlinePanel>>) -> Div {
+/// comes first, then Backlinks, then the sections asked for.
+pub(super) fn right_panel(
+    theme: &Theme,
+    outline: Option<Entity<OutlinePanel>>,
+    panels: &Panels,
+) -> Div {
+    let section = |id: &'static str, title: &'static str| {
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(
+                section_head(id, title, None, true, true, theme).debug_selector(move || id.into()),
+            )
+            .child(empty_state(
+                ElementId::Name(format!("empty-{id}").into()),
+                "Not available yet",
+                theme,
+            ))
+    };
     div()
         .w(px(size::PANEL_WIDTH))
         .flex_none()
@@ -90,10 +382,13 @@ pub(super) fn right_panel(theme: &Theme, outline: Option<Entity<OutlinePanel>>) 
         .border_l_1()
         .border_color(theme.border.default)
         .when_some(outline, |panel, outline| panel.child(outline))
-        .child(
-            section_head("backlinks-head", "Backlinks", None, true, true, theme)
-                .debug_selector(|| "backlinks-head".into()),
-        )
+        .child(section("backlinks-head", "Backlinks"))
+        .when(panels.outgoing_links, |panel| {
+            panel.child(section("outgoing-links-head", "Links in this note"))
+        })
+        .when(panels.link_checker, |panel| {
+            panel.child(section("link-checker-head", "Link checker"))
+        })
 }
 
 /// A section head: chevron, title and, at the right, a count. A

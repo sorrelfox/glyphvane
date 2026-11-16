@@ -13,7 +13,7 @@ use gpui::{
 use super::Workspace;
 use crate::chrome::WindowChrome;
 use crate::icons::{CaptionGlyph, Icon};
-use crate::menu::{MenuButton, MenuState};
+use crate::menu::MenuButton;
 use crate::metrics::size::icon_button as button;
 use crate::metrics::spacing::{
     linux_controls, macos_controls, sidebar_head, title_row, windows_controls,
@@ -99,12 +99,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
         if self.chrome.has_menu_button() {
-            let state = MenuState {
-                mode: self.mode(),
-                can_go_back: self.can_go_back(),
-                can_go_forward: self.can_go_forward(),
-                edit_locked: !self.can_edit(self.active, cx),
-            };
+            let state = self.menu_state(self.active, cx);
             return Some(MenuButton::new(menu_button(theme), state).into_any_element());
         }
         if !self.chrome.has_system_window_controls() || window.is_fullscreen() {

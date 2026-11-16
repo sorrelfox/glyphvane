@@ -66,6 +66,7 @@ command_actions! {
         Delete = "file.delete",
         RevealInFileManager = "file.reveal_in_file_manager",
         OpenWithDefaultApp = "file.open_with_default_app",
+        CopyPath = "file.copy_path",
         History = "file.history",
         ExportHtml = "file.export_html",
         ExportPdf = "file.export_pdf",
@@ -83,6 +84,8 @@ command_actions! {
         New = "tabs.new",
         Close = "tabs.close",
         ReopenClosed = "tabs.reopen_closed",
+        CloseOthers = "tabs.close_others",
+        CloseToRight = "tabs.close_to_right",
     }
     workspace {
         CommandPalette = "workspace.command_palette",

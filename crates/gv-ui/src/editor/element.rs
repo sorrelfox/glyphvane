@@ -1219,6 +1219,28 @@ impl EditorElement {
                 cx.stop_propagation();
             });
         }
+        // Right-click: the editor's context menu.
+        {
+            let view = self.view.clone();
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || e.button != MouseButton::Right
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let focus = view.read(cx).focus.clone();
+                focus.focus(window, cx);
+                crate::menu::show_context_menu(
+                    crate::menu::ContextMenu::Editor,
+                    e.position,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            });
+        }
         {
             let view = self.view.clone();
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {

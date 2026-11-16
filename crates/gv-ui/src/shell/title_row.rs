@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The title row: panel toggles, history, tabs, the mode switch.
+//! The title row: panel toggles, history, tabs, the mode switch, More
+//! actions. A right-click on a tab opens the tab menu.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, Corners, Div, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px, transparent_black,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px, transparent_black,
 };
 
 use super::controls::{
@@ -82,14 +83,8 @@ impl Workspace {
             )
             .child(self.mode_switch(theme, cx))
             .child(
-                icon_button(
-                    "more-actions",
-                    Icon::MoreActions,
-                    icon::TOOLBAR,
-                    square,
-                    theme,
-                )
-                .ml(px(title_row::MORE_MARGIN)),
+                self.more_actions_button(theme, cx)
+                    .ml(px(title_row::MORE_MARGIN)),
             )
             .child(
                 icon_button(
@@ -115,6 +110,29 @@ impl Workspace {
                         .mr(px(linux_controls::INSET_RIGHT - title_row::PAD_X)),
                 )
             })
+    }
+
+    /// More actions: opens its menu below the button.
+    fn more_actions_button(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        let square = (button::SQUARE, button::SQUARE);
+        let anchor = self.menus.more_anchor.clone();
+        icon_button(
+            "more-actions",
+            Icon::MoreActions,
+            icon::TOOLBAR,
+            square,
+            theme,
+        )
+        .debug_selector(|| "more-actions".into())
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_more_actions(window, cx)))
+        // Where the button is, for the menu to hang below it.
+        .child(
+            canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
     }
 
     /// Back or Forward: disabled while the active tab has nowhere to go.
@@ -311,6 +329,14 @@ impl Workspace {
                             this.activate_tab(index, window, cx)
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_tab_menu(index, e.position, window, cx);
+                        }),
+                    )
+                    .debug_selector(move || format!("tab-{index}"))
                     .child(div().min_w_0().truncate().child(tab.label.name.clone()))
                     .child(trailing)
             }))

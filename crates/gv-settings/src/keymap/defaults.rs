@@ -71,6 +71,7 @@ const BUILTIN: &[Row] = &[
     ("file.delete", "Move file to trash", Category::File, None, &[]),
     ("file.reveal_in_file_manager", "Reveal in file manager", Category::File, None, &[]),
     ("file.open_with_default_app", "Open with default app", Category::File, None, &[]),
+    ("file.copy_path", "Copy file path", Category::File, None, &[]),
     ("file.history", "File history", Category::File, None, &[]),
     ("file.export_html", "Export as HTML", Category::File, None, &[]),
     ("file.export_pdf", "Export as PDF", Category::File, None, &[]),
@@ -83,6 +84,8 @@ const BUILTIN: &[Row] = &[
     ("tabs.new", "New tab", Category::Tabs, None, &[]),
     ("tabs.close", "Close tab", Category::Tabs, None, &[("secondary-w", ALL)]),
     ("tabs.reopen_closed", "Reopen closed tab", Category::Tabs, None, &[("secondary-shift-t", ALL)]),
+    ("tabs.close_others", "Close other tabs", Category::Tabs, None, &[]),
+    ("tabs.close_to_right", "Close tabs to the right", Category::Tabs, None, &[]),
 
     // Workspace
     ("workspace.command_palette", "Command palette", Category::Workspace, None,

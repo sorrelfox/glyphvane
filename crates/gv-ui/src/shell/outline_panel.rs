@@ -78,6 +78,14 @@ impl OutlinePanel {
         cx.notify();
     }
 
+    /// Expands the section (`workspace.show_outline`).
+    pub fn expand(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.open {
+            self.open = true;
+            cx.notify();
+        }
+    }
+
     fn toggle(&mut self, cx: &mut Context<'_, Self>) {
         self.open = !self.open;
         cx.notify();

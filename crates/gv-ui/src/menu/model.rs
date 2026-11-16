@@ -84,6 +84,9 @@ pub enum Requirement {
     /// The active tab may be edited (viewer mode is off, or does not apply
     /// to it).
     CanEdit,
+    /// The tab the menu is about shows a file (not an untitled document or
+    /// an empty tab).
+    HasFile,
 }
 
 /// A standard edit item the system recognises.
@@ -125,6 +128,8 @@ pub struct MenuState {
     pub can_go_forward: bool,
     /// Viewer mode keeps the active tab out of Edit and Split.
     pub edit_locked: bool,
+    /// The tab the menu is about shows a file.
+    pub has_file: bool,
 }
 
 impl MenuState {
@@ -133,6 +138,7 @@ impl MenuState {
             Requirement::CanGoBack => self.can_go_back,
             Requirement::CanGoForward => self.can_go_forward,
             Requirement::CanEdit => !self.edit_locked,
+            Requirement::HasFile => self.has_file,
         }
     }
 }
@@ -426,6 +432,12 @@ pub enum ContextMenu {
     Editor,
     /// On an entry of the file tree.
     FileTree,
+    /// On a tab of the title row. The plan gives no contents (SPEC § Not
+    /// designed yet): the usual tab menu, from existing commands.
+    Tab,
+    /// The title row's More actions button (`ellipsis`). Its menu is not
+    /// designed: commands about the active document.
+    MoreActions,
 }
 
 /// The items of a context menu. They are the same on every platform.
@@ -489,6 +501,54 @@ pub fn context_menu(kind: ContextMenu) -> Menu {
                 SEPARATOR,
                 item("file.reveal_in_file_manager", "Reveal in file manager"),
                 item("file.open_with_default_app", "Open with default app"),
+            ],
+        ),
+        ContextMenu::Tab => Menu::new(
+            "Tab",
+            [
+                item("tabs.close", "Close"),
+                item("tabs.close_others", "Close others"),
+                item("tabs.close_to_right", "Close to the right"),
+                SEPARATOR,
+                requiring("file.copy_path", "Copy path", Requirement::HasFile),
+                requiring(
+                    "workspace.reveal_in_tree",
+                    "Reveal in file tree",
+                    Requirement::HasFile,
+                ),
+                requiring(
+                    "file.reveal_in_file_manager",
+                    "Reveal in file manager",
+                    Requirement::HasFile,
+                ),
+            ],
+        ),
+        ContextMenu::MoreActions => Menu::new(
+            "More actions",
+            [
+                requiring("file.copy_path", "Copy path", Requirement::HasFile),
+                requiring(
+                    "workspace.reveal_in_tree",
+                    "Reveal in file tree",
+                    Requirement::HasFile,
+                ),
+                requiring(
+                    "file.reveal_in_file_manager",
+                    "Reveal in file manager",
+                    Requirement::HasFile,
+                ),
+                item("file.open_with_default_app", "Open with default app"),
+                SEPARATOR,
+                item("bookmarks.toggle", "Bookmark"),
+                item("file.history", "File history"),
+                item("links.list", "Links in this note…"),
+                SEPARATOR,
+                item("search.find", "Find"),
+                item("view.toggle_viewer_mode", "Viewer mode"),
+                SEPARATOR,
+                item("file.export_html", "Export as HTML…"),
+                item("file.export_pdf", "Export as PDF…"),
+                item("file.print", "Print…"),
             ],
         ),
     }

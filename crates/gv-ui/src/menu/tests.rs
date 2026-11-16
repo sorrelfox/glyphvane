@@ -296,6 +296,36 @@ fn the_context_menus_hold_their_commands() {
             "file.open_with_default_app",
         ]
     );
+    // Not designed: the usual tab menu.
+    assert_eq!(
+        context_items(ContextMenu::Tab),
+        [
+            "tabs.close",
+            "tabs.close_others",
+            "tabs.close_to_right",
+            "file.copy_path",
+            "workspace.reveal_in_tree",
+            "file.reveal_in_file_manager",
+        ]
+    );
+    // Not designed: commands about the active document.
+    assert_eq!(
+        context_items(ContextMenu::MoreActions),
+        [
+            "file.copy_path",
+            "workspace.reveal_in_tree",
+            "file.reveal_in_file_manager",
+            "file.open_with_default_app",
+            "bookmarks.toggle",
+            "file.history",
+            "links.list",
+            "search.find",
+            "view.toggle_viewer_mode",
+            "file.export_html",
+            "file.export_pdf",
+            "file.print",
+        ]
+    );
 }
 
 /// Every menu on every platform, and every context menu.
@@ -306,6 +336,8 @@ fn all_menus() -> Vec<super::model::Menu> {
             ContextMenu::Link,
             ContextMenu::Editor,
             ContextMenu::FileTree,
+            ContextMenu::Tab,
+            ContextMenu::MoreActions,
         ]
         .into_iter()
         .map(context_menu),
@@ -635,15 +667,16 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
 const WIDTH: f32 = 1280.0;
 const HEIGHT: f32 = 800.0;
 
-fn open(
+fn open_sized(
     cx: &mut TestAppContext,
     file: &Path,
     chrome: WindowChrome,
+    height: f32,
 ) -> (AnyWindowHandle, Entity<Workspace>) {
     cx.update(|cx| {
         crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
         let target = Some(OpenTarget::new(file));
-        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(WIDTH), px(HEIGHT)));
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(WIDTH), px(height)));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..WindowOptions::default()
@@ -669,10 +702,14 @@ struct Fixture {
 }
 
 fn fixture(cx: &mut TestAppContext, chrome: WindowChrome) -> Fixture {
+    fixture_sized(cx, chrome, HEIGHT)
+}
+
+fn fixture_sized(cx: &mut TestAppContext, chrome: WindowChrome, height: f32) -> Fixture {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = dir.path().join("a.md");
     std::fs::write(&file, "# A\n\nSome text.\n").expect("write");
-    let (window, workspace) = open(cx, &file, chrome);
+    let (window, workspace) = open_sized(cx, &file, chrome, height);
     let mut vcx = VisualTestContext::from_window(window, cx);
     draw(&mut vcx);
     Fixture {
@@ -872,6 +909,55 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(f.is_open(), "no enabled item to run");
     f.keys("escape");
     assert!(!f.is_open());
+}
+
+/// In a short window a tall submenu moves up to stay inside it, keeping a
+/// margin; one taller than the window scrolls, and the keys still reach
+/// every item.
+#[gpui::test]
+fn tall_submenus_fit_short_windows(cx: &mut TestAppContext) {
+    use crate::metrics::spacing::menu::EDGE;
+    let height = 360.0;
+    let mut f = fixture_sized(cx, WindowChrome::Linux, height);
+    f.click("app-menu");
+    for menu in ["File", "View", "Go"] {
+        f.click(&format!("app-menu-top:{menu}"));
+        let submenu = f.bounds("app-menu-submenu").expect("submenu drawn");
+        assert!(
+            f32::from(submenu.top()) >= EDGE - 0.5,
+            "{menu}: {submenu:?}"
+        );
+        assert!(
+            f32::from(submenu.bottom()) <= height - EDGE + 0.5,
+            "{menu}: {submenu:?}"
+        );
+    }
+    // File is taller than the window: the last item scrolls into view.
+    f.click("app-menu-top:File");
+    let submenu = f.bounds("app-menu-submenu").expect("submenu drawn");
+    assert!(
+        (f32::from(submenu.size.height) - (height - 2.0 * EDGE)).abs() < 0.5,
+        "{submenu:?}"
+    );
+    let quit = |f: &mut Fixture| f.bounds("app-menu-item:app.quit").expect("drawn");
+    assert!(
+        quit(&mut f).top() >= submenu.bottom(),
+        "Quit starts out of view"
+    );
+    f.keys("end");
+    let item = quit(&mut f);
+    assert!(
+        item.top() >= submenu.top() && item.bottom() <= submenu.bottom(),
+        "{item:?} in {submenu:?}"
+    );
+    // Home goes back to the first enabled item, New tab.
+    f.keys("home");
+    let first = f.bounds("app-menu-item:tabs.new").expect("drawn");
+    assert!(
+        first.top() >= submenu.top() && first.bottom() <= submenu.bottom(),
+        "{first:?} in {submenu:?}"
+    );
+    assert!(f.is_open());
 }
 
 /// F10 opens the menu from the keyboard on Windows and Linux.

@@ -7,18 +7,22 @@
 //! last published and redraws when a newer one arrives, keeping open
 //! folders and the selection. The active tab's file is selected and
 //! revealed. Rows are drawn lazily, so the size of the vault does not
-//! matter.
+//! matter. A right-click on a row selects it and opens the file tree's
+//! context menu.
 
+use std::cell::Cell;
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _, Render,
-    ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, UniformListScrollHandle, Window, div, px, radians, uniform_list,
+    AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
+    canvas, div, px, radians, uniform_list,
 };
 
 use super::controls::icon_button;
@@ -77,6 +81,9 @@ pub(crate) struct FilesPanel {
     /// The active tab's file, selected and revealed.
     active: Option<PathBuf>,
     scroll: UniformListScrollHandle,
+    /// The selected row as last drawn, in window coordinates, for the
+    /// context menu key.
+    selected_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     _vault_changed: Option<Subscription>,
 }
 
@@ -110,6 +117,7 @@ impl FilesPanel {
             tree: None,
             active,
             scroll: UniformListScrollHandle::new(),
+            selected_bounds: Rc::default(),
             _vault_changed: None,
         };
         if let Some(vault) = vault {
@@ -151,6 +159,39 @@ impl FilesPanel {
             }
         }
         cx.notify();
+    }
+
+    /// Selects the active tab's file again and scrolls to it
+    /// (`workspace.reveal_in_tree`).
+    pub fn reveal(&mut self, cx: &mut Context<'_, Self>) {
+        self.reveal_active();
+        cx.notify();
+    }
+
+    /// The selected row, where the context menu key opens the menu.
+    pub fn selected_row_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.selected_bounds.get()
+    }
+
+    /// A right-click on row `row`: selects it without opening it and opens
+    /// the file tree's context menu at `position`.
+    fn context_row(
+        &mut self,
+        row: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.focus.focus(window, cx);
+        let Some(tree) = &mut self.tree else {
+            return;
+        };
+        let Some(id) = tree.rows().get(row).map(|r| r.id) else {
+            return;
+        };
+        tree.select(id);
+        cx.notify();
+        crate::menu::show_context_menu(crate::menu::ContextMenu::FileTree, position, window, cx);
     }
 
     fn reveal_active(&mut self) {
@@ -330,6 +371,9 @@ impl FilesPanel {
             return Vec::new();
         };
         let selected = tree.selected_row();
+        if selected.is_none_or(|row| !range.contains(&row)) {
+            self.selected_bounds.set(None);
+        }
         let rows =
             &tree.rows()[range.start.min(tree.rows().len())..range.end.min(tree.rows().len())];
         rows.iter()
@@ -360,7 +404,24 @@ impl FilesPanel {
                         .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.click_row(ix, window, cx)),
-                        );
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.context_row(ix, e.position, window, cx);
+                            }),
+                        )
+                        .when(selected == Some(ix), |row| {
+                            let bounds = self.selected_bounds.clone();
+                            row.child(
+                                canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            )
+                        });
                 // The list sizes its items to their content: a full-width
                 // slot holds the row and its side margins.
                 div()

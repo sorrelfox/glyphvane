@@ -10,6 +10,9 @@ mod files_panel;
 mod files_panel_tests;
 mod history;
 mod infobar;
+mod menus;
+#[cfg(test)]
+mod menus_tests;
 #[cfg(test)]
 mod navigation_tests;
 mod outline_panel;
@@ -534,6 +537,10 @@ pub struct Workspace {
     _settings: Subscription,
     /// The status bar's profile chip menu.
     profile_menu: profile_chip::ProfileMenu,
+    /// The context menu and the More actions button.
+    menus: menus::ShellMenus,
+    /// Which side panels show.
+    panels: panels::Panels,
     /// The profiles follow the overrides picked in any window.
     _profiles: Subscription,
 }
@@ -664,6 +671,8 @@ impl Workspace {
             _release: release,
             _settings: settings,
             profile_menu: profile_chip::ProfileMenu::default(),
+            menus: menus::ShellMenus::new(window, cx),
+            panels: panels::Panels::default(),
             _profiles: profiles,
         };
         // The document takes the keyboard from the start (copy, scrolling).
@@ -1706,7 +1715,7 @@ impl Render for Workspace {
                 this.go_forward(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                this.close_tab(this.active, window, cx);
+                this.close_tab(this.command_tab(cx), window, cx);
             }))
             .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                 this.reopen_closed_tab(window, cx);
@@ -1720,6 +1729,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &file_commands::SaveAs, _, cx| {
                 this.save_as_active(cx);
             }))
+            .map(|root| self.menu_actions(root, cx))
+            .map(|root| self.panel_actions(root, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1777,7 +1788,11 @@ impl Render for Workspace {
                                             .child(self.render_document(theme, cx)),
                                     )
                                     .when(self.panel_open, |row| {
-                                        row.child(panels::right_panel(theme, self.outline.clone()))
+                                        row.child(panels::right_panel(
+                                            theme,
+                                            self.outline.clone(),
+                                            &self.panels,
+                                        ))
                                     }),
                             ),
                     ),
@@ -1791,6 +1806,7 @@ impl Render for Workspace {
                 radii,
             ))
             .children(profile_menu)
+            .child(self.menus.popover.clone())
             .children(self.heading_probe(cx))
             .children(self.anchor_probe())
     }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The application menu: File, Edit, Format, View, Go and Help ([`model`]).
+//! The application menu: File, Edit, Format, View, Go, Help and, on macOS,
+//! the application and Window menus ([`model`]); and the context menus
+//! ([`context`]).
 //!
 //! - **macOS:** the system menu bar, set with [`gpui::App::set_menus`]. The
 //!   system shows each item's shortcut from the key bindings (a chord such
@@ -13,10 +15,16 @@
 //!   submenu beside it. Submenus keep the popover as short as the menu bar
 //!   it replaces and keep the macOS structure. F10 (`app.open_menu`) opens
 //!   it from the keyboard; arrow keys move and open, Enter runs, Esc closes;
-//!   the shortcut labels come from the keymap.
+//!   the shortcut labels come from the keymap. A submenu taller than the
+//!   room below its row moves up, and scrolls when taller than the window.
+//! - **Context menus** (link, editor, file tree, tab, More actions): one
+//!   panel at the pointer, a button or the caret, drawn the same way
+//!   ([`context`]).
 //!
-//! The menu's contents and the submenu layout are not designed.
+//! The menu's contents, the submenu layout and every context menu but the
+//! link menu are not designed.
 
+pub mod context;
 pub mod model;
 mod popover;
 #[cfg(test)]
@@ -26,8 +34,12 @@ use gpui::{App, KeyBinding, OsAction, SystemMenuType};
 use gv_settings::keymap::Platform;
 
 use crate::keymap::action_for;
+pub use context::{
+    ContextMenuPopover, ContextTarget, Placement, context_menu_of, context_target,
+    show_context_menu,
+};
+pub use model::{ContextMenu, Item, Menu, MenuState};
 use model::{Entry, Role, SystemEntry};
-pub use model::{Item, Menu, MenuState};
 pub use popover::{DEBUG_APP_MENU_ENV, MenuButton, MenuPopover};
 pub(crate) use popover::{open_in_last_window, panel, row, separator};
 

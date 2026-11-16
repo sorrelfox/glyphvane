@@ -9,6 +9,10 @@
 //! layer, so a click outside only closes it. A command runs where the
 //! keyboard was before the menu opened, as if its keys had been pressed
 //! there; the menu enables an item only when that place handles its command.
+//!
+//! A submenu taller than the room below its menu's row moves up to stay in
+//! the window; one taller than the window keeps a margin at both ends and
+//! scrolls, following the highlighted item (not designed).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,10 +20,10 @@ use std::sync::OnceLock;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, Context, Div, FocusHandle, Global,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Render,
-    RenderOnce, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window,
-    anchored, canvas, deferred, div, point, px,
+    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, Context, Div, ElementId, FocusHandle,
+    Global, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Render,
+    RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, anchored, canvas, deferred, div, point, px,
 };
 use gv_settings::keymap::Platform;
 
@@ -188,6 +192,8 @@ pub struct MenuPopover {
     item: Option<usize>,
     /// The menu button, in window coordinates.
     anchor: Rc<Cell<Bounds<Pixels>>>,
+    /// The submenu's scrolling, when it is taller than the window.
+    scroll: ScrollHandle,
     debug_opened: bool,
 }
 
@@ -214,6 +220,7 @@ impl MenuPopover {
             submenu: false,
             item: None,
             anchor: Rc::default(),
+            scroll: ScrollHandle::new(),
             debug_opened: false,
         }
     }
@@ -273,28 +280,27 @@ impl MenuPopover {
         }
         self.top = index;
         self.submenu = true;
+        self.scroll.set_offset(point(px(0.0), px(0.0)));
         self.item = if select_first {
             self.enabled_entries(window).first().copied()
         } else {
             None
         };
+        self.reveal_item();
         cx.notify();
+    }
+
+    /// Scrolls a submenu taller than the window to its highlighted item.
+    fn reveal_item(&self) {
+        if let (Some(item), Some(menu)) = (self.item, self.menus.get(self.top)) {
+            self.scroll.scroll_to_item(child_index(&menu.entries, item));
+        }
     }
 
     /// Whether `item` can run now: its condition holds and its command has
     /// a handler where the keyboard was.
     fn enabled(&self, item: &Item, window: &Window) -> bool {
-        if item.requires.is_some_and(|r| !self.state.allows(r)) {
-            return false;
-        }
-        let Some(action) = action_for(item.command) else {
-            return false;
-        };
-        keymap::APP_COMMANDS.contains(&item.command)
-            || self
-                .restore
-                .as_ref()
-                .is_some_and(|focus| window.is_action_available_in(action.as_ref(), focus))
+        item_enabled(item, self.state, self.restore.as_ref(), window)
     }
 
     /// The indices of the open submenu's enabled items.
@@ -331,6 +337,7 @@ impl MenuPopover {
                 (None, false) => len - 1,
             };
             self.item = Some(enabled[next]);
+            self.reveal_item();
         } else {
             let len = self.menus.len();
             self.top = if forward {
@@ -351,6 +358,7 @@ impl MenuPopover {
             } else {
                 enabled.first().copied()
             };
+            self.reveal_item();
         } else {
             self.top = if last { self.menus.len() - 1 } else { 0 };
         }
@@ -403,6 +411,131 @@ impl MenuPopover {
         self.close(window, cx);
         window.dispatch_action(action, cx);
     }
+}
+
+/// Whether `item` can run: its condition holds in `state` and its command
+/// has a handler where the keyboard was (`restore`). The application's own
+/// commands run anywhere.
+pub(super) fn item_enabled(
+    item: &Item,
+    state: MenuState,
+    restore: Option<&FocusHandle>,
+    window: &Window,
+) -> bool {
+    if item.requires.is_some_and(|r| !state.allows(r)) {
+        return false;
+    }
+    let Some(action) = action_for(item.command) else {
+        return false;
+    };
+    keymap::APP_COMMANDS.contains(&item.command)
+        || restore.is_some_and(|focus| window.is_action_available_in(action.as_ref(), focus))
+}
+
+/// The height of a panel holding `entries`: its border and padding, 24 per
+/// item and 9 per separator. The system's own entries are not drawn.
+pub(crate) fn panel_height(entries: &[Entry]) -> f32 {
+    let separator = HAIRLINE + 2.0 * spacing::SEPARATOR_MARGIN_Y;
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Command(_) => MENU_ROW,
+            Entry::Separator => separator,
+            Entry::System(_) => 0.0,
+        })
+        .sum::<f32>()
+        + 2.0 * (HAIRLINE + spacing::PAD)
+}
+
+/// Where a panel `height` high that would start at `top` goes in a window
+/// `viewport` high, keeping [`spacing::EDGE`] from both ends: moved up as
+/// far as it needs, and if it is still too tall, given the window's height
+/// less the margins (it then scrolls). Returns its top and that cap.
+pub(crate) fn fit_vertically(top: f32, height: f32, viewport: f32) -> (f32, Option<f32>) {
+    let margin = spacing::EDGE;
+    let room = (viewport - 2.0 * margin).max(MENU_ROW);
+    if height > room {
+        return (margin, Some(room));
+    }
+    (top.min(viewport - margin - height).max(margin), None)
+}
+
+/// Where a panel `width` wide that would start at `left` goes in a window
+/// `viewport` wide: at `flip` (the panel's left when it opens the other
+/// way) when it would cross the right edge, and never past the margins.
+pub(crate) fn fit_horizontally(left: f32, flip: f32, width: f32, viewport: f32) -> f32 {
+    let margin = spacing::EDGE;
+    let left = if left + width > viewport - margin {
+        flip
+    } else {
+        left
+    };
+    left.min(viewport - margin - width).max(margin)
+}
+
+/// The position of entry `index` among the drawn rows (the system's own
+/// entries are not drawn).
+pub(super) fn child_index(entries: &[Entry], index: usize) -> usize {
+    entries[..index.min(entries.len())]
+        .iter()
+        .filter(|e| !matches!(e, Entry::System(_)))
+        .count()
+}
+
+/// How an item's row is drawn.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ItemLook {
+    pub enabled: bool,
+    pub highlighted: bool,
+    /// `Some` when the menu has checks: whether this item is checked.
+    pub check: Option<bool>,
+}
+
+/// An item's row: a check slot when the menu has checks, the title, and
+/// the shortcut from the keymap; dimmed when disabled. `prefix` names the
+/// menu in the debug selectors (`{prefix}-item:{command}`).
+pub(super) fn item_row(
+    prefix: &'static str,
+    index: usize,
+    item: Item,
+    look: ItemLook,
+    theme: &Theme,
+    cx: &App,
+) -> Stateful<Div> {
+    let ItemLook {
+        enabled,
+        highlighted,
+        check,
+    } = look;
+    let shortcut = keymap::shortcut(cx, item.command);
+    let command = item.command;
+    row(theme, enabled && highlighted)
+        .id(ElementId::NamedInteger(
+            format!("{prefix}-item").into(),
+            index as u64,
+        ))
+        .debug_selector(move || format!("{prefix}-item:{command}"))
+        .when(!enabled, |row| row.opacity(DISABLED_OPACITY))
+        .when_some(check, |row, checked| {
+            row.child(div().flex_none().w(px(icon::ROW)).when(checked, |slot| {
+                slot.debug_selector(move || format!("{prefix}-check:{command}"))
+                    .child(Icon::MenuCheck.sized(icon::ROW))
+            }))
+        })
+        .child(label(item.title).when(!enabled, |label| {
+            label.debug_selector(move || format!("{prefix}-disabled:{command}"))
+        }))
+        .children(shortcut.map(|shortcut| {
+            let selector = format!("{prefix}-shortcut:{shortcut}");
+            div()
+                .debug_selector(move || selector.clone())
+                .flex_none()
+                .ml(px(spacing::SHORTCUT_GAP))
+                .font_family(font::EDITOR)
+                .text_size(px(text::MENU_SHORTCUT_SIZE))
+                .text_color(theme.text.secondary)
+                .child(shortcut)
+        }))
 }
 
 /// `shadow.popover`, the application's only shadow.
@@ -508,49 +641,37 @@ impl MenuPopover {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let enabled = self.enabled(&item, window);
-        let highlighted = enabled && self.item == Some(index);
         let checked = item.mode.is_some_and(|mode| mode == self.state.mode);
-        let shortcut = keymap::shortcut(cx, item.command);
-        let command = item.command;
-        row(theme, highlighted)
-            .id(("app-menu-item", index))
-            .debug_selector(move || format!("app-menu-item:{command}"))
-            .map(|row| {
-                if enabled {
-                    row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.item != Some(index) {
-                            this.item = Some(index);
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, window, cx| this.run(item, window, cx)))
-                } else {
-                    row.opacity(DISABLED_OPACITY)
+        item_row(
+            "app-menu",
+            index,
+            item,
+            ItemLook {
+                enabled,
+                highlighted: self.item == Some(index),
+                check: checks.then_some(checked),
+            },
+            theme,
+            cx,
+        )
+        .when(enabled, |row| {
+            row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && this.item != Some(index) {
+                    this.item = Some(index);
+                    cx.notify();
                 }
-            })
-            .when(checks, |row| {
-                row.child(div().flex_none().w(px(icon::ROW)).when(checked, |slot| {
-                    slot.debug_selector(move || format!("app-menu-check:{command}"))
-                        .child(Icon::MenuCheck.sized(icon::ROW))
-                }))
-            })
-            .child(label(item.title))
-            .children(shortcut.map(|shortcut| {
-                let selector = format!("app-menu-shortcut:{shortcut}");
-                div()
-                    .debug_selector(move || selector.clone())
-                    .flex_none()
-                    .ml(px(spacing::SHORTCUT_GAP))
-                    .font_family(font::EDITOR)
-                    .text_size(px(text::MENU_SHORTCUT_SIZE))
-                    .text_color(theme.text.secondary)
-                    .child(shortcut)
             }))
-            .into_any_element()
+            .on_click(cx.listener(move |this, _, window, cx| this.run(item, window, cx)))
+        })
+        .into_any_element()
     }
 
+    /// The open menu's items at the right of the menus, the first level
+    /// with its menu's row, moved up or scrolling to fit the window.
+    /// `origin` is the top of the menus in the window.
     fn submenu_panel(
         &self,
+        origin: Pixels,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<'_, Self>,
@@ -567,13 +688,20 @@ impl MenuPopover {
                 Entry::System(_) => None,
             })
             .collect();
+        let origin = f32::from(origin);
+        let natural = origin + self.top as f32 * MENU_ROW;
+        let viewport = f32::from(window.viewport_size().height);
+        let (top, cap) = fit_vertically(natural, panel_height(&menu.entries), viewport);
         Some(
             panel(theme)
+                .id("app-menu-submenu")
                 .debug_selector(|| "app-menu-submenu".into())
                 .absolute()
                 .left(px(MENU_WIDTH + spacing::SUBMENU_GAP))
-                // The first item level with its menu's row.
-                .top(px(self.top as f32 * MENU_ROW))
+                .top(px(top - origin))
+                .when_some(cap, |panel, cap| panel.max_h(px(cap)))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
                 .children(rows)
                 .into_any_element(),
         )
@@ -595,8 +723,9 @@ impl Render for MenuPopover {
                     .enumerate()
                     .map(|(index, title)| self.top_row(index, title, theme, cx)),
             );
+        let origin = anchor.bottom() + px(spacing::OFFSET_Y);
         let submenu = if self.submenu {
-            self.submenu_panel(theme, window, cx)
+            self.submenu_panel(origin, theme, window, cx)
         } else {
             None
         };
@@ -638,7 +767,7 @@ impl Render for MenuPopover {
                 div()
                     .absolute()
                     .left(anchor.left())
-                    .top(anchor.bottom() + px(spacing::OFFSET_Y))
+                    .top(origin)
                     .child(menus)
                     .children(submenu),
             )

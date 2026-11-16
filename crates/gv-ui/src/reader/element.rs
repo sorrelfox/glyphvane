@@ -1005,6 +1005,30 @@ impl ReaderElement {
             });
         }
 
+        // Right-click on a link: the link menu.
+        {
+            let state = self.state.clone();
+            let hitbox = hitbox.clone();
+            let focus = self.focus.clone();
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || e.button != MouseButton::Right
+                    || !hitbox.is_hovered(window)
+                    || state.borrow().link_at(e.position).is_none()
+                {
+                    return;
+                }
+                focus.focus(window, cx);
+                crate::menu::show_context_menu(
+                    crate::menu::ContextMenu::Link,
+                    e.position,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            });
+        }
+
         // Presses.
         {
             let state = self.state.clone();
