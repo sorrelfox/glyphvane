@@ -939,6 +939,7 @@ impl ReparseTask {
             | (Kind::Paragraph { .. }, Kind::Paragraph { .. })
             | (Kind::FencedCode { .. }, Kind::FencedCode { .. })
             | (Kind::MathBlock { .. }, Kind::MathBlock { .. })
+            | (Kind::CommentBlock { .. }, Kind::CommentBlock { .. })
             | (Kind::FrontMatter { .. }, Kind::FrontMatter { .. }) => true,
             (a, b) => a == b,
         };
@@ -1024,6 +1025,7 @@ fn phantom_kind(k: Kind) -> BlockKind {
         Kind::FencedCode { .. } => BlockKind::FencedCode,
         Kind::IndentedCode => BlockKind::IndentedCode,
         Kind::MathBlock { .. } => BlockKind::MathBlock,
+        Kind::CommentBlock { .. } => BlockKind::CommentBlock,
         Kind::Html { ty } => BlockKind::Html { kind: ty },
         Kind::Heading => BlockKind::AtxHeading { level: 1 },
         Kind::ThematicBreak => BlockKind::ThematicBreak,

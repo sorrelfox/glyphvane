@@ -98,7 +98,9 @@ fn kind_code(kind: LeafKind) -> Option<u8> {
         LeafKind::Heading { .. } => Some(2),
         LeafKind::Table => Some(3),
         LeafKind::FrontMatter { .. } => Some(4),
-        LeafKind::ThematicBreak
+        LeafKind::CalloutTitle => Some(5),
+        LeafKind::Comment
+        | LeafKind::ThematicBreak
         | LeafKind::FencedCode
         | LeafKind::IndentedCode
         | LeafKind::Html { .. }

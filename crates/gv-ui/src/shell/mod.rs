@@ -5,6 +5,9 @@
 
 mod controls;
 mod document;
+mod export;
+#[cfg(test)]
+mod export_tests;
 mod file_ops;
 #[cfg(test)]
 mod file_ops_tests;

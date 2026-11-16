@@ -186,6 +186,7 @@ pub fn detect(path: Option<&Path>, cx: &App) -> TabProfile {
             reason: Reason::Default,
             config: None,
             switches_apply: false,
+            tuning: gv_profile::Tuning::default(),
         },
     };
     for d in detection.config_diagnostics() {

@@ -164,7 +164,7 @@ impl Visitor for Collector<'_> {
             return;
         };
         let kind = match open.kind {
-            ContainerKind::BlockQuote => FoldKind::BlockQuote,
+            ContainerKind::BlockQuote | ContainerKind::Callout { .. } => FoldKind::BlockQuote,
             ContainerKind::Item if open.children > 1 => FoldKind::ListItem,
             _ => return,
         };
@@ -189,12 +189,13 @@ impl Visitor for Collector<'_> {
                 }
                 return;
             }
-            // A `$$` math block folds like a fence.
-            LeafKind::FencedCode | LeafKind::MathBlock => FoldKind::FencedCode,
+            // A `$$` math block and a `%%` comment fold like a fence.
+            LeafKind::FencedCode | LeafKind::MathBlock | LeafKind::Comment => FoldKind::FencedCode,
             LeafKind::IndentedCode => FoldKind::IndentedCode,
             LeafKind::Html { .. } => FoldKind::Html,
             LeafKind::FrontMatter { .. } => FoldKind::FrontMatter,
             LeafKind::Paragraph
+            | LeafKind::CalloutTitle
             | LeafKind::ThematicBreak
             | LeafKind::LinkRefDef
             | LeafKind::Table => return,

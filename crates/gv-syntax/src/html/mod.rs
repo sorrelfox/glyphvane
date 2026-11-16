@@ -192,7 +192,10 @@ impl<S: TextSource + ?Sized> Renderer<'_, S> {
                 segments: &self.segments,
             },
             &*self.refs,
-            self.inline,
+            crate::inline::InlineOptions {
+                block_ids: self.inline.block_ids && leaf.kind == LeafKind::Paragraph,
+                ..self.inline
+            },
         );
         self.render_inlines(&tree);
     }
@@ -483,6 +486,24 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                     marker: String::from_utf8_lossy(&self.buf).into_owned(),
                 };
             }
+            ContainerKind::Callout { fold } => {
+                // Obsidian's callout markup (simplified).
+                self.cr();
+                self.buf.clear();
+                if let Some(t) = c.callout_type() {
+                    self.text.copy_range(t, &mut self.buf);
+                }
+                let ty = String::from_utf8_lossy(&self.buf).to_lowercase();
+                self.out.push_str("<div class=\"callout\" data-callout=\"");
+                escape_html(&mut self.out, ty.trim());
+                self.out.push('"');
+                if fold.is_foldable() {
+                    self.out.push_str(" data-callout-fold=\"");
+                    self.out.push_str(fold.name());
+                    self.out.push('"');
+                }
+                self.out.push_str(">\n");
+            }
             ContainerKind::FootnoteDefinition => {
                 self.buf.clear();
                 if let Some(l) = c.footnote_label() {
@@ -542,6 +563,10 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
             ContainerKind::BlockQuote => {
                 self.cr();
                 self.out.push_str("</blockquote>\n");
+            }
+            ContainerKind::Callout { .. } => {
+                self.cr();
+                self.out.push_str("</div>\n");
             }
             ContainerKind::Alert { .. } => {
                 if let OpenState::Alert {
@@ -626,6 +651,12 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                 self.out.push(tag);
                 self.out.push_str(">\n");
             }
+            LeafKind::CalloutTitle => {
+                self.cr();
+                self.out.push_str("<div class=\"callout-title\">");
+                self.inlines(leaf);
+                self.out.push_str("</div>\n");
+            }
             LeafKind::ThematicBreak => {
                 self.cr();
                 self.out.push_str("<hr />\n");
@@ -658,7 +689,8 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                 self.out.push_str("</span></p>\n");
             }
             // Front matter is metadata; this emitter renders nothing for it.
-            LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => {}
+            // Front matter is metadata; comments are hidden.
+            LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } | LeafKind::Comment => {}
         }
     }
 }

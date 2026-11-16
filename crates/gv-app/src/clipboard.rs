@@ -2,7 +2,15 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The HTML flavor of the system clipboard, read through `arboard` for smart
-//! paste (GPUI's clipboard item carries no HTML).
+//! paste and written for *Copy as rich text* (GPUI's clipboard item carries
+//! no HTML).
+//!
+//! Writing works like reading: on demand, on a worker thread that keeps the
+//! platform clipboard open (on X11 and Wayland the program that copied
+//! serves the data for as long as it holds the clipboard), and the UI
+//! thread waits at most [`WRITE_TIMEOUT`]. A failure (no data-control
+//! protocol and no X server, a stuck connection) is reported, and the copy
+//! falls back to plain text.
 //!
 //! - **On demand only.** Nothing is read until a paste asks, and the
 //!   clipboard is never polled. The platform clipboard is opened at the
@@ -42,6 +50,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use gv_ui::editor::{ClipboardHtml, HtmlClipboard};
+use gv_ui::export::RichClipboard;
 
 /// How long a paste waits for the clipboard's HTML. Programs that own the
 /// clipboard answer within milliseconds; this only bounds a stuck owner.
@@ -50,6 +59,104 @@ pub const READ_TIMEOUT: Duration = Duration::from_millis(400);
 /// The system clipboard's HTML, as smart paste reads it.
 pub fn system_reader() -> Rc<dyn HtmlClipboard> {
     Rc::new(WorkerReader::new(ArboardSource::default(), READ_TIMEOUT))
+}
+
+/// How long *Copy as rich text* waits for the clipboard to take the HTML.
+pub const WRITE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// The system clipboard, as *Copy as rich text* writes to it.
+pub fn system_writer() -> Rc<dyn RichClipboard> {
+    Rc::new(WorkerWriter::new(ArboardSink::default(), WRITE_TIMEOUT))
+}
+
+/// Something that puts HTML with a plain-text alternative on the clipboard,
+/// blocking.
+trait HtmlSink {
+    fn write_html(&mut self, html: &str, text: &str) -> Result<(), String>;
+}
+
+/// The platform clipboard through `arboard`, opened at the first write and
+/// kept open, so that it goes on serving what was copied.
+#[derive(Default)]
+struct ArboardSink {
+    clipboard: Option<arboard::Clipboard>,
+}
+
+impl HtmlSink for ArboardSink {
+    fn write_html(&mut self, html: &str, text: &str) -> Result<(), String> {
+        let clipboard = match &mut self.clipboard {
+            Some(clipboard) => clipboard,
+            slot => slot.insert(arboard::Clipboard::new().map_err(|e| e.to_string())?),
+        };
+        clipboard.set().html(html, Some(text)).map_err(|e| {
+            // Open the clipboard again next time.
+            self.clipboard = None;
+            e.to_string()
+        })
+    }
+}
+
+/// A write request to the worker: the HTML, its text and where to answer.
+type WriteRequest = (String, String, mpsc::SyncSender<Result<(), String>>);
+
+/// Writes to the clipboard on a worker thread, started at the first write,
+/// and waits for it at most `timeout`.
+struct WorkerWriter<S> {
+    sink: RefCell<Option<S>>,
+    requests: RefCell<Option<mpsc::Sender<WriteRequest>>>,
+    timeout: Duration,
+}
+
+impl<S: HtmlSink + Send + 'static> WorkerWriter<S> {
+    fn new(sink: S, timeout: Duration) -> Self {
+        Self {
+            sink: RefCell::new(Some(sink)),
+            requests: RefCell::new(None),
+            timeout,
+        }
+    }
+
+    fn requests(&self) -> Result<mpsc::Sender<WriteRequest>, String> {
+        let mut requests = self.requests.borrow_mut();
+        if requests.is_none() {
+            let mut sink = self
+                .sink
+                .borrow_mut()
+                .take()
+                .ok_or("the clipboard writer could not start")?;
+            let (tx, rx) = mpsc::channel::<WriteRequest>();
+            std::thread::Builder::new()
+                .name("clipboard-write".into())
+                .spawn(move || {
+                    for (html, text, reply) in rx {
+                        // The copy may have stopped waiting.
+                        let _ = reply.send(sink.write_html(&html, &text));
+                    }
+                })
+                .map_err(|e| format!("cannot start the clipboard writer: {e}"))?;
+            *requests = Some(tx);
+        }
+        requests
+            .clone()
+            .ok_or_else(|| "no clipboard writer".to_owned())
+    }
+}
+
+impl<S: HtmlSink + Send + 'static> RichClipboard for WorkerWriter<S> {
+    fn write(&self, html: &str, text: &str) -> Result<(), String> {
+        let requests = self.requests()?;
+        let (reply, answer) = mpsc::sync_channel(1);
+        requests
+            .send((html.to_owned(), text.to_owned(), reply))
+            .map_err(|_| "the clipboard writer has stopped".to_owned())?;
+        match answer.recv_timeout(self.timeout) {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "the clipboard did not take the text within {:?}",
+                self.timeout
+            )),
+        }
+    }
 }
 
 /// Something that reads the clipboard's HTML, blocking.
@@ -235,6 +342,71 @@ mod tests {
         assert_eq!(WorkerReader::new(fake, LONG).read_html(), None);
         let (fake, _) = Fake::new(Ok("  \n"), Duration::ZERO);
         assert_eq!(WorkerReader::new(fake, LONG).read_html(), None);
+    }
+
+    /// Records writes, or fails, after an optional delay.
+    struct FakeSink {
+        written: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        fail: bool,
+        delay: Duration,
+    }
+
+    impl HtmlSink for FakeSink {
+        fn write_html(&mut self, html: &str, text: &str) -> Result<(), String> {
+            std::thread::sleep(self.delay);
+            if self.fail {
+                return Err("no data-control protocol".into());
+            }
+            self.written
+                .lock()
+                .expect("lock")
+                .push((html.to_owned(), text.to_owned()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rich_text_is_written_on_the_worker() {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = FakeSink {
+            written: Arc::clone(&written),
+            fail: false,
+            delay: Duration::ZERO,
+        };
+        let writer = WorkerWriter::new(sink, LONG);
+        assert_eq!(writer.write("<b>x</b>", "x"), Ok(()));
+        assert_eq!(writer.write("<i>y</i>", "y"), Ok(()));
+        assert_eq!(
+            *written.lock().expect("lock"),
+            [
+                ("<b>x</b>".to_owned(), "x".to_owned()),
+                ("<i>y</i>".to_owned(), "y".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn write_failures_and_timeouts_are_reported() {
+        let failing = FakeSink {
+            written: Arc::default(),
+            fail: true,
+            delay: Duration::ZERO,
+        };
+        assert!(
+            WorkerWriter::new(failing, LONG)
+                .write("<b>x</b>", "x")
+                .is_err()
+        );
+        let slow = FakeSink {
+            written: Arc::default(),
+            fail: false,
+            delay: Duration::from_millis(300),
+        };
+        assert!(
+            WorkerWriter::new(slow, Duration::from_millis(20))
+                .write("<b>x</b>", "x")
+                .is_err()
+        );
     }
 
     #[test]

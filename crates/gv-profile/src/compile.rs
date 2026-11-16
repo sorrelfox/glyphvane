@@ -73,6 +73,16 @@ pub struct Tuning {
 }
 
 impl Tuning {
+    /// The tuning in an Obsidian vault's `.obsidian/app.json`: its top-level
+    /// `strictLineBreaks`. A missing key, another value or a file that is
+    /// not JSON leaves the default.
+    #[must_use]
+    pub fn from_obsidian_app_json(text: &str) -> Tuning {
+        Tuning {
+            strict_line_breaks: json_top_level_bool(text, "strictLineBreaks"),
+        }
+    }
+
     fn apply(self, id: ProfileId, switches: &mut Switches) {
         if id == ProfileId::Obsidian
             && let Some(strict) = self.strict_line_breaks
@@ -84,6 +94,47 @@ impl Tuning {
             };
         }
     }
+}
+
+/// The value of `key` in the top-level JSON object `text` when it is
+/// `true` or `false`. Strings and nested values are skipped, so a key of the
+/// same name inside them does not count.
+fn json_top_level_bool(text: &str, key: &str) -> Option<bool> {
+    let b = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    let mut found = None;
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'"' => {
+                let start = i + 1;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                let name = text.get(start..i.min(b.len()))?;
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if depth == 1 && name == key && b.get(j) == Some(&b':') {
+                    let rest = text[j + 1..].trim_start();
+                    found = if rest.starts_with("true") {
+                        Some(true)
+                    } else if rest.starts_with("false") {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    found
 }
 
 /// A block-level extension rule. CommonMark's own block rules are always
@@ -334,6 +385,27 @@ pub fn compile(id: ProfileId, tuning: Tuning, overrides: &SwitchOverrides) -> Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_json_tuning() {
+        let t = |s: &str| Tuning::from_obsidian_app_json(s).strict_line_breaks;
+        assert_eq!(t(r#"{"strictLineBreaks": true}"#), Some(true));
+        assert_eq!(
+            t("{\n  \"a\": {\"strictLineBreaks\": true},\n  \"strictLineBreaks\" : false\n}"),
+            Some(false)
+        );
+        assert_eq!(t(r#"{"a": {"strictLineBreaks": true}}"#), None);
+        assert_eq!(t(r#"{"x": "\"strictLineBreaks\": true"}"#), None);
+        assert_eq!(t("not json"), None);
+        assert_eq!(t("{}"), None);
+        let p = compile(
+            ProfileId::Obsidian,
+            Tuning::from_obsidian_app_json(r#"{"strictLineBreaks":true}"#),
+            &SwitchOverrides::new(),
+        );
+        assert_eq!(p.switches.soft_break, crate::switches::SoftBreak::Space);
+        assert_eq!(p.changed, ["soft_break"]);
+    }
     use crate::switches::{FenceMeta, HtmlMarkdown, RawHtml, Slugs, SoftBreak, TaskLists};
 
     #[test]

@@ -14,6 +14,7 @@ futures = { workspace = true }
 gpui = { workspace = true }
 gv-diagram = { workspace = true }
 gv-editor = { workspace = true }
+gv-export = { workspace = true }
 gv-highlight = { workspace = true }
 gv-html = { workspace = true }
 gv-inline = { workspace = true }

@@ -98,6 +98,13 @@ fn document() -> impl Strategy<Value = String> {
         Just("<div>\n# html\n</div>\n".to_owned()),
         Just("\n".to_owned()),
         Just("plain text line\n".to_owned()),
+        // Obsidian (text in other profiles).
+        heading_text().prop_map(|t| format!(
+            "See [[Note#{t}|alias]] and ![[img.png]] #tag/x ^id-{}\n",
+            t.len()
+        )),
+        Just("- item ^b1\n\n^own\n".to_owned()),
+        Just("> [!note] T [[x]]\n> #t body\n".to_owned()),
     ];
     prop::collection::vec(block, 0..14).prop_map(|v| v.concat())
 }
@@ -129,6 +136,11 @@ const SNIPPETS: &[&str] = &[
     "---\n",
     "+++\n",
     "...\n",
+    "[[",
+    "]]",
+    "#t",
+    " ^a",
+    "^",
 ];
 
 #[derive(Debug, Clone)]
@@ -172,12 +184,14 @@ fn apply(text: &mut String, e: &EditSpec) -> Change {
 /// Everything a model holds, as comparable values.
 fn snapshot(m: &DocModel) -> String {
     let mut s = format!(
-        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n",
+        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n",
         m.headings(),
         m.outline(),
         m.links(),
         m.definitions(),
-        m.front_matter()
+        m.front_matter(),
+        m.tags(),
+        m.block_anchors()
     );
     for alg in SlugAlgorithm::ALL {
         s.push_str(&format!("{:?}\n", m.slugs(alg)));
@@ -339,6 +353,11 @@ proptest! {
     #[test]
     fn update_equals_build_on_a_rope(doc in document(), edits in edits()) {
         run_edits(doc, &edits, ParseOptions::default(), TextSnapshot::new)?;
+    }
+
+    #[test]
+    fn update_equals_build_obsidian(doc in document(), edits in edits()) {
+        run_edits(doc, &edits, ParseOptions::builtin(gv_syntax::ProfileId::Obsidian), |s| s.to_owned())?;
     }
 
     #[test]

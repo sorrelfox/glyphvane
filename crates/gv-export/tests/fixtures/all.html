@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:">
+<meta name="generator" content="Glyphvane">
+<title>Export fixture</title>
+<style>
+:root {
+  --text-primary: #010101;
+  --text-secondary: #020202;
+  --text-tertiary: #030303;
+  --accent-default: #040404;
+  --accent-tint: #050505;
+  --surface-page: #060606;
+  --surface-sunken: #070707;
+  --border-default: #080808;
+  --border-strong: #090909;
+  --status-error: #0a0a0a;
+  --status-error-tint: #0b0b0b;
+  --status-warning: #0c0c0c;
+  --status-warning-tint: #0d0d0d;
+  --status-success: #0e0e0e;
+  --status-success-tint: #0f0f0f;
+  --status-info: #101010;
+  --status-info-tint: #111111;
+  --syntax-key: #121212;
+  --syntax-string: #131313;
+  --syntax-number: #141414;
+  --syntax-tag: #151515;
+  --syntax-url: #161616;
+  --syntax-code: #171717;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { color-scheme: light; }
+body { margin: 0; background: var(--surface-page); color: var(--text-primary); font: 16px/1.6 "Inter", "Noto Sans", "Segoe UI", system-ui, -apple-system, sans-serif; }
+.gv-document { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; overflow-wrap: break-word; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.6em 0 0.6em; }
+h1 { font-size: 1.75em; letter-spacing: -0.02em; }
+h2 { font-size: 1.35em; letter-spacing: -0.01em; }
+h3 { font-size: 1.15em; }
+h4, h5, h6 { font-size: 1em; }
+h6 { color: var(--text-secondary); }
+p, ul, ol, dl, table, pre, blockquote, details, .gv-callout, .gv-diagram, .gv-math-block { margin: 0 0 1em; }
+a { color: var(--accent-default); text-decoration: underline; text-underline-offset: 0.15em; }
+.gv-unresolved { color: var(--status-error); text-decoration: underline dotted; }
+code, kbd, samp, pre { font-family: "JetBrains Mono", "Cascadia Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace; font-size: 0.875em; }
+:not(pre) > code { background: var(--surface-sunken); border-radius: 4px; padding: 0.1em 0.3em; }
+kbd { border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 0.3em; background: var(--surface-sunken); }
+pre { background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: 6px; padding: 0.75em 1em; overflow-x: auto; line-height: 1.5; }
+pre code { font-size: inherit; }
+blockquote { margin-left: 0; padding: 0 1em; border-left: 3px solid var(--border-strong); color: var(--text-secondary); }
+hr { border: 0; border-top: 1px solid var(--border-default); margin: 2em 0; }
+table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
+th, td { border: 1px solid var(--border-default); padding: 0.35em 0.75em; }
+th { background: var(--surface-sunken); font-weight: 600; }
+img { max-width: 100%; height: auto; }
+mark { background: var(--status-warning-tint); color: inherit; }
+.gv-tag { background: var(--accent-tint); color: var(--accent-default); border-radius: 999px; padding: 0 0.45em; font-size: 0.875em; }
+ul.gv-tasklist, li.gv-task { list-style: none; }
+li.gv-task > input { margin: 0 0.4em 0 -1.3em; vertical-align: middle; }
+.gv-callout { border-left: 4px solid var(--accent-default); padding: 0.5em 1em; border-radius: 4px; background: var(--accent-tint); }
+.gv-callout > :last-child { margin-bottom: 0; }
+.gv-callout-title { font-weight: 600; margin-bottom: 0.4em; }
+.gv-callout-note { border-color: var(--status-info); background: var(--status-info-tint); }
+.gv-callout-tip { border-color: var(--status-success); background: var(--status-success-tint); }
+.gv-callout-important { border-color: var(--accent-default); background: var(--accent-tint); }
+.gv-callout-warning { border-color: var(--status-warning); background: var(--status-warning-tint); }
+.gv-callout-caution { border-color: var(--status-error); background: var(--status-error-tint); }
+.gv-callout-info, .gv-callout-todo { border-color: var(--status-info); background: var(--status-info-tint); }
+.gv-callout-abstract, .gv-callout-success { border-color: var(--status-success); background: var(--status-success-tint); }
+.gv-callout-question { border-color: var(--status-warning); background: var(--status-warning-tint); }
+.gv-callout-failure, .gv-callout-danger, .gv-callout-bug { border-color: var(--status-error); background: var(--status-error-tint); }
+.gv-callout-example { border-color: var(--syntax-tag); background: var(--accent-tint); }
+.gv-callout-quote { border-color: var(--text-secondary); background: var(--surface-sunken); }
+.gv-embed { border-left: 2px solid var(--border-strong); padding-left: 1em; margin: 0 0 1em; }
+.gv-callout-note > .gv-callout-title { color: var(--status-info); }
+.gv-callout-tip > .gv-callout-title { color: var(--status-success); }
+.gv-callout-important > .gv-callout-title { color: var(--accent-default); }
+.gv-callout-warning > .gv-callout-title { color: var(--status-warning); }
+.gv-callout-caution > .gv-callout-title { color: var(--status-error); }
+.gv-math-block { text-align: center; overflow-x: auto; }
+.gv-math-error { color: var(--status-error); }
+.gv-diagram { text-align: center; overflow-x: auto; }
+.gv-diagram svg { max-width: 100%; height: auto; }
+.gv-properties { font-size: 0.875em; }
+.gv-properties th { text-align: left; }
+.gv-footnotes { font-size: 0.875em; color: var(--text-secondary); }
+.gv-fnref { line-height: 0; }
+.gv-toc { border-left: 2px solid var(--border-default); padding-left: 1em; margin-bottom: 2em; }
+.gv-toc ul { list-style: none; padding-left: 1em; margin: 0; }
+.gv-toc > ul { padding-left: 0; }
+details > summary { cursor: pointer; }
+@media print {
+  body { background: none; font-size: 11pt; }
+  .gv-document { max-width: none; padding: 0; }
+  pre, table, .gv-callout, .gv-diagram, .gv-math-block, img { break-inside: avoid; }
+  h1, h2, h3, h4, h5, h6 { break-after: avoid; }
+  a { color: inherit; }
+}
+.hl-comment { color: var(--text-tertiary); font-style: italic; }
+.hl-keyword { color: var(--syntax-tag); }
+.hl-operator { color: var(--text-secondary); }
+.hl-string { color: var(--syntax-string); }
+.hl-escape { color: var(--syntax-number); }
+.hl-regex { color: var(--syntax-string); }
+.hl-number { color: var(--syntax-number); }
+.hl-constant { color: var(--syntax-number); }
+.hl-function { color: var(--syntax-key); }
+.hl-type { color: var(--syntax-code); }
+.hl-variable { color: var(--text-primary); }
+.hl-property { color: var(--syntax-key); }
+.hl-tag { color: var(--syntax-code); }
+.hl-attribute { color: var(--syntax-key); }
+.hl-punctuation { color: var(--text-secondary); }
+.hl-heading { color: var(--syntax-key); font-weight: 600; }
+.hl-emphasis { color: var(--text-primary); font-style: italic; }
+.hl-strong { color: var(--text-primary); font-weight: 600; }
+.hl-link { color: var(--syntax-url); }
+.hl-code { color: var(--syntax-code); }
+.hl-inserted { color: var(--status-success); }
+.hl-deleted { color: var(--status-error); }
+.hl-changed { color: var(--status-warning); }
+</style>
+</head>
+<body>
+<main class="gv-document">
+<table class="gv-properties">
+<tbody>
+<tr><th>title</th><td>Fixture</td></tr>
+<tr><th>tags</th><td>alpha, beta</td></tr>
+</tbody>
+</table>
+<h1 id="user-content-export-fixture">Export fixture</h1>
+<p>Plain <em>emphasis</em>, <strong>strong</strong>, <strong><em>both</em></strong>, <del>struck</del>, <code>code</code>, and a <a href="https://example.com" title="Example" rel="noopener noreferrer">link</a>. A <a href="notes/other%20note.html#user-content-Section" rel="noopener noreferrer">relative note</a>, an <a href="#user-content-tables" rel="noopener noreferrer">anchor</a> and an <a href="img/dot.png" rel="noopener noreferrer">image file</a>. An autolink <a href="https://autolink.example" rel="noopener noreferrer">https://autolink.example</a>, an email <a href="mailto:me@example.com" rel="noopener noreferrer">me@example.com</a>, and a hard<br>
+break.</p>
+<h2 id="user-content-lists">Lists</h2>
+<ul>
+<li>one
+</li>
+<li>two
+<ul>
+<li>nested
+</li>
+</ul>
+</li>
+</ul>
+<ol start="3">
+<li>three
+</li>
+<li>four
+</li>
+</ol>
+<ul>
+<li class="gv-task"><input type="checkbox" disabled> open task
+</li>
+<li class="gv-task"><input type="checkbox" disabled checked> done task
+</li>
+</ul>
+<blockquote>
+<p>A quote with <strong>strong</strong> text.</p>
+<blockquote>
+<p>A nested quote.</p>
+</blockquote>
+</blockquote>
+<div class="gv-callout gv-callout-note">
+<p class="gv-callout-title">Note</p>
+<p>An alert with <code>code</code>.</p>
+</div>
+<div class="gv-callout gv-callout-warning">
+<p class="gv-callout-title">Warning</p>
+<p>Careful.</p>
+</div>
+<h2 id="user-content-code">Code</h2>
+<pre class="gv-code"><code><span class="hl-keyword">fn</span> <span class="hl-function">main</span><span class="hl-punctuation">()</span> <span class="hl-punctuation">{</span>
+    <span class="hl-keyword">let</span> <span class="hl-variable">x</span> <span class="hl-operator">=</span> <span class="hl-string">"&lt;b&gt;"</span><span class="hl-punctuation">;</span>
+<span class="hl-punctuation">}</span></code></pre>
+<pre class="gv-code"><code>indented &lt;code&gt;</code></pre>
+<h2 id="user-content-math">Math</h2>
+<p>Inline <span class="gv-math"><svg xmlns="http://www.w3.org/2000/svg" class="gv-math-svg" role="img" aria-label="a^2+b^2=c^2" viewBox="0 -0.015 5.146 0.913" width="5.146em" height="0.913em" style="vertical-align:-0.083em"><path d="M0.449 0.42 Q0.449 0.433 0.412 0.581 Q0.374 0.728 0.374 0.746 Q0.374 0.788 0.402 0.788 Q0.411 0.787 0.422 0.779 Q0.443 0.759 0.463 0.683 Q0.469 0.663 0.473 0.662 Q0.475 0.661 0.483 0.661 L0.487 0.661 Q0.506 0.661 0.506 0.669 Q0.506 0.673 0.503 0.685 Q0.481 0.769 0.449 0.801 Q0.426 0.824 0.393 0.824 Q0.33 0.824 0.305 0.775 Q0.3 0.762 0.3 0.763 Q0.299 0.762 0.296 0.764 Q0.294 0.766 0.292 0.768 Q0.244 0.813 0.197 0.823 Q0.191 0.824 0.172 0.824 Q0.106 0.824 0.063 0.769 Q0.033 0.725 0.033 0.657 Q0.033 0.641 0.034 0.635 Q0.041 0.571 0.076 0.513 Q0.11 0.454 0.158 0.418 Q0.216 0.373 0.28 0.373 Q0.33 0.373 0.37 0.422 Q0.386 0.392 0.416 0.392 Q0.429 0.392 0.439 0.4 Q0.449 0.408 0.449 0.42 Z M0.118 0.708 Q0.118 0.744 0.134 0.766 Q0.149 0.788 0.179 0.788 Q0.208 0.788 0.241 0.764 Q0.253 0.756 0.274 0.734 Q0.294 0.712 0.298 0.704 Q0.3 0.7 0.326 0.597 Q0.351 0.494 0.351 0.486 Q0.351 0.474 0.34 0.452 Q0.318 0.409 0.277 0.409 Q0.237 0.409 0.207 0.443 Q0.176 0.477 0.16 0.521 Q0.131 0.6 0.119 0.685 Q0.119 0.688 0.119 0.696 Q0.118 0.704 0.118 0.708 Z" fill="currentColor"/><path d="M0.606 0.151 Q0.586 0.151 0.575 0.138 Q0.564 0.126 0.564 0.107 Q0.564 0.057 0.602 0.021 Q0.64 -0.015 0.693 -0.015 Q0.753 -0.015 0.793 0.017 Q0.832 0.05 0.841 0.103 Q0.843 0.115 0.843 0.126 Q0.843 0.166 0.818 0.202 Q0.799 0.231 0.739 0.282 Q0.714 0.304 0.669 0.347 L0.628 0.386 L0.681 0.387 Q0.791 0.387 0.798 0.383 Q0.801 0.383 0.805 0.369 Q0.808 0.361 0.815 0.321 L0.815 0.319 L0.843 0.319 L0.843 0.321 L0.823 0.449 L0.823 0.451 L0.564 0.451 L0.564 0.438 Q0.564 0.424 0.565 0.422 Q0.566 0.42 0.624 0.355 Q0.7 0.271 0.722 0.243 Q0.769 0.18 0.769 0.126 Q0.769 0.08 0.745 0.049 Q0.72 0.018 0.677 0.018 Q0.636 0.018 0.611 0.054 Q0.61 0.057 0.607 0.062 Q0.605 0.065 0.605 0.066 Q0.605 0.067 0.608 0.067 Q0.626 0.067 0.637 0.079 Q0.648 0.092 0.648 0.109 Q0.648 0.126 0.636 0.139 Q0.624 0.151 0.606 0.151 Z" fill="currentColor"/><path d="M1.221 0.584 Q1.207 0.577 1.207 0.564 Q1.207 0.551 1.221 0.544 L1.52 0.544 L1.52 0.394 L1.521 0.244 Q1.531 0.231 1.54 0.231 Q1.553 0.231 1.56 0.246 L1.56 0.544 L1.858 0.544 Q1.873 0.552 1.873 0.564 Q1.873 0.576 1.858 0.584 L1.56 0.584 L1.56 0.882 Q1.553 0.896 1.54 0.896 Q1.527 0.896 1.52 0.882 L1.52 0.584 Z" fill="currentColor"/><path d="M2.24 0.131 Q2.241 0.131 2.312 0.126 Q2.384 0.12 2.385 0.12 Q2.397 0.12 2.397 0.129 Q2.397 0.137 2.362 0.276 Q2.327 0.414 2.327 0.415 Q2.327 0.418 2.333 0.412 Q2.367 0.384 2.409 0.374 Q2.421 0.372 2.434 0.372 Q2.447 0.372 2.459 0.374 Q2.511 0.386 2.542 0.428 Q2.573 0.47 2.573 0.534 Q2.573 0.646 2.494 0.736 Q2.416 0.825 2.324 0.825 Q2.295 0.825 2.269 0.812 Q2.191 0.777 2.191 0.664 Q2.191 0.635 2.197 0.607 Q2.197 0.606 2.247 0.402 L2.298 0.198 Q2.3 0.184 2.291 0.181 Q2.283 0.177 2.263 0.177 Q2.256 0.177 2.252 0.177 Q2.231 0.177 2.228 0.174 Q2.222 0.169 2.227 0.15 Q2.231 0.136 2.234 0.134 Q2.237 0.131 2.24 0.131 Z M2.487 0.489 Q2.487 0.409 2.426 0.409 Q2.424 0.409 2.419 0.41 Q2.415 0.41 2.414 0.41 Q2.362 0.421 2.316 0.482 Q2.314 0.484 2.311 0.488 L2.308 0.492 Q2.308 0.493 2.29 0.564 Q2.273 0.634 2.271 0.644 Q2.265 0.675 2.265 0.7 Q2.265 0.748 2.289 0.772 Q2.305 0.788 2.329 0.788 Q2.362 0.788 2.396 0.756 Q2.421 0.733 2.436 0.7 Q2.452 0.666 2.469 0.595 Q2.487 0.523 2.487 0.489 Z" fill="currentColor"/><path d="M2.657 0.151 Q2.637 0.151 2.626 0.138 Q2.615 0.126 2.615 0.107 Q2.615 0.057 2.653 0.021 Q2.691 -0.015 2.744 -0.015 Q2.805 -0.015 2.844 0.017 Q2.884 0.05 2.893 0.103 Q2.894 0.115 2.894 0.126 Q2.894 0.166 2.87 0.202 Q2.85 0.231 2.791 0.282 Q2.765 0.304 2.721 0.347 L2.679 0.386 L2.733 0.387 Q2.842 0.387 2.849 0.383 Q2.852 0.383 2.856 0.369 Q2.859 0.361 2.866 0.321 L2.866 0.319 L2.894 0.319 L2.894 0.321 L2.875 0.449 L2.875 0.451 L2.615 0.451 L2.615 0.438 Q2.615 0.424 2.616 0.422 Q2.617 0.42 2.675 0.355 Q2.751 0.271 2.773 0.243 Q2.82 0.18 2.82 0.126 Q2.82 0.08 2.796 0.049 Q2.772 0.018 2.728 0.018 Q2.688 0.018 2.663 0.054 Q2.661 0.057 2.658 0.062 Q2.656 0.065 2.656 0.066 Q2.656 0.067 2.66 0.067 Q2.677 0.067 2.688 0.079 Q2.699 0.092 2.699 0.109 Q2.699 0.126 2.687 0.139 Q2.676 0.151 2.657 0.151 Z" fill="currentColor"/><path d="M3.314 0.467 Q3.314 0.454 3.328 0.447 L3.965 0.447 Q3.98 0.454 3.98 0.467 Q3.98 0.478 3.966 0.486 L3.648 0.487 L3.33 0.487 Q3.314 0.482 3.314 0.467 Z M3.314 0.661 Q3.314 0.646 3.33 0.641 L3.966 0.641 Q3.967 0.642 3.97 0.645 Q3.974 0.647 3.975 0.649 Q3.977 0.65 3.978 0.654 Q3.98 0.657 3.98 0.661 Q3.98 0.674 3.965 0.681 L3.328 0.681 Q3.314 0.674 3.314 0.661 Z" fill="currentColor"/><path d="M4.74 0.459 Q4.74 0.49 4.721 0.51 Q4.702 0.529 4.673 0.529 Q4.654 0.529 4.643 0.519 Q4.632 0.508 4.632 0.489 Q4.632 0.472 4.642 0.456 Q4.652 0.44 4.668 0.433 Q4.676 0.428 4.679 0.428 Q4.683 0.428 4.672 0.421 Q4.653 0.41 4.619 0.41 Q4.564 0.41 4.519 0.455 Q4.493 0.481 4.477 0.517 Q4.461 0.553 4.445 0.62 Q4.434 0.667 4.434 0.695 Q4.434 0.767 4.497 0.786 Q4.505 0.788 4.522 0.788 Q4.537 0.788 4.553 0.786 Q4.647 0.772 4.707 0.703 Q4.716 0.693 4.719 0.693 Q4.723 0.693 4.732 0.702 Q4.744 0.714 4.741 0.719 Q4.737 0.73 4.711 0.753 Q4.649 0.809 4.554 0.823 Q4.532 0.825 4.515 0.825 Q4.408 0.825 4.366 0.737 Q4.347 0.7 4.347 0.655 Q4.347 0.609 4.366 0.561 Q4.395 0.486 4.461 0.434 Q4.526 0.381 4.6 0.373 Q4.606 0.372 4.619 0.372 Q4.654 0.372 4.684 0.383 Q4.74 0.407 4.74 0.459 Z" fill="currentColor"/><path d="M4.823 0.151 Q4.803 0.151 4.792 0.138 Q4.781 0.126 4.781 0.107 Q4.781 0.057 4.819 0.021 Q4.857 -0.015 4.911 -0.015 Q4.971 -0.015 5.01 0.017 Q5.05 0.05 5.059 0.103 Q5.06 0.115 5.06 0.126 Q5.06 0.166 5.036 0.202 Q5.016 0.231 4.957 0.282 Q4.932 0.304 4.887 0.347 L4.845 0.386 L4.899 0.387 Q5.009 0.387 5.016 0.383 Q5.018 0.383 5.023 0.369 Q5.025 0.361 5.032 0.321 L5.032 0.319 L5.06 0.319 L5.06 0.321 L5.041 0.449 L5.041 0.451 L4.781 0.451 L4.781 0.438 Q4.781 0.424 4.782 0.422 Q4.783 0.42 4.841 0.355 Q4.918 0.271 4.939 0.243 Q4.986 0.18 4.986 0.126 Q4.986 0.08 4.962 0.049 Q4.938 0.018 4.894 0.018 Q4.854 0.018 4.829 0.054 Q4.827 0.057 4.824 0.062 Q4.822 0.065 4.822 0.066 Q4.822 0.067 4.826 0.067 Q4.843 0.067 4.854 0.079 Q4.865 0.092 4.865 0.109 Q4.865 0.126 4.854 0.139 Q4.842 0.151 4.823 0.151 Z" fill="currentColor"/></svg></span> math.</p>
+<div class="gv-math-block"><svg xmlns="http://www.w3.org/2000/svg" class="gv-math-svg" role="img" aria-label="\frac{1}{2}" viewBox="0 -0.022 0.74 2.029" width="0.74em" height="2.029em" style="vertical-align:-0.686em"><path d="M0.536 0.644 Q0.519 0.641 0.377 0.641 Q0.237 0.641 0.22 0.644 L0.208 0.644 L0.208 0.598 L0.234 0.598 Q0.292 0.598 0.309 0.595 Q0.317 0.594 0.333 0.583 L0.333 0.066 Q0.331 0.066 0.325 0.069 Q0.279 0.087 0.222 0.088 L0.203 0.088 L0.203 0.042 L0.222 0.042 Q0.306 0.039 0.362 0.004 Q0.38 -0.006 0.393 -0.019 Q0.395 -0.022 0.405 -0.022 Q0.415 -0.022 0.422 -0.016 L0.422 0.283 L0.423 0.583 Q0.438 0.598 0.488 0.598 L0.521 0.598 L0.547 0.598 L0.547 0.644 Z" fill="currentColor"/><path d="M0.23 1.578 Q0.202 1.578 0.186 1.56 Q0.17 1.542 0.17 1.516 Q0.17 1.444 0.225 1.393 Q0.279 1.341 0.355 1.341 Q0.441 1.341 0.498 1.388 Q0.554 1.434 0.567 1.509 Q0.569 1.527 0.569 1.542 Q0.569 1.6 0.534 1.651 Q0.506 1.693 0.421 1.766 Q0.385 1.797 0.321 1.858 L0.262 1.914 L0.338 1.915 Q0.495 1.915 0.505 1.91 Q0.509 1.909 0.515 1.889 Q0.519 1.878 0.529 1.821 L0.529 1.818 L0.569 1.818 L0.569 1.821 L0.541 2.004 L0.541 2.007 L0.17 2.007 L0.17 1.988 Q0.17 1.968 0.172 1.965 Q0.173 1.963 0.256 1.87 Q0.365 1.749 0.396 1.71 Q0.463 1.619 0.463 1.543 Q0.463 1.477 0.429 1.433 Q0.394 1.388 0.332 1.388 Q0.274 1.388 0.238 1.44 Q0.236 1.444 0.232 1.451 Q0.229 1.456 0.229 1.457 Q0.229 1.458 0.234 1.458 Q0.259 1.458 0.275 1.476 Q0.29 1.494 0.29 1.518 Q0.29 1.543 0.273 1.561 Q0.257 1.578 0.23 1.578 Z" fill="currentColor"/><path d="M0.12 1.051 L0.62 1.051 L0.62 1.091 L0.12 1.091 Z" fill="currentColor"/></svg></div>
+<h2 id="user-content-diagram">Diagram</h2>
+<div class="gv-diagram"><svg xmlns="http://www.w3.org/2000/svg" data-len="15"></svg></div>
+<h2 id="user-content-tables">Tables</h2>
+<table>
+<thead>
+<tr><th align="left">Left</th><th align="center">Center</th><th align="right">Right</th></tr>
+</thead>
+<tbody>
+<tr><td align="left">a</td><td align="center"><strong>b</strong></td><td align="right"><code>c</code></td></tr>
+<tr><td align="left"><a href="#user-content-lists" rel="noopener noreferrer">x</a></td><td align="center"><span class="gv-math"><svg xmlns="http://www.w3.org/2000/svg" class="gv-math-svg" role="img" aria-label="y" viewBox="0 -0.011 0.526 0.647" width="0.526em" height="0.647em" style="vertical-align:-0.205em"><path d="M0.462 0 Q0.476 0 0.486 0.007 Q0.496 0.015 0.496 0.028 Q0.496 0.041 0.447 0.238 Q0.398 0.435 0.391 0.454 Q0.375 0.503 0.34 0.544 Q0.304 0.586 0.257 0.61 Q0.203 0.636 0.156 0.636 Q0.08 0.636 0.053 0.588 Q0.043 0.574 0.043 0.548 Q0.043 0.514 0.062 0.495 Q0.083 0.476 0.106 0.476 Q0.15 0.476 0.15 0.518 Q0.15 0.555 0.115 0.572 Q0.113 0.573 0.11 0.574 Q0.107 0.576 0.105 0.577 Q0.103 0.578 0.102 0.578 L0.099 0.579 Q0.102 0.585 0.12 0.592 Q0.136 0.598 0.152 0.598 L0.16 0.598 Q0.177 0.598 0.186 0.596 Q0.224 0.585 0.258 0.545 Q0.292 0.505 0.31 0.449 Q0.321 0.416 0.321 0.41 Q0.321 0.409 0.319 0.41 Q0.317 0.412 0.313 0.415 Q0.276 0.442 0.231 0.442 Q0.18 0.442 0.147 0.418 Q0.114 0.394 0.104 0.349 Q0.103 0.342 0.103 0.318 Q0.103 0.294 0.105 0.281 Q0.112 0.238 0.151 0.134 Q0.173 0.075 0.173 0.052 Q0.173 0.038 0.171 0.032 Q0.168 0.027 0.159 0.027 L0.154 0.027 Q0.131 0.027 0.11 0.048 Q0.078 0.08 0.061 0.144 Q0.061 0.145 0.06 0.147 Q0.059 0.15 0.059 0.15 Q0.058 0.151 0.057 0.152 Q0.056 0.153 0.054 0.153 Q0.051 0.153 0.049 0.153 Q0.047 0.153 0.041 0.153 L0.027 0.153 Q0.019 0.145 0.024 0.13 Q0.045 0.06 0.087 0.021 Q0.121 -0.011 0.158 -0.011 Q0.2 -0.011 0.225 0.012 Q0.25 0.035 0.25 0.076 Q0.248 0.095 0.247 0.097 Q0.247 0.103 0.232 0.14 Q0.191 0.251 0.183 0.303 Q0.182 0.311 0.182 0.326 Q0.182 0.364 0.194 0.384 Q0.206 0.404 0.238 0.404 Q0.261 0.404 0.282 0.392 Q0.302 0.38 0.312 0.368 Q0.323 0.357 0.339 0.337 Q0.339 0.336 0.358 0.261 Q0.376 0.187 0.396 0.11 Q0.416 0.033 0.419 0.027 Q0.432 0 0.462 0 Z" fill="currentColor"/></svg></span></td><td align="right"></td></tr>
+</tbody>
+</table>
+<h2 id="user-content-footnotes">Footnotes</h2>
+<p>A note<sup class="gv-fnref"><a href="#user-content-fn-1" id="user-content-fnref-1-1" rel="noopener noreferrer">1</a></sup> and again<sup class="gv-fnref"><a href="#user-content-fn-1" id="user-content-fnref-1-2" rel="noopener noreferrer">1</a></sup>, and another<sup class="gv-fnref"><a href="#user-content-fn-2" id="user-content-fnref-2-1" rel="noopener noreferrer">2</a></sup>.</p>
+<h2 id="user-content-images">Images</h2>
+<p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgYGBgAAAABQABeqhXUAAAAABJRU5ErkJggg==" alt="local dot"> <img src="https://example.com/x.png" alt="remote" title="Remote"> <img src="img/missing.png" alt="missing"> <img src="../outside.png" alt="outside"></p>
+<h2 id="user-content-html">HTML</h2>
+<div align="center" style="color: red"><b>bold</b> </div>
+<p>click <a rel="noopener noreferrer">js</a> <a rel="noopener noreferrer">unc</a> <a id="user-content-top" href="#user-content-footnotes" rel="noopener noreferrer">ok</a></p>
+<details>
+<summary>More</summary>
+<p>Hidden <em>text</em>.</p>
+</details>
+<hr>
+<p>The end.</p>
+<section class="gv-footnotes">
+<hr>
+<ol>
+<li id="user-content-fn-1">
+<p>The footnote. <a href="#user-content-fnref-1-1" class="gv-backref" aria-label="Back to reference 1" rel="noopener noreferrer">↩</a> <a href="#user-content-fnref-1-2" class="gv-backref" aria-label="Back to reference 2" rel="noopener noreferrer">↩</a></p>
+</li>
+<li id="user-content-fn-2">
+<p>Second footnote with <em>emphasis</em>. <a href="#user-content-fnref-2-1" class="gv-backref" aria-label="Back to reference 1" rel="noopener noreferrer">↩</a></p>
+</li>
+</ol>
+</section>
+</main>
+</body>
+</html>

@@ -80,6 +80,10 @@ pub(crate) enum Kind {
     MathBlock {
         offset: u32,
     },
+    /// An Obsidian `%%` block comment; `offset` as for math blocks.
+    CommentBlock {
+        offset: u32,
+    },
     Html {
         ty: u8,
     },
@@ -124,6 +128,7 @@ impl Kind {
                 | Kind::FencedCode { .. }
                 | Kind::IndentedCode
                 | Kind::MathBlock { .. }
+                | Kind::CommentBlock { .. }
                 | Kind::Html { .. }
                 | Kind::FrontMatter { .. }
         )

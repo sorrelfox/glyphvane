@@ -37,6 +37,8 @@ fn outline(rt: &RenderTree) -> Vec<String> {
                 FrameKind::Details => " details".to_owned(),
                 FrameKind::Quote { .. } => " quote".to_owned(),
                 FrameKind::List { .. } => " list".to_owned(),
+                FrameKind::Callout { name, .. } => format!(" callout({name})"),
+                FrameKind::Embed { depth } => format!(" embed({depth})"),
             });
             format!("{}{frame}", it.kind.name())
         })

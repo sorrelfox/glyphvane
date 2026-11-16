@@ -53,15 +53,12 @@ impl ProfileId {
 
     /// Whether this build parses and renders the profile. A detected
     /// profile that has not shipped falls back to [`ProfileId::Extended`]
-    /// with a hint.
-    ///
-    /// Obsidian ships with the vault milestone: its definition is here so
-    /// that detection, overrides and the switch matrix already know it,
-    /// and flipping this flag (plus `app.json` tuning in
-    /// [`crate::compile::Tuning`]) is all the profile side needs.
+    /// with a hint. Every built-in profile has shipped (Obsidian with the
+    /// vault milestone, tuned from `app.json` by
+    /// [`crate::compile::Tuning`]).
     #[must_use]
     pub fn is_shipped(self) -> bool {
-        !matches!(self, Self::Obsidian)
+        true
     }
 
     /// The release that brings full support, for a profile that has not
@@ -270,10 +267,12 @@ mod tests {
             Requested::BuiltIn(ProfileId::GfmFile).effective(),
             ProfileId::GfmFile
         );
+        // Every built-in profile has shipped.
         assert_eq!(
             Requested::BuiltIn(ProfileId::Obsidian).effective(),
-            ProfileId::Extended
+            ProfileId::Obsidian
         );
+        assert!(ProfileId::ALL.into_iter().all(ProfileId::is_shipped));
         assert_eq!(
             Requested::Planned(PlannedProfile::MkDocs).effective(),
             ProfileId::Extended

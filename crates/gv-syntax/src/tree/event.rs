@@ -185,6 +185,35 @@ impl AlertKind {
     }
 }
 
+/// The fold state an Obsidian callout's header asks for (`[!type]-` or
+/// `[!type]+`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
+pub enum CalloutFold {
+    /// No sign: not foldable.
+    #[default]
+    None,
+    /// `+`: foldable, open at first.
+    Open,
+    /// `-`: foldable, closed at first.
+    Closed,
+}
+
+impl CalloutFold {
+    /// The fold sign's name in the CST dump.
+    pub fn name(self) -> &'static str {
+        match self {
+            CalloutFold::None => "",
+            CalloutFold::Open => "+",
+            CalloutFold::Closed => "-",
+        }
+    }
+
+    /// Whether the callout can be folded.
+    pub fn is_foldable(self) -> bool {
+        self != CalloutFold::None
+    }
+}
+
 /// Block kinds as known when the block opens.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum BlockKind {
@@ -249,6 +278,26 @@ pub enum BlockKind {
     /// `[^label]:` and the blocks indented under it. The `[^label]:` and
     /// the spaces after it are an [`TokenKind::ExtMarker`] token.
     FootnoteDefinition,
+    /// An Obsidian callout (with
+    /// [`ParseOptions::callouts`](crate::ParseOptions::callouts)): a block
+    /// quote, at any depth, whose first line starts with `[!type]`, an
+    /// optional `+` or `-`, and an optional title. The `[!type]` and the
+    /// fold sign are an [`TokenKind::ExtMarker`] token; a title is a
+    /// [`BlockKind::CalloutTitle`] leaf.
+    Callout {
+        /// The fold sign.
+        fold: CalloutFold,
+    },
+    /// The title of an Obsidian callout: the rest of its first line, a
+    /// one-line leaf with inline content.
+    CalloutTitle,
+    /// An Obsidian `%%` block comment (with
+    /// [`ParseOptions::comments`](crate::ParseOptions::comments)): opened
+    /// by a line starting with exactly `%%` that holds no other `%%`, closed
+    /// by the next line holding `%%` (the closing marker token runs to the
+    /// end of that line). May hold blank lines; unclosed, it runs to the end
+    /// of its container.
+    CommentBlock,
 }
 
 impl BlockKind {
@@ -269,6 +318,9 @@ impl BlockKind {
             BlockKind::MathBlock => 10,
             BlockKind::Alert { .. } => 11,
             BlockKind::FootnoteDefinition => 12,
+            BlockKind::Callout { .. } => 13,
+            BlockKind::CalloutTitle => 14,
+            BlockKind::CommentBlock => 15,
         }
     }
 
@@ -281,6 +333,7 @@ impl BlockKind {
                 | BlockKind::OrderedList { .. }
                 | BlockKind::Item
                 | BlockKind::Alert { .. }
+                | BlockKind::Callout { .. }
                 | BlockKind::FootnoteDefinition
         )
     }
@@ -351,6 +404,9 @@ const K_FRONT: u8 = 10;
 const K_MATH: u8 = 11;
 const K_ALERT: u8 = 12;
 const K_FOOTNOTE: u8 = 13;
+const K_CALLOUT: u8 = 14;
+const K_CALLOUT_TITLE: u8 = 15;
+const K_COMMENT: u8 = 16;
 
 /// A packed event: 8 bytes. The BlockId of an `Open` lives in a parallel
 /// array.
@@ -402,6 +458,9 @@ impl Ev {
             BlockKind::MathBlock => (K_MATH, 0, 0),
             BlockKind::Alert { kind } => (K_ALERT, kind as u16, 0),
             BlockKind::FootnoteDefinition => (K_FOOTNOTE, 0, 0),
+            BlockKind::Callout { fold } => (K_CALLOUT, fold as u16, 0),
+            BlockKind::CalloutTitle => (K_CALLOUT_TITLE, 0, 0),
+            BlockKind::CommentBlock => (K_COMMENT, 0, 0),
         };
         Ev {
             tag: T_OPEN,
@@ -538,6 +597,15 @@ impl Ev {
                     .unwrap_or(AlertKind::Note),
             },
             K_FOOTNOTE => BlockKind::FootnoteDefinition,
+            K_CALLOUT => BlockKind::Callout {
+                fold: match self.b {
+                    1 => CalloutFold::Open,
+                    2 => CalloutFold::Closed,
+                    _ => CalloutFold::None,
+                },
+            },
+            K_CALLOUT_TITLE => BlockKind::CalloutTitle,
+            K_COMMENT => BlockKind::CommentBlock,
             K_FRONT => BlockKind::FrontMatter {
                 kind: if self.b == FrontMatterKind::Toml as u16 {
                     FrontMatterKind::Toml
@@ -628,6 +696,17 @@ mod tests {
                 kind: AlertKind::Note,
             },
             BlockKind::FootnoteDefinition,
+            BlockKind::Callout {
+                fold: CalloutFold::None,
+            },
+            BlockKind::Callout {
+                fold: CalloutFold::Open,
+            },
+            BlockKind::Callout {
+                fold: CalloutFold::Closed,
+            },
+            BlockKind::CalloutTitle,
+            BlockKind::CommentBlock,
         ];
         for k in kinds {
             assert_eq!(Ev::open(k).open_kind(), Some(k));

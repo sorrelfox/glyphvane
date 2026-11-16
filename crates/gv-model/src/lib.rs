@@ -51,7 +51,7 @@ pub mod slug;
 pub use fragment::{Anchoring, BlockMatch, FragmentMatch};
 pub use gv_syntax::FrontMatterKind;
 pub use model::{
-    BlockAnchor, BuildStats, Definition, DocModel, FrontMatter, Heading, Link, LinkKind,
+    BlockAnchor, BuildStats, Definition, DocModel, FrontMatter, Heading, Link, LinkKind, Tag,
 };
 pub use outline::OutlineEntry;
 pub use slug::{HugoIds, PandocIds, Projection, SlugAlgorithm, Slugger};

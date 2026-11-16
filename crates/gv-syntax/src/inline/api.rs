@@ -118,6 +118,26 @@ pub struct InlineOptions {
     /// Footnote references: `[^label]` when a footnote is defined for the
     /// label ([`RefLookup::has_footnote`]) and the brackets are no link.
     pub footnotes: bool,
+    /// `==x==` highlight: a run of exactly two `=` is a delimiter
+    /// ([`InlineKind::Highlight`](super::InlineKind::Highlight)).
+    pub highlight: bool,
+    /// `[[target#anchor|alias]]` wikilinks
+    /// ([`InlineKind::Wikilink`](super::InlineKind::Wikilink)).
+    pub wikilinks: bool,
+    /// `![[…]]` embeds ([`InlineKind::Embed`](super::InlineKind::Embed)).
+    pub embeds: bool,
+    /// `%%…%%` inline comments, both markers on one line
+    /// ([`InlineKind::Comment`](super::InlineKind::Comment)).
+    pub comments: bool,
+    /// Obsidian `#tag`s ([`InlineKind::Tag`](super::InlineKind::Tag)).
+    pub tags: bool,
+    /// A `^block-id` at the end of the content
+    /// ([`InlineKind::BlockId`](super::InlineKind::BlockId)); for
+    /// paragraphs only (see [`crate::ParseOptions::inline_for`]).
+    pub block_ids: bool,
+    /// `^[…]` inline footnotes
+    /// ([`InlineKind::InlineFootnote`](super::InlineKind::InlineFootnote)).
+    pub inline_footnotes: bool,
 }
 
 impl InlineOptions {
@@ -130,6 +150,13 @@ impl InlineOptions {
         math_code: false,
         math_brackets: false,
         footnotes: false,
+        highlight: false,
+        wikilinks: false,
+        embeds: false,
+        comments: false,
+        tags: false,
+        block_ids: false,
+        inline_footnotes: false,
     };
 
     /// The GFM extensions.

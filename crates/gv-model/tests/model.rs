@@ -443,3 +443,44 @@ fn nul_in_heading_text_is_replaced() {
     let m = model("# a\0b &#0;\n");
     assert_eq!(&*m.headings()[0].text, "a\u{fffd}b \u{fffd}");
 }
+
+#[test]
+fn obsidian_wikilinks_tags_and_block_ids() {
+    let src = "# Head #h\n\nSee [[Note#Sec|alias]] and ![[img.png|20]] #a/b ^p1\n\n- item ^i1\n\n^own\n\n| [[c\\|d]] |\n| -- |\n";
+    let tree = gv_syntax::SyntaxTree::parse_with(
+        src,
+        gv_syntax::ParseOptions::builtin(gv_syntax::ProfileId::Obsidian),
+    );
+    let m = DocModel::build(&tree, src);
+    let links: Vec<(LinkKind, &str, &str)> = m
+        .links()
+        .iter()
+        .map(|l| (l.kind, &*l.destination, &src[l.text_range.clone()]))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            (LinkKind::Wikilink, "Note#Sec|alias", "alias"),
+            (LinkKind::Embed, "img.png|20", "20"),
+        ]
+    );
+    assert_eq!(m.links()[0].range, 15..33);
+    let tags: Vec<(&str, u32)> = m.tags().iter().map(|t| (&*t.name, t.line)).collect();
+    assert_eq!(tags, [("h", 0), ("a/b", 2)]);
+    let anchors: Vec<(&str, bool, &str)> = m
+        .block_anchors()
+        .iter()
+        .map(|a| (&*a.id, a.own_line, &src[a.id_range.clone()]))
+        .collect();
+    assert_eq!(
+        anchors,
+        [
+            ("p1", false, "^p1"),
+            ("i1", false, "^i1"),
+            ("own", true, "^own")
+        ]
+    );
+    let m2 = DocModel::build(&gv_syntax::SyntaxTree::parse(src), src);
+    assert!(m2.tags().is_empty() && m2.block_anchors().is_empty());
+    assert!(m2.links().iter().all(|l| !l.kind.is_wiki()));
+}

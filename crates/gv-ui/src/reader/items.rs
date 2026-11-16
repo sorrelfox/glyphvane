@@ -966,7 +966,11 @@ impl ItemCache {
         }
         tree.index_of(ItemId { block, chunk: 0 })
             .and_then(|ix| tree.node_of(ix))
-            .is_some_and(|n| matches!(n.kind, NodeKind::Details { open: true, .. }))
+            .is_some_and(|n| {
+                matches!(n.kind, NodeKind::Details { open: true, .. })
+                    || matches!(n.kind, NodeKind::CalloutTitle { fold, .. }
+                        if fold != gv_syntax::CalloutFold::Closed)
+            })
     }
 
     /// Whether item `ix` of `tree` is folded away in a closed `<details>`.

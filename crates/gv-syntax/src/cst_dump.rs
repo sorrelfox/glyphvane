@@ -54,7 +54,7 @@ use std::ops::Range;
 
 use gv_text::TextSource;
 
-use crate::inline::api::{InlineInput, cst_dump_inlines, parse_inlines};
+use crate::inline::api::{InlineInput, cst_dump_inlines, parse_inlines_with};
 use crate::tree::SyntaxTree;
 use crate::tree::event::{BlockId, BlockKind, Event, TokenKind};
 use crate::tree::walk::{self, ContainerKind, LeafKind};
@@ -68,6 +68,8 @@ struct Resolved {
     text: Option<String>,
     /// Inline segments of the paragraph or heading part.
     segments: Option<Vec<Range<usize>>>,
+    /// The segments are a paragraph's (block ids are parsed there only).
+    paragraph: bool,
 }
 
 /// Writes the CST dump of `tree` (parsed from `text`).
@@ -87,7 +89,11 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
         fn leaf(&mut self, leaf: &walk::Leaf<'_>) {
             let r = self.0.entry(leaf.id).or_default();
             match leaf.kind {
-                LeafKind::Paragraph => r.text = Some(String::from("paragraph")),
+                LeafKind::Paragraph => {
+                    r.text = Some(String::from("paragraph"));
+                    r.paragraph = true;
+                }
+                LeafKind::CalloutTitle => {}
                 LeafKind::Heading { level, .. } => r.text = Some(format!("heading {level}")),
                 LeafKind::Table => {
                     r.text = Some(if r.text.as_deref() == Some("paragraph") {
@@ -159,15 +165,21 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
                     BlockKind::MathBlock => String::from("math-block"),
                     BlockKind::Alert { kind } => format!("alert {}", kind.name()),
                     BlockKind::FootnoteDefinition => String::from("footnote-definition"),
+                    BlockKind::Callout { fold } => format!("callout{}", fold.name()),
+                    BlockKind::CalloutTitle => String::from("callout-title"),
+                    BlockKind::CommentBlock => String::from("comment-block"),
                 };
                 let _ = writeln!(out, "{indent}({head} {off}..{}", ends[i]);
                 stack.push(id);
             }
             Event::Close => {
                 if let Some(id) = stack.pop()
-                    && let Some(segments) = res.get(&id).and_then(|r| r.segments.as_ref())
+                    && let Some(r) = res.get(&id)
+                    && let Some(segments) = r.segments.as_ref()
                 {
-                    let tree = parse_inlines(text, InlineInput { segments }, &*refs);
+                    let mut options = tree.options().inline();
+                    options.block_ids &= r.paragraph;
+                    let tree = parse_inlines_with(text, InlineInput { segments }, &*refs, options);
                     let mut s = String::new();
                     cst_dump_inlines(&tree, &mut s);
                     let _ = writeln!(out, "{indent}(inlines");

@@ -517,7 +517,7 @@ impl SyntaxTree {
                 segments: &segments,
             },
             &*refs,
-            self.0.options.inline(),
+            self.0.options.inline_for(leaf.kind),
         ));
         if let Ok(mut cache) = self.0.inlines.lock() {
             cache.insert(leaf.id, Arc::clone(&tree));
@@ -630,13 +630,21 @@ impl SyntaxTree {
                             .any(|c| matches!(c, b'-' | b'+' | b'*' | b'.' | b')')),
                         TokenKind::Marker => {
                             s.iter().all(|c| b"#=-*_`~+. \t|:$\x0b\x0c".contains(c))
+                                // A block comment's markers; the closing one
+                                // runs to the end of its line.
+                                || (s.starts_with(b"%%")
+                                    && !s.contains(&b'\n')
+                                    && !s.contains(&b'\r'))
                         }
                         TokenKind::InfoString | TokenKind::Content => {
                             !s.contains(&b'\n') && !s.contains(&b'\r')
                         }
                         TokenKind::ExtMarker => {
                             s.first() == Some(&b'[')
-                                && (s.ends_with(b"]") || s.ends_with(b"]:"))
+                                && (s.ends_with(b"]")
+                                    || s.ends_with(b"]:")
+                                    || s.ends_with(b"]+")
+                                    || s.ends_with(b"]-"))
                                 && !s.contains(&b'\n')
                                 && !s.contains(&b'\r')
                         }

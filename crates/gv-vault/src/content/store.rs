@@ -63,7 +63,7 @@ const MAGIC: &[u8; 8] = b"GVCONTNT";
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The extraction version: bump whenever extracted records would change.
-pub const EXTRACT_VERSION: u32 = 1;
+pub const EXTRACT_VERSION: u32 = 2;
 
 /// The cache file's extension.
 pub const CACHE_EXTENSION: &str = "gvci";

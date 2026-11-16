@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:">
+<meta name="generator" content="Glyphvane">
+<title>Obsidian fixture</title>
+<style>
+:root {
+  --text-primary: #010101;
+  --text-secondary: #020202;
+  --text-tertiary: #030303;
+  --accent-default: #040404;
+  --accent-tint: #050505;
+  --surface-page: #060606;
+  --surface-sunken: #070707;
+  --border-default: #080808;
+  --border-strong: #090909;
+  --status-error: #0a0a0a;
+  --status-error-tint: #0b0b0b;
+  --status-warning: #0c0c0c;
+  --status-warning-tint: #0d0d0d;
+  --status-success: #0e0e0e;
+  --status-success-tint: #0f0f0f;
+  --status-info: #101010;
+  --status-info-tint: #111111;
+  --syntax-key: #121212;
+  --syntax-string: #131313;
+  --syntax-number: #141414;
+  --syntax-tag: #151515;
+  --syntax-url: #161616;
+  --syntax-code: #171717;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { color-scheme: light; }
+body { margin: 0; background: var(--surface-page); color: var(--text-primary); font: 16px/1.6 "Inter", "Noto Sans", "Segoe UI", system-ui, -apple-system, sans-serif; }
+.gv-document { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; overflow-wrap: break-word; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.6em 0 0.6em; }
+h1 { font-size: 1.75em; letter-spacing: -0.02em; }
+h2 { font-size: 1.35em; letter-spacing: -0.01em; }
+h3 { font-size: 1.15em; }
+h4, h5, h6 { font-size: 1em; }
+h6 { color: var(--text-secondary); }
+p, ul, ol, dl, table, pre, blockquote, details, .gv-callout, .gv-diagram, .gv-math-block { margin: 0 0 1em; }
+a { color: var(--accent-default); text-decoration: underline; text-underline-offset: 0.15em; }
+.gv-unresolved { color: var(--status-error); text-decoration: underline dotted; }
+code, kbd, samp, pre { font-family: "JetBrains Mono", "Cascadia Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace; font-size: 0.875em; }
+:not(pre) > code { background: var(--surface-sunken); border-radius: 4px; padding: 0.1em 0.3em; }
+kbd { border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 0.3em; background: var(--surface-sunken); }
+pre { background: var(--surface-sunken); border: 1px solid var(--border-default); border-radius: 6px; padding: 0.75em 1em; overflow-x: auto; line-height: 1.5; }
+pre code { font-size: inherit; }
+blockquote { margin-left: 0; padding: 0 1em; border-left: 3px solid var(--border-strong); color: var(--text-secondary); }
+hr { border: 0; border-top: 1px solid var(--border-default); margin: 2em 0; }
+table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
+th, td { border: 1px solid var(--border-default); padding: 0.35em 0.75em; }
+th { background: var(--surface-sunken); font-weight: 600; }
+img { max-width: 100%; height: auto; }
+mark { background: var(--status-warning-tint); color: inherit; }
+.gv-tag { background: var(--accent-tint); color: var(--accent-default); border-radius: 999px; padding: 0 0.45em; font-size: 0.875em; }
+ul.gv-tasklist, li.gv-task { list-style: none; }
+li.gv-task > input { margin: 0 0.4em 0 -1.3em; vertical-align: middle; }
+.gv-callout { border-left: 4px solid var(--accent-default); padding: 0.5em 1em; border-radius: 4px; background: var(--accent-tint); }
+.gv-callout > :last-child { margin-bottom: 0; }
+.gv-callout-title { font-weight: 600; margin-bottom: 0.4em; }
+.gv-callout-note { border-color: var(--status-info); background: var(--status-info-tint); }
+.gv-callout-tip { border-color: var(--status-success); background: var(--status-success-tint); }
+.gv-callout-important { border-color: var(--accent-default); background: var(--accent-tint); }
+.gv-callout-warning { border-color: var(--status-warning); background: var(--status-warning-tint); }
+.gv-callout-caution { border-color: var(--status-error); background: var(--status-error-tint); }
+.gv-callout-info, .gv-callout-todo { border-color: var(--status-info); background: var(--status-info-tint); }
+.gv-callout-abstract, .gv-callout-success { border-color: var(--status-success); background: var(--status-success-tint); }
+.gv-callout-question { border-color: var(--status-warning); background: var(--status-warning-tint); }
+.gv-callout-failure, .gv-callout-danger, .gv-callout-bug { border-color: var(--status-error); background: var(--status-error-tint); }
+.gv-callout-example { border-color: var(--syntax-tag); background: var(--accent-tint); }
+.gv-callout-quote { border-color: var(--text-secondary); background: var(--surface-sunken); }
+.gv-embed { border-left: 2px solid var(--border-strong); padding-left: 1em; margin: 0 0 1em; }
+.gv-callout-note > .gv-callout-title { color: var(--status-info); }
+.gv-callout-tip > .gv-callout-title { color: var(--status-success); }
+.gv-callout-important > .gv-callout-title { color: var(--accent-default); }
+.gv-callout-warning > .gv-callout-title { color: var(--status-warning); }
+.gv-callout-caution > .gv-callout-title { color: var(--status-error); }
+.gv-math-block { text-align: center; overflow-x: auto; }
+.gv-math-error { color: var(--status-error); }
+.gv-diagram { text-align: center; overflow-x: auto; }
+.gv-diagram svg { max-width: 100%; height: auto; }
+.gv-properties { font-size: 0.875em; }
+.gv-properties th { text-align: left; }
+.gv-footnotes { font-size: 0.875em; color: var(--text-secondary); }
+.gv-fnref { line-height: 0; }
+.gv-toc { border-left: 2px solid var(--border-default); padding-left: 1em; margin-bottom: 2em; }
+.gv-toc ul { list-style: none; padding-left: 1em; margin: 0; }
+.gv-toc > ul { padding-left: 0; }
+details > summary { cursor: pointer; }
+@media print {
+  body { background: none; font-size: 11pt; }
+  .gv-document { max-width: none; padding: 0; }
+  pre, table, .gv-callout, .gv-diagram, .gv-math-block, img { break-inside: avoid; }
+  h1, h2, h3, h4, h5, h6 { break-after: avoid; }
+  a { color: inherit; }
+}
+.hl-comment { color: var(--text-tertiary); font-style: italic; }
+.hl-keyword { color: var(--syntax-tag); }
+.hl-operator { color: var(--text-secondary); }
+.hl-string { color: var(--syntax-string); }
+.hl-escape { color: var(--syntax-number); }
+.hl-regex { color: var(--syntax-string); }
+.hl-number { color: var(--syntax-number); }
+.hl-constant { color: var(--syntax-number); }
+.hl-function { color: var(--syntax-key); }
+.hl-type { color: var(--syntax-code); }
+.hl-variable { color: var(--text-primary); }
+.hl-property { color: var(--syntax-key); }
+.hl-tag { color: var(--syntax-code); }
+.hl-attribute { color: var(--syntax-key); }
+.hl-punctuation { color: var(--text-secondary); }
+.hl-heading { color: var(--syntax-key); font-weight: 600; }
+.hl-emphasis { color: var(--text-primary); font-style: italic; }
+.hl-strong { color: var(--text-primary); font-weight: 600; }
+.hl-link { color: var(--syntax-url); }
+.hl-code { color: var(--syntax-code); }
+.hl-inserted { color: var(--status-success); }
+.hl-deleted { color: var(--status-error); }
+.hl-changed { color: var(--status-warning); }
+</style>
+</head>
+<body>
+<main class="gv-document">
+<table class="gv-properties">
+<tbody>
+<tr><th>tags</th><td>project</td></tr>
+<tr><th>aliases</th><td>Fixture two</td></tr>
+</tbody>
+</table>
+<h1 id="user-content-obsidian-fixture">Obsidian fixture</h1>
+<p>A <mark>highlight</mark>, a <span class="gv-tag">#tag</span>, a <a href="Other%20note.html" rel="noopener noreferrer">Other note</a>, an <a href="Other%20note.html#user-content-section" rel="noopener noreferrer">alias</a>,  and an inline noteInline footnote text..</p>
+<div class="gv-callout gv-callout-info">
+<p class="gv-callout-title"><strong>Custom title</strong></p>
+<p>Callout body with <strong>strong</strong> text.</p>
+</div>
+<div class="gv-callout gv-callout-warning">
+<p class="gv-callout-title"><strong>Folded</strong></p>
+<div>
+<p>Hidden until opened.</p>
+</div>
+</div>
+<div class="gv-callout">
+<p class="gv-callout-title"><strong>Unknown</strong></p>
+<p>An unknown type.</p>
+</div>
+<ul>
+<li class="gv-task"><input type="checkbox" disabled> task
+</li>
+<li class="gv-task"><input type="checkbox" disabled checked> in progress
+</li>
+</ul>
+<p>Paragraph with a block id.</p>
+</main>
+</body>
+</html>

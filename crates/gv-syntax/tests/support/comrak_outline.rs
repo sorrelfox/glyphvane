@@ -184,6 +184,7 @@ pub fn gv_outline<S: TextSource + ?Sized>(
                 ContainerKind::Item => format!("item @{line}"),
                 ContainerKind::Alert { kind } => format!("alert {} @{line}", kind.name()),
                 ContainerKind::FootnoteDefinition => format!("footnote_definition @{line}"),
+                ContainerKind::Callout { fold } => format!("callout{} @{line}", fold.name()),
             };
             self.push(s);
             self.depth += 1;
@@ -212,6 +213,10 @@ pub fn gv_outline<S: TextSource + ?Sized>(
                 LeafKind::Table => format!("table @{}-{}", leaf.start_line + 1, leaf.end_line + 1),
                 LeafKind::MathBlock => {
                     format!("math_block @{}-{}", leaf.start_line + 1, leaf.end_line + 1)
+                }
+                LeafKind::CalloutTitle => format!("callout_title @{}", leaf.start_line + 1),
+                LeafKind::Comment => {
+                    format!("comment @{}-{}", leaf.start_line + 1, leaf.end_line + 1)
                 }
                 LeafKind::ThematicBreak => format!("thematic_break @{}", leaf.open_line + 1),
                 LeafKind::FencedCode | LeafKind::IndentedCode => {

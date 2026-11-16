@@ -8,6 +8,7 @@ pub mod appearance;
 pub mod chrome;
 pub mod compare;
 pub mod editor;
+pub mod export;
 pub mod files;
 pub mod find;
 pub mod goto;

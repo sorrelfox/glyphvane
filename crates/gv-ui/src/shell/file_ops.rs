@@ -518,9 +518,22 @@ impl Workspace {
                 this.reveal_command(window, cx);
             }),
         )
-        .on_action(cx.listener(
-            |this, _: &file_commands::OpenWithDefaultApp, window, cx| {
+        .on_action(
+            cx.listener(|this, _: &file_commands::OpenWithDefaultApp, window, cx| {
                 this.open_with_default_app_command(window, cx);
+            }),
+        )
+        .on_action(cx.listener(|this, _: &file_commands::ExportHtml, _, cx| {
+            this.export_html_command(cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &file_commands::OpenInBrowser, _, cx| {
+                this.open_in_browser_command(cx);
+            }),
+        )
+        .on_action(cx.listener(
+            |this, _: &crate::keymap::actions::editor::CopyAsRichText, window, cx| {
+                this.copy_as_rich_text_command(window, cx);
             },
         ))
     }

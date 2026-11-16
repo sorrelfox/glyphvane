@@ -30,7 +30,9 @@ use std::ops::Range;
 use gv_text::TextSource;
 
 use crate::inline::api::{RefDefSpans, parse_ref_def_spans};
-use crate::tree::event::{AlertKind, BlockId, BlockKind, Event, FrontMatterKind, TokenKind};
+use crate::tree::event::{
+    AlertKind, BlockId, BlockKind, CalloutFold, Event, FrontMatterKind, TokenKind,
+};
 use crate::tree::range::{self, OpenAt};
 use crate::tree::{LineView, SyntaxTree, TreeData};
 
@@ -49,7 +51,8 @@ pub struct Container {
     /// The extension marker on its first line
     /// ([`TokenKind::ExtMarker`]): the checkbox of a task item (`[x]`; an
     /// item without one is no task item), the `[^label]:` of a footnote
-    /// definition, the `[!TYPE]` of an alert. `None` for other containers.
+    /// definition, the `[!TYPE]` of an alert, the `[!type]` and fold sign of
+    /// a callout. `None` for other containers.
     pub marker: Option<Range<usize>>,
 }
 
@@ -65,6 +68,17 @@ impl Container {
         match (self.kind, &self.marker) {
             (ContainerKind::FootnoteDefinition, Some(m)) if m.len() >= 4 => {
                 Some(m.start + 2..m.end - 2)
+            }
+            _ => None,
+        }
+    }
+
+    /// For a callout, the range of its type (between `[!` and `]`).
+    pub fn callout_type(&self) -> Option<Range<usize>> {
+        match (self.kind, &self.marker) {
+            (ContainerKind::Callout { fold }, Some(m)) => {
+                let sign = usize::from(fold != CalloutFold::None);
+                (m.len() >= 4 + sign).then(|| m.start + 2..m.end - 1 - sign)
             }
             _ => None,
         }
@@ -104,6 +118,14 @@ pub enum ContainerKind {
     /// A footnote definition (`[^label]:`, [`Container::marker`]) and its
     /// blocks.
     FootnoteDefinition,
+    /// An Obsidian callout: a block quote whose first line starts with
+    /// `[!type]` ([`Container::marker`], [`Container::callout_type`]). Its
+    /// title, if it has one, is its first leaf
+    /// ([`LeafKind::CalloutTitle`]).
+    Callout {
+        /// The fold sign.
+        fold: CalloutFold,
+    },
 }
 
 impl ContainerKind {
@@ -112,7 +134,7 @@ impl ContainerKind {
     pub fn is_quote(self) -> bool {
         matches!(
             self,
-            ContainerKind::BlockQuote | ContainerKind::Alert { .. }
+            ContainerKind::BlockQuote | ContainerKind::Alert { .. } | ContainerKind::Callout { .. }
         )
     }
 }
@@ -157,6 +179,10 @@ pub enum LeafKind {
     /// included), and the text before the closing `$$` (when there is
     /// any).
     MathBlock,
+    /// The title of an Obsidian callout (one line of inline content).
+    CalloutTitle,
+    /// An Obsidian `%%` block comment: every line, the markers included.
+    Comment,
 }
 
 /// One line of a leaf block.
@@ -294,7 +320,10 @@ struct CFrame {
 fn deferred(bk: BlockKind) -> bool {
     matches!(
         bk,
-        BlockKind::Item | BlockKind::Alert { .. } | BlockKind::FootnoteDefinition
+        BlockKind::Item
+            | BlockKind::Alert { .. }
+            | BlockKind::Callout { .. }
+            | BlockKind::FootnoteDefinition
     )
 }
 
@@ -716,6 +745,7 @@ fn container(f: &CFrame, end: usize) -> Container {
             tight,
         },
         BlockKind::Alert { kind } => ContainerKind::Alert { kind },
+        BlockKind::Callout { fold } => ContainerKind::Callout { fold },
         BlockKind::FootnoteDefinition => ContainerKind::FootnoteDefinition,
         _ => ContainerKind::Item,
     };
@@ -870,6 +900,8 @@ fn emit_leaf(
                 BlockKind::FrontMatter { kind } => (LeafKind::FrontMatter { kind }, body()),
                 BlockKind::IndentedCode => (LeafKind::IndentedCode, &f.lines[..]),
                 BlockKind::Html { kind } => (LeafKind::Html { kind }, &f.lines[..]),
+                BlockKind::CalloutTitle => (LeafKind::CalloutTitle, &f.lines[..]),
+                BlockKind::CommentBlock => (LeafKind::Comment, &f.lines[..]),
                 _ => (LeafKind::Paragraph, &f.lines[..]),
             };
             let (kind, start_line, end_line, info) = mk(kind, lines, f.info.clone());

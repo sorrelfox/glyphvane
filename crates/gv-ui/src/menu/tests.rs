@@ -837,7 +837,7 @@ fn the_menu_shows_shortcuts_checks_and_disabled_items(cx: &mut TestAppContext) {
     assert_eq!(close.size.height, px(MENU_ROW));
 
     // A disabled item does nothing and keeps the menu open.
-    f.click("app-menu-item:file.export_html");
+    f.click("app-menu-item:file.export_pdf");
     assert!(f.is_open());
 
     // View: the current mode is checked; chords are labelled in full.
@@ -875,9 +875,10 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(f.sidebar_open());
     assert!(f.reader_focused());
 
-    // Edit ▸ Select all, then Edit ▸ Copy, run in the document.
+    // Edit ▸ Select all (after Copy, Copy as Markdown and Copy as rich
+    // text), then Edit ▸ Copy, run in the document.
     f.click("app-menu");
-    f.keys("down right down down enter");
+    f.keys("down right down down down enter");
     f.click("app-menu");
     f.keys("down right enter");
     let copied = f

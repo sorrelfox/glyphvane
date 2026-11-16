@@ -274,14 +274,18 @@ pub fn indent(frame: &Frame, m: &Metrics) -> f32 {
         FrameKind::Quote { .. } => m.quote_indent,
         FrameKind::List { .. } | FrameKind::Details => 0.0,
         FrameKind::Item { .. } | FrameKind::Footnote { .. } => m.list_indent,
-        FrameKind::Alert { .. } => m.callout_padding_x,
+        FrameKind::Alert { .. } | FrameKind::Callout { .. } | FrameKind::Embed { .. } => {
+            m.callout_padding_x
+        }
     }
 }
 
 /// The indent a frame gives its content from the right.
 pub fn right_indent(frame: &Frame, m: &Metrics) -> f32 {
     match frame.kind {
-        FrameKind::Alert { .. } => m.callout_padding_x,
+        FrameKind::Alert { .. } | FrameKind::Callout { .. } | FrameKind::Embed { .. } => {
+            m.callout_padding_x
+        }
         _ => 0.0,
     }
 }
@@ -403,6 +407,10 @@ impl Flatten<'_> {
             NodeKind::Details { summary, .. } => {
                 let e = self.text_estimate(&summary.measure, TextRole::Body, inset);
                 out.push(mk(0, ItemKind::Details, node.source.clone(), e));
+            }
+            NodeKind::CalloutTitle { title, .. } => {
+                let e = self.text_estimate(&title.measure, TextRole::Body, inset);
+                out.push(mk(0, ItemKind::Paragraph, node.source.clone(), e));
             }
             NodeKind::Picture(p) => {
                 // The light scheme's image, until the view knows the
@@ -607,7 +615,7 @@ fn frame_spacing(ctx: &[Frame], i: usize, m: &Metrics) -> Spacing {
         FrameKind::Item { .. } | FrameKind::Footnote { .. } | FrameKind::Details => {
             Spacing::default()
         }
-        FrameKind::Alert { .. } => m.callout,
+        FrameKind::Alert { .. } | FrameKind::Callout { .. } | FrameKind::Embed { .. } => m.callout,
     }
 }
 
@@ -618,6 +626,15 @@ fn frame_insets(item: &Item, m: &Metrics) -> (f32, f32) {
         if let FrameKind::Alert { .. } = f.kind {
             if item.opens_frame(i) {
                 top += m.callout_padding_top + m.callout_title + m.callout_title_gap;
+            }
+            if item.closes_frame(i) {
+                bottom += m.callout_padding_bottom;
+            }
+        }
+        // A callout's title is its first item; an embed's line is.
+        if let FrameKind::Callout { .. } | FrameKind::Embed { .. } = f.kind {
+            if item.opens_frame(i) {
+                top += m.callout_padding_top;
             }
             if item.closes_frame(i) {
                 bottom += m.callout_padding_bottom;

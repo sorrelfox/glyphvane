@@ -639,6 +639,48 @@ impl Notice {
         )
     }
 
+    /// An HTML export could not be made or written (not designed).
+    pub fn export_failed(reason: &str) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Error,
+            "Not exported.".to_owned(),
+            Some(format!("The HTML file could not be written: {reason}.")),
+        )
+    }
+
+    /// An export left `count` local images as links: missing, too large,
+    /// outside the vault or not an image (not designed).
+    pub fn export_images_skipped(count: usize) -> Self {
+        let what = if count == 1 {
+            "1 image was".to_owned()
+        } else {
+            format!("{count} images were")
+        };
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Information,
+            "Exported.".to_owned(),
+            Some(format!(
+                "{what} not embedded (missing, too large, outside the vault or not an image)."
+            )),
+        )
+    }
+
+    /// *Copy as rich text* fell back to plain text: the clipboard's HTML
+    /// format is not available, as on Wayland without the data-control
+    /// protocol (not designed).
+    pub fn rich_copy_plain(reason: &str) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Information,
+            "Copied as plain text.".to_owned(),
+            Some(format!(
+                "Rich text could not be put on the clipboard here ({reason})."
+            )),
+        )
+    }
+
     /// A new note could not be created (not designed).
     pub fn new_note_failed(folder: &Path, reason: &str) -> Self {
         Self::titled(

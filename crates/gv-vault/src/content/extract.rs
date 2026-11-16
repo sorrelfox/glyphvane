@@ -7,19 +7,20 @@
 //! views use (`gv-syntax`), and the document model (`gv-model`) supplies
 //! headings, Markdown links and images, and the front matter block.
 //!
-//! The Obsidian constructs the model does not record yet (wikilinks,
-//! embeds, inline tags, block ids, `%%` comments) are found by a scan of
-//! the prose leaves (paragraphs, headings, table rows) that skips code
-//! spans, so code blocks, code spans, math and HTML blocks never yield
-//! links or tags. The profile's switches decide which constructs exist.
-//! When the model gains these records, this scan goes away and the index
-//! format version is bumped ([`super::store::EXTRACT_VERSION`]).
+//! The Obsidian constructs (wikilinks, embeds, inline tags, block ids,
+//! `%%` comments) come from the parser's inline trees of the prose leaves
+//! (paragraphs, headings, callout titles, table cells; through the tree's
+//! inline cache, which the model filled), so code, math and HTML never
+//! yield links or tags. The profile's switches decide which constructs
+//! exist.
 
 use std::sync::Arc;
 
 use gv_model::{DocModel, Projection};
-use gv_profile::Switches;
-use gv_syntax::{Container, ContainerKind, FrontMatterKind, Leaf, LeafKind, ParseOptions, Visitor};
+use gv_syntax::inline::{InlineKind, InlineTree};
+use gv_syntax::{
+    Container, ContainerKind, FrontMatterKind, Leaf, LeafKind, ParseOptions, SyntaxTree, Visitor,
+};
 
 use super::frontmatter;
 use super::record::{
@@ -40,12 +41,13 @@ pub fn extract(text: &str, profile: ProfileId) -> NoteData {
 
     let mut scan = Scan {
         text,
-        switches,
+        tree: &tree,
+        options,
         lines: &lines,
         data: NoteData::default(),
         open_tasks: Vec::new(),
         pending_task_text: None,
-        prev_leaf: None,
+        prev_block: None,
     };
     gv_syntax::walk(&tree, &mut scan);
     let mut data = scan.data;
@@ -67,8 +69,9 @@ pub fn extract(text: &str, profile: ProfileId) -> NoteData {
         });
     }
 
-    // Markdown links and images.
-    for l in model.links() {
+    // Markdown links and images (wikilinks and embeds come from the scan,
+    // which also sees table cells).
+    for l in model.links().iter().filter(|l| !l.kind.is_wiki()) {
         data.links.push(IndexedLink {
             kind: crate::model::link_kind(l),
             raw: l.destination.clone(),
@@ -174,14 +177,16 @@ struct OpenTask {
 
 struct Scan<'a> {
     text: &'a str,
-    switches: &'a Switches,
+    tree: &'a SyntaxTree,
+    options: ParseOptions,
     lines: &'a LineIndex,
     data: NoteData,
     open_tasks: Vec<OpenTask>,
     /// The innermost open task still waits for its text.
     pending_task_text: Option<usize>,
-    /// The previous prose leaf: a block id alone on a line names it.
-    prev_leaf: Option<(Span, u32)>,
+    /// The previous block (a leaf, or a container that ended): a block id
+    /// alone in its paragraph names it.
+    prev_block: Option<(Span, u32)>,
 }
 
 impl Visitor for Scan<'_> {
@@ -205,6 +210,12 @@ impl Visitor for Scan<'_> {
     }
 
     fn exit(&mut self, c: &Container) {
+        if c.kind != ContainerKind::Item {
+            self.prev_block = Some((
+                Span::of(c.range.clone()),
+                u32::try_from(c.line).unwrap_or(u32::MAX),
+            ));
+        }
         if c.is_task()
             && let Some(task) = self.open_tasks.pop()
         {
@@ -232,16 +243,24 @@ impl Visitor for Scan<'_> {
             self.open_tasks[i].text = Some(line.into());
         }
         match leaf.kind {
-            LeafKind::Paragraph | LeafKind::Heading { .. } | LeafKind::Table => {
+            LeafKind::Paragraph | LeafKind::Heading { .. } | LeafKind::CalloutTitle => {
                 self.prose(leaf);
             }
+            LeafKind::Table => self.table(leaf),
             LeafKind::FencedCode
             | LeafKind::IndentedCode
             | LeafKind::Html { .. }
-            | LeafKind::MathBlock => {
+            | LeafKind::MathBlock
+            | LeafKind::Comment => {
                 self.data.skip.push(Span::of(leaf.range.clone()));
             }
             LeafKind::ThematicBreak | LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => {}
+        }
+        if leaf.kind != LeafKind::LinkRefDef {
+            self.prev_block = Some((
+                Span::of(leaf.range.clone()),
+                self.lines.line_of(leaf.range.start),
+            ));
         }
     }
 }
@@ -259,241 +278,128 @@ fn strip_checkbox(line: &str) -> &str {
 }
 
 impl Scan<'_> {
-    /// Wikilinks, embeds, tags, comments and block ids in a prose leaf.
+    /// Wikilinks, embeds, tags, comments, code spans and the block id of a
+    /// paragraph, heading or callout title.
     fn prose(&mut self, leaf: &Leaf<'_>) {
-        let segments = leaf.segments();
-        if segments.is_empty() {
+        // Nothing to find without one of these bytes: no inline parse.
+        let interesting = leaf.lines.iter().filter(|l| l.has_content).any(|l| {
+            self.text.as_bytes()[l.content.clone()]
+                .iter()
+                .any(|b| matches!(b, b'[' | b'#' | b'^' | b'`' | b'%'))
+        });
+        if !interesting {
             return;
         }
-        let s = self.switches;
-        let table = leaf.kind == LeafKind::Table;
-        let mut excluded = code_spans(self.text, &segments);
-        if s.comments {
-            excluded.extend(comments(self.text, &segments, &excluded));
-            excluded.sort();
-        }
-        for span in &excluded {
-            self.data.skip.push(*span);
-        }
-        let skip_to = |at: usize| {
-            excluded
-                .iter()
-                .find(|e| e.contains(at))
-                .map(|e| e.end as usize)
-        };
-
-        for seg in &segments {
-            let bytes = self.text.as_bytes();
-            let mut i = seg.start;
-            while i < seg.end {
-                if let Some(end) = skip_to(i) {
-                    i = end.max(i + 1);
-                    continue;
-                }
-                let b = bytes[i];
-                if b == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b == b'['
-                    && s.wikilinks
-                    && bytes.get(i + 1) == Some(&b'[')
-                    && let Some(end) = self.wikilink(i, seg.end, table)
-                {
-                    i = end;
-                    continue;
-                }
-                if b == b'#'
-                    && s.tags
-                    && (i == seg.start || is_space_before(self.text, i))
-                    && let Some(end) = self.tag(i, seg.end)
-                {
-                    i = end;
-                    continue;
-                }
-                i += 1;
-            }
-        }
-
-        let leaf_span = Span::of(leaf.range.clone());
-        let leaf_line = self.lines.line_of(leaf.range.start);
-        if s.block_ids
-            && let Some(last) = segments.last()
-        {
-            let line = &self.text[last.clone()];
-            if let Some((id, alone)) = block_id(line) {
-                let (span, at) = if alone && segments.len() == 1 {
-                    self.prev_leaf.unwrap_or((leaf_span, leaf_line))
-                } else {
-                    (leaf_span, leaf_line)
-                };
-                self.data.block_ids.push(IndexedBlockId {
-                    id: id.into(),
-                    span,
-                    line: at,
-                });
-            }
-        }
-        self.prev_leaf = Some((leaf_span, leaf_line));
-    }
-
-    /// A `[[…]]` (or `![[…]]`) at `open`; returns where it ends.
-    fn wikilink(&mut self, open: usize, seg_end: usize, table: bool) -> Option<usize> {
-        let text = &self.text[open + 2..seg_end];
-        let close = text.find("]]")?;
-        let inner = &text[..close];
-        if inner.trim().is_empty() || inner.contains("[[") {
-            return None;
-        }
-        let embed = self.switches.embeds && open > 0 && self.text.as_bytes()[open - 1] == b'!';
-        let start = if embed { open - 1 } else { open };
-        let end = open + 2 + close + 2;
-        let raw: Arc<str> = if table && inner.contains("\\|") {
-            inner.replace("\\|", "|").into()
-        } else {
-            inner.into()
-        };
-        self.data.links.push(IndexedLink {
-            kind: if embed {
-                LinkKind::Embed
+        let tree = self.tree.inlines(leaf, self.text);
+        self.inline_tree(&tree);
+        if let Some((id, _)) = tree.block_id() {
+            let own_line = tree.nodes().all(|n| {
+                !n.kind().is_token()
+                    || matches!(
+                        n.kind(),
+                        InlineKind::Whitespace
+                            | InlineKind::SoftBreak
+                            | InlineKind::Marker
+                            | InlineKind::BlockIdText
+                    )
+            });
+            let here = (
+                Span::of(leaf.range.clone()),
+                self.lines.line_of(leaf.range.start),
+            );
+            let (span, line) = if own_line {
+                self.prev_block.unwrap_or(here)
             } else {
-                LinkKind::Wikilink
-            },
-            raw,
-            span: Span::of(start..end),
-            line: self.lines.line_of(start),
-            front_matter: false,
-        });
-        Some(end)
-    }
-
-    /// A `#tag` at `hash`; returns where it ends.
-    fn tag(&mut self, hash: usize, seg_end: usize) -> Option<usize> {
-        let rest = &self.text[hash + 1..seg_end];
-        let mut len = 0;
-        for c in rest.chars() {
-            if is_tag_char(c) {
-                len += c.len_utf8();
-            } else {
-                break;
-            }
+                here
+            };
+            self.data.block_ids.push(IndexedBlockId {
+                id: id.into(),
+                span,
+                line,
+            });
         }
-        let name = &rest[..len];
-        // At least one character that is not a digit.
-        if name.is_empty() || name.chars().all(|c| c.is_ascii_digit() || c == '/') {
-            return None;
-        }
-        let end = hash + 1 + len;
-        self.data.tags.push(IndexedTag {
-            name: name.into(),
-            span: Some(Span::of(hash..end)),
-            line: self.lines.line_of(hash),
-        });
-        Some(end)
     }
-}
 
-fn is_space_before(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_some_and(char::is_whitespace)
-}
-
-/// Obsidian tag characters: letters, digits, `_`, `-`, `/` and any
-/// non-ASCII character that is not whitespace or punctuation.
-fn is_tag_char(c: char) -> bool {
-    if c.is_ascii() {
-        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/')
-    } else {
-        !c.is_whitespace() && !is_unicode_punctuation(c)
-    }
-}
-
-fn is_unicode_punctuation(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2000}'..='\u{206F}' | '\u{3000}'..='\u{303F}' | '\u{FF01}'..='\u{FF0F}' | '\u{00A1}'..='\u{00BF}'
-    )
-}
-
-/// A block id at the end of `line`: `text ^id` or `^id` alone (which then
-/// names the previous block).
-fn block_id(line: &str) -> Option<(&str, bool)> {
-    let line = line.trim_end();
-    let caret = line.rfind('^')?;
-    let id = &line[caret + 1..];
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return None;
-    }
-    let before = &line[..caret];
-    if before.trim().is_empty() {
-        return Some((id, true));
-    }
-    before
-        .chars()
-        .next_back()
-        .is_some_and(char::is_whitespace)
-        .then_some((id, false))
-}
-
-/// Code spans in a leaf whose content lines are `segments`: backtick runs
-/// paired by length (CommonMark), across lines; a backslash before the
-/// opening run escapes it.
-fn code_spans(text: &str, segments: &[std::ops::Range<usize>]) -> Vec<Span> {
-    let bytes = text.as_bytes();
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for seg in segments {
-        let mut i = seg.start;
-        while i < seg.end {
-            if bytes[i] == b'`' {
-                let start = i;
-                while i < seg.end && bytes[i] == b'`' {
-                    i += 1;
-                }
-                let escaped = start > seg.start && bytes[start - 1] == b'\\';
-                if !escaped {
-                    runs.push((start, i - start));
-                }
+    /// Each cell of a table, parsed with the profile's inline switches.
+    fn table(&mut self, leaf: &Leaf<'_>) {
+        let refs = self.tree.ref_map(self.text);
+        let options = self.options.inline_for(LeafKind::Table);
+        for line in leaf.lines.iter().filter(|l| l.has_content && !l.marker) {
+            let row = &self.text.as_bytes()[line.content.clone()];
+            let Some(cells) = gv_syntax::table::row_cells(row) else {
                 continue;
+            };
+            for cell in cells {
+                let cell = line.content.start + cell.start..line.content.start + cell.end;
+                let tree = gv_syntax::inline::parse_table_cell(self.text, cell, &*refs, options);
+                self.inline_tree(&tree);
+                for l in tree.links() {
+                    let kind = if l.is_image {
+                        LinkKind::Image
+                    } else if l.kind.is_reference() {
+                        LinkKind::Reference
+                    } else if matches!(
+                        l.kind,
+                        gv_syntax::inline::LinkKind::UriAutolink
+                            | gv_syntax::inline::LinkKind::EmailAutolink
+                    ) {
+                        if l.text_range.start == l.range.start {
+                            // A GFM extended autolink: no link here, as in
+                            // the model.
+                            continue;
+                        }
+                        LinkKind::Autolink
+                    } else {
+                        LinkKind::Inline
+                    };
+                    let raw: Arc<str> =
+                        if matches!(l.kind, gv_syntax::inline::LinkKind::EmailAutolink) {
+                            format!("mailto:{}", l.destination).into()
+                        } else {
+                            l.destination.into()
+                        };
+                    self.data.links.push(IndexedLink {
+                        kind,
+                        raw,
+                        span: Span::of(l.range.clone()),
+                        line: self.lines.line_of(l.range.start),
+                        front_matter: false,
+                    });
+                }
             }
-            i += 1;
         }
     }
-    let mut spans = Vec::new();
-    let mut k = 0;
-    while k < runs.len() {
-        let (start, len) = runs[k];
-        match runs[k + 1..].iter().position(|&(_, l)| l == len) {
-            Some(j) => {
-                let (close, _) = runs[k + 1 + j];
-                spans.push(Span::of(start..close + len));
-                k += j + 2;
-            }
-            None => k += 1,
-        }
-    }
-    spans
-}
 
-/// `%%…%%` comments in a leaf, outside code spans.
-fn comments(text: &str, segments: &[std::ops::Range<usize>], code: &[Span]) -> Vec<Span> {
-    let mut marks = Vec::new();
-    for seg in segments {
-        let mut from = seg.start;
-        while let Some(i) = text[from..seg.end].find("%%").map(|i| i + from) {
-            if !code.iter().any(|c| c.contains(i)) {
-                marks.push(i);
-            }
-            from = i + 2;
+    /// The wikilinks, embeds, tags, code spans and comments of one inline
+    /// tree.
+    fn inline_tree(&mut self, tree: &InlineTree) {
+        for c in tree.code_spans() {
+            self.data.skip.push(Span::of(c.range));
+        }
+        for c in tree.comments() {
+            self.data.skip.push(Span::of(c));
+        }
+        for w in tree.wikilinks() {
+            self.data.links.push(IndexedLink {
+                kind: if w.embed {
+                    LinkKind::Embed
+                } else {
+                    LinkKind::Wikilink
+                },
+                raw: w.inner.into(),
+                span: Span::of(w.range.clone()),
+                line: self.lines.line_of(w.range.start),
+                front_matter: false,
+            });
+        }
+        for (name, range) in tree.tags() {
+            self.data.tags.push(IndexedTag {
+                name: name.into(),
+                line: self.lines.line_of(range.start),
+                span: Some(Span::of(range)),
+            });
         }
     }
-    marks
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|[open, close]| Span::of(*open..*close + 2))
-        .collect()
 }
 
 #[cfg(test)]
@@ -538,7 +444,8 @@ mod tests {
     #[test]
     fn headings_title_and_block_ids() {
         let d = obs("# Title [[In heading]]\n\nPara one ^abc\n\n- item\n\n^list-id\n");
-        assert_eq!(d.title.as_deref(), Some("Title [[In heading]]"));
+        // The heading's text shows the wikilink's text.
+        assert_eq!(d.title.as_deref(), Some("Title In heading"));
         assert_eq!(d.title_source, TitleSource::Heading);
         let ids: Vec<&str> = d.block_ids.iter().map(|b| &*b.id).collect();
         assert_eq!(ids, vec!["abc", "list-id"]);
@@ -575,6 +482,32 @@ mod tests {
     fn commonmark_has_no_wikilinks() {
         let d = extract("[[A]] #t\n", ProfileId::CommonMark);
         assert!(d.links.is_empty() && d.tags.is_empty());
+    }
+
+    #[test]
+    fn callouts_block_comments_and_lists() {
+        let text = "> [!note] Title [[T]] #t1\n> body [[B]]\n\n%%\n[[Hidden]] #no\n%%\n\n- a\n- b\n\n^list\n";
+        let d = obs(text);
+        let raws: Vec<&str> = d.links.iter().map(|l| &*l.raw).collect();
+        assert_eq!(raws, ["T", "B"]);
+        let names: Vec<&str> = d.tags.iter().map(|t| &*t.name).collect();
+        assert_eq!(names, ["t1"]);
+        // The block id alone names the list before it.
+        assert_eq!(d.block_ids.len(), 1);
+        assert_eq!(d.block_ids[0].line, 7);
+        assert_eq!(text[d.block_ids[0].span.range()].trim_end(), "- a\n- b");
+        assert!(
+            d.skip
+                .iter()
+                .any(|s| text[s.range()].starts_with("%%\n[[Hidden]]"))
+        );
+    }
+
+    #[test]
+    fn inline_math_and_links_hide_their_text() {
+        let d = obs("$[[NoMath]]$ [x](y.md \"[[NoTitle]]\") [[Yes]]\n");
+        let raws: Vec<&str> = d.links.iter().map(|l| &*l.raw).collect();
+        assert_eq!(raws, ["y.md", "Yes"]);
     }
 
     #[test]

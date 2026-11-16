@@ -8,6 +8,7 @@ mod cli;
 mod clipboard;
 #[cfg(target_os = "linux")]
 mod emoji_font;
+mod export;
 mod gpu;
 mod instance;
 mod latency;
@@ -64,6 +65,7 @@ fn main() -> ExitCode {
     // Headless commands start no GUI, logger, settings or instance.
     if let Some(command) = &cli.command {
         return match command {
+            Command::Export(args) => export::run(args),
             Command::Render(args) => render::run(args),
             Command::CheckLinks(args) => check_links::run(args),
         };
@@ -189,6 +191,7 @@ fn main() -> ExitCode {
             emoji_font::install(cx);
             latency::install(cx);
             gv_ui::editor::set_html_clipboard(cx, Some(clipboard::system_reader()));
+            gv_ui::export::set_rich_clipboard(cx, Some(clipboard::system_writer()));
             gv_ui::keymap::install(cx, locations.as_ref());
             // The crash journal and file watching; safe mode keeps both:
             // they protect the user's text.

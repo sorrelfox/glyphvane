@@ -61,6 +61,30 @@ pub enum InlineKind {
     /// `[^` marker, a [`FootnoteLabel`](Self::FootnoteLabel) token, a `]`
     /// marker. The normalized label is [`InlineNode::footnote_label`].
     FootnoteRef,
+    /// `==x==` (with
+    /// [`InlineOptions::highlight`](super::InlineOptions::highlight)): a
+    /// marker, the content, a marker. A colour emoji right after the
+    /// opener (`==🔴x==`) is part of the content.
+    Highlight,
+    /// `[[target#anchor|alias]]` (with
+    /// [`InlineOptions::wikilinks`](super::InlineOptions::wikilinks)): a
+    /// `[[` marker, a [`WikiTarget`](Self::WikiTarget) token, optionally a
+    /// `|` marker and a [`WikiAlias`](Self::WikiAlias) token, a `]]`
+    /// marker. On one line. See [`InlineNode::wikilink`].
+    Wikilink,
+    /// `![[target#anchor|alias]]`: an embed, shaped like a
+    /// [`Wikilink`](Self::Wikilink) with a `![[` marker.
+    Embed,
+    /// `%%hidden%%` on one line: a marker,
+    /// [`CommentText`](Self::CommentText), a marker.
+    Comment,
+    /// `#tag`: a `#` marker and a [`TagText`](Self::TagText) token.
+    Tag,
+    /// A `^block-id` ending a paragraph: a `^` marker and a
+    /// [`BlockIdText`](Self::BlockIdText) token.
+    BlockId,
+    /// `^[note]`: a `^[` marker, the note's content, a `]` marker.
+    InlineFootnote,
     /// Raw inline HTML: one or more [`HtmlText`](Self::HtmlText) tokens.
     RawHtml,
     /// Literal text.
@@ -97,6 +121,17 @@ pub enum InlineKind {
     LinkLabel,
     /// The label of a footnote reference, as written.
     FootnoteLabel,
+    /// The text of an inline `%%` comment.
+    CommentText,
+    /// A tag's name (without the `#`).
+    TagText,
+    /// A wikilink's or embed's target with its anchors (`Note#H^b`), as
+    /// written.
+    WikiTarget,
+    /// A wikilink's or embed's text after the `|`, as written.
+    WikiAlias,
+    /// A block id without its `^`.
+    BlockIdText,
 }
 
 impl InlineKind {
@@ -120,6 +155,13 @@ impl InlineKind {
             Self::InlineMath => "InlineMath",
             Self::DisplayMath => "DisplayMath",
             Self::FootnoteRef => "FootnoteRef",
+            Self::Highlight => "Highlight",
+            Self::Wikilink => "Wikilink",
+            Self::Embed => "Embed",
+            Self::Comment => "Comment",
+            Self::Tag => "Tag",
+            Self::BlockId => "BlockId",
+            Self::InlineFootnote => "InlineFootnote",
             Self::RawHtml => "RawHtml",
             Self::Text => "Text",
             Self::Escape => "Escape",
@@ -136,6 +178,11 @@ impl InlineKind {
             Self::LinkTitle => "LinkTitle",
             Self::LinkLabel => "LinkLabel",
             Self::FootnoteLabel => "FootnoteLabel",
+            Self::CommentText => "CommentText",
+            Self::TagText => "TagText",
+            Self::WikiTarget => "WikiTarget",
+            Self::WikiAlias => "WikiAlias",
+            Self::BlockIdText => "BlockIdText",
         }
     }
 }
@@ -782,6 +829,79 @@ impl InlineTree {
             })
     }
 
+    /// Wikilinks and embeds in document order.
+    pub fn wikilinks(&self) -> impl Iterator<Item = WikiLinkRef<'_>> + '_ {
+        self.nodes.iter().filter_map(move |n| self.wiki_ref(n))
+    }
+
+    /// The wikilink data of `n`, if it is a wikilink or embed.
+    pub(super) fn wiki_ref(&self, n: &Node) -> Option<WikiLinkRef<'_>> {
+        let open = match n.kind {
+            InlineKind::Wikilink => 2,
+            InlineKind::Embed => 3,
+            _ => return None,
+        };
+        let close = n.end.saturating_sub(2).max(n.start + open);
+        let target_end = if n.data > 0 {
+            n.start + n.data - 1
+        } else {
+            close
+        };
+        let escaped = n.data > 0 && self.slice(target_end, target_end + 1) == "\\";
+        let alias = (n.data > 0).then(|| (target_end + 1 + u32::from(escaped), close));
+        let inner = self.slice(n.start + open, close);
+        Some(WikiLinkRef {
+            embed: n.kind == InlineKind::Embed,
+            range: self.src_range(n.start, n.end),
+            inner: if escaped {
+                std::borrow::Cow::Owned(inner.replacen("\\|", "|", 1))
+            } else {
+                std::borrow::Cow::Borrowed(inner)
+            },
+            target: self.slice(n.start + open, target_end),
+            target_range: self.src_range(n.start + open, target_end),
+            alias: alias.map(|(a, b)| self.slice(a, b)),
+            alias_range: alias.map(|(a, b)| self.src_range(a, b)),
+        })
+    }
+
+    /// Tags in document order: the name (without `#`) and the document
+    /// range of the whole tag.
+    pub fn tags(&self) -> impl Iterator<Item = (&str, Range<usize>)> + '_ {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind == InlineKind::Tag)
+            .map(move |n| {
+                (
+                    self.slice(n.start + 1, n.end),
+                    self.src_range(n.start, n.end),
+                )
+            })
+    }
+
+    /// The block id that ends the content (without `^`), with the document
+    /// range of the `^id`.
+    pub fn block_id(&self) -> Option<(&str, Range<usize>)> {
+        self.nodes
+            .iter()
+            .rev()
+            .find(|n| n.kind == InlineKind::BlockId)
+            .map(|n| {
+                (
+                    self.slice(n.start + 1, n.end),
+                    self.src_range(n.start, n.end),
+                )
+            })
+    }
+
+    /// The document ranges of inline `%%` comments, in order.
+    pub fn comments(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind == InlineKind::Comment)
+            .map(move |n| self.src_range(n.start, n.end))
+    }
+
     /// The normalized label of footnote reference `i`.
     pub(super) fn footnote_label(&self, i: u32) -> Option<&str> {
         let &(a, z) = self.footnotes.get(i as usize)?;
@@ -891,6 +1011,12 @@ impl<'a> InlineNode<'a> {
             .flatten()
     }
 
+    /// The wikilink data of a [`Wikilink`](InlineKind::Wikilink) or
+    /// [`Embed`](InlineKind::Embed) node; `None` for other nodes.
+    pub fn wikilink(&self) -> Option<WikiLinkRef<'a>> {
+        self.tree.wiki_ref(self.node())
+    }
+
     /// Appends a text projection of this node and its descendants (see
     /// [`TextProjection`]; the projection of an image's own description
     /// with [`TextProjection::TextContent`] is empty).
@@ -969,6 +1095,74 @@ pub struct LinkRef<'a> {
     /// The label as written (reference links: the content of the second
     /// bracket pair of a full reference, otherwise the link text).
     pub label_range: Option<Range<usize>>,
+}
+
+/// A wikilink or embed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WikiLinkRef<'a> {
+    /// `![[…]]` rather than `[[…]]`.
+    pub embed: bool,
+    /// The whole construct.
+    pub range: Range<usize>,
+    /// Everything between the brackets: what the resolver takes
+    /// (`Note#H|alias`). A `\|` that ends the target (as tables write it)
+    /// is a plain `|` here.
+    pub inner: std::borrow::Cow<'a, str>,
+    /// The target with its anchors (`Note#H^b`), as written.
+    pub target: &'a str,
+    /// Where [`target`](Self::target) is.
+    pub target_range: Range<usize>,
+    /// The text after the first `|` (display text, or an image size such
+    /// as `100x145`).
+    pub alias: Option<&'a str>,
+    /// Where [`alias`](Self::alias) is.
+    pub alias_range: Option<Range<usize>>,
+}
+
+impl WikiLinkRef<'_> {
+    /// The path part of the target (before the first `#`).
+    pub fn path(&self) -> &str {
+        self.target.split('#').next().unwrap_or("")
+    }
+
+    /// The anchor chain after the first `#` (`H1#H2`, `^id`), if any.
+    pub fn anchor(&self) -> Option<&str> {
+        self.target.split_once('#').map(|(_, a)| a)
+    }
+
+    /// The text a reader shows: the alias, or the target with its anchors
+    /// written as ` > ` (`Note > Heading`, `Heading` for `[[#Heading]]`).
+    pub fn display(&self) -> String {
+        if let Some(a) = self.alias.filter(|a| !a.trim().is_empty()) {
+            return a.to_owned();
+        }
+        self.target
+            .split('#')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" > ")
+    }
+
+    /// An image size in the alias (`100` or `100x145`): width and optional
+    /// height.
+    pub fn size(&self) -> Option<(u32, Option<u32>)> {
+        image_size(self.alias?)
+    }
+}
+
+/// An Obsidian image size (`^\d+(x\d+)?$`): `100` or `100x145`.
+pub fn image_size(s: &str) -> Option<(u32, Option<u32>)> {
+    let s = s.trim();
+    let digits = |t: &str| {
+        (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse::<u32>().ok())
+            .flatten()
+    };
+    match s.split_once('x') {
+        Some((w, h)) => Some((digits(w)?, Some(digits(h)?))),
+        None => Some((digits(s)?, None)),
+    }
 }
 
 /// A code span.

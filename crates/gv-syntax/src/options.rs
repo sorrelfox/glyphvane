@@ -29,7 +29,10 @@
 //! | `math_brackets` | [`ParseOptions::math_brackets`] |
 //! | `task_lists` | [`ParseOptions::task_lists`] |
 //! | `footnotes`, `footnote_indent` | [`ParseOptions::footnotes`], [`ParseOptions::footnote_indent`] |
-//! | `admonitions = alerts` | [`ParseOptions::alerts`] (Obsidian callouts are not parsed yet: their `> [!x]` stays a block quote) |
+//! | `admonitions = alerts` | [`ParseOptions::alerts`] |
+//! | `admonitions = callouts` | [`ParseOptions::callouts`] |
+//! | `comments` | [`ParseOptions::comments`]: `%%` block and inline comments |
+//! | `highlight`, `wikilinks`, `embeds`, `tags`, `block_ids`, `inline_footnotes` | the [`ParseOptions`] fields of the same names |
 //!
 //! [`InlineOptions`]: crate::inline::InlineOptions
 //!
@@ -154,6 +157,24 @@ pub struct ParseOptions {
     pub footnote_indent: u8,
     /// GitHub alerts ([`BlockKind::Alert`](crate::BlockKind::Alert)).
     pub alerts: bool,
+    /// Obsidian callouts ([`BlockKind::Callout`](crate::BlockKind::Callout)).
+    pub callouts: bool,
+    /// Obsidian `%%` comments: block comments
+    /// ([`BlockKind::CommentBlock`](crate::BlockKind::CommentBlock)) and
+    /// inline ones ([`InlineKind::Comment`](crate::inline::InlineKind::Comment)).
+    pub comments: bool,
+    /// `==x==` highlight.
+    pub highlight: bool,
+    /// `[[…]]` wikilinks.
+    pub wikilinks: bool,
+    /// `![[…]]` embeds.
+    pub embeds: bool,
+    /// Obsidian `#tag`s.
+    pub tags: bool,
+    /// Obsidian `^block-id`s at the end of a paragraph.
+    pub block_ids: bool,
+    /// `^[…]` inline footnotes.
+    pub inline_footnotes: bool,
 }
 
 impl Default for ParseOptions {
@@ -178,6 +199,14 @@ impl ParseOptions {
         footnotes: false,
         footnote_indent: 4,
         alerts: false,
+        callouts: false,
+        comments: false,
+        highlight: false,
+        wikilinks: false,
+        embeds: false,
+        tags: false,
+        block_ids: false,
+        inline_footnotes: false,
     };
 
     /// The GFM extensions of the GFM spec (tables, strikethrough, extended
@@ -231,6 +260,14 @@ impl ParseOptions {
             footnotes: s.footnotes,
             footnote_indent: if s.footnote_indent == 2 { 2 } else { 4 },
             alerts: s.admonitions == Admonitions::Alerts,
+            callouts: s.admonitions == Admonitions::Callouts,
+            comments: s.comments,
+            highlight: s.highlight,
+            wikilinks: s.wikilinks,
+            embeds: s.embeds,
+            tags: s.tags,
+            block_ids: s.block_ids,
+            inline_footnotes: s.inline_footnotes,
         }
     }
 
@@ -244,7 +281,22 @@ impl ParseOptions {
             math_code: self.math_code,
             math_brackets: self.math_brackets,
             footnotes: self.footnotes,
+            highlight: self.highlight,
+            wikilinks: self.wikilinks,
+            embeds: self.embeds,
+            comments: self.comments,
+            tags: self.tags,
+            block_ids: self.block_ids,
+            inline_footnotes: self.inline_footnotes,
         }
+    }
+
+    /// The inline part of the options for a leaf of kind `kind`: block ids
+    /// end paragraphs only.
+    pub fn inline_for(self, kind: crate::LeafKind) -> crate::inline::InlineOptions {
+        let mut o = self.inline();
+        o.block_ids &= kind == crate::LeafKind::Paragraph;
+        o
     }
 
     /// Whether `$$` math blocks open.
@@ -280,6 +332,14 @@ mod tests {
                 task_lists: TaskLists::Off,
                 footnotes: false,
                 alerts: false,
+                callouts: false,
+                comments: false,
+                highlight: false,
+                wikilinks: false,
+                embeds: false,
+                tags: false,
+                block_ids: false,
+                inline_footnotes: false,
                 ..gfm
             },
             ParseOptions::GFM
@@ -293,6 +353,10 @@ mod tests {
         assert_eq!((ob.math, ob.math_code), (DollarMath::Pandoc, false));
         assert_eq!(ob.task_lists, TaskLists::AnyCharacter);
         assert!(ob.footnotes && ob.footnote_indent == 2 && !ob.alerts);
+        assert!(ob.callouts && ob.comments && ob.highlight && ob.wikilinks && ob.embeds);
+        assert!(ob.tags && ob.block_ids && ob.inline_footnotes);
+        assert!(!ext.callouts && !ext.comments && !ext.tags && !ext.block_ids);
+        assert!(ext.highlight && ext.wikilinks && ext.embeds && ext.inline_footnotes);
         assert!(ext.alerts && ext.footnotes);
         let cm = ParseOptions::COMMONMARK;
         assert!(!cm.tables && !cm.strikethrough && !cm.autolinks && !cm.math_blocks());

@@ -13,6 +13,7 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 use gv_model::LinkKind;
 use gv_syntax::BlockId;
@@ -76,10 +77,46 @@ pub struct LinkTarget<'a> {
     pub block: BlockId,
 }
 
+/// What a note embed (`![[Note#Heading]]`) shows, as the UI finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedFetch {
+    /// The embedded note's text.
+    Note {
+        /// Identifies the note (its vault path): the key of cycle
+        /// detection, and what links inside the embed resolve from.
+        key: Arc<str>,
+        /// The note's name, for the embed's header and notices.
+        title: Arc<str>,
+        /// The whole note.
+        text: Arc<str>,
+    },
+    /// The target is not a note that can be shown here (a missing note,
+    /// one outside the root, a file of another kind); the header link says
+    /// why.
+    Unavailable,
+    /// The index is still building.
+    Pending,
+}
+
 /// Gives the status of each link. Implemented by the UI over the resolver.
 pub trait LinkStatusSource {
     /// The status of `link`.
     fn status(&self, link: &LinkTarget<'_>) -> LinkStatus;
+
+    /// The note a note embed shows: `destination` is what is between the
+    /// brackets of `![[…]]`; `from` is the key of the embedding note when
+    /// the embed is itself inside an embed (`None`: the document). The
+    /// default shows no embedded notes.
+    fn embed(&self, destination: &str, from: Option<&str>) -> EmbedFetch {
+        let _ = (destination, from);
+        EmbedFetch::Unavailable
+    }
+
+    /// The document's own key and title, as [`EmbedFetch::Note`] would
+    /// give them: an embed of the document inside itself is a cycle.
+    fn document_key(&self) -> Option<(Arc<str>, Arc<str>)> {
+        None
+    }
 }
 
 impl<F: Fn(&LinkTarget<'_>) -> LinkStatus> LinkStatusSource for F {

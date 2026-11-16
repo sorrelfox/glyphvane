@@ -795,6 +795,7 @@ mod code_tests;
 mod constructs_tests;
 mod find_tests;
 mod media_tests;
+mod obsidian_tests;
 mod remote_tests;
 
 /// Timing runs with the platform's real text system (Linux), for the

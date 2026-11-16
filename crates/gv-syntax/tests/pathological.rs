@@ -667,6 +667,84 @@ fn math_cases() -> Vec<Case> {
     ]
 }
 
+fn obsidian_cases() -> Vec<Case> {
+    vec![
+        case("obsidian: [[ openers", 50_000, |k| "[[a ".repeat(k), None),
+        case("obsidian: a run of [", 200_000, |k| "[".repeat(k), None),
+        case(
+            "obsidian: [[ runs with one ]]",
+            50_000,
+            |k| format!("{}]]", "[[a [ ".repeat(k)),
+            None,
+        ),
+        case(
+            "obsidian: many wikilinks",
+            50_000,
+            |k| "[[a|b]] ".repeat(k),
+            Some(|o, k| o.matches("internal-link").count() == k),
+        ),
+        case("obsidian: ![[ openers", 50_000, |k| "![[a ".repeat(k), None),
+        case(
+            "obsidian: %% opener and runs of three",
+            50_000,
+            |k| format!("%%{}", "x %%% ".repeat(k)),
+            None,
+        ),
+        case("obsidian: %% openers", 50_000, |k| "%%a ".repeat(k), None),
+        case(
+            "obsidian: %% block lines",
+            50_000,
+            |k| "%%\n".repeat(k),
+            None,
+        ),
+        case(
+            "obsidian: unclosed %% block",
+            50_000,
+            |k| format!("%%\n{}", "a %%% b\n\n".repeat(k)),
+            Some(|o, _| o.is_empty()),
+        ),
+        case("obsidian: == runs", 50_000, |k| "==a ".repeat(k), None),
+        case("obsidian: a run of =", 200_000, |k| "=".repeat(k), None),
+        case(
+            "obsidian: many tags",
+            50_000,
+            |k| "#a/b ".repeat(k),
+            Some(|o, k| o.matches("class=\"tag\"").count() == k),
+        ),
+        case("obsidian: a run of #", 200_000, |k| "x #".repeat(k), None),
+        case("obsidian: ^[ openers", 50_000, |k| "^[a ".repeat(k), None),
+        case(
+            "obsidian: nested ^[",
+            20_000,
+            |k| format!("{}{}", "^[a ".repeat(k), "]".repeat(k)),
+            None,
+        ),
+        case("obsidian: a run of ^", 200_000, |k| "^".repeat(k), None),
+        case(
+            "obsidian: block id after a long line",
+            50_000,
+            |k| format!("{}^id\n", "a ".repeat(k)),
+            None,
+        ),
+        case(
+            "obsidian: deep callouts",
+            5_000,
+            |k| format!("{}[!note] t\n", "> ".repeat(k)),
+            None,
+        ),
+        case(
+            "obsidian: many callouts",
+            20_000,
+            |k| "> [!tip]- t\n> b\n\n".repeat(k),
+            None,
+        ),
+    ]
+}
+
+fn render_obsidian(src: &str) -> String {
+    render_html_with(src, ParseOptions::builtin(ProfileId::Obsidian))
+}
+
 fn render_math_github(src: &str) -> String {
     render_html_with(src, ParseOptions::builtin(ProfileId::GfmFile))
 }
@@ -868,6 +946,12 @@ fn pathological_gv_syntax() {
         "gv-syntax (Pandoc math, brackets)",
         render_math_pandoc,
         math_cases(),
+        Vec::new(),
+    );
+    run_suite(
+        "gv-syntax (Obsidian)",
+        render_obsidian,
+        obsidian_cases(),
         Vec::new(),
     );
 }

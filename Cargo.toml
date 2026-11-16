@@ -162,6 +162,11 @@ nucleo-matcher = "0.3.1"
 # HTML (gv-html): the HTML5 parser, building into gv-html's own tree sink
 # (MIT OR Apache-2.0). The WHATWG URL parser above resolves pasted links.
 html5ever = "0.40.1"
+# Export (gv-export): the sanitizer of exported HTML and copied rich text,
+# configured with the native walker's allowlist and URL classifier. Pinned:
+# take its security releases promptly (MIT OR Apache-2.0; it pulls in
+# cssparser, MPL-2.0).
+ammonia = "=4.2.5"
 # Math (gv-math): RaTeX, LaTeX parsing and layout to a display list
 # (MIT; its mhchem part derives from KaTeX's Apache-2.0 mhchem, credited in
 # the notices), the KaTeX fonts it bundles (OFL-1.1) and the font reader

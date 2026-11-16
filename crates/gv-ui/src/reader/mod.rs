@@ -665,6 +665,14 @@ impl Reader {
         Some(doc.tree.markdown_for(&doc.syntax, &doc.text, range))
     }
 
+    /// The shown document's text and the selected source range, for
+    /// *Copy as rich text*; `None` without a selection.
+    pub fn selection_source(&self) -> Option<(Arc<str>, std::ops::Range<usize>)> {
+        let st = self.state.borrow();
+        let range = st.selected()?;
+        Some((st.doc.as_ref()?.text.clone(), range))
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<'_, Self>) {
         if let Some(text) = self.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));

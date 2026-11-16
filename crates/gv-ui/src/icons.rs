@@ -18,6 +18,10 @@ gpui::assets::icon_assets!(
         ArrowUpDown,
         ArrowUpRight,
         Bookmark,
+        Bug,
+        Check,
+        CircleQuestionMark,
+        ClipboardList,
         ChevronsDownUp,
         Columns2,
         Contrast,
@@ -33,13 +37,16 @@ gpui::assets::icon_assets!(
         Link,
         ListFilter,
         Lock,
+        List,
         LogOut,
         PencilLine,
+        Quote,
         SlidersHorizontal,
         SpellCheck,
         Table2,
         TextWrap,
         X,
+        Zap,
     ]
 );
 

@@ -17,9 +17,10 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gv_model::{BlockMatch, DocModel, FragmentMatch};
-use gv_render_tree::{ItemId, LinkStatus, LinkStatusSource, LinkTarget, RenderTree};
+use gv_render_tree::{EmbedFetch, ItemId, LinkStatus, LinkStatusSource, LinkTarget, RenderTree};
 use gv_vault::url::{UrlClass, UrlPolicy};
 use gv_vault::{
     Fragment, FragmentKind, FsProbe, IndexConfig, LinkKind, LinkRef, PathIndex, PlatformRules,
@@ -34,7 +35,11 @@ pub(crate) fn is_markdown(path: &Path) -> bool {
 
 /// The resolver's kind of a render-tree link.
 fn resolver_kind(kind: gv_model::LinkKind, image: bool) -> LinkKind {
-    if image {
+    if kind == gv_model::LinkKind::Wikilink {
+        LinkKind::Wikilink
+    } else if kind == gv_model::LinkKind::Embed && !image {
+        LinkKind::Embed
+    } else if image {
         LinkKind::Image
     } else if kind.is_reference() {
         LinkKind::Reference
@@ -215,6 +220,9 @@ impl Resolver {
     }
 }
 
+/// The largest note a note embed reads (the render tree's budget).
+const EMBED_MAX_BYTES: u64 = 2 << 20;
+
 impl LinkStatusSource for Resolver {
     fn status(&self, link: &LinkTarget<'_>) -> LinkStatus {
         let res = self.resolve(resolver_kind(link.kind, link.image), link.destination);
@@ -223,6 +231,64 @@ impl LinkStatusSource for Resolver {
             LinkStatus::Unresolved if !self.vault => LinkStatus::Pending,
             status => status,
         }
+    }
+
+    /// A note embed's note, read from the disk: resolved from the
+    /// document, or from the embedding note `from` inside an embed.
+    fn embed(&self, destination: &str, from: Option<&str>) -> EmbedFetch {
+        let source = from
+            .and_then(|f| VaultPath::new(f).ok())
+            .unwrap_or_else(|| self.source.clone());
+        let link = LinkRef::new(LinkKind::Embed, destination, source, self.profile);
+        let mut res = match &self.probe {
+            Some(probe) => resolve_with_probe(&self.index, &link, &self.params, probe),
+            None => resolve(&self.index, &link, &self.params),
+        };
+        if !self.vault && !res.status.is_resolved() {
+            // Without the window's vault: the files below the document's
+            // folder, checked directly.
+            let probe = FsProbe::new(self.index.root().to_path_buf(), PlatformRules::host());
+            res = resolve_with_probe(&self.index, &link, &self.params, &probe);
+        }
+        if res.status == Status::Pending {
+            return EmbedFetch::Pending;
+        }
+        let (Some(target), Some(TargetKind::File)) = (res.target_path.as_ref(), res.target_kind)
+        else {
+            return EmbedFetch::Unavailable;
+        };
+        if !res.status.is_resolved()
+            || !target
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            return EmbedFetch::Unavailable;
+        }
+        let path = target.to_fs_path(self.index.root());
+        if std::fs::metadata(&path).map_or(true, |m| m.len() > EMBED_MAX_BYTES) {
+            return EmbedFetch::Unavailable;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return EmbedFetch::Unavailable;
+        };
+        let title = target
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(".md")
+            .to_owned();
+        EmbedFetch::Note {
+            key: target.as_str().into(),
+            title: title.into(),
+            text: text.into(),
+        }
+    }
+
+    fn document_key(&self) -> Option<(Arc<str>, Arc<str>)> {
+        let key = self.source.as_str();
+        let title = key.rsplit('/').next().unwrap_or("").trim_end_matches(".md");
+        (!key.is_empty()).then(|| (Arc::from(key), Arc::from(title)))
     }
 }
 

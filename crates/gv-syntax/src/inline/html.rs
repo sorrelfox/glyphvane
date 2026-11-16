@@ -79,6 +79,40 @@ pub(super) fn render_with(
                 out.push_str("<del>");
                 closers.push((n.next, "</del>", K::Strikethrough));
             }
+            K::Highlight => {
+                out.push_str("<mark>");
+                closers.push((n.next, "</mark>", K::Highlight));
+            }
+            K::InlineFootnote => {
+                out.push_str("<sup class=\"footnote-inline\">");
+                closers.push((n.next, "</sup>", K::InlineFootnote));
+            }
+            K::Wikilink | K::Embed => {
+                if let Some(w) = tree.wiki_ref(&n) {
+                    if w.embed {
+                        out.push_str("<span class=\"internal-embed\" src=\"");
+                        escape_html(out, w.target.trim());
+                        out.push_str("\"></span>");
+                    } else {
+                        out.push_str("<a href=\"");
+                        escape_href(out, w.target.trim());
+                        out.push_str("\" class=\"internal-link\">");
+                        escape_html(out, &w.display());
+                        out.push_str("</a>");
+                    }
+                }
+                next = n.next as usize;
+            }
+            K::Tag => {
+                let text = tree.slice(n.start, n.end);
+                out.push_str("<a href=\"");
+                escape_href(out, text);
+                out.push_str("\" class=\"tag\">");
+                escape_html(out, text);
+                out.push_str("</a>");
+                next = n.next as usize;
+            }
+            K::Comment | K::BlockId => next = n.next as usize,
             K::CodeSpan => {
                 out.push_str("<code>");
                 code_content(tree, &n, out, true);
@@ -164,7 +198,12 @@ pub(super) fn render_with(
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel
-            | K::FootnoteLabel => {}
+            | K::FootnoteLabel
+            | K::CommentText
+            | K::TagText
+            | K::WikiTarget
+            | K::WikiAlias
+            | K::BlockIdText => {}
         }
         i = next;
     }
@@ -270,9 +309,23 @@ pub(super) fn plain_text(
                 }
                 next = n.next as usize;
             }
-            // Its number is document-global: no text here.
-            K::FootnoteRef => next = n.next as usize,
-            K::Emphasis
+            K::Wikilink => {
+                if let Some(w) = tree.wiki_ref(&n) {
+                    push(out, &w.display());
+                }
+                next = n.next as usize;
+            }
+            K::Tag => {
+                push(out, tree.slice(n.start, n.end));
+                next = n.next as usize;
+            }
+            // Its number is document-global: no text here. Embeds, comments
+            // and block ids have none either.
+            K::FootnoteRef | K::InlineFootnote | K::Embed | K::Comment | K::BlockId => {
+                next = n.next as usize;
+            }
+            K::Highlight
+            | K::Emphasis
             | K::Strong
             | K::Strikethrough
             | K::Link
@@ -286,7 +339,12 @@ pub(super) fn plain_text(
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel
-            | K::FootnoteLabel => {}
+            | K::FootnoteLabel
+            | K::CommentText
+            | K::TagText
+            | K::WikiTarget
+            | K::WikiAlias
+            | K::BlockIdText => {}
         }
         i = next;
     }
@@ -327,10 +385,26 @@ pub(super) fn project(
                 push_raw(out, super::tree::math_tex(tree, &n));
                 next = n.next as usize;
             }
-            K::RawHtml | K::FootnoteRef => next = n.next as usize,
+            K::Wikilink => {
+                if let Some(w) = tree.wiki_ref(&n) {
+                    push_raw(out, &w.display());
+                }
+                next = n.next as usize;
+            }
+            K::Tag => {
+                push_raw(out, tree.slice(n.start, n.end));
+                next = n.next as usize;
+            }
+            K::RawHtml
+            | K::FootnoteRef
+            | K::InlineFootnote
+            | K::Embed
+            | K::Comment
+            | K::BlockId => next = n.next as usize,
             // Containers: their text children follow; syntax tokens render
             // nothing.
-            K::Emphasis
+            K::Highlight
+            | K::Emphasis
             | K::Strong
             | K::Strikethrough
             | K::Link
@@ -344,7 +418,12 @@ pub(super) fn project(
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel
-            | K::FootnoteLabel => {}
+            | K::FootnoteLabel
+            | K::CommentText
+            | K::TagText
+            | K::WikiTarget
+            | K::WikiAlias
+            | K::BlockIdText => {}
         }
         i = next;
     }

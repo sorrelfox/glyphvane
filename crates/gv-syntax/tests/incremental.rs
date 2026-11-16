@@ -191,12 +191,36 @@ const TABLES: &[&str] = &[
     "> [!NOTE] title\n",
 ];
 
+/// Obsidian constructs and near misses.
+const OBSIDIAN: &[&str] = &[
+    "> [!note] Title\n",
+    "> [!tip]- folded\n> body\n",
+    "> [!faq]+\n",
+    "> > [!todo] nested\n",
+    "> [!x]\n",
+    "- > [!info] in a list\n",
+    "%%\n",
+    "%% open\n",
+    "close %%\n",
+    "a %%inline%% b\n",
+    "%%%%\n",
+    "> %%\n",
+    "[[Note]] [[a#h|t]] ![[img.png|10x20]]\n",
+    "[[open\n",
+    "]]\n",
+    "==hi== #tag #a/b ^[note]\n",
+    "para ^block-1\n",
+    "^lone\n",
+    "- item ^id\n",
+    "| [[a\\|b]] | x |\n",
+];
+
 /// Strings typed or pasted by edits.
 const TYPED: &[&str] = &[
     "x", " ", "\n", "\r", "\r\n", "\t", ">", "-", "*", "+", "#", "`", "```", "~~~", "1.", "2)",
     "[", "]", ":", "=", "<", "<div>", "    ", "> ", "- ", "\u{e9}", "\n\n", "]: /u", "-->", "\"",
     "---", "\n---\n", "...", "+++\n", "|", "| - |", "$", "$$", "$$\n", "[ ]", "[x] ", "[^1]",
-    "[^1]: ", "[!NOTE]", "!",
+    "[^1]: ", "[!NOTE]", "!", "%%", "[[", "]]", "==", "^", "[!tip]-", "#t",
 ];
 
 fn fragment() -> impl Strategy<Value = String> {
@@ -220,6 +244,16 @@ fn gfm_document(max: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(piece, 0..max).prop_map(|v| v.concat())
 }
 
+/// A document for Obsidian tests: the usual fragments and Obsidian ones.
+fn obsidian_document(max: usize) -> impl Strategy<Value = String> {
+    let piece = prop_oneof![
+        2 => fragment(),
+        2 => select(OBSIDIAN).prop_map(String::from),
+        1 => select(TABLES).prop_map(String::from),
+    ];
+    prop::collection::vec(piece, 0..max).prop_map(|v| v.concat())
+}
+
 /// A document for front matter tests.
 fn fm_document(max: usize) -> impl Strategy<Value = String> {
     (select(FRONT_MATTER), document(max)).prop_map(|(start, rest)| format!("{start}{rest}"))
@@ -229,6 +263,11 @@ fn fm_document(max: usize) -> impl Strategy<Value = String> {
 /// strikethrough, extended autolinks).
 fn gfm() -> ParseOptions {
     ParseOptions::builtin(gv_syntax::ProfileId::GfmFile)
+}
+
+/// The options of the `obsidian` profile.
+fn obsidian() -> ParseOptions {
+    ParseOptions::builtin(gv_syntax::ProfileId::Obsidian)
 }
 
 /// The options of the `extended` profile (YAML and TOML front matter).
@@ -395,6 +434,26 @@ proptest! {
     #[test]
     fn gfm_trace(doc in gfm_document(60), ops in prop::collection::vec(op(), 100..200), seed in 0usize..1000) {
         run_trace_with(&doc, &ops, seed, gfm())?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: env_u32("GV_PROP_SINGLE", 2000), ..ProptestConfig::default() })]
+
+    /// One random edit on a random document, Obsidian profile.
+    #[test]
+    fn obsidian_single_edit(doc in obsidian_document(40), op in op(), seed in 0usize..1000) {
+        run_trace_with(&doc, &[op], seed, obsidian())?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: env_u32("GV_PROP_TRACES", 100), ..ProptestConfig::default() })]
+
+    /// Traces of consecutive edits with the Obsidian profile.
+    #[test]
+    fn obsidian_trace(doc in obsidian_document(60), ops in prop::collection::vec(op(), 100..200), seed in 0usize..1000) {
+        run_trace_with(&doc, &ops, seed, obsidian())?;
     }
 }
 

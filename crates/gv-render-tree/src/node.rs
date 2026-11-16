@@ -20,9 +20,10 @@ use gv_inline::Paragraph;
 use gv_model::LinkKind;
 use gv_syntax::inline::RefDef;
 use gv_syntax::table::Alignment;
-use gv_syntax::{AlertKind, BlockId, FrontMatterKind};
+use gv_syntax::{AlertKind, BlockId, CalloutFold, FrontMatterKind};
 
 use crate::status::{ImageSize, LinkStatus};
+use crate::style::ColorToken;
 
 /// A container around a block. The decorations of a virtual item come
 /// from its frames, outermost first.
@@ -70,8 +71,108 @@ pub enum FrameKind {
     },
     /// The blocks of a `<details>` element, after its summary row
     /// ([`NodeKind::Details`], whose block id is the frame's id). Folded
-    /// away while the details are closed.
+    /// away while the details are closed. A foldable callout's blocks
+    /// after its title ([`NodeKind::CalloutTitle`]) are in one too.
     Details,
+    /// An Obsidian callout: a box tinted in its type's colour; its first
+    /// block is its title ([`NodeKind::CalloutTitle`]).
+    Callout {
+        /// The type as written, in lower case (`faq`, or a custom type);
+        /// [`CalloutType::of`] gives the built-in type that styles it.
+        name: Arc<str>,
+        /// Its fold sign.
+        fold: CalloutFold,
+    },
+    /// A note embed (`![[Note#Heading]]`) shown in place: a bordered box
+    /// holding the embed's own line (a link to the note) and the embedded
+    /// blocks.
+    Embed {
+        /// Number of embeds around it (0 for an outermost embed).
+        depth: u16,
+    },
+}
+
+/// The built-in Obsidian callout types (aliases in parentheses), which
+/// decide a callout's icon and colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CalloutType {
+    Note,
+    /// (summary, tldr)
+    Abstract,
+    Info,
+    Todo,
+    /// (hint, important)
+    Tip,
+    /// (check, done)
+    Success,
+    /// (help, faq)
+    Question,
+    /// (caution, attention)
+    Warning,
+    /// (fail, missing)
+    Failure,
+    /// (error)
+    Danger,
+    Bug,
+    Example,
+    /// (cite)
+    Quote,
+}
+
+impl CalloutType {
+    /// The type a callout named `name` gets (any case); unknown types are
+    /// notes, as in Obsidian.
+    pub fn of(name: &str) -> CalloutType {
+        match name.to_ascii_lowercase().as_str() {
+            "abstract" | "summary" | "tldr" => Self::Abstract,
+            "info" => Self::Info,
+            "todo" => Self::Todo,
+            "tip" | "hint" | "important" => Self::Tip,
+            "success" | "check" | "done" => Self::Success,
+            "question" | "help" | "faq" => Self::Question,
+            "warning" | "caution" | "attention" => Self::Warning,
+            "failure" | "fail" | "missing" => Self::Failure,
+            "danger" | "error" => Self::Danger,
+            "bug" => Self::Bug,
+            "example" => Self::Example,
+            "quote" | "cite" => Self::Quote,
+            _ => Self::Note,
+        }
+    }
+
+    /// The callout's tint (its box) and colour (its title and icon). The
+    /// design gives notes `status.info` and tips `status.success`; the
+    /// other types follow Obsidian's hues with the nearest tokens.
+    pub fn colors(self) -> (ColorToken, ColorToken) {
+        use ColorToken as T;
+        match self {
+            Self::Note | Self::Info | Self::Todo => (T::StatusInfoTint, T::StatusInfo),
+            Self::Abstract | Self::Tip => (T::StatusSuccessTint, T::StatusSuccess),
+            Self::Success => (T::StatusSuccessTint, T::StatusSuccess),
+            Self::Question | Self::Warning => (T::StatusWarningTint, T::StatusWarning),
+            Self::Failure | Self::Danger | Self::Bug => (T::StatusErrorTint, T::StatusError),
+            Self::Example => (T::AccentTint, T::SyntaxTag),
+            Self::Quote => (T::SurfaceSunken, T::TextSecondary),
+        }
+    }
+
+    /// Whether `name` is a built-in type or alias.
+    pub fn is_known(name: &str) -> bool {
+        Self::of(name) != Self::Note || name.eq_ignore_ascii_case("note")
+    }
+}
+
+/// The title a callout without one shows: its type as written, in title
+/// case (`Faq`, `My-type`).
+pub fn default_callout_title(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
+        None => String::new(),
+    }
 }
 
 /// The marker of a list item.
@@ -160,7 +261,8 @@ impl BlockNode {
         match &self.kind {
             NodeKind::Paragraph(c)
             | NodeKind::Heading { content: c, .. }
-            | NodeKind::Details { summary: c, .. } => Some(c),
+            | NodeKind::Details { summary: c, .. }
+            | NodeKind::CalloutTitle { title: c, .. } => Some(c),
             _ => None,
         }
     }
@@ -267,6 +369,14 @@ pub enum NodeKind {
     /// image. The view picks a source by the app theme
     /// ([`Picture::pick`]).
     Picture(Arc<Picture>),
+    /// The title row of an Obsidian callout (the first block of its
+    /// [`FrameKind::Callout`] frame): its title, or the type's name in
+    /// title case. A foldable callout's other blocks are in a
+    /// [`FrameKind::Details`] frame with this node's id.
+    CalloutTitle {
+        title: Arc<InlineContent>,
+        fold: CalloutFold,
+    },
 }
 
 /// A `<source>` of a `<picture>`: its media query and the first URL of
@@ -332,6 +442,7 @@ impl NodeKind {
             Self::EmptyQuote => "empty-quote",
             Self::Details { .. } => "details",
             Self::Picture(_) => "picture",
+            Self::CalloutTitle { .. } => "callout-title",
         }
     }
 }
@@ -402,6 +513,9 @@ pub enum InlineRole {
     /// The `↩` after a footnote's text that leads back to its reference
     /// number `k` (0-based, in document order). Not content.
     FootnoteBackref(u32),
+    /// An Obsidian `#tag`, drawn as a pill; its click target is a link of
+    /// kind [`LinkKind::Tag`](gv_model::LinkKind::Tag).
+    Tag,
 }
 
 /// A footnote reference of a block.

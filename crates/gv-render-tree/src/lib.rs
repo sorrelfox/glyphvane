@@ -65,21 +65,23 @@ mod style;
 mod text;
 mod tree;
 
-pub use build::MAX_FRAMES;
+pub use build::{
+    CALLOUT_TITLE_GUTTER, MAX_EMBED_BYTES, MAX_EMBED_DEPTH, MAX_EMBED_NODES, MAX_FRAMES,
+};
 pub use find::{FindError, FindIndex, Finder, Matches};
 pub use footnote::FootnoteIndex;
 pub use inline::MATH_DISPLAY_SCALE;
 pub use item::{Estimate, Item, ItemId, ItemKind, indent, right_indent};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
-    BlockNode, BoxRef, CodeBlock, CodeLine, Context, FootnoteRefInfo, Frame, FrameKind, ImageInfo,
-    InlineContent, InlineRole, InlineSpan, LinkInfo, ListMarker, MathInfo, NodeKind, Picture,
-    PictureSource, TableBlock, TableRow, Units,
+    BlockNode, BoxRef, CalloutType, CodeBlock, CodeLine, Context, FootnoteRefInfo, Frame,
+    FrameKind, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, ListMarker, MathInfo,
+    NodeKind, Picture, PictureSource, TableBlock, TableRow, Units, default_callout_title,
 };
 pub use properties::Property;
 pub use status::{
-    AllPending, ImageSize, ImageSizeSource, LinkStatus, LinkStatusSource, LinkTarget, NoImageSizes,
-    Sources,
+    AllPending, EmbedFetch, ImageSize, ImageSizeSource, LinkStatus, LinkStatusSource, LinkTarget,
+    NoImageSizes, Sources,
 };
 pub use style::{
     ColorToken, Family, LinkDecor, LinkSuffix, StatusIcon, StyleSpec, StyleTable, TextRole,

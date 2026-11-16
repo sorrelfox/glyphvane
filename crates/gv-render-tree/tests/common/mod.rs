@@ -108,7 +108,21 @@ fn rendered_content(tree: &SyntaxTree, opts: &RenderOptions, text: &str) -> Vec<
     impl Visitor for V<'_> {
         fn leaf(&mut self, leaf: &Leaf<'_>) {
             match leaf.kind {
-                LeafKind::LinkRefDef => return,
+                // Obsidian block comments are hidden.
+                LeafKind::LinkRefDef | LeafKind::Comment => return,
+                // So is a block id alone (Obsidian).
+                LeafKind::Paragraph
+                    if leaf.lines.len() == 1 && {
+                        let t = self.text[leaf.lines[0].content.clone()].trim();
+                        t.len() > 1
+                            && t.starts_with('^')
+                            && t[1..]
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    } =>
+                {
+                    return;
+                }
                 // A block of only `</details>` ends its details and shows
                 // nothing.
                 LeafKind::Html { .. }

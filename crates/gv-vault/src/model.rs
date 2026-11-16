@@ -33,7 +33,11 @@ use crate::profile::{ProfileId, ProfileParams};
 /// mapping here is treated as inline until it gets one.
 #[must_use]
 pub fn link_kind(link: &Link) -> LinkKind {
-    if link.image {
+    if link.kind == gv_model::LinkKind::Wikilink {
+        LinkKind::Wikilink
+    } else if link.kind == gv_model::LinkKind::Embed {
+        LinkKind::Embed
+    } else if link.image {
         LinkKind::Image
     } else if link.kind.is_reference() {
         LinkKind::Reference

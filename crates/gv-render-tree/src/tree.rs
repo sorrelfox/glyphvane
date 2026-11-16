@@ -38,7 +38,7 @@ use std::sync::{Arc, OnceLock};
 
 use gv_math::{MacroLimits, MacroPass, MacroSet};
 use gv_model::{DocModel, SlugAlgorithm};
-use gv_profile::switches::Math;
+use gv_profile::switches::{Math, SoftBreak};
 use gv_profile::{CompiledProfile, ProfileId};
 use gv_syntax::inline::RefLookup;
 use gv_syntax::{BlockId, Changes, Container, Leaf, LeafKind, RefMap, SyntaxTree, Visitor};
@@ -78,6 +78,10 @@ pub struct RenderOptions {
     /// ` ```mermaid ` fences are diagrams (the profile's `mermaid` switch),
     /// not code.
     pub mermaid: bool,
+    /// A soft line break is a line break (the profile's `soft_break =
+    /// br`: Obsidian unless `strictLineBreaks`, GitHub comments), not a
+    /// space.
+    pub soft_breaks: bool,
 }
 
 /// The macros in force for every formula of a tree, from one pass over
@@ -102,6 +106,7 @@ impl RenderOptions {
             chunk_lines: 50,
             math_fences: false,
             mermaid: false,
+            soft_breaks: false,
         }
     }
 
@@ -112,6 +117,7 @@ impl RenderOptions {
         Self {
             math_fences: profile.switches.math == Math::GitHub,
             mermaid: profile.switches.mermaid,
+            soft_breaks: profile.switches.soft_break == SoftBreak::Br,
             ..Self::commonmark()
         }
     }
@@ -122,6 +128,7 @@ impl RenderOptions {
         Self {
             math_fences: switches.math == Math::GitHub,
             mermaid: switches.mermaid,
+            soft_breaks: switches.soft_break == SoftBreak::Br,
             ..Self::commonmark()
         }
     }
@@ -134,6 +141,7 @@ impl RenderOptions {
         Self {
             math_fences: p.math_fences,
             mermaid: p.mermaid,
+            soft_breaks: p.soft_breaks,
             ..self
         }
     }
@@ -237,6 +245,7 @@ impl RenderTree {
         };
         let inline_opts = tree.options().inline();
         let mut b = NodeBuilder::new(text, refs, &t.opts, inline_opts, sources, None);
+        b.parse_opts = Some(tree.options());
         b.footnotes = footnotes;
         gv_syntax::walk(tree, &mut b);
         let nodes = std::mem::take(&mut b.nodes);
@@ -341,6 +350,8 @@ impl RenderTree {
                     sources,
                     block: def.id,
                     footnotes: Some(&index),
+                    soft_breaks: self.opts.soft_breaks,
+                    title: None,
                 };
                 let content = crate::inline::build_backrefs_only(at, count, &cx);
                 def.nodes.push(BlockNode {
@@ -506,6 +517,7 @@ impl RenderTree {
             sources,
             Some(reuse),
         );
+        builder.parse_opts = Some(tree.options());
         walk_region(tree, s..e, &mut builder);
         let built = builder.built;
         let reused = builder.reused;

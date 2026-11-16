@@ -187,6 +187,9 @@ pub struct Detection {
     pub config: Option<Arc<ConfigFile>>,
     /// Whether the config's `[switches]` apply.
     pub switches_apply: bool,
+    /// The tool-config tuning (Obsidian's `app.json`); it changes only the
+    /// profile it belongs to.
+    pub tuning: Tuning,
 }
 
 impl Detection {
@@ -209,7 +212,7 @@ impl Detection {
     /// Compiles the chosen profile with the overrides in effect.
     #[must_use]
     pub fn compile(&self) -> CompiledProfile {
-        compile(self.profile, Tuning::default(), &self.switch_overrides())
+        compile(self.profile, self.tuning, &self.switch_overrides())
     }
 
     /// The `.glyphvane.toml` problems, for the status bar and the log.
@@ -265,6 +268,8 @@ pub struct FolderScan {
     pub tool: Option<(Tool, String, PathBuf)>,
     /// The nearest Git repository and its remote's host.
     pub git: Option<(GitHost, PathBuf)>,
+    /// The tuning read from the nearest Obsidian vault's `app.json`.
+    pub tuning: Tuning,
 }
 
 /// Looks at `folder` (absolute) and its ancestors.
@@ -281,6 +286,11 @@ pub fn scan_folder(folder: &Path, options: &DetectOptions) -> FolderScan {
         if scan.tool.is_none() {
             scan.tool =
                 tool_in(dir, options).map(|(tool, marker)| (tool, marker, dir.to_path_buf()));
+            if let Some((Tool::Obsidian(name), _, root)) = &scan.tool {
+                scan.tuning = std::fs::read_to_string(root.join(name).join("app.json"))
+                    .map(|text| Tuning::from_obsidian_app_json(&text))
+                    .unwrap_or_default();
+            }
         }
         if scan.git.is_none() && dir.join(".git").exists() {
             scan.git = Some((git_host(dir), dir.to_path_buf()));
@@ -455,6 +465,7 @@ pub fn resolve(
         switches_apply: reason != Reason::FileOverride,
         reason,
         config: config.clone(),
+        tuning: scan.tuning,
     };
     if let Some(id) = overrides.file {
         return make(id.into(), Reason::FileOverride);
@@ -706,19 +717,48 @@ mod tests {
         let vault_note = t.file("repo/n.md", "");
         let d = run(&vault_note, &Overrides::default());
         assert_eq!(d.requested, Requested::BuiltIn(ProfileId::Obsidian));
-        // Obsidian has not shipped: Extended, with a note.
-        assert_eq!(d.profile, ProfileId::Extended);
+        assert_eq!(d.profile, ProfileId::Obsidian);
         assert_eq!(
             d.reason.describe(Some(t.0.path())),
             "Found `.obsidian/` at `~/repo`"
         );
-        assert_eq!(
-            d.pending_note().as_deref(),
-            Some("Obsidian detected — full support in 0.5")
-        );
+        assert_eq!(d.pending_note(), None);
         let site_note = t.file("repo/site/docs/n.md", "");
         let d = run(&site_note, &Overrides::default());
         assert_eq!(d.requested, Requested::Planned(PlannedProfile::MkDocs));
+    }
+
+    #[test]
+    fn obsidian_app_json_tunes_the_profile() {
+        let t = Tree::new();
+        t.dir("v/.obsidian");
+        t.file("v/.obsidian/app.json", "{\"strictLineBreaks\": true}");
+        let d = run(&t.file("v/sub/n.md", ""), &Overrides::default());
+        assert_eq!(d.profile, ProfileId::Obsidian);
+        assert_eq!(d.tuning.strict_line_breaks, Some(true));
+        let p = d.compile();
+        assert_eq!(p.switches.soft_break, crate::switches::SoftBreak::Space);
+        // Without the key: Obsidian's default, a line break.
+        t.dir("w/.obsidian");
+        t.file("w/.obsidian/app.json", "{}");
+        let d = run(&t.file("w/n.md", ""), &Overrides::default());
+        assert_eq!(
+            d.compile().switches.soft_break,
+            crate::switches::SoftBreak::Br
+        );
+        // Another profile chosen in the vault ignores it.
+        let d = run(
+            &t.file("v/m.md", ""),
+            &Overrides {
+                file: Some(ProfileId::GfmFile),
+                ..Overrides::default()
+            },
+        );
+        assert_eq!(
+            d.compile().switches.soft_break,
+            crate::switches::SoftBreak::Space
+        );
+        assert!(d.compile().changed.is_empty());
     }
 
     #[test]

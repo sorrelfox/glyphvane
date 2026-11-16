@@ -28,7 +28,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gv_inline::{BoxAlign, BoxKind, InlineBox, ParagraphBuilder, RunStyle, Strikethrough};
+use gv_inline::{
+    Background, BoxAlign, BoxKind, InlineBox, ParagraphBuilder, RunStyle, Strikethrough,
+};
 use gv_model::LinkKind;
 use gv_syntax::BlockId;
 use gv_syntax::inline::{
@@ -52,7 +54,18 @@ pub(crate) struct InlineCx<'a> {
     pub block: BlockId,
     /// The document's footnote numbers.
     pub footnotes: Option<&'a FootnoteIndex>,
+    /// Soft line breaks are line breaks.
+    pub soft_breaks: bool,
+    /// A callout's title: bold, in this colour, after a gutter of this
+    /// width for the type's icon.
+    pub title: Option<(ColorToken, f32)>,
 }
+
+/// Size of a tag pill's text relative to the text around it (11.5 px in
+/// 14 px body text).
+const TAG_SCALE: f32 = 11.5 / 14.0;
+/// A tag pill's horizontal padding, in px at zoom 1.
+const TAG_PADDING_X: f32 = 8.0;
 
 /// Size of a footnote reference's number relative to the text around it.
 const FOOTNOTE_SCALE: f32 = 0.75;
@@ -70,6 +83,7 @@ pub(crate) fn build(
     let mut b = Builder::new(cx, role, base);
     b.para
         .source_anchor(tree.source_range().start.saturating_sub(base));
+    b.title_gutter(tree.source_range().start);
     b.walk(tree.top_level());
     b.finish()
 }
@@ -110,11 +124,18 @@ pub(crate) fn build_plain(
 ) -> InlineContent {
     let mut b = Builder::new(cx, role, base);
     b.para.source_anchor(source.start.saturating_sub(base));
+    b.title_gutter(source.start);
     let state = State {
-        variant: Variant::PLAIN,
+        variant: if cx.title.is_some() {
+            Variant::STRONG
+        } else {
+            Variant::PLAIN
+        },
         link: None,
         alt: None,
         strike: false,
+        mark: None,
+        note: false,
     };
     let key = b.key(state, InlineRole::Text);
     let exact = text.len() == source.len();
@@ -162,6 +183,10 @@ struct State {
     alt: Option<u32>,
     /// Struck through.
     strike: bool,
+    /// Highlighted (`==x==`), in this colour.
+    mark: Option<ColorToken>,
+    /// Inside an inline footnote (`^[…]`).
+    note: bool,
 }
 
 /// What ends when a subtree ends.
@@ -258,10 +283,16 @@ impl Builder<'_, '_> {
     /// emphasis nesting must not overflow the stack).
     fn walk(&mut self, top: Children<'_>) {
         let mut state = State {
-            variant: Variant::PLAIN,
+            variant: if self.cx.title.is_some() {
+                Variant::STRONG
+            } else {
+                Variant::PLAIN
+            },
             link: None,
             alt: None,
             strike: false,
+            mark: None,
+            note: false,
         };
         let mut stack: Vec<(Children<'_>, Option<Exit>)> = vec![(top, None)];
         while let Some((iter, _)) = stack.last_mut() {
@@ -293,6 +324,21 @@ impl Builder<'_, '_> {
                     state.strike = true;
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
+                InlineKind::Highlight => {
+                    let saved = state;
+                    state.mark = Some(mark_color(&node));
+                    stack.push((node.children(), Some(Exit::Restore(saved))));
+                }
+                InlineKind::InlineFootnote => {
+                    let saved = state;
+                    state.note = true;
+                    stack.push((node.children(), Some(Exit::Restore(saved))));
+                }
+                InlineKind::Wikilink => self.wikilink(&node, state),
+                InlineKind::Embed => self.embed(&node, state),
+                InlineKind::Tag => self.tag(&node, state),
+                // Hidden in a view: shown in the Source view only.
+                InlineKind::Comment | InlineKind::BlockId => {}
                 InlineKind::InlineMath | InlineKind::DisplayMath => self.math_box(&node, state),
                 InlineKind::Link if state.alt.is_none() => {
                     let saved = state;
@@ -335,6 +381,16 @@ impl Builder<'_, '_> {
                     node.push_text(TextProjection::TextContent, &mut s);
                     self.piece(&s, node.range(), false, self.key(state, InlineRole::Text));
                 }
+                InlineKind::SoftBreak if self.cx.soft_breaks => {
+                    self.flush();
+                    let r = self.rel(node.range());
+                    self.para.hard_break(r);
+                    self.spans.push(InlineSpan {
+                        role: InlineRole::Break,
+                        link: state.link,
+                    });
+                    self.lines.push(std::mem::take(&mut self.line));
+                }
                 InlineKind::SoftBreak => {
                     let r = node.range();
                     let exact = r.len() == 1;
@@ -360,7 +416,12 @@ impl Builder<'_, '_> {
                 | InlineKind::LinkDestination
                 | InlineKind::LinkTitle
                 | InlineKind::LinkLabel
-                | InlineKind::FootnoteLabel => {}
+                | InlineKind::FootnoteLabel
+                | InlineKind::CommentText
+                | InlineKind::TagText
+                | InlineKind::WikiTarget
+                | InlineKind::WikiAlias
+                | InlineKind::BlockIdText => {}
             }
         }
     }
@@ -400,6 +461,8 @@ impl Builder<'_, '_> {
             link: None,
             alt: None,
             strike: false,
+            mark: None,
+            note: false,
         };
         for k in 0..count {
             let mut text = String::from("\u{a0}\u{21a9}");
@@ -473,6 +536,10 @@ impl Builder<'_, '_> {
             // The chip's padding at both ends.
             self.line.px += 10.0 * self.cx.styles.zoom();
         }
+        if key.role == InlineRole::Tag && self.run.as_ref().is_none_or(|r| r.key != key) {
+            // The pill's padding at both ends.
+            self.line.px += 2.0 * TAG_PADDING_X * self.cx.styles.zoom();
+        }
     }
 
     /// Ends the current run.
@@ -514,7 +581,37 @@ impl Builder<'_, '_> {
             InlineRole::FootnoteBackref(_) => {
                 return style.with_color(ColorToken::AccentDefault.role());
             }
+            InlineRole::Tag => {
+                let zoom = styles.zoom();
+                style.size *= TAG_SCALE;
+                return style
+                    .with_color(ColorToken::AccentDefault.role())
+                    .with_background(Background {
+                        role: ColorToken::AccentTint.role(),
+                        padding_x: TAG_PADDING_X * zoom,
+                        padding_y: 2.0 * zoom,
+                        radius: 9.0 * zoom,
+                    });
+            }
             _ => {}
+        }
+        if key.state.note {
+            style = style.with_color(ColorToken::TextSecondary.role());
+        }
+        if let Some((title, _)) = self.cx.title
+            && key.state.link.is_none()
+        {
+            style = style.with_color(title.role());
+        }
+        if let Some(mark) = key.state.mark
+            && key.role != InlineRole::Code
+        {
+            style = style.with_background(Background {
+                role: mark.role(),
+                padding_x: 0.0,
+                padding_y: 1.0 * styles.zoom(),
+                radius: 2.0 * styles.zoom(),
+            });
         }
         if let Some(link) = key.state.link
             && let Some(info) = self.links.get(link as usize)
@@ -562,6 +659,17 @@ impl Builder<'_, '_> {
         let b =
             InlineBox::new(BoxKind::Math, width, ascent, descent).with_id(BoxRef::Math(index).id());
         self.push_box(b, source, InlineRole::Math(index), state.link);
+    }
+
+    /// The space for a callout title's icon, at `at` (absolute): a gap box
+    /// of the gutter's width (no content: copy and find skip it).
+    fn title_gutter(&mut self, at: usize) {
+        if let Some((_, width)) = self.cx.title
+            && width > 0.0
+        {
+            let b = InlineBox::new(BoxKind::Other, width, 0.0, 0.0).with_id(BoxRef::Cell(0).id());
+            self.push_box(b, at..at, InlineRole::CellGap(0), None);
+        }
     }
 
     /// The gap box before table column `col` (`col` = the column count:
@@ -713,6 +821,127 @@ impl Builder<'_, '_> {
             }
             _ => Some(index),
         }
+    }
+
+    /// A wikilink: its display text as a link (status from the resolver),
+    /// then the status suffix.
+    fn wikilink(&mut self, node: &InlineNode<'_>, state: State) {
+        let Some(w) = node.wikilink() else {
+            return;
+        };
+        let display = w.display();
+        let mut inner = state;
+        let link = if state.alt.is_none() {
+            let link = self.add_link(LinkKind::Wikilink, Arc::from(&*w.inner), None, node.range());
+            inner.link = Some(link);
+            Some(link)
+        } else {
+            None
+        };
+        let key = self.key(inner, InlineRole::Text);
+        match (&w.alias, &w.alias_range) {
+            (Some(alias), Some(r)) if !alias.trim().is_empty() => {
+                self.piece(alias, r.clone(), alias.len() == r.len(), key);
+            }
+            _ => {
+                let r = w.target_range.clone();
+                let exact = display == w.target && display.len() == r.len();
+                self.piece(&display, r, exact, key);
+            }
+        }
+        if let Some(link) = link {
+            self.link_suffix(link, state);
+        }
+    }
+
+    /// An embed inside a paragraph: an image embed is an image (sized by
+    /// `|100` or `|100x145`); another embed is a link to its target (a
+    /// paragraph that is only a note embed shows the note; see the block
+    /// builder).
+    fn embed(&mut self, node: &InlineNode<'_>, state: State) {
+        let Some(w) = node.wikilink() else {
+            return;
+        };
+        let path = w.path().trim();
+        if state.alt.is_some() || !is_image_path(path) {
+            self.wikilink(node, state);
+            return;
+        }
+        let range = node.range();
+        let size = self.cx.sources.images.size(&LinkTarget {
+            kind: LinkKind::Embed,
+            image: true,
+            destination: path,
+            title: None,
+            range: range.clone(),
+            block: self.cx.block,
+        });
+        let index = u32::try_from(self.images.len()).unwrap_or(u32::MAX);
+        self.images.push(ImageInfo {
+            kind: LinkKind::Embed,
+            destination: path.into(),
+            title: None,
+            alt: Arc::from(path),
+            size,
+            source: self.rel(range.clone()),
+            link: state.link,
+        });
+        let wanted = w.size();
+        match size {
+            ImageSize::Known { width, height }
+                if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
+            {
+                let zoom = self.cx.styles.zoom();
+                #[allow(clippy::cast_precision_loss)]
+                let (mut w, mut h) = match wanted {
+                    Some((ww, Some(hh))) => (ww as f32, hh as f32),
+                    Some((ww, None)) => (ww as f32, ww as f32 * height / width),
+                    None => (width, height),
+                };
+                w *= zoom;
+                h *= zoom;
+                let max = self.cx.metrics.image_max_width;
+                if w > max && max > 0.0 {
+                    h *= max / w;
+                    w = max;
+                }
+                let b =
+                    InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(BoxRef::Image(index).id());
+                self.push_box(b, range, InlineRole::Image(index), state.link);
+            }
+            _ => {
+                let key = RunKey {
+                    state,
+                    role: InlineRole::ImageAlt(index),
+                };
+                self.piece(path, w.target_range.clone(), false, key);
+            }
+        }
+    }
+
+    /// A `#tag`: a pill whose click target is a [`LinkKind::Tag`] link.
+    fn tag(&mut self, node: &InlineNode<'_>, state: State) {
+        let range = node.range();
+        let text = node.text();
+        let mut inner = state;
+        if state.alt.is_none() && state.link.is_none() {
+            let index = u32::try_from(self.links.len()).unwrap_or(u32::MAX);
+            self.links.push(LinkInfo {
+                kind: LinkKind::Tag,
+                destination: Arc::from(text.get(1..).unwrap_or("")),
+                title: None,
+                status: crate::status::LinkStatus::Exact,
+                source: self.rel(range.clone()),
+            });
+            inner.link = Some(index);
+        }
+        self.flush();
+        let key = RunKey {
+            state: inner,
+            role: InlineRole::Tag,
+        };
+        self.piece(text, range.clone(), text.len() == range.len(), key);
+        self.flush();
     }
 
     fn autolink(&mut self, node: &InlineNode<'_>, state: State) {
@@ -876,6 +1105,28 @@ fn strip_code_space(pieces: &mut Vec<(String, Range<usize>, bool)>) {
             }
         }
     }
+}
+
+/// The background of a highlight: Obsidian's colour emoji right after
+/// `==` pick a colour (🔴🟠🟡🟢🔵🟣), else the default highlight.
+fn mark_color(node: &InlineNode<'_>) -> ColorToken {
+    let text = node.text();
+    let first = text.get(2..).and_then(|t| t.chars().next());
+    match first {
+        Some('\u{1f534}') => ColorToken::StatusErrorTint,
+        Some('\u{1f7e2}') => ColorToken::StatusSuccessTint,
+        Some('\u{1f535}') => ColorToken::StatusInfoTint,
+        Some('\u{1f7e3}') => ColorToken::AccentTint,
+        _ => ColorToken::StatusWarningTint,
+    }
+}
+
+/// Whether `path` names an image Obsidian embeds as one.
+pub(crate) fn is_image_path(path: &str) -> bool {
+    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
+    ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif"]
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
 }
 
 fn link_kind(kind: SynLinkKind) -> LinkKind {

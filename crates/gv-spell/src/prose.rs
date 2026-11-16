@@ -57,7 +57,7 @@ pub fn leaf_prose<S: TextSource + ?Sized>(
 ) -> Vec<Range<usize>> {
     let mut runs = Runs::default();
     match leaf.kind {
-        LeafKind::Paragraph | LeafKind::Heading { .. } => {
+        LeafKind::Paragraph | LeafKind::Heading { .. } | LeafKind::CalloutTitle => {
             let inlines = tree.inlines(leaf, text);
             runs.tree(&inlines);
         }
@@ -91,7 +91,8 @@ pub fn leaf_prose<S: TextSource + ?Sized>(
         | LeafKind::IndentedCode
         | LeafKind::Html { .. }
         | LeafKind::LinkRefDef
-        | LeafKind::MathBlock => {}
+        | LeafKind::MathBlock
+        | LeafKind::Comment => {}
     }
     let mut out = Vec::new();
     let mut buf = Vec::new();
@@ -141,9 +142,12 @@ impl Runs {
             | InlineKind::Strong
             | InlineKind::Strikethrough
             | InlineKind::Link
-            | InlineKind::Image => node.children().for_each(|c| self.node(c)),
-            // Code, math, HTML, autolinks, footnote references, escapes,
-            // entities, breaks and syntax are not prose.
+            | InlineKind::Image
+            | InlineKind::Highlight
+            | InlineKind::InlineFootnote => node.children().for_each(|c| self.node(c)),
+            // Code, math, HTML, autolinks, footnote references, wikilinks,
+            // tags, comments, block ids, escapes, entities, breaks and
+            // syntax are not prose.
             _ => {}
         }
     }

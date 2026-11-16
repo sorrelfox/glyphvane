@@ -60,8 +60,8 @@ impl Heading {
     }
 }
 
-/// How a link got its destination. More kinds (wikilinks, embeds, extended
-/// autolinks, HTML attributes) come with later profiles.
+/// How a link got its destination. More kinds (extended autolinks, HTML
+/// attributes) come with later profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LinkKind {
@@ -77,9 +77,23 @@ pub enum LinkKind {
     UriAutolink,
     /// `<user@example.com>`.
     EmailAutolink,
+    /// `[[target#anchor|alias]]` (Obsidian, Extended). The destination is
+    /// everything between the brackets, as the resolver takes it.
+    Wikilink,
+    /// `![[target#anchor|alias]]`, shaped like a wikilink.
+    Embed,
+    /// An Obsidian `#tag` as a view's click target (its destination is the
+    /// tag without `#`). The model's own links never have this kind; its
+    /// tags are [`DocModel::tags`](crate::DocModel::tags).
+    Tag,
 }
 
 impl LinkKind {
+    /// A wikilink or embed.
+    pub fn is_wiki(self) -> bool {
+        matches!(self, Self::Wikilink | Self::Embed)
+    }
+
     /// The destination comes from a link reference definition.
     pub fn is_reference(self) -> bool {
         matches!(self, Self::Full | Self::Collapsed | Self::Shortcut)
@@ -153,11 +167,31 @@ pub struct Definition {
 pub struct BlockAnchor {
     /// The id as written, without `^`.
     pub id: Arc<str>,
-    /// The block it identifies.
+    /// The paragraph that ends with it (with [`own_line`](Self::own_line),
+    /// the paragraph that is only the `^id`).
     pub range: Range<usize>,
+    /// Where the `^id` is.
+    pub id_range: Range<usize>,
+    /// The id is a paragraph of its own: it names the block before it (a
+    /// list, quote, callout or table), which is found from the syntax tree
+    /// when it is needed.
+    pub own_line: bool,
     /// 0-based line of the block.
     pub line: u32,
     /// The block.
+    pub block: BlockId,
+}
+
+/// An inline tag (`#tag`, Obsidian).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    /// The name as written, without `#` (`a/b`).
+    pub name: Arc<str>,
+    /// The whole `#tag`.
+    pub range: Range<usize>,
+    /// 0-based line.
+    pub line: u32,
+    /// The block it is in.
     pub block: BlockId,
 }
 
@@ -205,6 +239,8 @@ pub(crate) struct BlockFacts {
     pub headings: Range<u32>,
     pub links: Range<u32>,
     pub definitions: Range<u32>,
+    pub tags: Range<u32>,
+    pub anchors: Range<u32>,
     /// Labels looked up while parsing the block's inlines, with what they
     /// resolved to.
     pub lookups: Option<Lookups>,
@@ -224,6 +260,7 @@ pub(crate) struct ModelData {
     pub links: Vec<Link>,
     pub definitions: Vec<Definition>,
     pub block_anchors: Vec<BlockAnchor>,
+    pub tags: Vec<Tag>,
     pub front_matter: Option<FrontMatter>,
     pub blocks: Vec<BlockFacts>,
     pub ref_map: Option<Arc<RefMap>>,
@@ -343,6 +380,11 @@ impl DocModel {
     /// profile).
     pub fn block_anchors(&self) -> &[BlockAnchor] {
         &self.0.block_anchors
+    }
+
+    /// Inline tags in document order (none in the CommonMark profile).
+    pub fn tags(&self) -> &[Tag] {
+        &self.0.tags
     }
 
     /// The front matter, if the document starts with one (only trees

@@ -28,8 +28,9 @@ use super::tree::{self, ANode, InlineKind as K, LinkData, LinkKind, NIL, Segs, S
 use super::unicode;
 
 /// Bytes that end a text run: CommonMark's, plus `~` with strikethrough,
-/// `:` and `w` with extended autolinks and `$` with math. `flags`: bit 0
-/// strikethrough, bit 1 autolinks, bit 2 math.
+/// `:` and `w` with extended autolinks, `$` with math and the Obsidian
+/// triggers `=`, `%`, `#` and `^` with any of their constructs. `flags`:
+/// bit 0 strikethrough, bit 1 autolinks, bit 2 math, bit 3 Obsidian.
 const fn special(flags: usize) -> [bool; 256] {
     let mut t = [false; 256];
     let specials = b"\n\r`\\&<*_[]!";
@@ -42,10 +43,15 @@ const fn special(flags: usize) -> [bool; 256] {
     t[b':' as usize] = flags & 2 != 0;
     t[b'w' as usize] = flags & 2 != 0;
     t[b'$' as usize] = flags & 4 != 0;
+    let ob = flags & 8 != 0;
+    t[b'=' as usize] = ob;
+    t[b'%' as usize] = ob;
+    t[b'#' as usize] = ob;
+    t[b'^' as usize] = ob;
     t
 }
 
-static SPECIALS: [[bool; 256]; 8] = [
+static SPECIALS: [[bool; 256]; 16] = [
     special(0),
     special(1),
     special(2),
@@ -54,7 +60,42 @@ static SPECIALS: [[bool; 256]; 8] = [
     special(5),
     special(6),
     special(7),
+    special(8),
+    special(9),
+    special(10),
+    special(11),
+    special(12),
+    special(13),
+    special(14),
+    special(15),
 ];
+
+/// Whether `c` can be part of an Obsidian tag name: ASCII letters and
+/// digits, `_`, `-`, `/`, and any other character that is not whitespace
+/// or punctuation (letters of any script, emoji). The exact rule is still
+/// to be checked against Obsidian; punctuation outside ASCII is
+/// approximated by the Latin-1, General Punctuation, CJK and full-width
+/// punctuation blocks.
+pub fn is_tag_char(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/');
+    }
+    if c.is_alphanumeric() {
+        return true;
+    }
+    !(c.is_whitespace()
+        || matches!(c as u32,
+            0x80..=0xBF
+            | 0x2000..=0x206F
+            | 0x2E00..=0x2E7F
+            | 0x3000..=0x303F
+            | 0xFE10..=0xFE1F
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF0F
+            | 0xFF1A..=0xFF20
+            | 0xFF3B..=0xFF40
+            | 0xFF5B..=0xFF65))
+}
 
 /// An entry of the delimiter stack (a doubly linked list over a vector, in
 /// push order: a larger index is later in the text).
@@ -85,6 +126,8 @@ struct Bracket {
     delim_base: u32,
     /// Where the link text starts.
     text_start: usize,
+    /// An inline footnote's `^[`.
+    note: bool,
 }
 
 /// The syntax after the `]` of a matched link.
@@ -166,10 +209,20 @@ fn parse_with(
         html_skip: 0,
         dollars: None,
         bracket_closers: [None; 2],
+        comment_fail: 0,
+        comment_line: (0, 0),
+        wiki_fail: 0,
         opts,
         special: &SPECIALS[usize::from(opts.strikethrough)
             | usize::from(opts.autolinks) << 1
-            | usize::from(opts.math != DollarMath::Off || opts.math_code) << 2],
+            | usize::from(opts.math != DollarMath::Off || opts.math_code) << 2
+            | usize::from(
+                opts.highlight
+                    || opts.comments
+                    || opts.tags
+                    || opts.inline_footnotes
+                    || opts.block_ids,
+            ) << 3],
     };
     p.run();
     let flat = tree::flatten(
@@ -237,6 +290,12 @@ struct Parser<'a> {
     /// and what it found. Openers come in increasing order, so the
     /// searches never overlap.
     bracket_closers: [Option<(usize, Option<usize>)>; 2],
+    /// `%%` openers before this offset have no closer on their line.
+    comment_fail: usize,
+    /// The last line end found for a `%%` opener: `(from, end)`.
+    comment_line: (usize, usize),
+    /// `[[` openers before this offset have no `]]` on their line.
+    wiki_fail: usize,
     opts: InlineOptions,
     /// The bytes that end a text run.
     special: &'static [bool; 256],
@@ -258,8 +317,14 @@ impl Parser<'_> {
         if start > 0 {
             self.add(K::Whitespace, 0, start, 0);
         }
+        // A block id ends the content: `^id` after whitespace, or alone.
+        let block_id = if self.opts.block_ids {
+            block_id_at_end(b, start, end)
+        } else {
+            None
+        };
         self.pos = start;
-        self.end = end;
+        self.end = block_id.map_or(end, |(ws, _)| ws);
         while self.pos < self.end {
             match b[self.pos] {
                 b'\n' | b'\r' => self.newline(),
@@ -269,17 +334,46 @@ impl Parser<'_> {
                 b'<' => self.pointy(),
                 c @ (b'*' | b'_') => self.delimiter_run(c),
                 b'~' if self.opts.strikethrough => self.delimiter_run(b'~'),
+                b'=' if self.opts.highlight => self.delimiter_run(b'='),
+                b'%' if self.opts.comments => self.comment(),
+                b'#' if self.opts.tags => self.tag(),
+                b'^' if self.opts.inline_footnotes
+                    && self.pos + 1 < self.end
+                    && b[self.pos + 1] == b'[' =>
+                {
+                    let p = self.pos;
+                    let n = self.add_provisional(p, p + 2);
+                    self.pos += 2;
+                    self.push_bracket(n, false);
+                    if let Some(top) = self.brackets.last_mut() {
+                        top.note = true;
+                    }
+                }
                 b'$' if self.special[usize::from(b'$')] => self.dollar(),
                 b'w' if self.opts.autolinks => self.www_autolink(),
                 b':' if self.opts.autolinks => self.url_autolink(),
                 b'[' => {
                     let p = self.pos;
+                    if self.opts.wikilinks
+                        && p + 1 < self.end
+                        && b[p + 1] == b'['
+                        && self.wikilink(p, false)
+                    {
+                        continue;
+                    }
                     let n = self.add_provisional(p, p + 1);
                     self.pos += 1;
                     self.push_bracket(n, false);
                 }
                 b'!' if self.pos + 1 < self.end && b[self.pos + 1] == b'[' => {
                     let p = self.pos;
+                    if self.opts.embeds
+                        && p + 2 < self.end
+                        && b[p + 2] == b'['
+                        && self.wikilink(p, true)
+                    {
+                        continue;
+                    }
                     let n = self.add_provisional(p, p + 2);
                     self.pos += 2;
                     self.push_bracket(n, true);
@@ -291,6 +385,14 @@ impl Parser<'_> {
         self.process_emphasis(0);
         if self.opts.autolinks {
             self.email_autolinks();
+        }
+        if let Some((ws, caret)) = block_id {
+            if ws < caret {
+                self.add(K::Whitespace, ws, caret, 0);
+            }
+            let n = self.add(K::BlockId, caret, end, 0);
+            self.child(n, K::Marker, caret, caret + 1);
+            self.child(n, K::BlockIdText, caret + 1, end);
         }
         if end < len {
             self.add(K::Whitespace, end, len, 0);
@@ -994,8 +1096,14 @@ impl Parser<'_> {
         let node = self.add_provisional(start, end);
         self.pos = end;
         // Strikethrough: runs of two tildes, or of one where allowed.
-        let tilde_ok = |n: usize| n == 2 || (n == 1 && self.opts.strikethrough_single);
-        if (can_open || can_close) && (ch != b'~' || tilde_ok(end - start)) {
+        // Highlight: runs of exactly two `=`.
+        let n = end - start;
+        let len_ok = match ch {
+            b'~' => n == 2 || (n == 1 && self.opts.strikethrough_single),
+            b'=' => n == 2,
+            _ => true,
+        };
+        if (can_open || can_close) && len_ok {
             let index = self.delims.len() as u32;
             self.delims.push(Delim {
                 node,
@@ -1032,7 +1140,7 @@ impl Parser<'_> {
             return;
         }
         // openers_bottom[character][closer length % 3][closer can open]
-        let mut openers_bottom = [[[lower; 2]; 3]; 3];
+        let mut openers_bottom = [[[lower; 2]; 3]; 4];
         let mut closer = self.last_delim;
         let mut first = NIL;
         while closer != NIL && closer >= lower {
@@ -1049,7 +1157,8 @@ impl Parser<'_> {
             let ch_index = match c.ch {
                 b'*' => 0,
                 b'_' => 1,
-                _ => 2,
+                b'~' => 2,
+                _ => 3,
             };
             let slot = &mut openers_bottom[ch_index][(c.len % 3) as usize][usize::from(c.can_open)];
             let bottom = *slot;
@@ -1090,7 +1199,8 @@ impl Parser<'_> {
         let (on, cn) = (o.node, c.node);
         let o_len = self.nodes[on as usize].end - self.nodes[on as usize].start;
         let c_len = self.nodes[cn as usize].end - self.nodes[cn as usize].start;
-        if o.ch == b'~' && o_len != c_len {
+        let exact = matches!(o.ch, b'~' | b'=');
+        if exact && o_len != c_len {
             // cmark-gfm: tildes of different lengths make no strikethrough;
             // the closer, the opener and every delimiter between them are
             // dropped.
@@ -1103,7 +1213,7 @@ impl Parser<'_> {
             self.remove_delim(opener);
             return c.next;
         }
-        let used = if o.ch == b'~' {
+        let used = if exact {
             o_len
         } else if o_len >= 2 && c_len >= 2 {
             2
@@ -1124,6 +1234,8 @@ impl Parser<'_> {
         let close = self.new_node(K::Marker, c_start as usize, (c_start + used) as usize, 0);
         let kind = if o.ch == b'~' {
             K::Strikethrough
+        } else if o.ch == b'=' {
+            K::Highlight
         } else if used == 2 {
             K::Strong
         } else {
@@ -1175,6 +1287,7 @@ impl Parser<'_> {
             bracket_after: false,
             delim_base: self.delims.len() as u32,
             text_start: self.pos,
+            note: false,
         });
     }
 
@@ -1184,6 +1297,10 @@ impl Parser<'_> {
             self.pos = p + 1;
             return;
         };
+        if br.note {
+            self.inline_footnote(br, p);
+            return;
+        }
         if !br.active {
             self.brackets.pop();
             self.pos = p + 1;
@@ -1451,12 +1568,165 @@ impl Parser<'_> {
             // walked over at most once.
             let floor = self.link_floor.min(self.brackets.len());
             for b in &mut self.brackets[floor..] {
-                if !b.image {
+                if !b.image && !b.note {
                     b.active = false;
                 }
             }
             self.link_floor = self.brackets.len();
         }
+    }
+
+    /// `^[note]` closed at `p`: wraps the opener and everything after it
+    /// in an inline footnote.
+    fn inline_footnote(&mut self, br: Bracket, p: usize) {
+        self.brackets.pop();
+        let opener = br.node;
+        let start = self.nodes[opener as usize].start as usize;
+        let note = self.new_node(K::InlineFootnote, start, p + 1, 0);
+        let prev = self.nodes[opener as usize].prev;
+        let root_last = self.nodes[0].last;
+        self.node(note).prev = prev;
+        if prev == NIL {
+            self.node(0).first = note;
+        } else {
+            self.node(prev).next = note;
+        }
+        self.node(note).first = opener;
+        self.node(note).last = root_last;
+        self.node(opener).prev = NIL;
+        self.node(opener).kind = K::Marker;
+        self.node(0).last = note;
+        self.process_emphasis(br.delim_base);
+        let close = self.new_node(K::Marker, p, p + 1, 0);
+        self.append(note, close);
+        self.pos = p + 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Obsidian
+
+    /// `%%`: an inline comment if a run of exactly two `%` closes it on the
+    /// same line; otherwise text.
+    fn comment(&mut self) {
+        let (b, p) = (self.b, self.pos);
+        let mut q = p;
+        while q < self.end && b[q] == b'%' {
+            q += 1;
+        }
+        if q - p != 2 || p < self.comment_fail {
+            self.pos = q;
+            return;
+        }
+        let line_end = match self.comment_line {
+            (a, z) if a <= q && q < z => z,
+            _ => {
+                let z = memchr::memchr2(b'\n', b'\r', &b[q..self.end]).map_or(self.end, |i| q + i);
+                self.comment_line = (q, z);
+                z
+            }
+        };
+        let mut i = q;
+        while let Some(k) = memchr::memchr(b'%', &b[i..line_end]) {
+            let a = i + k;
+            let mut z = a;
+            while z < line_end && b[z] == b'%' {
+                z += 1;
+            }
+            if z - a == 2 {
+                self.add_wrapped(K::Comment, p, z, (q, a), K::CommentText, 0);
+                self.pos = z;
+                return;
+            }
+            i = z;
+        }
+        self.comment_fail = line_end;
+        self.pos = q;
+    }
+
+    /// `#`: a tag after whitespace or at the start, with at least one
+    /// character that is not a digit; otherwise text.
+    fn tag(&mut self) {
+        let p = self.pos;
+        let before = self.t[..p].chars().next_back();
+        let mut e = p + 1;
+        let mut digits_only = true;
+        if before.is_none_or(char::is_whitespace) {
+            for c in self.t[p + 1..self.end].chars() {
+                if !is_tag_char(c) {
+                    break;
+                }
+                digits_only &= c.is_ascii_digit() || c == '/';
+                e += c.len_utf8();
+            }
+        }
+        if e == p + 1 || digits_only {
+            self.pos = p + 1;
+            return;
+        }
+        let n = self.add(K::Tag, p, e, 0);
+        self.child(n, K::Marker, p, p + 1);
+        self.child(n, K::TagText, p + 1, e);
+        self.pos = e;
+    }
+
+    /// `[[` (or `![[` with `embed`) at `p`: a wikilink or embed if `]]`
+    /// follows on the same line, with no `[[` before it and something
+    /// between. Adds the node, moves past it and returns true.
+    fn wikilink(&mut self, p: usize, embed: bool) -> bool {
+        let b = self.b;
+        let open = p + if embed { 3 } else { 2 };
+        if p < self.wiki_fail {
+            return false;
+        }
+        let mut i = open;
+        let close = loop {
+            match memchr::memchr3(b']', b'[', b'\n', &b[i..self.end]).map(|k| i + k) {
+                Some(k) if b[k] == b']' && b.get(k + 1) == Some(&b']') && k + 1 < self.end => {
+                    break k;
+                }
+                Some(k) if b[k] == b'[' && b.get(k + 1) == Some(&b'[') => return false,
+                Some(k) if b[k] == b'\n' => {
+                    self.wiki_fail = k;
+                    return false;
+                }
+                Some(k) => i = k + 1,
+                None => {
+                    self.wiki_fail = self.end;
+                    return false;
+                }
+            }
+        };
+        if b[open..close]
+            .iter()
+            .all(|&c| matches!(c, b' ' | b'\t' | b'\r'))
+            || b[open..close].contains(&b'\r')
+        {
+            return false;
+        }
+        // The first `|` (or `\|`, as tables need it) ends the target.
+        let pipe = memchr::memchr(b'|', &b[open..close]).map(|k| {
+            let q = open + k;
+            if q > open && b[q - 1] == b'\\' {
+                (q - 1, q)
+            } else {
+                (q, q)
+            }
+        });
+        let kind = if embed { K::Embed } else { K::Wikilink };
+        let data = pipe.map_or(0, |(t, _)| (t - p + 1) as u32);
+        let n = self.add(kind, p, close + 2, data);
+        self.child(n, K::Marker, p, open);
+        match pipe {
+            Some((t, q)) => {
+                self.child(n, K::WikiTarget, open, t);
+                self.child(n, K::Marker, t, q + 1);
+                self.child(n, K::WikiAlias, q + 1, close);
+            }
+            None => self.child(n, K::WikiTarget, open, close),
+        }
+        self.child(n, K::Marker, close, close + 2);
+        self.pos = close + 2;
+        true
     }
 
     /// Appends a token to `parent` unless it is empty.
@@ -1470,6 +1740,25 @@ impl Parser<'_> {
 
 /// cmark's `isspace`: space, tab, LF, VT, FF, CR.
 #[inline]
+/// A block id ending `b[start..end]`: `^` and one or more ASCII letters,
+/// digits or `-` up to `end`, after whitespace or at `start`. Returns where
+/// the whitespace before it starts and where the `^` is.
+fn block_id_at_end(b: &[u8], start: usize, end: usize) -> Option<(usize, usize)> {
+    let mut k = end;
+    while k > start && (b[k - 1].is_ascii_alphanumeric() || b[k - 1] == b'-') {
+        k -= 1;
+    }
+    if k == end || k == start || b[k - 1] != b'^' {
+        return None;
+    }
+    let caret = k - 1;
+    let mut ws = caret;
+    while ws > start && matches!(b[ws - 1], b' ' | b'\t') {
+        ws -= 1;
+    }
+    (ws < caret || caret == start || matches!(b[caret - 1], b'\n' | b'\r')).then_some((ws, caret))
+}
+
 fn is_cmark_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
 }

@@ -316,6 +316,26 @@ fn alert_style(kind: gv_syntax::AlertKind) -> (Token, Token, IconName) {
     }
 }
 
+/// The Lucide icon of an Obsidian callout type (08 § Per-construct
+/// rendering; only note and tip are in the design).
+fn callout_icon(kind: gv_render_tree::CalloutType) -> IconName {
+    use gv_render_tree::CalloutType as C;
+    match kind {
+        C::Note | C::Info => IconName::Info,
+        C::Abstract => IconName::ClipboardList,
+        C::Todo => IconName::CircleCheck,
+        C::Tip => IconName::Lightbulb,
+        C::Success => IconName::Check,
+        C::Question => IconName::CircleQuestionMark,
+        C::Warning => IconName::TriangleAlert,
+        C::Failure => IconName::X,
+        C::Danger => IconName::Zap,
+        C::Bug => IconName::Bug,
+        C::Example => IconName::List,
+        C::Quote => IconName::Quote,
+    }
+}
+
 /// Size of a callout's title icon, of the disclosure triangle of a
 /// summary row, and the gap after them (the design's callout: icon 15,
 /// gap 7; the summary row is not designed).
@@ -707,7 +727,104 @@ impl Element for ReaderElement {
                             });
                         }
                     }
+                    FrameKind::Callout { ref name, .. } => {
+                        // An Obsidian callout: the alert's box (its title is
+                        // its first item). A folded one ends with its title.
+                        let (tint, _) = gv_render_tree::CalloutType::of(name).colors();
+                        let opens = item.opens_frame(i);
+                        let folded =
+                            matches!(node.kind, gv_render_tree::NodeKind::CalloutTitle { .. })
+                                && frame_title_is(item, i, node.id)
+                                && !cache.details_open(tree, node.id);
+                        let closes = item.closes_frame(i) || folded;
+                        let y0 = if opens { box_top } else { top };
+                        let w = (column - item.frame_x(i, &m)).max(1.0);
+                        let (r, zero) = (px(radius::BLOCK), px(0.0));
+                        let fill = palette.role(tint.role());
+                        out.under.push(Op::Frame {
+                            bounds: bounds_of(fx, y0, w, box_bottom - y0),
+                            borders: Edges::default(),
+                            corners: Corners {
+                                top_left: if opens { r } else { zero },
+                                top_right: if opens { r } else { zero },
+                                bottom_right: if closes { r } else { zero },
+                                bottom_left: if closes { r } else { zero },
+                            },
+                            fill,
+                            border: fill,
+                        });
+                    }
+                    FrameKind::Embed { .. } => {
+                        // A note embed: a bordered box around its line and
+                        // the embedded blocks.
+                        let opens = item.opens_frame(i);
+                        let closes = item.closes_frame(i);
+                        let y0 = if opens { box_top } else { top };
+                        let w = (column - item.frame_x(i, &m)).max(1.0);
+                        let (r, zero) = (px(radius::BLOCK), px(0.0));
+                        let line = px(HAIRLINE);
+                        out.under.push(Op::Frame {
+                            bounds: bounds_of(fx, y0, w, box_bottom - y0),
+                            borders: Edges {
+                                top: if opens { line } else { zero },
+                                bottom: if closes { line } else { zero },
+                                left: line,
+                                right: line,
+                            },
+                            corners: Corners {
+                                top_left: if opens { r } else { zero },
+                                top_right: if opens { r } else { zero },
+                                bottom_right: if closes { r } else { zero },
+                                bottom_left: if closes { r } else { zero },
+                            },
+                            fill: color(Token::SurfaceWindow),
+                            border: color(Token::BorderDefault),
+                        });
+                    }
                     _ => {}
+                }
+            }
+            if let gv_render_tree::NodeKind::CalloutTitle { fold, .. } = &node.kind {
+                // The type's icon in the title's gutter; the fold chevron at
+                // the row's end, and the whole row folds the callout.
+                let name = item.context.iter().rev().find_map(|f| match &f.kind {
+                    FrameKind::Callout { name, .. } => Some(name.clone()),
+                    _ => None,
+                });
+                let kind = gv_render_tree::CalloutType::of(name.as_deref().unwrap_or("note"));
+                let (_, status) = kind.colors();
+                let icon_size = CALLOUT_ICON * zoom;
+                out.over.push(Op::Icon {
+                    bounds: bounds_of(
+                        left,
+                        content_top + (body.line_height - icon_size) / 2.0,
+                        icon_size,
+                        icon_size,
+                    ),
+                    path: callout_icon(kind).path(),
+                    color: palette.role(status.role()),
+                });
+                if fold.is_foldable() {
+                    let open = cache.details_open(tree, node.id);
+                    let side = SUMMARY_CHEVRON * zoom;
+                    out.over.push(Op::Icon {
+                        bounds: bounds_of(
+                            left + content_w - side,
+                            content_top + (body.line_height - side) / 2.0,
+                            side,
+                            side,
+                        ),
+                        path: if open {
+                            IconName::ChevronDown.path()
+                        } else {
+                            IconName::ChevronRight.path()
+                        },
+                        color: palette.role(status.role()),
+                    });
+                    geometry.controls.push(Control {
+                        bounds: bounds_of(left, content_top, content_w, bottom - content_top),
+                        kind: ControlKind::Details { block: node.id },
+                    });
                 }
             }
 
@@ -1706,6 +1823,7 @@ impl ReaderElement {
                 let mut follow = None;
                 let mut toggle = None;
                 let mut open_file = None;
+                let mut tag_search = false;
                 match (press, e.button) {
                     (Press::None, _) => return,
                     (Press::Control(control), MouseButton::Left) => {
@@ -1756,7 +1874,16 @@ impl ReaderElement {
                         }
                     }
                     (Press::Select { moved, link, .. }, MouseButton::Left) => {
-                        if let Some(link) = link.filter(|_| !moved)
+                        if let Some(link) = link.as_ref().filter(|_| !moved)
+                            && st.link_at(e.position).is_some_and(|l| same_link(&l, link))
+                            && link.kind == gv_model::LinkKind::Tag
+                        {
+                            // A tag: a search for it (the vault search runs
+                            // the `search.vault` command).
+                            st.selection = None;
+                            st.tag_search = Some(format!("tag:#{}", link.destination).into());
+                            tag_search = true;
+                        } else if let Some(link) = link.filter(|_| !moved)
                             && st.link_at(e.position).is_some_and(|l| same_link(&l, &link))
                         {
                             st.selection = None;
@@ -1784,6 +1911,9 @@ impl ReaderElement {
                 }
                 if let Some(t) = toggle {
                     let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::ToggleTask(t)));
+                }
+                if tag_search {
+                    window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);
                 }
                 if let Some(req) = follow {
                     note_navigation(Cause::Link {
@@ -2034,4 +2164,13 @@ fn fit_text(text: &str, room: f32, size: f32) -> String {
 /// The height of a line of code text in `styles`.
 fn body_line(styles: &gv_render_tree::StyleTable) -> f32 {
     styles.role(TextRole::Code).line_height
+}
+
+/// Whether frame `i` of `item` is the callout whose title is node `title`
+/// (the callout's fold frame, right after it, is keyed by the title).
+fn frame_title_is(item: &gv_render_tree::Item, i: usize, title: gv_syntax::BlockId) -> bool {
+    item.context
+        .get(i + 1)
+        .is_some_and(|f| matches!(f.kind, FrameKind::Details) && f.id == title)
+        || item.context.len() == i + 1
 }

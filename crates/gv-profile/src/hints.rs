@@ -318,10 +318,7 @@ mod tests {
         let obsidian = scan("Text %%comment%%\n\nA claim.^[note]\n\n> [!info]- x\n");
         let hint = suggest(&obsidian, &compile_builtin(ProfileId::CommonMark)).expect("hint");
         assert_eq!(hint.dialect, Requested::BuiltIn(ProfileId::Obsidian));
-        assert_eq!(
-            hint.message(),
-            "This looks like Obsidian. Switch profile? (full support in 0.5)"
-        );
+        assert_eq!(hint.message(), "This looks like Obsidian. Switch profile?");
         // Extended reads `^[`; `%%` and folding callouts still point to
         // Obsidian.
         let hint = suggest(&obsidian, &compile_builtin(ProfileId::Extended)).expect("hint");

@@ -60,6 +60,8 @@ mod unicode;
 mod unicode_tables;
 
 pub use api::*;
+pub use parse::is_tag_char;
 pub use tree::{
     Children, CodeSpanRef, EmphasisRef, InlineKind, InlineNode, LinkKind, LinkRef, TextProjection,
+    WikiLinkRef, image_size,
 };

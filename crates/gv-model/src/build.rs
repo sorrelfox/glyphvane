@@ -40,16 +40,15 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use gv_syntax::inline::{
-    InlineInput, InlineTree, LinkKind as SynLinkKind, RefDef, RefLookup, parse_inlines,
-};
+use gv_syntax::inline::{InlineTree, LinkKind as SynLinkKind, RefDef, RefLookup};
 use gv_syntax::{
     Changes, Container, FrontMatterKind, Leaf, LeafKind, RefMap, SyntaxTree, Visitor, walk,
 };
 use gv_text::TextSource;
 
 use crate::model::{
-    BlockFacts, BuildStats, Definition, DocModel, FrontMatter, Heading, Link, LinkKind, ModelData,
+    BlockAnchor, BlockFacts, BuildStats, Definition, DocModel, FrontMatter, Heading, Link,
+    LinkKind, ModelData, Tag,
 };
 use crate::outline;
 
@@ -167,6 +166,8 @@ struct Builder<'a, S: TextSource + ?Sized> {
     headings: Vec<Heading>,
     links: Vec<Link>,
     definitions: Vec<Definition>,
+    tags: Vec<Tag>,
+    anchors: Vec<BlockAnchor>,
     blocks: Vec<BlockFacts>,
     front_matter: Option<FrontMatter>,
     /// The block being recorded.
@@ -191,6 +192,8 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
             headings: Vec::with_capacity(like.map_or(0, |m| cap(m.headings.len()))),
             links: Vec::with_capacity(like.map_or(0, |m| cap(m.links.len()))),
             definitions: Vec::with_capacity(like.map_or(0, |m| cap(m.definitions.len()))),
+            tags: Vec::with_capacity(like.map_or(0, |m| cap(m.tags.len()))),
+            anchors: Vec::with_capacity(like.map_or(0, |m| cap(m.block_anchors.len()))),
             blocks: Vec::with_capacity(like.map_or(0, |m| cap(m.blocks.len()))),
             front_matter: None,
             open: None,
@@ -228,7 +231,8 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
             outline,
             links: self.links,
             definitions: self.definitions,
-            block_anchors: Vec::new(),
+            block_anchors: self.anchors,
+            tags: self.tags,
             front_matter: self.front_matter,
             blocks: self.blocks,
             ref_map: self.refs.into_inner(),
@@ -245,18 +249,22 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
             && (!b.headings.is_empty()
                 || !b.links.is_empty()
                 || !b.definitions.is_empty()
+                || !b.tags.is_empty()
+                || !b.anchors.is_empty()
                 || b.parsed)
         {
             self.blocks.push(b);
         }
     }
 
-    fn counts(&self) -> (u32, u32, u32) {
-        (
-            to_u32(self.headings.len()),
-            to_u32(self.links.len()),
-            to_u32(self.definitions.len()),
-        )
+    fn counts(&self) -> Counts {
+        Counts {
+            headings: to_u32(self.headings.len()),
+            links: to_u32(self.links.len()),
+            definitions: to_u32(self.definitions.len()),
+            tags: to_u32(self.tags.len()),
+            anchors: to_u32(self.anchors.len()),
+        }
     }
 
     /// Takes over `old`'s blocks `blocks` with their records, shifted by
@@ -289,16 +297,31 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
         let (Some(first), Some(last)) = (run.first(), run.last()) else {
             return;
         };
-        let (h0, l0, d0) = self.counts();
+        let c0 = self.counts();
         let span = |a: &Range<u32>, b: &Range<u32>| a.start as usize..b.end as usize;
         let headings = &old.headings[span(&first.headings, &last.headings)];
         let links = &old.links[span(&first.links, &last.links)];
         let definitions = &old.definitions[span(&first.definitions, &last.definitions)];
+        let tags = &old.tags[span(&first.tags, &last.tags)];
+        let anchors = &old.block_anchors[span(&first.anchors, &last.anchors)];
         if delta == 0 && line_delta == 0 {
             self.headings.extend_from_slice(headings);
             self.links.extend_from_slice(links);
             self.definitions.extend_from_slice(definitions);
+            self.tags.extend_from_slice(tags);
+            self.anchors.extend_from_slice(anchors);
         } else {
+            self.tags.extend(tags.iter().map(|t| Tag {
+                range: shift(&t.range, delta),
+                line: shift_line(t.line, line_delta),
+                ..t.clone()
+            }));
+            self.anchors.extend(anchors.iter().map(|a| BlockAnchor {
+                range: shift(&a.range, delta),
+                id_range: shift(&a.id_range, delta),
+                line: shift_line(a.line, line_delta),
+                ..a.clone()
+            }));
             self.headings.extend(headings.iter().map(|h| Heading {
                 range: shift(&h.range, delta),
                 content_range: shift(&h.content_range, delta),
@@ -325,17 +348,14 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
         }
         // Record indices move by the same amount for the whole run.
         let at = |r: &Range<u32>, from: u32, to: u32| r.start - from + to..r.end - from + to;
-        let (fh, fl, fd) = (
-            first.headings.start,
-            first.links.start,
-            first.definitions.start,
-        );
         self.blocks.extend(run.iter().map(|b| BlockFacts {
             id: b.id,
             range: shift(&b.range, delta),
-            headings: at(&b.headings, fh, h0),
-            links: at(&b.links, fl, l0),
-            definitions: at(&b.definitions, fd, d0),
+            headings: at(&b.headings, first.headings.start, c0.headings),
+            links: at(&b.links, first.links.start, c0.links),
+            definitions: at(&b.definitions, first.definitions.start, c0.definitions),
+            tags: at(&b.tags, first.tags.start, c0.tags),
+            anchors: at(&b.anchors, first.anchors.start, c0.anchors),
             lookups: b.lookups.clone(),
             parsed: b.parsed,
         }));
@@ -344,18 +364,22 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
 
     /// Appends the records of `other` (built over the same tree).
     fn append(&mut self, other: Builder<'_, S>) {
-        let (h, l, d) = self.counts();
+        let c = self.counts();
         let at = |r: &Range<u32>, base: u32| r.start + base..r.end + base;
         self.blocks
             .extend(other.blocks.into_iter().map(|b| BlockFacts {
-                headings: at(&b.headings, h),
-                links: at(&b.links, l),
-                definitions: at(&b.definitions, d),
+                headings: at(&b.headings, c.headings),
+                links: at(&b.links, c.links),
+                definitions: at(&b.definitions, c.definitions),
+                tags: at(&b.tags, c.tags),
+                anchors: at(&b.anchors, c.anchors),
                 ..b
             }));
         self.headings.extend(other.headings);
         self.links.extend(other.links);
         self.definitions.extend(other.definitions);
+        self.tags.extend(other.tags);
+        self.anchors.extend(other.anchors);
         if other.front_matter.is_some() {
             self.front_matter = other.front_matter;
         }
@@ -367,22 +391,104 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
         self.stats.inline_parses += other.stats.inline_parses;
     }
 
-    /// Parses the inlines of `leaf`, records its links and lookups.
-    fn inlines(&mut self, leaf: &Leaf<'_>, in_heading: bool) -> InlineTree {
-        let segments = leaf.segments();
+    /// Parses the inlines of `leaf` (with the tree's inline switches,
+    /// through its inline cache), records its links, wikilinks, tags,
+    /// block id and lookups. GFM extended autolinks are no links here.
+    fn inlines(&mut self, leaf: &Leaf<'_>, in_heading: bool) -> Arc<InlineTree> {
         let refs = Arc::clone(self.refs());
-        let tree = parse_inlines(
-            self.text,
-            InlineInput {
-                segments: &segments,
-            },
-            &*refs,
-        );
+        let tree = self.tree.inlines(leaf, self.text);
         self.stats.inline_parses += 1;
         if let Some(open) = self.open.as_mut() {
             open.parsed = true;
         }
-        for l in tree.links() {
+        let line_of = |at: usize| {
+            let k = leaf
+                .lines
+                .partition_point(|l| l.content.start <= at)
+                .saturating_sub(1);
+            to_u32(leaf.lines.get(k).map_or(leaf.start_line, |l| l.line))
+        };
+        for n in tree.nodes() {
+            match n.kind() {
+                gv_syntax::inline::InlineKind::Wikilink | gv_syntax::inline::InlineKind::Embed => {
+                    if let Some(w) = n.wikilink() {
+                        let inner = w.target_range.start
+                            ..w.alias_range.as_ref().map_or(w.target_range.end, |r| r.end);
+                        self.links.push(Link {
+                            kind: if w.embed {
+                                LinkKind::Embed
+                            } else {
+                                LinkKind::Wikilink
+                            },
+                            image: false,
+                            range: w.range.clone(),
+                            text_range: w.alias_range.clone().unwrap_or(w.target_range.clone()),
+                            destination: w.inner.into(),
+                            destination_range: Some(inner),
+                            title: None,
+                            label: None,
+                            label_range: None,
+                            in_heading,
+                            block: leaf.id,
+                        });
+                    }
+                }
+                gv_syntax::inline::InlineKind::Link
+                | gv_syntax::inline::InlineKind::Image
+                | gv_syntax::inline::InlineKind::Autolink => {
+                    if let Some(l) = n.link() {
+                        self.link(&l, in_heading, leaf);
+                    }
+                }
+                gv_syntax::inline::InlineKind::Tag => {
+                    let range = n.range();
+                    self.tags.push(Tag {
+                        name: n.text().get(1..).unwrap_or("").into(),
+                        line: line_of(range.start),
+                        range,
+                        block: leaf.id,
+                    });
+                }
+                gv_syntax::inline::InlineKind::BlockId => {
+                    let id_range = n.range();
+                    let own_line = tree.nodes().all(|m| {
+                        !m.kind().is_token()
+                            || matches!(
+                                m.kind(),
+                                gv_syntax::inline::InlineKind::Whitespace
+                                    | gv_syntax::inline::InlineKind::SoftBreak
+                                    | gv_syntax::inline::InlineKind::Marker
+                                    | gv_syntax::inline::InlineKind::BlockIdText
+                            )
+                    });
+                    self.anchors.push(BlockAnchor {
+                        id: n.text().get(1..).unwrap_or("").into(),
+                        range: leaf.range.clone(),
+                        line: line_of(id_range.start),
+                        id_range,
+                        own_line,
+                        block: leaf.id,
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.lookups(&tree, &refs);
+        tree
+    }
+
+    /// Records one Markdown link, image or angle autolink.
+    fn link(&mut self, l: &gv_syntax::inline::LinkRef<'_>, in_heading: bool, leaf: &Leaf<'_>) {
+        {
+            // A GFM extended autolink has no angle brackets around its
+            // text.
+            if matches!(
+                l.kind,
+                SynLinkKind::UriAutolink | SynLinkKind::EmailAutolink
+            ) && l.text_range.start == l.range.start
+            {
+                return;
+            }
             let kind = match l.kind {
                 SynLinkKind::Inline => LinkKind::Inline,
                 SynLinkKind::Full => LinkKind::Full,
@@ -399,17 +505,21 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
             self.links.push(Link {
                 kind,
                 image: l.is_image,
-                range: l.range,
-                text_range: l.text_range,
+                range: l.range.clone(),
+                text_range: l.text_range.clone(),
                 destination,
-                destination_range: l.raw_destination,
+                destination_range: l.raw_destination.clone(),
                 title: l.title.map(Arc::from),
                 label: l.label.map(Arc::from),
-                label_range: l.label_range,
+                label_range: l.label_range.clone(),
                 in_heading,
                 block: leaf.id,
             });
         }
+    }
+
+    /// Records the labels `tree` looked up in the open block.
+    fn lookups(&mut self, tree: &InlineTree, refs: &RefMap) {
         let mut seen = HashSet::new();
         let lookups: Vec<(Box<str>, Option<RefDef>)> = tree
             .label_lookups()
@@ -427,7 +537,6 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
                 .collect();
             open.lookups = Some(merged.into());
         }
-        tree
     }
 
     fn heading(&mut self, leaf: &Leaf<'_>, level: u8, setext: bool) {
@@ -473,12 +582,19 @@ impl<'a, S: TextSource + ?Sized> Builder<'a, S> {
     }
 
     fn paragraph(&mut self, leaf: &Leaf<'_>) {
-        // No link, image or autolink starts without `[` or `<`.
+        // No link, image or autolink starts without `[` or `<`, no tag
+        // without `#`, no block id without `^`.
+        let o = self.tree.options();
+        let (tags, ids) = (o.tags, o.block_ids);
         let mut candidate = false;
         for l in leaf.lines.iter().filter(|l| l.has_content) {
             let line = self.text.line(l.content.start, &mut self.scratch);
             let n = (l.content.end - l.content.start).min(line.len());
-            if memchr::memchr2(b'[', b'<', &line[..n]).is_some() {
+            let s = &line[..n];
+            if memchr::memchr2(b'[', b'<', s).is_some()
+                || (tags && memchr::memchr(b'#', s).is_some())
+                || (ids && memchr::memchr(b'^', s).is_some())
+            {
                 candidate = true;
                 break;
             }
@@ -533,7 +649,10 @@ impl<S: TextSource + ?Sized> Visitor for Builder<'_, S> {
         self.first_start.get_or_insert(leaf.range.start);
         self.last_end = self.last_end.max(leaf.range.end);
         match leaf.kind {
-            LeafKind::Heading { .. } | LeafKind::Paragraph | LeafKind::LinkRefDef => {}
+            LeafKind::Heading { .. }
+            | LeafKind::Paragraph
+            | LeafKind::CalloutTitle
+            | LeafKind::LinkRefDef => {}
             LeafKind::FrontMatter { kind } => {
                 self.front_matter(leaf, kind);
                 return;
@@ -542,30 +661,43 @@ impl<S: TextSource + ?Sized> Visitor for Builder<'_, S> {
         }
         if self.open.as_ref().map(|b| b.id) != Some(leaf.id) {
             self.flush();
-            let (h, l, d) = self.counts();
+            let c = self.counts();
             self.open = Some(BlockFacts {
                 id: leaf.id,
                 range: leaf.range.clone(),
-                headings: h..h,
-                links: l..l,
-                definitions: d..d,
+                headings: c.headings..c.headings,
+                links: c.links..c.links,
+                definitions: c.definitions..c.definitions,
+                tags: c.tags..c.tags,
+                anchors: c.anchors..c.anchors,
                 lookups: None,
                 parsed: false,
             });
         }
         match leaf.kind {
             LeafKind::Heading { level, setext } => self.heading(leaf, level, setext),
-            LeafKind::Paragraph => self.paragraph(leaf),
+            LeafKind::Paragraph | LeafKind::CalloutTitle => self.paragraph(leaf),
             LeafKind::LinkRefDef => self.definition(leaf),
             _ => {}
         }
-        let (h, l, d) = self.counts();
+        let c = self.counts();
         if let Some(open) = self.open.as_mut() {
-            open.headings.end = h;
-            open.links.end = l;
-            open.definitions.end = d;
+            open.headings.end = c.headings;
+            open.links.end = c.links;
+            open.definitions.end = c.definitions;
+            open.tags.end = c.tags;
+            open.anchors.end = c.anchors;
         }
     }
+}
+
+/// How many records of each kind a builder holds.
+struct Counts {
+    headings: u32,
+    links: u32,
+    definitions: u32,
+    tags: u32,
+    anchors: u32,
 }
 
 fn shift(r: &Range<usize>, delta: isize) -> Range<usize> {

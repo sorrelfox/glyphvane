@@ -60,11 +60,14 @@ pub mod table;
 pub mod tree;
 
 pub use block::MAX_NESTING;
+pub use block::callout_marker;
 pub use gv_profile::{CompiledProfile, ProfileId};
 pub use html::{GfmHtmlOptions, to_commonmark_html, to_gfm_html};
 pub use incremental::{Budget, Change, Changes, Reparse, ReparseTask};
 pub use options::{DollarMath, FrontMatterOptions, ParseOptions, TaskLists};
-pub use tree::event::{AlertKind, BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};
+pub use tree::event::{
+    AlertKind, BlockId, BlockKind, CalloutFold, Event, FrontMatterKind, Token, TokenKind,
+};
 pub use tree::index::BlockIndex;
 pub use tree::walk::{
     Container, ContainerKind, Leaf, LeafKind, LeafLine, Visitor, walk, walk_range,

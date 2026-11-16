@@ -43,7 +43,7 @@ pub(crate) mod state;
 use crate::inline::api::parse_ref_def;
 use crate::options::TaskLists;
 use crate::table;
-use crate::tree::event::{AlertKind, BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
+use crate::tree::event::{AlertKind, BlockKind, CalloutFold, Ev, FrontMatterKind, Sink, TokenKind};
 use state::{Closed, Entry, Interner, Kind, ROOT, RefMode, StateId, TABLE_VISITED};
 
 /// Maximum number of simultaneously open blocks, the document included.
@@ -326,6 +326,10 @@ pub(crate) struct BlockOptions {
     pub footnote_indent: u8,
     /// GitHub alerts.
     pub alerts: bool,
+    /// Obsidian callouts.
+    pub callouts: bool,
+    /// Obsidian `%%` block comments.
+    pub comments: bool,
 }
 
 impl BlockOptions {
@@ -338,6 +342,8 @@ impl BlockOptions {
             footnotes: options.footnotes,
             footnote_indent: options.footnote_indent.max(1),
             alerts: options.alerts,
+            callouts: options.callouts,
+            comments: options.comments,
         }
     }
 }
@@ -407,6 +413,50 @@ pub(crate) fn alert_marker(s: &[u8]) -> Option<(AlertKind, usize)> {
         .iter()
         .all(|&c| scan::is_space_or_tab(c))
         .then_some((kind, end))
+}
+
+/// An Obsidian callout header: `s` (a block quote's first line after its
+/// marker) starts with `[!type]` (a type of one or more characters other
+/// than `]` and line endings) and an optional `+` or `-`. Returns the fold
+/// sign and the header's length; the rest of the line is the title.
+pub fn callout_marker(s: &[u8]) -> Option<(CalloutFold, usize)> {
+    let rest = s.strip_prefix(b"[!")?;
+    let close = rest
+        .iter()
+        .position(|&c| matches!(c, b']' | b'\n' | b'\r'))?;
+    if close == 0 || rest[close] != b']' {
+        return None;
+    }
+    let end = close + 3;
+    Some(match s.get(end) {
+        Some(b'+') => (CalloutFold::Open, end + 1),
+        Some(b'-') => (CalloutFold::Closed, end + 1),
+        _ => (CalloutFold::None, end),
+    })
+}
+
+/// An Obsidian block comment opener: `s` (a line from its first non-space
+/// byte) starts with exactly two `%` and holds no other `%%` (a line with
+/// both markers is an inline comment).
+fn comment_block_open(s: &[u8]) -> bool {
+    s.starts_with(b"%%") && s.get(2) != Some(&b'%') && comment_closer(&s[2..]).is_none()
+}
+
+/// The first run of exactly two `%` in `s`.
+fn comment_closer(s: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(k) = memchr::memchr(b'%', &s[i..]) {
+        let a = i + k;
+        let mut z = a;
+        while z < s.len() && s[z] == b'%' {
+            z += 1;
+        }
+        if z - a == 2 {
+            return Some(a);
+        }
+        i = z;
+    }
+    None
 }
 
 /// A `$$` math block opener: `s` is the line from its first non-space
@@ -1107,6 +1157,32 @@ impl BlockParser {
                     self.pre_tok(&mut cur, TokenKind::CodeIndent);
                     true
                 }
+                Kind::CommentBlock { offset } => {
+                    let fns = cur.fns.min(cur.content_end);
+                    let end = cur.content_end.max(fns);
+                    if let Some(k) = comment_closer(&b[cur.offset.min(end)..end]) {
+                        // The closing line: content before the `%%`, then
+                        // the marker to the end of the line's content; the
+                        // block ends with this line.
+                        let at = cur.offset.min(end) + k;
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns.min(at));
+                        self.tok(&mut cur, sink, TokenKind::Content, at);
+                        let mend = trim_end(b, at, end).max(at + 2);
+                        self.tok(&mut cur, sink, TokenKind::Marker, mend);
+                        let ce = cur.content_end.max(cur.tp);
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
+                        self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                        self.close_top(sink);
+                        return;
+                    }
+                    let mut k = offset;
+                    while k > 0 && cur.peek(cur.offset).is_some_and(scan::is_space_or_tab) {
+                        cur.advance(1, true);
+                        k -= 1;
+                    }
+                    self.pre_tok(&mut cur, TokenKind::CodeIndent);
+                    true
+                }
                 Kind::MathBlock { offset } => {
                     let fns = cur.fns.min(cur.content_end);
                     let end = trim_end(b, fns, cur.content_end.max(fns));
@@ -1207,6 +1283,7 @@ impl BlockParser {
                 Kind::FencedCode { .. }
                     | Kind::IndentedCode
                     | Kind::MathBlock { .. }
+                    | Kind::CommentBlock { .. }
                     | Kind::Html { .. }
                     | Kind::FrontMatter { .. }
             ) {
@@ -1222,8 +1299,11 @@ impl BlockParser {
             let can_nest = self.stack.len() + 3 <= MAX_NESTING;
             let mut started = false;
             let math = self.opts.math_blocks;
+            let comments = self.opts.comments;
             if !indented
-                && let Some(c) = c.filter(|&c| scan::maybe_special(c) || (math && c == b'$'))
+                && let Some(c) = c.filter(|&c| {
+                    scan::maybe_special(c) || (math && c == b'$') || (comments && c == b'%')
+                })
             {
                 if c == b'>' && can_nest {
                     self.close_unmatched_for(Kind::BlockQuote, sink);
@@ -1246,15 +1326,46 @@ impl BlockParser {
                     } else {
                         None
                     };
-                    let bk =
-                        alert.map_or(BlockKind::BlockQuote, |(kind, _)| BlockKind::Alert { kind });
+                    // An Obsidian callout: a block quote at any depth whose
+                    // first line starts with `[!type]`.
+                    let callout = if self.opts.callouts && !cur.partial {
+                        let end = cur.content_end.max(cur.offset);
+                        callout_marker(&b[cur.offset..end])
+                    } else {
+                        None
+                    };
+                    let bk = match (alert, callout) {
+                        (Some((kind, _)), _) => BlockKind::Alert { kind },
+                        (None, Some((fold, _))) => BlockKind::Callout { fold },
+                        (None, None) => BlockKind::BlockQuote,
+                    };
                     container = self.add_child(Kind::BlockQuote, bk, sink);
                     let e = cur.prefix_end();
                     self.tok(&mut cur, sink, TokenKind::QuoteMarker, e);
-                    if let Some((_, n)) = alert {
+                    if let Some(n) = alert.map(|a| a.1).or(callout.map(|c| c.1)) {
                         let end = cur.offset + n;
                         self.tok(&mut cur, sink, TokenKind::ExtMarker, end);
                         cur.advance(n, false);
+                    }
+                    if callout.is_some() {
+                        let end = cur.content_end.max(cur.offset);
+                        let fns = skip_ws(b, cur.offset, end);
+                        if fns < end {
+                            // The title: a one-line leaf.
+                            let ci = self.add_child(Kind::Heading, BlockKind::CalloutTitle, sink);
+                            let text_end = trim_end(b, fns, end);
+                            self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                            self.tok(&mut cur, sink, TokenKind::Content, text_end);
+                            self.tok(&mut cur, sink, TokenKind::Whitespace, end);
+                            self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                            if let Some(k) = self.lb_index
+                                && k < ci
+                            {
+                                self.set_lb(k, false);
+                            }
+                            self.set_lb(ci, false);
+                            return;
+                        }
                     }
                     started = true;
                 } else if let Some((level, m)) = scan::atx_heading_start(s) {
@@ -1288,6 +1399,19 @@ impl BlockParser {
                         };
                         self.close_unmatched_for(kind, sink);
                         container = self.add_child(kind, BlockKind::MathBlock, sink);
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                        self.tok(&mut cur, sink, TokenKind::Marker, fns + 2);
+                        cur.advance(fns + 2 - cur.offset, false);
+                        started = true;
+                    }
+                } else if c == b'%' {
+                    let end = cur.content_end.max(fns);
+                    if comments && comment_block_open(&b[fns..end]) {
+                        let kind = Kind::CommentBlock {
+                            offset: len32(cur.indent),
+                        };
+                        self.close_unmatched_for(kind, sink);
+                        container = self.add_child(kind, BlockKind::CommentBlock, sink);
                         self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
                         self.tok(&mut cur, sink, TokenKind::Marker, fns + 2);
                         cur.advance(fns + 2 - cur.offset, false);
@@ -1491,6 +1615,7 @@ impl BlockParser {
                 | Kind::ThematicBreak
                 | Kind::FencedCode { .. }
                 | Kind::MathBlock { .. }
+                | Kind::CommentBlock { .. }
                 | Kind::FrontMatter { .. } => false,
                 Kind::Item { .. } => e.has_child || ci < self.first_new,
                 _ => true,
@@ -1546,9 +1671,20 @@ impl BlockParser {
                     self.close_top(sink);
                 }
             }
+            Kind::CommentBlock { .. } if ci >= self.first_new => {
+                // Opening line: the rest is content.
+                let start = skip_ws(b, cur.tp, cur.content_end.max(cur.tp));
+                self.tok(&mut cur, sink, TokenKind::Whitespace, start);
+                let ce = cur.content_end.max(cur.tp);
+                let te = trim_end(b, cur.tp, ce);
+                self.tok(&mut cur, sink, TokenKind::Content, te);
+                self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
+                self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+            }
             Kind::FencedCode { .. }
             | Kind::IndentedCode
             | Kind::MathBlock { .. }
+            | Kind::CommentBlock { .. }
             | Kind::FrontMatter { .. } => self.literal_line(&mut cur, sink),
             Kind::Html { ty } => {
                 self.literal_line(&mut cur, sink);

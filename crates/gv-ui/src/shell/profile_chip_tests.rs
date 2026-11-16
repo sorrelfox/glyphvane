@@ -116,12 +116,18 @@ fn the_chip_shows_the_detected_profile_and_switches_it(cx: &mut TestAppContext) 
     let commands = editor.read_with(&vcx, |e, _| e.markdown_commands());
     assert_eq!(commands.flavor, gv_editor::Flavor::CommonMark);
 
-    // Obsidian has not shipped: listed, but picking it does nothing.
+    // Obsidian has shipped: picking it switches the file's profile.
     click(&mut vcx, "profile-chip");
     click(&mut vcx, "profile-menu-item:obsidian");
-    assert_eq!(profile(&workspace, &mut vcx).0, ProfileId::CommonMark);
+    assert_eq!(
+        profile(&workspace, &mut vcx),
+        (ProfileId::Obsidian, Reason::FileOverride)
+    );
+    let commands = editor.read_with(&vcx, |e, _| e.markdown_commands());
+    assert_eq!(commands.flavor, gv_editor::Flavor::Obsidian);
 
     // Back to Automatic: the toml decides again.
+    click(&mut vcx, "profile-chip");
     click(&mut vcx, "profile-menu-item:auto");
     assert_eq!(profile(&workspace, &mut vcx).0, ProfileId::GfmFile);
 
@@ -188,10 +194,7 @@ fn another_dialect_shows_a_hint_until_dismissed_in_the_folder(cx: &mut TestAppCo
         )
     });
     assert_eq!(title, "This looks like Obsidian.");
-    assert_eq!(
-        detail.as_deref(),
-        Some("Switch profile? (full support in 0.5)")
-    );
+    assert_eq!(detail.as_deref(), Some("Switch profile?"));
 
     // Its button opens the chip's menu.
     click(&mut vcx, "infobar-action-0");

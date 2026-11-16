@@ -178,6 +178,8 @@ fn frame(f: &Frame) -> String {
             format!("footnote#{}({number} {label:?})", f.id.0)
         }
         FrameKind::Details => format!("details#{}", f.id.0),
+        FrameKind::Callout { name, fold } => format!("callout#{}({name}{})", f.id.0, fold.name()),
+        FrameKind::Embed { depth } => format!("embed#{}(depth={depth})", f.id.0),
     }
 }
 
@@ -238,6 +240,10 @@ fn dump_node(node: &BlockNode, out: &mut String) {
             let _ = writeln!(out, "  details open={open}");
             dump_inline(summary, out);
         }
+        NodeKind::CalloutTitle { title, fold } => {
+            let _ = writeln!(out, "  callout title fold={:?}", fold.name());
+            dump_inline(title, out);
+        }
         NodeKind::Picture(p) => {
             let _ = writeln!(
                 out,
@@ -269,6 +275,7 @@ fn dump_inline(c: &InlineContent, out: &mut String) {
             InlineRole::CellGap(i) => format!("gap[{i}]"),
             InlineRole::FootnoteRef(i) => format!("footnote[{i}]"),
             InlineRole::FootnoteBackref(k) => format!("backref[{k}]"),
+            InlineRole::Tag => "tag".to_owned(),
         };
         let link = span.link.map(|l| format!(" link[{l}]")).unwrap_or_default();
         let what = match it.kind() {

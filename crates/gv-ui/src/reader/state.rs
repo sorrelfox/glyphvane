@@ -264,6 +264,9 @@ pub(crate) struct State {
     /// The widest the Preview text column gets (the readable line width;
     /// infinite when it is off).
     pub column_max: f32,
+    /// The search a click on a tag asked for (`tag:#name`), handed to the
+    /// vault search with the `search.vault` command.
+    pub tag_search: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for State {
@@ -298,6 +301,7 @@ impl State {
             layout: ReaderLayout::Column,
             band: None,
             sync: None,
+            tag_search: None,
             column_max: document::COLUMN_MAX,
         }
     }

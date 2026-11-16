@@ -1251,3 +1251,79 @@ fn incremental_updates_change_resolution() {
         (Some(id), Some(vp("z/Meeting.md")))
     );
 }
+
+/// Wikilinks as the parser reads them (through the content index's
+/// extraction) resolve with the Obsidian order: vault root, then the
+/// source's folder, then the basename; files before folders; the
+/// tie-break for several basename matches; fragments and sizes decoded.
+#[test]
+fn parsed_wikilinks_resolve_in_obsidian_order() {
+    let idx = PathIndex::from_paths([
+        "Note.md",
+        "Sub/Note.md",
+        "Sub/Only.md",
+        "Deep/x/Twin.md",
+        "Twin.md",
+        "A/Twin2.md",
+        "B/Twin2.md",
+        "img.png",
+        "Folder/x.md",
+    ])
+    .unwrap();
+    let text = "[[Note]] [[Only#Heading]] [[ Twin ]] [[Twin2]] ![[img.png|100x20]] [[Folder]] \
+                [[Missing]] %%[[Hidden]]%% `[[Code]]`\n\n| [[Sub/Note\\|alias]] |\n| -- |\n";
+    let data = gv_vault::content::extract(text, Obsidian);
+    let got: Vec<(String, Status, Option<String>)> = data
+        .links
+        .iter()
+        .map(|l| {
+            let lref = LinkRef::new(l.kind, &*l.raw, vp("Sub/Source.md"), Obsidian);
+            let r = resolve(&idx, &lref, &params(Obsidian));
+            (
+                l.raw.to_string(),
+                r.status,
+                r.target_path.map(|p| p.as_str().to_owned()),
+            )
+        })
+        .collect();
+    let want = [
+        // The vault root first, even beside a note of the same name.
+        ("Note", Status::Exact, Some("Note.md")),
+        // Then the basename.
+        ("Only#Heading", Status::Exact, Some("Sub/Only.md")),
+        // Spaces around the target are trimmed (ORACLE-PENDING); the root
+        // path wins over the deeper basename match.
+        (" Twin ", Status::Exact, Some("Twin.md")),
+        // Two basename matches: the tie-break picks one.
+        ("Twin2", Status::Ambiguous(2), Some("A/Twin2.md")),
+        ("img.png|100x20", Status::Exact, Some("img.png")),
+        // A folder is a target only after every file lookup failed.
+        ("Folder", Status::Exact, Some("Folder")),
+        ("Missing", Status::Unresolved, None),
+        // `\|` in a table cell is the pipe.
+        ("Sub/Note|alias", Status::Exact, Some("Sub/Note.md")),
+    ];
+    let want: Vec<(String, Status, Option<String>)> = want
+        .into_iter()
+        .map(|(r, s, t)| (r.to_owned(), s, t.map(str::to_owned)))
+        .collect();
+    assert_eq!(got, want);
+    let d = decode(
+        &link(Embed, &data.links[4].raw, "Sub/Source.md", Obsidian),
+        &params(Obsidian),
+    );
+    assert_eq!(
+        d.size,
+        Some(ImageSize {
+            width: 100,
+            height: Some(20)
+        })
+    );
+    let d = decode(
+        &link(Wikilink, &data.links[1].raw, "Sub/Source.md", Obsidian),
+        &params(Obsidian),
+    );
+    assert!(
+        matches!(d.fragment.map(|f| f.kind), Some(FragmentKind::Heading(h)) if h == ["Heading"])
+    );
+}

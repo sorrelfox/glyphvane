@@ -30,6 +30,10 @@ use crate::tree::{FrontMatterDisplay, RenderOptions};
 
 /// Containers deeper than this draw nothing more: their content is placed
 /// at this depth. Keeps contexts small on pathological nesting.
+mod obsidian;
+
+pub use obsidian::{CALLOUT_TITLE_GUTTER, MAX_EMBED_BYTES, MAX_EMBED_DEPTH, MAX_EMBED_NODES};
+
 pub const MAX_FRAMES: usize = 32;
 
 /// The previous tree's nodes that an update may take over.
@@ -80,6 +84,9 @@ struct Open {
     list_depth: u16,
     /// Whether it has a frame (not past [`MAX_FRAMES`]).
     framed: bool,
+    /// A foldable callout's body frame (a [`FrameKind::Details`] after
+    /// its title) is open.
+    body_frame: bool,
 }
 
 pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
@@ -88,6 +95,9 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     pub opts: &'a RenderOptions,
     /// The inline switches of the syntax tree's profile.
     pub inline_opts: InlineOptions,
+    /// The syntax tree's options, to parse embedded notes with; `None`:
+    /// note embeds show only their link.
+    pub parse_opts: Option<gv_syntax::ParseOptions>,
     pub sources: Sources<'a>,
     pub reuse: Option<Reuse<'a>>,
     frames: Vec<Frame>,
@@ -117,6 +127,10 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     /// The paragraph that gets footnote backreferences: its block and the
     /// number of references.
     pub backrefs: Option<(BlockId, u32)>,
+    /// Synthetic block ids made for embedded blocks so far.
+    pub(crate) synthetic: u64,
+    /// While a callout's title is built: its colour and icon gutter.
+    pub(crate) title_cx: Option<(crate::style::ColorToken, f32)>,
 }
 
 impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
@@ -133,6 +147,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             refs,
             opts,
             inline_opts,
+            parse_opts: None,
             sources,
             reuse,
             frames: Vec::new(),
@@ -151,6 +166,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             saved_frames: Vec::new(),
             details: Vec::new(),
             backrefs: None,
+            synthetic: 0,
+            title_cx: None,
         }
     }
 
@@ -161,6 +178,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             sources: self.sources,
             block,
             footnotes: self.footnotes.as_deref(),
+            soft_breaks: self.opts.soft_breaks,
+            title: self.title_cx,
         }
     }
 
@@ -242,7 +261,25 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         let range = leaf.range.clone();
         let first_content = leaf.lines.first().map_or(range.start, |l| l.content.start);
         let (kind, start, lookups) = match leaf.kind {
-            LeafKind::LinkRefDef => return None,
+            LeafKind::LinkRefDef | LeafKind::Comment => return None,
+            LeafKind::CalloutTitle => {
+                self.title_cx = self.callout_title_cx();
+                let (title, lookups) = self.inline(leaf, first_content, TextRole::Body);
+                self.title_cx = None;
+                let fold = match self.open.last().map(|o| o.kind) {
+                    Some(ContainerKind::Callout { fold }) => fold,
+                    _ => gv_syntax::CalloutFold::None,
+                };
+                (
+                    NodeKind::CalloutTitle { title, fold },
+                    first_content,
+                    lookups,
+                )
+            }
+            LeafKind::Paragraph if self.inline_opts.block_ids && only_block_id(self.text, leaf) => {
+                // A block id alone: hidden.
+                return None;
+            }
             LeafKind::FrontMatter { kind } => {
                 if self.opts.front_matter == FrontMatterDisplay::Hidden {
                     return None;
@@ -371,6 +408,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             sources: self.sources,
             block: leaf.id,
             footnotes: footnotes.as_deref(),
+            soft_breaks: self.opts.soft_breaks,
+            title: None,
         };
         let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));
         let mut labels: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = Vec::new();
@@ -391,7 +430,15 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 .map(|r| {
                     let abs = line.content.start + r.start..line.content.start + r.end;
                     let tree = (!abs.is_empty()).then(|| {
-                        parse_table_cell(self.text, abs.clone(), &*self.refs, self.inline_opts)
+                        parse_table_cell(
+                            self.text,
+                            abs.clone(),
+                            &*self.refs,
+                            InlineOptions {
+                                block_ids: false,
+                                ..self.inline_opts
+                            },
+                        )
                     });
                     if let Some(t) = &tree {
                         for l in t.label_lookups() {
@@ -455,7 +502,10 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 segments: &self.segments,
             },
             &*self.refs,
-            self.inline_opts,
+            InlineOptions {
+                block_ids: self.inline_opts.block_ids && leaf.kind == LeafKind::Paragraph,
+                ..self.inline_opts
+            },
         );
         let cx = self.inline_cx(leaf.id);
         let content = match self.backrefs {
@@ -632,6 +682,19 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
         let kind = match c.kind {
             ContainerKind::BlockQuote => FrameKind::Quote { depth: quote_depth },
             ContainerKind::Alert { kind } => FrameKind::Alert { kind },
+            ContainerKind::Callout { fold } => {
+                self.scratch.clear();
+                if let Some(t) = c.callout_type() {
+                    self.text.copy_range(t, &mut self.scratch);
+                }
+                FrameKind::Callout {
+                    name: String::from_utf8_lossy(&self.scratch)
+                        .trim()
+                        .to_lowercase()
+                        .into(),
+                    fold,
+                }
+            }
             // Entered by `enter_footnote` above.
             ContainerKind::FootnoteDefinition => return,
             ContainerKind::BulletList { marker, tight } => FrameKind::List {
@@ -694,7 +757,11 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
             items: 0,
             list_depth,
             framed,
+            body_frame: false,
         });
+        if let ContainerKind::Callout { fold } = c.kind {
+            self.callout_untitled(c, fold);
+        }
     }
 
     fn exit(&mut self, c: &Container) {
@@ -707,6 +774,10 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
         if o.kind == ContainerKind::FootnoteDefinition {
             self.exit_footnote(c, &o);
             return;
+        }
+        if o.body_frame {
+            self.frames.pop();
+            self.ctx = None;
         }
         let empty = self.made() == o.first_made;
         if empty && matches!(o.kind, ContainerKind::Alert { .. }) {
@@ -767,6 +838,9 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
                 }
             }
         }
+        if leaf.kind == LeafKind::Paragraph && self.embed_paragraph(leaf) {
+            return;
+        }
         let made = match self.try_reuse(leaf) {
             Some((n, index)) => {
                 self.reused += 1;
@@ -781,6 +855,9 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
                 None => false,
             },
         };
+        if made && leaf.kind == LeafKind::CalloutTitle {
+            self.callout_body(leaf.id);
+        }
         if made && let Some(DetailsPart::Open { .. }) = part {
             // The blocks after it, up to its `</details>`, fold with it.
             let frames = self.frames.len();
@@ -842,6 +919,7 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             items: 0,
             list_depth: 0,
             framed: true,
+            body_frame: false,
         });
     }
 
@@ -899,4 +977,19 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             self.ctx = None;
         }
     }
+}
+
+/// Whether a paragraph is only a block id (`^id` on a line of its own).
+fn only_block_id<S: TextSource + ?Sized>(text: &S, leaf: &Leaf<'_>) -> bool {
+    let [line] = leaf.lines else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    text.copy_range(line.content.clone(), &mut buf);
+    let s = buf.trim_ascii();
+    s.len() > 1
+        && s[0] == b'^'
+        && s[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
 }

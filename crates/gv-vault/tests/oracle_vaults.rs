@@ -13,20 +13,16 @@
 //!   emitted files are then also checked with it (`python3 -I`), against a
 //!   synthetic oracle built from them and through its `--skeleton` output.
 //!
-//! Markdown links, images and autolinks come from the document model
-//! ([`links_from_model`]); heading fragments are matched by
-//! [`ModelFragments`]. Notes are parsed with the Obsidian profile's
-//! options, so YAML front matter is front matter, not Markdown. The parser
-//! and the model have no other Obsidian syntax yet, so three small
-//! stand-ins remain here, each covering only what the fixtures use:
-//!
-//! - the front matter's content (where the model puts it) is parsed as
-//!   Markdown on its own for its links (`frontmatter` links), until the
-//!   model parses properties;
-//! - wikilinks, embeds, `%%` comments and bare URLs are found by a text scan
-//!   of the paragraph and heading lines the parser reports, outside code
-//!   spans, raw HTML and Markdown links;
-//! - block ids (`^id`) are found by a line scan.
+//! Links (Markdown links, images, autolinks, wikilinks and embeds) and
+//! block ids come from the document model ([`links_from_model`],
+//! [`DocModel::block_anchors`]); bare URLs (GFM extended autolinks, which
+//! the model leaves out) from the parser's inline trees; heading and block
+//! fragments are matched by [`ModelFragments`]. Notes are parsed with the
+//! Obsidian profile's options, so YAML front matter is front matter, not
+//! Markdown, and `%%` comments hide what they hold. One stand-in remains:
+//! the front matter's content (where the model puts it) is parsed as
+//! Markdown on its own for its links (`frontmatter` links), until the model
+//! parses properties.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -36,15 +32,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gv_model::DocModel;
-use gv_syntax::inline::InlineKind;
+use gv_syntax::inline::LinkKind as SynLinkKind;
 use gv_syntax::{Leaf, LeafKind, ParseOptions, SyntaxTree, Visitor};
 use gv_vault::expect::{
     EXPECT_SCHEMA, ExpectFile, ExpectKind, ExpectLink, ExpectProbe, is_valid_status,
 };
 use gv_vault::{
-    Fragment, FragmentKind, FragmentResolver, FragmentTarget, IndexConfig, LinkKind, LinkRef,
-    ModelFragments, PathIndex, ProfileId, ProfileParams, Status, VaultPath, links_from_model,
-    resolve,
+    IndexConfig, LinkKind, LinkRef, ModelFragments, PathIndex, ProfileId, ProfileParams, Status,
+    VaultPath, links_from_model, resolve,
 };
 use serde_json::{Value, json};
 
@@ -86,107 +81,25 @@ struct Extracted {
     link: LinkRef,
 }
 
-/// The content lines of paragraphs and headings, and the ranges inside
-/// them the scan must skip (code spans, raw HTML).
-struct TextLines<'a> {
+/// The bare URLs (GFM extended autolinks) of the paragraphs and headings.
+struct BareUrls<'a> {
     tree: &'a SyntaxTree,
     text: &'a str,
-    lines: Vec<Range<usize>>,
-    masked: Vec<Range<usize>>,
+    found: Vec<(usize, usize, String)>,
 }
 
-impl Visitor for TextLines<'_> {
+impl Visitor for BareUrls<'_> {
     fn leaf(&mut self, leaf: &Leaf<'_>) {
         if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
             return;
         }
-        self.lines
-            .extend(leaf.lines.iter().map(|l| l.content.clone()));
         let inlines = self.tree.inlines(leaf, self.text);
-        self.masked.extend(
-            inlines
-                .tokens()
-                .filter(|(k, _)| matches!(k, InlineKind::CodeText | InlineKind::HtmlText))
-                .map(|(_, r)| r),
-        );
-    }
-}
-
-fn inside(ranges: &[Range<usize>], at: usize) -> bool {
-    ranges.iter().any(|r| r.contains(&at))
-}
-
-/// Obsidian comments (`%%…%%`, possibly over several lines and blocks):
-/// `%%` pairs in document order, outside masked ranges.
-// TODO(gv-syntax profile hooks): Obsidian comments in the parser.
-fn comments(text: &str, lines: &[Range<usize>], masked: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut marks = Vec::new();
-    for line in lines {
-        let mut i = line.start;
-        while let Some(n) = text[i..line.end].find("%%") {
-            let at = i + n;
-            if !inside(masked, at) {
-                marks.push(at);
+        for l in inlines.links() {
+            if matches!(l.kind, SynLinkKind::UriAutolink) && l.text_range.start == l.range.start {
+                self.found
+                    .push((l.range.start, l.range.end, l.destination.to_owned()));
             }
-            i = at + 2;
         }
-    }
-    marks
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|[open, close]| *open..*close + 2)
-        .collect()
-}
-
-/// Wikilinks, embeds and bare URLs in one content line.
-// TODO(gv-syntax profile hooks): wikilinks, embeds and extended autolinks
-// from the parser and the model.
-fn scan_line(
-    text: &str,
-    line: Range<usize>,
-    skip: &[Range<usize>],
-    kind: ExpectKind,
-    source: &VaultPath,
-    out: &mut Vec<Extracted>,
-) {
-    let mut push = |kind, start: usize, end: usize, link_kind, raw: String| {
-        out.push(Extracted {
-            kind,
-            start,
-            original: text[start..end].to_owned(),
-            link: LinkRef::new(link_kind, raw, source.clone(), ProfileId::Obsidian),
-        });
-    };
-    let mut i = line.start;
-    while i < line.end {
-        if inside(skip, i) || !text.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        let rest = &text[i..line.end];
-        let embed = rest.starts_with("![[");
-        let r = if embed { &rest[1..] } else { rest };
-        if let Some(after_open) = r.strip_prefix("[[")
-            && let Some(close) = after_open.find("]]")
-        {
-            let end = i + usize::from(embed) + 2 + close + 2;
-            let (k, lk) = if embed {
-                (ExpectKind::Embed, LinkKind::Embed)
-            } else {
-                (kind, LinkKind::Wikilink)
-            };
-            push(k, i, end, lk, after_open[..close].replace("\\|", "|"));
-            i = end;
-            continue;
-        }
-        if rest.starts_with("https://") || rest.starts_with("http://") {
-            let end = i + rest.find([' ', ')', '>']).unwrap_or(rest.len());
-            push(kind, i, end, LinkKind::Autolink, text[i..end].to_owned());
-            i = end;
-            continue;
-        }
-        i += 1;
     }
 }
 
@@ -197,32 +110,30 @@ fn extract_parsed(
     kind: ExpectKind,
     source: &VaultPath,
 ) -> Vec<Extracted> {
-    let mut v = TextLines {
-        tree,
-        text,
-        lines: Vec::new(),
-        masked: Vec::new(),
-    };
-    gv_syntax::walk(tree, &mut v);
-    let hidden = comments(text, &v.lines, &v.masked);
     let mut out = Vec::new();
     let refs = links_from_model(model, source, ProfileId::Obsidian);
     for (l, link) in model.links().iter().zip(refs) {
-        if inside(&hidden, l.range.start) {
-            continue;
-        }
+        let embed = l.image || l.kind == gv_model::LinkKind::Embed;
         out.push(Extracted {
-            kind: if l.image { ExpectKind::Embed } else { kind },
+            kind: if embed { ExpectKind::Embed } else { kind },
             start: l.range.start,
             original: text[l.range.clone()].to_owned(),
             link,
         });
     }
-    let mut skip = v.masked;
-    skip.extend(hidden);
-    skip.extend(model.links().iter().map(|l| l.range.clone()));
-    for line in v.lines {
-        scan_line(text, line, &skip, kind, source, &mut out);
+    let mut v = BareUrls {
+        tree,
+        text,
+        found: Vec::new(),
+    };
+    gv_syntax::walk(tree, &mut v);
+    for (start, end, url) in v.found {
+        out.push(Extracted {
+            kind,
+            start,
+            original: text[start..end].to_owned(),
+            link: LinkRef::new(LinkKind::Autolink, url, source.clone(), ProfileId::Obsidian),
+        });
     }
     out.sort_by_key(|x| x.start);
     out
@@ -244,36 +155,8 @@ fn extract(text: &str, source: &VaultPath) -> Vec<Extracted> {
 }
 
 // ---------------------------------------------------------------------------
-// Fragments: the model's, plus a block-id scan.
+// Fragments: the model's.
 // ---------------------------------------------------------------------------
-
-/// Block ids (`^id` at the end of a line, after a space or alone) with
-/// their 0-based lines, outside fenced code.
-// TODO(gv-model block ids): the Obsidian profile's `DocModel::block_anchors`.
-fn block_ids(text: &str) -> Vec<(String, u32)> {
-    let mut out = Vec::new();
-    let mut fence = false;
-    for (n, line) in text.lines().enumerate() {
-        if line.trim_start().starts_with("```") {
-            fence = !fence;
-            continue;
-        }
-        if fence {
-            continue;
-        }
-        if let Some(pos) = line.rfind('^') {
-            let id = &line[pos + 1..];
-            let before = &line[..pos];
-            if !id.is_empty()
-                && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
-                && (before.is_empty() || before.ends_with(' '))
-            {
-                out.push((id.to_owned(), u32::try_from(n).unwrap_or(u32::MAX)));
-            }
-        }
-    }
-    out
-}
 
 /// Notes of a vault, parsed once each.
 struct Notes {
@@ -298,47 +181,6 @@ impl Notes {
                 Some((text, model))
             })
             .clone()
-    }
-}
-
-/// [`ModelFragments`] over the vault's notes, with block ids from
-/// [`block_ids`] while the model has none.
-struct VaultFragments<'a, F> {
-    notes: &'a Notes,
-    model: ModelFragments<F>,
-}
-
-impl<F: Fn(&VaultPath) -> Option<DocModel>> FragmentResolver for VaultFragments<'_, F> {
-    fn resolve_fragment(
-        &self,
-        target: &VaultPath,
-        fragment: &Fragment,
-        params: &ProfileParams,
-    ) -> FragmentTarget {
-        let FragmentKind::Block(id) = &fragment.kind else {
-            return self.model.resolve_fragment(target, fragment, params);
-        };
-        let Some((text, model)) = self.notes.get(target) else {
-            return FragmentTarget::Unchecked;
-        };
-        if !model.block_anchors().is_empty() {
-            return self.model.resolve_fragment(target, fragment, params);
-        }
-        let ids = block_ids(&text);
-        let lower = id.to_lowercase();
-        let exact = ids.iter().find(|(b, _)| b == id).map(|x| (x, false));
-        match exact.or_else(|| {
-            ids.iter()
-                .find(|(b, _)| b.to_lowercase() == lower)
-                .map(|x| (x, true))
-        }) {
-            Some(((bid, line), loose)) => FragmentTarget::Block {
-                id: bid.clone(),
-                line: *line,
-                loose,
-            },
-            None => FragmentTarget::Missing,
-        }
     }
 }
 
@@ -371,10 +213,7 @@ fn expect_for_vault(vault: &Path, name: &str) -> (ExpectFile, BTreeMap<String, u
         root: vault.to_path_buf(),
         cache: RefCell::new(HashMap::new()),
     };
-    let fragments = VaultFragments {
-        notes: &notes,
-        model: ModelFragments::new(|p: &VaultPath| notes.get(p).map(|(_, m)| m)),
-    };
+    let fragments = ModelFragments::new(|p: &VaultPath| notes.get(p).map(|(_, m)| m));
     let mut links = Vec::new();
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut sources: Vec<&gv_vault::Entry> = idx

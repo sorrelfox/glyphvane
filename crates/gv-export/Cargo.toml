@@ -9,6 +9,19 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ammonia.workspace = true
+gv-highlight.workspace = true
+gv-inline.workspace = true
+gv-math.workspace = true
+gv-model.workspace = true
+gv-render-tree.workspace = true
+gv-syntax.workspace = true
+# The URL classifier and policy shared with the Reading view.
+gv-vault.workspace = true
+
+[dev-dependencies]
+gv-profile.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -563,6 +563,16 @@ impl Visitor for Leaves<'_, '_> {
                 self.table(leaf);
                 self.callout(leaf);
             }
+            // An Obsidian callout's title (its `[!type]` is an extension
+            // marker, painted with the block tokens).
+            LeafKind::CalloutTitle => {
+                for line in leaf.lines {
+                    self.painter.paint(line.content.clone(), |s| s.bold = true);
+                }
+                self.inlines(leaf);
+            }
+            // An Obsidian `%%` block comment.
+            LeafKind::Comment => self.painter.set(leaf.range.clone(), Style::COMMENT),
             // A GFM table: its lines are the header, the delimiter row and
             // the body rows, as `table` expects.
             LeafKind::Table => self.table(leaf),
@@ -653,6 +663,37 @@ impl Leaves<'_, '_> {
                     self.painter.set(child.range(), style);
                 }
             }
+            InlineKind::Highlight | InlineKind::InlineFootnote => {
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            // Obsidian: wikilinks and embeds (the target in its status's
+            // style), `%%` comments, tags and block ids.
+            InlineKind::Wikilink | InlineKind::Embed => {
+                let target = node.wikilink().map(|w| {
+                    let kind = if w.embed {
+                        gv_model::LinkKind::Embed
+                    } else {
+                        gv_model::LinkKind::Wikilink
+                    };
+                    link_style(self.links.status(kind, false, &w.inner))
+                });
+                let ctx = Ctx { target, ..ctx };
+                node.children().for_each(|c| self.inline(c, ctx));
+            }
+            InlineKind::Comment => self.painter.set(range, Style::COMMENT),
+            InlineKind::Tag => self.painter.set(range, Style::of(Token::AccentDefault)),
+            InlineKind::BlockId => self.painter.set(range, Style::MARKER),
+            InlineKind::WikiTarget => {
+                let style = ctx.target.unwrap_or(Style::of(Token::AccentDefault));
+                self.painter.set(range, style);
+            }
+            InlineKind::WikiAlias => self.painter.paint(range, |s| {
+                s.bold |= ctx.bold;
+                s.italic |= ctx.italic;
+            }),
+            InlineKind::CommentText => self.painter.set(range, Style::COMMENT),
+            InlineKind::TagText => self.painter.set(range, Style::of(Token::AccentDefault)),
+            InlineKind::BlockIdText => self.painter.set(range, Style::MARKER),
             InlineKind::Link | InlineKind::Image | InlineKind::Autolink => {
                 let target = node.link().map(|link| self.target_style(&link));
                 let ctx = Ctx { target, ..ctx };
