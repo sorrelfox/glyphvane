@@ -205,8 +205,6 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             ],
         ));
     }
-    // TODO(files): Save as needs a file dialog; until then nothing handles
-    // it and the item stays disabled.
     let mut file = vec![
         item("tabs.new", "New tab"),
         item("file.open", "Open file…"),

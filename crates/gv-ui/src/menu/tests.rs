@@ -493,7 +493,7 @@ fn the_menu_shows_shortcuts_checks_and_disabled_items(cx: &mut TestAppContext) {
     assert_eq!(close.size.height, px(MENU_ROW));
 
     // A disabled item does nothing and keeps the menu open.
-    f.click("app-menu-item:file.save_as");
+    f.click("app-menu-item:file.open");
     assert!(f.is_open());
 
     // View: the current mode is checked; chords are labelled in full.

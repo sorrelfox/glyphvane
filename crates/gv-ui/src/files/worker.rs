@@ -22,7 +22,7 @@
 //! stays on disk for recovery.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
@@ -30,7 +30,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::Either;
 use gpui::BackgroundExecutor;
 use gv_text::{EditSummary, TextFormat, TextSnapshot, Transaction};
-use gv_vault::files::journal::DocumentJournal;
+use gv_vault::files::journal::{DocumentJournal, DocumentKey};
 use gv_vault::files::{Backup, ContentHash, DocumentFile, SaveError, SaveOptions, SaveOutcome};
 
 use super::Claim;
@@ -61,6 +61,20 @@ pub(crate) enum Msg {
         file: DocumentFile,
         text: TextSnapshot,
         options: SaveOptions,
+        reply: oneshot::Sender<SaveReply>,
+    },
+    /// Save `text` to `path` ("Save As", or an untitled document's first
+    /// save) from `file` (`None` for an untitled document, which is written
+    /// in `format`). On success the journal moves to the new path's key,
+    /// with `claim` (the right to that key in this process) replacing the
+    /// old one; the reply carries the new file.
+    SaveAs {
+        file: Option<DocumentFile>,
+        path: PathBuf,
+        format: TextFormat,
+        text: TextSnapshot,
+        options: SaveOptions,
+        claim: Option<Claim>,
         reply: oneshot::Sender<SaveReply>,
     },
     /// Sync the journal now (focus loss, closing, quitting). The reply, if
@@ -96,8 +110,7 @@ impl Worker {
         let timers = executor.clone();
         executor
             .spawn(async move {
-                run(journal, rx, timers).await;
-                drop(claim);
+                run(journal, claim, rx, timers).await;
             })
             .detach();
         Self { tx }
@@ -124,6 +137,7 @@ impl Worker {
 
 async fn run(
     mut journal: Option<DocumentJournal>,
+    mut claim: Option<Claim>,
     mut rx: mpsc::UnboundedReceiver<Msg>,
     executor: BackgroundExecutor,
 ) {
@@ -176,7 +190,7 @@ async fn run(
                         record(journal, &batch);
                     }
                 }
-                other => handle(&mut journal, other),
+                other => handle(&mut journal, &mut claim, other),
             }
         }
     }
@@ -199,7 +213,7 @@ fn sync_due(journal: &mut DocumentJournal) -> Option<Instant> {
     }
 }
 
-fn handle(journal: &mut Option<DocumentJournal>, msg: Msg) {
+fn handle(journal: &mut Option<DocumentJournal>, claim: &mut Option<Claim>, msg: Msg) {
     match msg {
         Msg::Record { summary, text } => {
             if let Some(journal) = journal.as_mut() {
@@ -237,6 +251,27 @@ fn handle(journal: &mut Option<DocumentJournal>, msg: Msg) {
             // The view may be gone (a tab closed while its last save ran).
             let _ = reply.send(SaveReply { result });
         }
+        Msg::SaveAs {
+            file,
+            path,
+            format,
+            text,
+            options,
+            claim: new_claim,
+            reply,
+        } => {
+            let result = save_as(journal, file, &path, format, &text, &options);
+            match &result {
+                Ok((file, _)) => {
+                    retarget_journal(journal, &path, file, text);
+                    // The old key's claim is released here; without a
+                    // journal the document claims no key.
+                    *claim = if journal.is_some() { new_claim } else { None };
+                }
+                Err(err) => tracing::info!("not saved as {}: {err}", path.display()),
+            }
+            let _ = reply.send(SaveReply { result });
+        }
         Msg::Sync(reply) => {
             if let Some(journal) = journal.as_mut()
                 && let Err(err) = journal.sync()
@@ -254,6 +289,62 @@ fn handle(journal: &mut Option<DocumentJournal>, msg: Msg) {
                     tracing::warn!("journal {id}: cannot delete: {err}");
                 }
             }
+        }
+    }
+}
+
+/// Writes `text` to `path` as a new file, or as a copy of `file`.
+fn save_as(
+    journal: &mut Option<DocumentJournal>,
+    file: Option<DocumentFile>,
+    path: &Path,
+    format: TextFormat,
+    text: &TextSnapshot,
+    options: &SaveOptions,
+) -> Result<(DocumentFile, SaveOutcome), SaveError> {
+    let mut no_backup = NoBackup;
+    let backup: &mut dyn Backup = match journal.as_mut() {
+        Some(journal) => journal,
+        None => &mut no_backup,
+    };
+    match file {
+        Some(mut file) => {
+            let outcome = file.save_as(path, text, options, backup)?;
+            Ok((file, outcome))
+        }
+        None => {
+            let mut file = DocumentFile::new_file(path, format);
+            let outcome = file.save(text, options, backup)?;
+            Ok((file, outcome))
+        }
+    }
+}
+
+/// After a save to `path`, the journal continues under that path's key,
+/// cleared. If it cannot (another process journals that file), it is
+/// deleted: the text is saved, and later edits go unjournaled.
+fn retarget_journal(
+    journal: &mut Option<DocumentJournal>,
+    path: &Path,
+    file: &DocumentFile,
+    text: TextSnapshot,
+) {
+    let (Some(current), Some(baseline)) = (journal.as_mut(), file.baseline()) else {
+        return;
+    };
+    let key = DocumentKey::Path(path.to_path_buf());
+    let Err(err) = current.saved_as(key, text, file.format(), baseline.hash) else {
+        return;
+    };
+    tracing::warn!(
+        "journal {}: cannot move to {}: {err}; edits to it are not journaled",
+        current.id(),
+        path.display()
+    );
+    if let Some(old) = journal.take() {
+        let id = old.id().clone();
+        if let Err(err) = old.discard() {
+            tracing::warn!("journal {id}: cannot delete: {err}");
         }
     }
 }

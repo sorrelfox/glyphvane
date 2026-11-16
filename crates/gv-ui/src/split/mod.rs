@@ -173,6 +173,12 @@ impl SplitView {
         }
     }
 
+    /// The document moved to `path` (Save As): the preview's links resolve
+    /// from there.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
     /// The editor pane's share of the view's width, as last set (before
     /// clamping to the view's current width).
     pub fn ratio(&self) -> f32 {

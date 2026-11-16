@@ -23,7 +23,13 @@
 //!    diff ([`reload_transaction`]), one undoable edit, so anchors,
 //!    selections and the scroll position survive; a modified one gets the
 //!    conflict infobar (Keep mine, Take theirs; Compare is not designed).
-//!    A deleted file gets an infobar with Save and Close.
+//!    A deleted file gets an infobar with Save, Save as and Close.
+//! 5. **Save As** (and Save on an untitled document): the window asks for
+//!    a path ([`crate::files::save_as`]) and hands it to
+//!    [`EditorView::save_as`]. The worker writes the new file and moves the
+//!    journal to the new path's key; on success the view follows the new
+//!    path and tells the window ([`DocEvent::SavedAs`]), which re-points
+//!    the tab.
 
 use std::cell::Cell;
 use std::io;
@@ -67,6 +73,11 @@ pub enum DocEvent {
     Reloaded,
     /// A save finished.
     Saved,
+    /// The document should be saved under a path the user chooses: Save
+    /// on an untitled document, or an infobar's Save as.
+    SaveAsRequested,
+    /// Save As succeeded: the document now lives at [`EditorView::path`].
+    SavedAs,
     /// The user closed the document from its infobar.
     CloseRequested,
 }
@@ -268,7 +279,22 @@ struct Theirs {
 struct Saving {
     request: SaveRequest,
     point: SavePoint,
+    /// Where it writes.
     path: PathBuf,
+    /// The text it writes.
+    text: TextSnapshot,
+    /// A Save As: the document moves to `path` once written.
+    save_as: Option<SaveAsTarget>,
+}
+
+/// Where Save As writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SaveAsTarget {
+    /// The absolute path.
+    pub path: PathBuf,
+    /// The user confirmed replacing a file there (the save dialog asks);
+    /// otherwise an existing file is not replaced.
+    pub overwrite: bool,
 }
 
 /// The file side of a document in a Source view.
@@ -286,6 +312,8 @@ pub(crate) struct DocState {
     saving: Option<Saving>,
     /// A manual save asked for while one ran.
     save_again: bool,
+    /// A Save As asked for while a save ran.
+    save_as_again: Option<SaveAsTarget>,
     /// A change on disk that arrived while a save ran.
     deferred: Option<ExternalChange>,
     conflict: Option<Theirs>,
@@ -335,6 +363,7 @@ impl DocState {
             edited: Rc::default(),
             saving: None,
             save_again: false,
+            save_as_again: None,
             deferred: None,
             conflict: None,
             deleted: false,
@@ -469,7 +498,7 @@ impl EditorView {
         };
         let state = &mut doc.state;
         if state.key.is_none() || state.untitled() || state.worker.is_none() {
-            // Untitled documents live in the journal until Save As exists.
+            // Untitled documents live in the journal until saved as.
             settings.enabled = false;
         }
         state.autosave.set_settings(settings);
@@ -557,16 +586,15 @@ impl EditorView {
 
     // ----- saving --------------------------------------------------------------------
 
-    /// Mod+S.
+    /// Mod+S. An untitled document has no file yet: the window is asked
+    /// for a Save As.
     pub fn save(&mut self, cx: &mut Context<'_, Self>) {
         self.after_edit(cx);
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
         if doc.state.untitled() {
-            // Not designed: there is no Save As dialog yet.
-            doc.state.set_notice(Some(Notice::untitled()));
-            self.notice_changed(cx);
+            cx.emit(DocEvent::SaveAsRequested);
             return;
         }
         if doc.state.saving.is_some() {
@@ -615,7 +643,7 @@ impl EditorView {
         let (reply, answer) = oneshot::channel();
         worker.send(Msg::Save {
             file,
-            text,
+            text: text.clone(),
             options,
             reply,
         });
@@ -623,12 +651,151 @@ impl EditorView {
             request,
             point,
             path,
+            text,
+            save_as: None,
         });
+        self.await_save(answer, cx);
+    }
+
+    fn await_save(&mut self, answer: oneshot::Receiver<SaveReply>, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
         doc.state.save_task = Some(cx.spawn(async move |this, cx| {
             let reply = answer.await.ok();
             this.update(cx, |view, cx| view.save_finished(reply, cx))
                 .ok();
         }));
+    }
+
+    // ----- Save As --------------------------------------------------------------
+
+    /// Saves the text to `target` (Save As, or an untitled document's first
+    /// save) and, once written, makes it this document's file. A view still
+    /// loading saves once loaded; a save running finishes first. Fails with
+    /// an error infobar when another tab edits the file at `target`.
+    pub(crate) fn save_as(&mut self, target: SaveAsTarget, cx: &mut Context<'_, Self>) {
+        let target = SaveAsTarget {
+            path: std::path::absolute(&target.path).unwrap_or(target.path),
+            ..target
+        };
+        if self.doc.is_none() {
+            self.save_as_after_load = Some(target);
+            return;
+        }
+        self.after_edit(cx);
+        // Both absolute.
+        let same = self.path.as_deref() == Some(target.path.as_path());
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        if doc.state.key.is_none() || doc.state.worker.is_none() {
+            return;
+        }
+        if doc.state.saving.is_some() {
+            doc.state.save_as_again = Some(target);
+            return;
+        }
+        if same {
+            // Its own file: a plain save, even of unchanged text.
+            self.save_anyway(SaveOptions::default(), cx);
+            return;
+        }
+        let key = DocumentKey::Path(target.path.clone());
+        let claim = files::claim(cx, &key);
+        if claim.is_none() && files::store(cx).is_some() {
+            self.show_save_as_error(Notice::save_as_open_elsewhere(&file_name(&target.path)), cx);
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let Some(worker) = doc.state.worker.clone() else {
+            return;
+        };
+        let request = doc.state.autosave.manual().unwrap_or(SaveRequest {
+            reason: SaveReason::Manual,
+            generation: 0,
+        });
+        let point = doc.editor.save_point();
+        let text = doc.editor.snapshot();
+        let file = doc.state.file.clone();
+        let format = file
+            .as_ref()
+            .map_or_else(TextFormat::default, DocumentFile::format);
+        if let Some(watch) = &self.watch {
+            watch.begin_write(&target.path);
+        }
+        let options = SaveOptions {
+            on_external_change: if target.overwrite {
+                OnExternalChange::Overwrite
+            } else {
+                OnExternalChange::Refuse
+            },
+            ..SaveOptions::default()
+        };
+        let (reply, answer) = oneshot::channel();
+        worker.send(Msg::SaveAs {
+            file,
+            path: target.path.clone(),
+            format,
+            text: text.clone(),
+            options,
+            claim,
+            reply,
+        });
+        doc.state.saving = Some(Saving {
+            request,
+            point,
+            path: target.path.clone(),
+            text,
+            save_as: Some(target),
+        });
+        self.await_save(answer, cx);
+    }
+
+    /// Shows a Save As failure in the error infobar (also the window's: the
+    /// dialog could not be shown, the file is open in another tab).
+    pub(crate) fn show_save_as_error(&mut self, notice: Notice, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        doc.state.last_error = Some(notice.clone());
+        doc.state.set_notice(Some(notice));
+        self.notice_changed(cx);
+    }
+
+    /// Save As wrote the file: the document lives there from now on.
+    fn saved_as(&mut self, file: DocumentFile, saving: Saving, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let path = saving.path;
+        let baseline = file.baseline().cloned();
+        doc.state.key = Some(DocumentKey::Path(path.clone()));
+        doc.state.file = Some(file);
+        doc.editor.mark_saved_at(saving.point);
+        doc.state.autosave.save_succeeded(saving.request);
+        doc.state.base = saving.text;
+        // What was pending concerned the old file.
+        doc.state.deferred = None;
+        doc.state.conflict = None;
+        doc.state.deleted = false;
+        doc.state.recovering = false;
+        doc.state.last_error = None;
+        doc.state.set_notice(None);
+        if let Some(watch) = &self.watch {
+            match baseline {
+                Some(state) => watch.expect_write(&path, state),
+                None => watch.cancel_write(&path),
+            }
+        }
+        self.links = super::LinkStatuses::new(Some(&path), None);
+        self.path = Some(path);
+        self.untitled = None;
+        cx.emit(DocEvent::Saved);
+        cx.emit(DocEvent::SavedAs);
+        self.notice_changed(cx);
     }
 
     fn save_finished(&mut self, reply: Option<SaveReply>, cx: &mut Context<'_, Self>) {
@@ -639,7 +806,22 @@ impl EditorView {
             return;
         };
         doc.state.save_task = None;
+        let save_as = saving.save_as.clone();
         match reply.map(|r| r.result) {
+            Some(Ok((file, _))) if save_as.is_some() => self.saved_as(file, saving, cx),
+            Some(Err(err)) if save_as.is_some() => {
+                doc.state.autosave.save_failed(saving.request);
+                if let Some(watch) = &self.watch {
+                    watch.cancel_write(&saving.path);
+                }
+                match err {
+                    // Only when not told to overwrite: `.md` was added to
+                    // the name the dialog asked about.
+                    SaveError::ExternalChange { .. } => self
+                        .show_save_as_error(Notice::save_as_exists(&file_name(&saving.path)), cx),
+                    err => self.save_failed(err, SaveReason::Manual, cx),
+                }
+            }
             Some(Ok((file, _))) => {
                 let baseline = file.baseline().cloned();
                 doc.state.file = Some(file);
@@ -682,6 +864,9 @@ impl EditorView {
         {
             self.save(cx);
         }
+        if let Some(target) = self.doc.as_mut().and_then(|d| d.state.save_as_again.take()) {
+            self.save_as(target, cx);
+        }
         self.after_edit(cx);
         cx.notify();
     }
@@ -707,9 +892,12 @@ impl EditorView {
                     .map_or(Encoding::Utf8, |f| f.format().encoding);
                 Notice::lossy(encoding)
             }
+            SaveError::ReadOnly(reason @ ReadOnlyReason::Permissions) => {
+                Notice::read_only(sentence(&reason.to_string()))
+            }
             SaveError::ReadOnly(reason) => Notice::save_failed(sentence(&reason.to_string())),
             SaveError::Write(WriteError::ReadOnly { .. }) => {
-                Notice::save_failed("The file is read-only.".to_owned())
+                Notice::read_only("The file is read-only.".to_owned())
             }
             other => Notice::save_failed(sentence(&other.to_string())),
         };
@@ -935,6 +1123,7 @@ impl EditorView {
                 },
                 cx,
             ),
+            NoticeAction::SaveAs => cx.emit(DocEvent::SaveAsRequested),
             NoticeAction::Close => cx.emit(DocEvent::CloseRequested),
             // Compare is not designed yet (its button is disabled); opening
             // a sync-conflict copy is the window's.
@@ -1088,6 +1277,14 @@ impl EditorView {
         }
         Some(worker.flush())
     }
+}
+
+/// The file name of `path`, for messages.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// `text` as a sentence: capitalised, ending with a full stop.

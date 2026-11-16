@@ -1672,6 +1672,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &file_commands::Save, _, cx| {
                 this.save_active(cx);
             }))
+            .on_action(cx.listener(|this, _: &file_commands::SaveAs, _, cx| {
+                this.save_as_active(cx);
+            }))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),

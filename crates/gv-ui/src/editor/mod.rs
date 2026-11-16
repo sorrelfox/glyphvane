@@ -135,6 +135,7 @@ use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
 use element::{EditorElement, Press, Scrollbar};
 pub use file::DocEvent;
+pub(crate) use file::SaveAsTarget;
 use file::{DocState, Loaded};
 pub use find::DEBUG_REPLACE_ENV;
 pub use fold::DEBUG_FOLD_ENV;
@@ -417,6 +418,8 @@ pub struct EditorView {
     handed_off: Option<Revision>,
     /// Find and replace.
     find: find::FindState,
+    /// A Save As asked for while the document loaded.
+    save_as_after_load: Option<file::SaveAsTarget>,
     #[cfg(test)]
     probe: element::Probe,
     _load: Option<Task<()>>,
@@ -472,6 +475,7 @@ impl EditorView {
             scrollbar: None,
             handed_off: None,
             find: find::FindState::default(),
+            save_as_after_load: None,
             #[cfg(test)]
             probe: element::Probe::default(),
             _load: None,
@@ -630,6 +634,9 @@ impl EditorView {
                 }
                 self.after_edit(cx);
                 cx.emit(DocEvent::Loaded);
+                if let Some(target) = self.save_as_after_load.take() {
+                    self.save_as(target, cx);
+                }
             }
             Err(err) => {
                 tracing::warn!("cannot edit {:?}: {err}", self.path);

@@ -133,7 +133,7 @@ impl WindowVault {
         cx.notify();
     }
 
-    #[cfg(test)]
+    /// The root folder.
     pub fn root(&self) -> &Path {
         &self.root
     }

@@ -13,6 +13,7 @@
 //! | [`worker`] | One background task per edited document: it records every edit in the journal and runs the saves, in order |
 //! | [`watch`] | Per window: open files changed on disk, the vault watcher |
 //! | [`notice`] | What the infobar says |
+//! | [`save_as`] | Where Save As writes: the save dialog, the suggested name, the `.md` extension |
 //! | The Source view ([`crate::editor`]) | A document's file, journal, autosave state and conflicts |
 //! | The window ([`crate::shell`]) | Save and close commands, the infobar, the unsaved dot, watcher events |
 //!
@@ -32,6 +33,9 @@
 //!   when the save may not run (a conflict), the journal is kept and the
 //!   text comes back with the recovery infobar the next time the file is
 //!   opened or the application starts.
+//! - **Untitled documents** live in the journal until saved. Save on one
+//!   is Save As; after Save As (of any document) its tab, journal, watcher
+//!   and recent-files entry follow the new path.
 //! - **Crash recovery:** at start-up every journal left in the store
 //!   reopens its document in Edit mode with the recovered text, marked
 //!   modified, and the recovery infobar (Keep, Discard).
@@ -40,6 +44,7 @@
 //! tied to vault ids yet.
 
 pub mod notice;
+pub mod save_as;
 #[cfg(test)]
 mod tests;
 pub(crate) mod watch;

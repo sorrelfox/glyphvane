@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The window's side of data safety ([`crate::files`]): Save, untitled
-//! tabs, closing with unsaved changes, the watchers' events, crash
+//! The window's side of data safety ([`crate::files`]): Save, Save As,
+//! untitled tabs, closing with unsaved changes, the watchers' events, crash
 //! recovery and the Source views' events.
 
 use std::path::{Path, PathBuf};
@@ -13,9 +13,10 @@ use gpui::{App, AppContext as _, Context, Entity, EntityId, Window};
 use gv_vault::WatchEvent;
 use gv_vault::files::{DiskState, ExternalChange};
 
-use super::{OpenTarget, RecentWindows, Tab, ViewMode, Workspace};
-use crate::editor::{DocEvent, EditorView};
+use super::{FileLabel, OpenTarget, RecentWindows, Tab, ViewMode, Workspace, session};
+use crate::editor::{DocEvent, EditorView, SaveAsTarget};
 use crate::files::notice::{Notice, Topic};
+use crate::files::save_as::{self, SaveAnswer, SavePrompt};
 use crate::files::watch::WatchHandle;
 use crate::files::{self};
 
@@ -42,8 +43,172 @@ impl Workspace {
         }
     }
 
+    /// `file.save_as`: asks where to save the active tab's document, then
+    /// saves it there and re-points the tab. A tab showing only its Reading
+    /// view gets a Source view for it (loading while the dialog is open).
+    pub fn save_as_active(&mut self, cx: &mut Context<'_, Self>) {
+        if self.active_tab().is_placeholder() {
+            return;
+        }
+        if let Some(editor) = self.ensure_editor(self.active, cx) {
+            self.ask_save_as(editor, cx);
+        }
+    }
+
+    /// Shows the save dialog for `editor`'s document. The dialog answers
+    /// asynchronously; cancelling it does nothing.
+    pub(super) fn ask_save_as(&mut self, editor: Entity<EditorView>, cx: &mut Context<'_, Self>) {
+        let prompt = self.save_prompt(&editor, cx);
+        let answer = save_as::dialog(cx).ask(&prompt, cx);
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            this.update(cx, |ws, cx| ws.save_as_answered(&editor, answer, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Where the save dialog opens and the name it suggests: the file's own
+    /// folder and name; for an untitled document the vault folder (else the
+    /// folder of another tab's file, else the home folder) and a name made
+    /// from its title.
+    fn save_prompt(&self, editor: &Entity<EditorView>, cx: &App) -> SavePrompt {
+        let view = editor.read(cx);
+        if let Some(path) = view.path() {
+            let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let suggested_name = path.file_name().map_or_else(
+                || format!("Untitled.{}", save_as::MARKDOWN_EXTENSION),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            return SavePrompt {
+                directory,
+                suggested_name,
+            };
+        }
+        let directory = self
+            .vault
+            .as_ref()
+            .map(|v| v.read(cx).root().to_path_buf())
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find_map(|t| Some(absolute(t.path.as_deref()?).parent()?.to_path_buf()))
+            })
+            .or_else(gv_vault::root::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let head = view.editor().map(|e| {
+            let text = e.text();
+            let end = text.clip_offset(text.len().min(4096), gv_text::Bias::Left);
+            text.text_for_range(0..end).unwrap_or_default()
+        });
+        let untitled = match view.untitled() {
+            Some(n) if n > 1 => format!("Untitled {n}"),
+            _ => "Untitled".to_owned(),
+        };
+        let suggested_name = head
+            .as_deref()
+            .and_then(save_as::suggested_name)
+            .unwrap_or_else(|| format!("{untitled}.{}", save_as::MARKDOWN_EXTENSION));
+        SavePrompt {
+            directory,
+            suggested_name,
+        }
+    }
+
+    /// The save dialog answered for `editor`'s document.
+    fn save_as_answered(
+        &mut self,
+        editor: &Entity<EditorView>,
+        answer: SaveAnswer,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let path = match answer {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(reason) => {
+                tracing::warn!("the save dialog could not be opened: {reason}");
+                editor.update(cx, |e, cx| {
+                    e.show_save_as_error(Notice::save_dialog_failed(&reason), cx);
+                });
+                return;
+            }
+        };
+        // The dialog asked about replacing the name it was given, not one
+        // with `.md` added.
+        let (path, renamed) = save_as::with_markdown_extension(path);
+        let path = absolute(&path);
+        let elsewhere = self
+            .tabs
+            .iter()
+            .any(|t| t.shows(&path) && t.editor.as_ref() != Some(editor));
+        if elsewhere {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            editor.update(cx, |e, cx| {
+                e.show_save_as_error(Notice::save_as_open_elsewhere(&name), cx);
+            });
+            return;
+        }
+        let target = SaveAsTarget {
+            path,
+            overwrite: !renamed,
+        };
+        editor.update(cx, |e, cx| e.save_as(target, cx));
+    }
+
+    /// Save As moved `editor`'s document: its tab follows the new path (the
+    /// name, the window title, the watcher, the Reading and Split views,
+    /// recent files and the session).
+    fn retarget_tab(
+        &mut self,
+        editor: &Entity<EditorView>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.editor.as_ref() == Some(editor))
+        else {
+            return;
+        };
+        let Some((path, baseline)) = editor.read(cx).disk_baseline() else {
+            return;
+        };
+        let tab = &mut self.tabs[index];
+        let old = tab.path.replace(path.clone());
+        tab.untitled = None;
+        tab.label = FileLabel::new(Some(&path));
+        tab.position = None;
+        tab.notice = None;
+        let reader = tab.reader.clone();
+        let split = tab.split.clone();
+        if let Some(old) = old {
+            self.untrack_if_unused(&old);
+        }
+        self.track_file(&path, Some(baseline), cx);
+        session::note_recent_file(cx, &path);
+        let index_snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
+        editor.update(cx, |e, cx| e.set_index(index_snapshot, cx));
+        if let Some(reader) = reader {
+            let target = path.clone();
+            reader.update(cx, |r, cx| {
+                let at = r.position();
+                r.open(target, at, cx);
+            });
+        }
+        if let Some(split) = split {
+            let target = path.clone();
+            split.update(cx, |s, _| s.set_path(target));
+        }
+        self.tabs_changed(window, cx);
+    }
+
     /// `tabs.new`: an untitled document in a new tab, in Edit mode. It lives
-    /// in the crash journal until it can be saved (Save As is not built).
+    /// in the crash journal until it is saved (Save As).
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let n = files::next_untitled(cx);
         let index = self.place_tab(Tab::untitled(n));
@@ -146,6 +311,17 @@ impl Workspace {
                                 ws.close_tab(index, window, cx);
                             }
                         })
+                    });
+                })
+                .detach();
+            }
+            DocEvent::SaveAsRequested => self.ask_save_as(editor.clone(), cx),
+            DocEvent::SavedAs => {
+                let editor = editor.clone();
+                let window = self.window_handle;
+                cx.spawn(async move |this, cx| {
+                    let _ = cx.update_window(window, |_, window, cx| {
+                        this.update(cx, |ws, cx| ws.retarget_tab(&editor, window, cx))
                     });
                 })
                 .detach();

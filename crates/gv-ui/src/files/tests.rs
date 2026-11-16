@@ -7,7 +7,10 @@
 //! (clean reload, conflicts, deleted files) and save errors. Every file
 //! and journal lives in a temporary folder.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -19,8 +22,10 @@ use gv_vault::files::journal::{DocumentKey, JournalStore};
 use gv_vault::files::{CheckMode, DocumentFile, ExternalChange, check_external_change};
 
 use super::notice::{NoticeAction, Topic};
+use super::save_as::{SaveAnswer, SavePathDialog, SavePrompt};
 use crate::chrome::WindowChrome;
 use crate::editor::{EditorStatus, EditorView};
+use crate::keymap::actions::file as file_commands;
 use crate::keymap::actions::tabs as tab_commands;
 use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
@@ -327,9 +332,13 @@ fn untitled_documents_live_in_the_journal(cx: &mut TestAppContext) {
     f.draw();
     assert_eq!(f.journals(), ["untitled-1"]);
     assert!(f.drawn("unsaved-dot-1"));
-    // Save has nowhere to write yet: an information bar says so.
+    // Save has nowhere to write yet: it asks where, and a cancelled
+    // dialog leaves everything as it was.
+    let dialog = FakeDialog::install(&mut f, [Ok(None)]);
     f.save();
-    assert_eq!(f.topic(&editor), Some(Topic::Untitled));
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.topic(&editor), None);
+    assert!(f.modified(&editor));
     assert_eq!(f.journals(), ["untitled-1"]);
 }
 
@@ -792,4 +801,269 @@ fn a_file_shown_only_in_preview_reloads(cx: &mut TestAppContext) {
         .read_with(&f.vcx, |r, _| r.plain_text())
         .unwrap_or_default();
     assert!(shown.contains("Changed elsewhere"), "{shown:?}");
+}
+
+// ----- Save As ------------------------------------------------------------------
+
+/// A save dialog that answers from a list and remembers what it was asked.
+#[derive(Clone, Default)]
+struct FakeDialog {
+    answers: Rc<RefCell<VecDeque<SaveAnswer>>>,
+    prompts: Rc<RefCell<Vec<SavePrompt>>>,
+}
+
+impl SavePathDialog for FakeDialog {
+    fn ask(
+        &self,
+        prompt: &SavePrompt,
+        _: &mut gpui::App,
+    ) -> futures::future::LocalBoxFuture<'static, SaveAnswer> {
+        use futures::FutureExt as _;
+        self.prompts.borrow_mut().push(prompt.clone());
+        let answer = self
+            .answers
+            .borrow_mut()
+            .pop_front()
+            .expect("the test gave an answer");
+        async move { answer }.boxed_local()
+    }
+}
+
+impl FakeDialog {
+    fn install(f: &mut Fixture, answers: impl IntoIterator<Item = SaveAnswer>) -> Self {
+        let dialog = Self::default();
+        dialog.answers.borrow_mut().extend(answers);
+        let installed = dialog.clone();
+        f.vcx
+            .update(|_, cx| super::save_as::set_dialog(cx, installed));
+        dialog
+    }
+
+    fn answer(&self, answer: SaveAnswer) {
+        self.answers.borrow_mut().push_back(answer);
+    }
+
+    fn asked(&self) -> usize {
+        self.prompts.borrow().len()
+    }
+
+    fn last_prompt(&self) -> SavePrompt {
+        self.prompts.borrow().last().cloned().expect("asked")
+    }
+}
+
+impl Fixture {
+    fn tab_path(&self) -> Option<PathBuf> {
+        self.workspace.read_with(&self.vcx, |ws, _| {
+            ws.active_tab().path().map(Path::to_path_buf)
+        })
+    }
+
+    fn save_as(&mut self) {
+        self.vcx.simulate_keystrokes("secondary-shift-s");
+        self.draw();
+    }
+}
+
+#[gpui::test]
+fn saving_an_untitled_document_asks_where_and_moves_it_there(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    f.vcx.dispatch_action(tab_commands::New);
+    f.draw();
+    let editor = f.editor();
+    f.vcx.simulate_input("# Shopping list\n\nMilk.");
+    f.draw();
+    assert_eq!(f.journals(), ["untitled-1"]);
+
+    // The name typed without an extension gets `.md`.
+    let answer = f.path("shopping");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.save();
+    assert_eq!(
+        dialog.last_prompt(),
+        SavePrompt {
+            directory: f.dir.path().to_path_buf(),
+            suggested_name: "Shopping list.md".to_owned(),
+        },
+        "the folder of the window's file, and the title"
+    );
+    let text = "# Shopping list\n\nMilk.";
+    assert_eq!(f.read("shopping.md"), text.as_bytes());
+    assert_eq!(f.tab_path(), Some(f.path("shopping.md")));
+    let untitled = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().untitled_number());
+    assert_eq!(untitled, None);
+    assert!(!f.modified(&editor));
+    assert_eq!(f.topic(&editor), None);
+    assert!(f.journals().is_empty(), "the untitled journal is gone");
+    assert!(!f.drawn("unsaved-dot-1"));
+
+    // From now on it is a file: edits are journaled under its path, and
+    // Save writes it without asking.
+    f.type_at_end(" Eggs.");
+    let journals = f.journals();
+    assert_eq!(journals.len(), 1);
+    assert!(!journals[0].starts_with("untitled-"), "{journals:?}");
+    f.save();
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.read("shopping.md"), format!("{text} Eggs.").as_bytes());
+    assert!(f.journals().is_empty());
+}
+
+#[gpui::test]
+fn save_as_writes_a_copy_and_the_tab_follows_it(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    let editor = f.edit();
+    f.type_at_end("Added.");
+    assert_eq!(f.journals().len(), 1);
+    std::fs::create_dir(f.path("sub")).expect("folder");
+    let answer = f.path("sub/copy.md");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.save_as();
+    assert_eq!(
+        dialog.last_prompt(),
+        SavePrompt {
+            directory: f.dir.path().to_path_buf(),
+            suggested_name: "note.md".to_owned(),
+        },
+        "the file's own folder and name"
+    );
+    assert_eq!(f.read("sub/copy.md"), format!("{NOTE}Added.").as_bytes());
+    assert_eq!(
+        f.read("note.md"),
+        NOTE.as_bytes(),
+        "the original is untouched"
+    );
+    assert_eq!(f.tab_path(), Some(f.path("sub/copy.md")));
+    assert_eq!(
+        editor.read_with(&f.vcx, |e, _| e.path().map(Path::to_path_buf)),
+        Some(f.path("sub/copy.md"))
+    );
+    assert!(!f.modified(&editor));
+    assert!(f.journals().is_empty());
+
+    // Back in Preview, the Reading view shows the new file.
+    f.vcx.simulate_keystrokes("secondary-e");
+    f.draw();
+    let reader = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().reader().cloned())
+        .expect("reader");
+    let shown = reader.read_with(&f.vcx, |r, _| r.path().map(Path::to_path_buf));
+    assert_eq!(shown, Some(f.path("sub/copy.md")));
+}
+
+#[gpui::test]
+fn save_as_from_preview_loads_the_text_and_copies_it(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    let answer = f.path("copy.md");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.vcx.dispatch_action(file_commands::SaveAs);
+    f.draw();
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.read("copy.md"), NOTE.as_bytes());
+    assert_eq!(f.tab_path(), Some(f.path("copy.md")));
+    let mode = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().mode());
+    assert_eq!(mode, ViewMode::Preview);
+}
+
+#[gpui::test]
+fn cancelling_save_as_changes_nothing(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    let editor = f.edit();
+    f.type_at_end("Added.");
+    let dialog = FakeDialog::install(&mut f, [Ok(None)]);
+    f.save_as();
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.tab_path(), Some(f.path("note.md")));
+    assert_eq!(f.read("note.md"), NOTE.as_bytes());
+    assert!(f.modified(&editor));
+    assert_eq!(f.topic(&editor), None);
+    assert_eq!(f.journals().len(), 1);
+}
+
+#[gpui::test]
+fn an_added_extension_never_replaces_a_file_unasked(cx: &mut TestAppContext) {
+    let other = b"Other text.\n";
+    let mut f = fixture(
+        cx,
+        &[("note.md", NOTE.as_bytes()), ("other.md", other)],
+        Some("note.md"),
+        false,
+    );
+    let editor = f.edit();
+    f.type_at_end("Added.");
+    // "other" becomes "other.md", which the dialog did not ask about.
+    let answer = f.path("other");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.save_as();
+    assert_eq!(f.read("other.md"), other, "not replaced");
+    assert_eq!(f.topic(&editor), Some(Topic::SaveFailed));
+    let notice = editor
+        .read_with(&f.vcx, |e, _| e.notice().cloned())
+        .expect("notice");
+    assert!(notice.offers(&NoticeAction::SaveAs));
+    assert_eq!(f.tab_path(), Some(f.path("note.md")));
+    assert!(f.modified(&editor));
+
+    // Chosen as "other.md" in the dialog, which asked about replacing it.
+    dialog.answer(Ok(Some(f.path("other.md"))));
+    f.click("infobar-action-0");
+    assert_eq!(dialog.asked(), 2);
+    assert_eq!(f.read("other.md"), format!("{NOTE}Added.").as_bytes());
+    assert_eq!(f.tab_path(), Some(f.path("other.md")));
+    assert_eq!(f.topic(&editor), None);
+}
+
+#[gpui::test]
+fn save_as_refuses_a_file_open_in_another_tab(cx: &mut TestAppContext) {
+    let mut f = fixture(
+        cx,
+        &[("note.md", NOTE.as_bytes()), ("other.md", b"Other.\n")],
+        Some("other.md"),
+        false,
+    );
+    let target = OpenTarget::new(f.path("note.md"));
+    f.workspace
+        .update_in(&mut f.vcx, |ws, window, cx| ws.open_tab(target, window, cx));
+    let editor = f.edit();
+    f.type_at_end("Added.");
+    let answer = f.path("other.md");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.save_as();
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.read("other.md"), b"Other.\n");
+    assert_eq!(f.topic(&editor), Some(Topic::SaveFailed));
+    assert_eq!(f.tab_path(), Some(f.path("note.md")));
+}
+
+#[gpui::test]
+fn a_dialog_that_cannot_open_shows_the_save_error(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    let editor = f.edit();
+    let _dialog = FakeDialog::install(&mut f, [Err("no file chooser portal".to_owned())]);
+    f.save_as();
+    assert_eq!(f.topic(&editor), Some(Topic::SaveFailed));
+    let detail = editor
+        .read_with(&f.vcx, |e, _| e.notice().and_then(|n| n.detail.clone()))
+        .expect("detail");
+    assert!(detail.contains("no file chooser portal"), "{detail}");
+}
+
+#[gpui::test]
+fn a_deleted_file_offers_save_as(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, &[("note.md", NOTE.as_bytes())], Some("note.md"), false);
+    let editor = f.edit();
+    std::fs::remove_file(f.path("note.md")).expect("delete");
+    f.report("note.md", ExternalChange::Deleted);
+    let answer = f.path("moved.md");
+    let dialog = FakeDialog::install(&mut f, [Ok(Some(answer))]);
+    f.act(&editor, NoticeAction::SaveAs);
+    assert_eq!(dialog.asked(), 1);
+    assert_eq!(f.read("moved.md"), NOTE.as_bytes());
+    assert_eq!(f.tab_path(), Some(f.path("moved.md")));
+    assert_eq!(f.topic(&editor), None);
 }

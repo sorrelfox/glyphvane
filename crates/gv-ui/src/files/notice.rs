@@ -33,7 +33,6 @@ pub enum Topic {
     Deleted,
     Recovered,
     SyncConflict,
-    Untitled,
     NotText,
 }
 
@@ -54,6 +53,8 @@ pub enum NoticeAction {
     DiscardRecovered,
     /// Write the text to the deleted file's path again.
     Recreate,
+    /// Save the text to a path chosen in the save dialog.
+    SaveAs,
     /// Close the tab.
     Close,
     /// Open a sync-conflict copy in a new tab.
@@ -175,6 +176,39 @@ impl Notice {
         )
     }
 
+    /// A save the file's permissions refused: Save As can write the text
+    /// elsewhere (not designed).
+    pub fn read_only(detail: String) -> Self {
+        Self::save_failed(detail).with(NoticeButton::new(NoticeAction::SaveAs, "Save as…"))
+    }
+
+    /// Save As chose a name that `.md` was added to, and a file with that
+    /// name exists; the dialog did not ask about replacing it (not
+    /// designed).
+    pub fn save_as_exists(name: &str) -> Self {
+        Self::save_failed(format!(
+            "A file named “{name}” already exists. To replace it, choose it in the save dialog."
+        ))
+        .with(NoticeButton::new(NoticeAction::SaveAs, "Save as…"))
+    }
+
+    /// Save As chose a file another tab edits (not designed).
+    pub fn save_as_open_elsewhere(name: &str) -> Self {
+        Self::save_failed(format!(
+            "“{name}” is open in another tab. Close it there first, or choose another name."
+        ))
+        .with(NoticeButton::new(NoticeAction::SaveAs, "Save as…"))
+    }
+
+    /// The save dialog could not be shown (not designed).
+    pub fn save_dialog_failed(reason: &str) -> Self {
+        let mut detail = format!("The save dialog could not be opened: {reason}");
+        if !detail.ends_with('.') {
+            detail.push('.');
+        }
+        Self::save_failed(detail)
+    }
+
     /// The file was deleted or moved away on disk (not designed).
     /// `can_save`: the tab holds the text, so it can be written again.
     pub fn deleted(can_save: bool) -> Self {
@@ -190,7 +224,9 @@ impl Notice {
             Some(detail.to_owned()),
         );
         let notice = if can_save {
-            notice.with(NoticeButton::new(NoticeAction::Recreate, "Save"))
+            notice
+                .with(NoticeButton::new(NoticeAction::Recreate, "Save"))
+                .with(NoticeButton::new(NoticeAction::SaveAs, "Save as…"))
         } else {
             notice
         };
@@ -244,19 +280,6 @@ impl Notice {
             NoticeAction::OpenCopy(copy.to_path_buf()),
             "Open copy",
         ))
-    }
-
-    /// Save on a document that has no file yet (not designed).
-    pub fn untitled() -> Self {
-        Self::new(
-            Topic::Untitled,
-            NoticeKind::Information,
-            "Not saved yet.",
-            Some(
-                "Save as is not available yet. The text is kept in the recovery journal and comes back on the next start."
-                    .to_owned(),
-            ),
-        )
     }
 
     /// The file on disk is no longer text (not designed).
