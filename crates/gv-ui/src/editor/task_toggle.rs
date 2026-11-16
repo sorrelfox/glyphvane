@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! Writing a task checkbox clicked in the Reading view back to the text:
-//! one byte patch, its own undo step (FR-VIEW-07).
+//! one byte patch, its own undo step (FR-VIEW-07). The Link action of an
+//! unlinked mention writes its link the same way.
 
 use gpui::Context;
 use gv_editor::EditKind;
@@ -45,6 +46,43 @@ impl EditorView {
         let edited = doc
             .editor
             .edit([(start..end, toggle.to.to_string())], EditKind::Command);
+        if !matches!(edited, Ok(Some(_))) {
+            return false;
+        }
+        self.input_changed(cx);
+        true
+    }
+
+    /// Replaces `range` with `replacement` of the text found there, as one
+    /// undoable edit, when that text is still `expected` (ignoring ASCII
+    /// case): the Link action of an unlinked mention. Nothing changes when
+    /// the view is read-only or not loaded. Returns whether the text
+    /// changed.
+    pub fn apply_checked_replace(
+        &mut self,
+        range: std::ops::Range<usize>,
+        expected: &str,
+        replacement: impl FnOnce(&str) -> String,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return false;
+        };
+        if doc.editor.is_composing() || range.end > doc.editor.text().len() {
+            return false;
+        }
+        let Ok(found) = doc.editor.text().text_for_range(range.clone()) else {
+            return false;
+        };
+        if !found.eq_ignore_ascii_case(expected) {
+            return false;
+        }
+        let edited = doc
+            .editor
+            .edit([(range, replacement(&found))], EditKind::Command);
         if !matches!(edited, Ok(Some(_))) {
             return false;
         }

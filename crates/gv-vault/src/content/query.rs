@@ -416,6 +416,24 @@ impl ContentSnapshot {
         self.conflict_of(path).is_some()
     }
 
+    /// The text of `path` as the index sees it: an unsaved buffer's text,
+    /// or the file read through `source` (for context lines). `None` when
+    /// it is not a note of the index or cannot be read.
+    #[must_use]
+    pub fn note_text(&self, path: &VaultPath, source: &dyn FileSource) -> Option<String> {
+        let record = self.0.effective(path)?;
+        if !matches!(record.kind, RecordKind::Indexed | RecordKind::Overlay) {
+            return None;
+        }
+        match self.0.overlay_text.get(path) {
+            Some(text) => Some(text.to_string()),
+            None => source
+                .read(path)
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        }
+    }
+
     /// Occurrences of `target`'s title, file name and aliases in other
     /// notes that are not links (unlinked mentions): whole words, ignoring
     /// ASCII case, outside code, math, comments, front matter and links.

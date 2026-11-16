@@ -10,8 +10,8 @@
 //!   the others show their panel head and a one-line empty state (empty
 //!   states are not designed).
 //! - **Right panel:** collapsible sections, the Outline first, then
-//!   Backlinks (head and empty state so far). *Links in this note* and the
-//!   Link checker join it once asked for, with an empty state.
+//!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
+//!   checker joins it once asked for, with an empty state.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -22,6 +22,7 @@ use gpui::{
 
 use super::Workspace;
 use super::controls::{RowStart, icon_button};
+use super::links_panel::LinksPanel;
 use super::outline_panel::OutlinePanel;
 use crate::appearance::Appearance;
 use crate::icons::Icon;
@@ -93,8 +94,6 @@ pub(super) enum RightSection {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Panels {
     pub sidebar: SidebarPanel,
-    /// *Links in this note* was asked for.
-    pub outgoing_links: bool,
     /// The Link checker was asked for.
     pub link_checker: bool,
 }
@@ -238,10 +237,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        match section {
-            RightSection::Outline | RightSection::Backlinks => {}
-            RightSection::OutgoingLinks => self.panels.outgoing_links = true,
-            RightSection::LinkChecker => self.panels.link_checker = true,
+        if section == RightSection::LinkChecker {
+            self.panels.link_checker = true;
         }
         if !self.panel_open {
             self.set_panel_open(true, window, cx);
@@ -250,6 +247,13 @@ impl Workspace {
             && let Some(outline) = &self.outline
         {
             outline.update(cx, |o, cx| o.expand(cx));
+        }
+        if let Some(links) = &self.links {
+            match section {
+                RightSection::Backlinks => links.update(cx, |l, cx| l.expand_backlinks(cx)),
+                RightSection::OutgoingLinks => links.update(cx, |l, cx| l.expand_outgoing(cx)),
+                RightSection::Outline | RightSection::LinkChecker => {}
+            }
         }
         cx.notify();
     }
@@ -379,10 +383,12 @@ fn empty_state(id: ElementId, note: &'static str, theme: &Theme) -> AnyElement {
 }
 
 /// The right panel: collapsible sections stacked from the top. The Outline
-/// comes first, then Backlinks, then the sections asked for.
+/// comes first, then Backlinks and *Links in this note*, then the Link
+/// checker when asked for.
 pub(super) fn right_panel(
     theme: &Theme,
     outline: Option<Entity<OutlinePanel>>,
+    links: Option<Entity<LinksPanel>>,
     panels: &Panels,
 ) -> Div {
     let section = |id: &'static str, title: &'static str| {
@@ -410,10 +416,7 @@ pub(super) fn right_panel(
         .border_l_1()
         .border_color(theme.border.default)
         .when_some(outline, |panel, outline| panel.child(outline))
-        .child(section("backlinks-head", "Backlinks"))
-        .when(panels.outgoing_links, |panel| {
-            panel.child(section("outgoing-links-head", "Links in this note"))
-        })
+        .when_some(links, |panel, links| panel.child(links))
         .when(panels.link_checker, |panel| {
             panel.child(section("link-checker-head", "Link checker"))
         })

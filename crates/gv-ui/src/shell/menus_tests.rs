@@ -548,10 +548,11 @@ fn the_show_commands_open_their_panels(cx: &mut TestAppContext) {
     assert!(!f.has("backlinks-head"));
     f.dispatch(commands::ShowBacklinks);
     assert!(f.has("backlinks-head"));
-    assert!(f.has("empty-backlinks-head"));
-    assert!(!f.has("outgoing-links-head"));
-    f.dispatch(commands::ShowOutgoingLinks);
+    assert!(f.has("backlinks-list"));
     assert!(f.has("outgoing-links-head"));
+    assert!(!f.has("outgoing-list"));
+    f.dispatch(commands::ShowOutgoingLinks);
+    assert!(f.has("outgoing-list"));
     f.dispatch(commands::ShowLinkChecker);
     assert!(f.has("link-checker-head"));
     f.dispatch(commands::ShowOutline);

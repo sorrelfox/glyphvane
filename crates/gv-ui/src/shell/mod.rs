@@ -13,6 +13,10 @@ mod files_panel;
 mod files_panel_tests;
 mod history;
 mod infobar;
+mod links_data;
+mod links_panel;
+#[cfg(test)]
+mod links_panel_tests;
 mod menus;
 #[cfg(test)]
 mod menus_tests;
@@ -514,6 +518,10 @@ pub struct Workspace {
     /// The Outline, created with the right panel.
     outline: Option<Entity<OutlinePanel>>,
     _outline_events: Option<Subscription>,
+    /// Backlinks and *Links in this note*, created with the vault or the
+    /// right panel.
+    links: Option<Entity<links_panel::LinksPanel>>,
+    _links_events: Option<Subscription>,
     /// The tabs' Reading views, by entity.
     readers: HashMap<EntityId, ReaderWatch>,
     /// The window is part of the saved session: it was not created for a
@@ -673,6 +681,8 @@ impl Workspace {
             _content_updates: None,
             outline: None,
             _outline_events: None,
+            links: None,
+            _links_events: None,
             readers: HashMap::new(),
             in_session,
             bounds: window.window_bounds(),
@@ -965,6 +975,7 @@ impl Workspace {
             self.refresh_heading(id, cx);
         }
         self.sync_outline(cx);
+        self.sync_links(cx);
         self.session_changed(cx);
         cx.notify();
     }
@@ -1021,6 +1032,7 @@ impl Workspace {
             let index = index.clone();
             split.update(cx, |s, cx| s.set_index(Some(index), cx));
         }
+        self.sync_links(cx);
     }
 
     /// The Reading view of tab `index`, made and loading on first use.
@@ -1646,6 +1658,7 @@ impl Workspace {
             }
         }
         self.leave_locked_mode(cx);
+        self.sync_links(cx);
         cx.notify();
     }
 
@@ -1692,6 +1705,7 @@ impl Workspace {
         if open {
             self.ensure_outline(window, cx);
         }
+        self.sync_links(cx);
         self.session_changed(cx);
         cx.notify();
     }
@@ -1824,6 +1838,7 @@ impl Render for Workspace {
                                         row.child(panels::right_panel(
                                             theme,
                                             self.outline.clone(),
+                                            self.links.clone(),
                                             &self.panels,
                                         ))
                                     }),
@@ -1834,6 +1849,7 @@ impl Render for Workspace {
                 self.active_tab(),
                 self.active_doc(),
                 editor_facts.as_ref(),
+                self.link_findings(cx),
                 crate::zoom::percent(cx),
                 profile_chip,
                 theme,

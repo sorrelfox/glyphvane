@@ -16,7 +16,7 @@ use super::{OpenTarget, Workspace};
 use crate::chrome::WindowChrome;
 use crate::metrics::spacing::{list, panel_head};
 use crate::metrics::{HAIRLINE, size};
-use crate::{AppSettings, ThemeChoice, ToggleEditMode, TogglePanel, ToggleSidebar};
+use crate::{AppSettings, ThemeChoice, ToggleEditMode, ToggleSidebar};
 
 /// An Obsidian vault with hidden and excluded entries and every file kind.
 fn temp_vault() -> tempfile::TempDir {
@@ -141,13 +141,12 @@ fn a_file_window_indexes_nothing_until_the_sidebar_opens(cx: &mut TestAppContext
     let vault = temp_vault();
     let (window, workspace) = open_window(cx, &vault.path().join("Notes/inner.md"));
     cx.dispatch_action(window, ToggleEditMode);
-    cx.dispatch_action(window, TogglePanel);
     drawn(window, cx);
     let (has_vault, has_files) =
         workspace.read_with(cx, |ws, _| (ws.vault.is_some(), ws.files.is_some()));
     assert!(
         !has_vault && !has_files,
-        "nothing is indexed before the sidebar"
+        "nothing is indexed before the sidebar or the right panel (Backlinks)"
     );
 
     cx.dispatch_action(window, ToggleSidebar);

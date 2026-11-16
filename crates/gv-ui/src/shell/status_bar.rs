@@ -3,7 +3,8 @@
 
 //! The status bar: where the document is at the left (folder, file, the
 //! heading being read), facts about it at the right: in Preview words and
-//! reading time; in Edit and Split the caret's line and column, words, the
+//! reading time, after the note's link findings
+//! ([`super::links_panel`]); in Edit and Split the caret's line and column, words, the
 //! encoding and the line endings ([`EditorFacts`]); in Preview the zoom
 //! ([`crate::zoom`]); the profile chip ([`super::profile_chip`]).
 //!
@@ -28,10 +29,12 @@ use crate::theme::Theme;
 /// Reading speed for "M min read", in words per minute.
 const WORDS_PER_MINUTE: usize = 200;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn status_bar(
     tab: &Tab,
     doc: Option<&DocFacts>,
     editor: Option<&EditorFacts>,
+    link_findings: Option<AnyElement>,
     zoom_percent: u32,
     profile_chip: AnyElement,
     theme: &Theme,
@@ -71,6 +74,7 @@ pub(super) fn status_bar(
                 .flex()
                 .items_center()
                 .gap(px(spacing::GAP))
+                .children(link_findings)
                 .children(facts(tab, doc, editor))
                 .when_some(zoom, |row, label| {
                     let hover = theme.text.primary;

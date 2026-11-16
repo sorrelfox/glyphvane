@@ -309,6 +309,29 @@ pub mod spacing {
         pub const SECTION_PAD_BOTTOM: f32 = 8.0;
     }
 
+    /// Backlinks (SPEC § Right panel): a source row has padding `0 8` and
+    /// gap 5 inside the list's `0 6` margin; a context line padding
+    /// `2 8 3 27` and 4 below it; 8 below a section's list. The counts of
+    /// *Links in this note* and of the status bar's findings have 3 between
+    /// an icon and its number, 4 (head) or 5 (status bar) before the
+    /// warnings and 6 before the total. Not designed: the widest a heading
+    /// at the right of a row gets, and the Link button's padding.
+    pub mod backlinks {
+        pub const HEAD_PAD_X: f32 = 8.0;
+        pub const HEAD_GAP: f32 = 5.0;
+        pub const LINE_PAD_TOP: f32 = 2.0;
+        pub const LINE_PAD_BOTTOM: f32 = 3.0;
+        pub const LINE_PAD_LEFT: f32 = 27.0;
+        pub const LINE_GAP: f32 = 4.0;
+        pub const SECTION_PAD_BOTTOM: f32 = 8.0;
+        pub const COUNT_GAP: f32 = 3.0;
+        pub const COUNT_GROUP_GAP: f32 = 4.0;
+        pub const STATUS_GROUP_GAP: f32 = 5.0;
+        pub const COUNT_TOTAL_GAP: f32 = 6.0;
+        pub const HEADING_MAX_WIDTH: f32 = 96.0;
+        pub const BUTTON_PAD_X: f32 = 6.0;
+    }
+
     /// The find popover: padding 4, rows 4 apart, 2 between the controls
     /// of the find row and 4 between those of the replace row; the find
     /// field has padding `0 2 0 7` and 4 between its text and its toggles,
