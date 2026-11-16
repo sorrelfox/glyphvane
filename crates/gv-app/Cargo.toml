@@ -67,8 +67,7 @@ workspace = true
 # /usr/libexec/glyphvane/; xtask selects them when that binary is built.
 [package.metadata.deb]
 name = "glyphvane"
-# TODO: a real contact address before the first public release.
-maintainer = "Glyphvane contributors <noreply@example.invalid>"
+maintainer = "sorrelfox <348316453+sorrelfox@users.noreply.github.com>"
 copyright = "2026 Glyphvane contributors"
 license-file = ["../../LICENSE", "0"]
 extended-description = """\
