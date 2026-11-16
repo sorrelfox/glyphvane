@@ -30,6 +30,9 @@ mod recent_panel;
 mod saving;
 pub mod session;
 mod status_bar;
+mod switcher;
+#[cfg(test)]
+mod switcher_tests;
 #[cfg(test)]
 mod tests;
 mod title_row;
@@ -507,6 +510,7 @@ pub struct Workspace {
     files: Option<Entity<FilesPanel>>,
     _files_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
+    _content_updates: Option<Subscription>,
     /// The Outline, created with the right panel.
     outline: Option<Entity<OutlinePanel>>,
     _outline_events: Option<Subscription>,
@@ -666,6 +670,7 @@ impl Workspace {
             files: None,
             _files_events: None,
             _vault_changed: None,
+            _content_updates: None,
             outline: None,
             _outline_events: None,
             readers: HashMap::new(),
@@ -1758,6 +1763,7 @@ impl Render for Workspace {
             .map(|root| self.file_actions(root, cx))
             .map(|root| self.panel_actions(root, cx))
             .map(|root| self.pane_actions(root, cx))
+            .map(|root| self.switcher_actions(root, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),

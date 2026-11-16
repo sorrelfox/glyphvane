@@ -98,6 +98,15 @@ pub enum Icon {
     /// The search icon of the quick switcher's and the command palette's
     /// input row.
     SwitcherSearch,
+    /// An alias row of the quick switcher ("Alias → Note").
+    SwitcherAlias,
+    /// A heading row of the quick switcher (`#` mode; not designed).
+    SwitcherHeading,
+    /// A block row of the quick switcher (`^` mode; not designed).
+    SwitcherBlock,
+    /// A note that does not exist yet (the design draws its outline
+    /// dashed).
+    NotCreated,
     /// The infobar's kind icons and its dismiss button.
     NoticeInformation,
     NoticeWarning,
@@ -161,6 +170,10 @@ impl Icon {
             Self::MenuCheck => IconName::Check,
             Self::Submenu => IconName::ChevronRight,
             Self::SwitcherSearch => IconName::Search,
+            Self::SwitcherAlias => IconName::CornerUpRight,
+            Self::SwitcherHeading => IconName::Hash,
+            Self::SwitcherBlock => IconName::Link,
+            Self::NotCreated => IconName::FilePlus,
             Self::NoticeInformation => IconName::Info,
             Self::NoticeWarning => IconName::TriangleAlert,
             Self::NoticeError => IconName::CircleX,
@@ -300,7 +313,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 47] = [
+    const ALL: [Icon; 51] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -344,6 +357,10 @@ mod tests {
         Icon::CloseFind,
         Icon::MenuCheck,
         Icon::Submenu,
+        Icon::SwitcherAlias,
+        Icon::SwitcherHeading,
+        Icon::SwitcherBlock,
+        Icon::NotCreated,
         Icon::NoticeInformation,
         Icon::NoticeWarning,
         Icon::NoticeError,

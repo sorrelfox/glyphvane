@@ -26,6 +26,7 @@ pub mod settings_window;
 pub mod shell;
 pub mod spell;
 pub mod split;
+pub mod switcher;
 pub mod theme;
 pub mod zoom;
 
@@ -74,6 +75,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     menu::init(cx);
     palette::init(cx);
     goto::init(cx);
+    switcher::init(cx);
     settings_window::init(cx);
     keymap::init(cx);
     cx.on_window_closed(|cx, _| {

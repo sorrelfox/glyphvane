@@ -208,6 +208,7 @@ impl Workspace {
         self.vault_watch_started = false;
         self.index_asked = false;
         self._vault_changed = Some(cx.observe(&vault, |this, _, cx| this.vault_changed(cx)));
+        self.follow_content(&vault, cx);
         self.vault_changed(cx);
         if let Some(files) = &self.files {
             files.update(cx, |files, cx| files.set_vault(vault, cx));

@@ -19,14 +19,18 @@
 //! folder. Every path-index snapshot the vault publishes (from the
 //! watcher) goes to it, and so do the unsaved buffers of files in the
 //! vault ([`crate::files::overlay`]). Dropping the vault (closing the
-//! window, opening another folder) cancels it.
+//! window, opening another folder) cancels it. Each snapshot it publishes
+//! is announced with a [`ContentUpdated`] event (the quick switcher
+//! follows them).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext as _, Context, Global, SharedString, Task};
+use futures::StreamExt as _;
+use gpui::{App, AppContext as _, Context, EventEmitter, Global, SharedString, Task};
 use gv_vault::content::{ContentEvent, ContentIndexer, ContentOptions, ContentSnapshot};
 use gv_vault::root::{self, RootDetection, RootMarker, RootReason};
 use gv_vault::{IndexConfig, IndexError, PathIndex, ProfileId, SharedPathIndex};
@@ -65,6 +69,10 @@ fn auto_index_limit(cx: &App) -> Option<usize> {
     )
 }
 
+/// The content index published a new snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContentUpdated;
+
 /// The vault of one window. Views observe it: it notifies whenever it
 /// publishes a new snapshot of the index.
 pub(crate) struct WindowVault {
@@ -79,7 +87,13 @@ pub(crate) struct WindowVault {
     _build: Option<Task<()>>,
     /// The content index, once the path index is built.
     content: Option<ContentIndexer>,
+    /// Turns the content index's snapshots into [`ContentUpdated`] events.
+    _content_events: Option<Task<()>>,
+    /// The content index published a snapshot not announced yet.
+    content_pending: Arc<AtomicBool>,
 }
+
+impl EventEmitter<ContentUpdated> for WindowVault {}
 
 impl fmt::Debug for WindowVault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,6 +147,8 @@ impl WindowVault {
             build_time: None,
             _build: None,
             content: None,
+            _content_events: None,
+            content_pending: Arc::default(),
         };
         if let Some(reason) = root::is_refused_root(&detected.root, root::home_dir().as_deref()) {
             this.status = VaultStatus::NotIndexed(format!("Not indexed: {reason}").into());
@@ -251,20 +267,47 @@ impl WindowVault {
             options = options.with_cache(locations.cache_dir(), &self.root);
         }
         let root = self.root.clone();
+        // The indexer's thread marks each snapshot and wakes the window's
+        // thread, which announces it. GPUI's test scheduler forbids waking
+        // from another thread: there, tests call `poll_content`.
+        let pending = Arc::new(AtomicBool::new(false));
+        self.content_pending = pending.clone();
+        let (published, mut snapshots) = futures::channel::mpsc::unbounded::<()>();
+        let published = (!cx.background_executor().is_test()).then_some(published);
+        let announce = move || {
+            pending.store(true, Ordering::Release);
+            if let Some(published) = &published {
+                // Fails only when the vault is gone.
+                let _ = published.unbounded_send(());
+            }
+        };
         let on_event = move |event: ContentEvent| match event {
-            ContentEvent::Ready { stats, .. } => tracing::info!(
-                root = %root.display(),
-                notes = stats.notes,
-                parsed = stats.parsed,
-                cache = ?stats.cache,
-                elapsed = ?stats.elapsed,
-                "content index built"
-            ),
+            ContentEvent::Ready { stats, .. } => {
+                tracing::info!(
+                    root = %root.display(),
+                    notes = stats.notes,
+                    parsed = stats.parsed,
+                    cache = ?stats.cache,
+                    elapsed = ?stats.elapsed,
+                    "content index built"
+                );
+                announce();
+            }
+            ContentEvent::Updated { .. } => announce(),
             ContentEvent::PersistFailed(err) => {
                 tracing::warn!(root = %root.display(), "content index cache: {err}");
             }
-            ContentEvent::Updated { .. } | ContentEvent::Persisted { .. } => {}
+            ContentEvent::Persisted { .. } => {}
         };
+        self._content_events = Some(cx.spawn(async move |this, cx| {
+            while snapshots.next().await.is_some() {
+                // One event for a burst of snapshots.
+                while snapshots.try_recv().is_ok() {}
+                if this.update(cx, |v, cx| v.poll_content(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
         self.content = None;
         match ContentIndexer::start(self.index.load(), options, on_event) {
             Ok(content) => {
@@ -275,12 +318,18 @@ impl WindowVault {
         }
     }
 
+    /// Announces a snapshot the content index published since the last
+    /// call, with [`ContentUpdated`]. Returns whether there was one.
+    pub fn poll_content(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let fresh = self.content_pending.swap(false, Ordering::AcqRel);
+        if fresh {
+            cx.emit(ContentUpdated);
+        }
+        fresh
+    }
+
     /// The content index's current snapshot, once it is built (for the
     /// backlinks, tags, switcher and link-checker panels).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the panels that read it come next")
-    )]
     pub fn content(&self) -> Option<ContentSnapshot> {
         self.content.as_ref().and_then(ContentIndexer::snapshot)
     }

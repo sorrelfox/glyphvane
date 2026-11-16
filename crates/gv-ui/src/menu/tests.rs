@@ -905,9 +905,10 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     );
 
     // Go: nothing to go back to, so Back and Forward are disabled; the
-    // first enabled item is Go to heading, which opens the Go popover.
+    // first enabled item is Quick switcher, the next Go to heading, which
+    // opens the Go popover.
     f.click("app-menu");
-    f.keys("end up right enter");
+    f.keys("end up right down enter");
     assert!(!f.is_open());
     assert!(f.bounds("goto-popover").is_some());
     f.keys("escape");
