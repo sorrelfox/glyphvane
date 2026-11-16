@@ -544,3 +544,10 @@ These go beyond upstream and are our own:
 4. Tests: `replace_map/tests.rs` adds tests for hidden text, widgets and
    inlays, and a random test mixing folds, replacements and buffer edits
    that also checks the tab and wrap layers against fresh builds.
+
+### Local change of 2026-11-16 (provisional unwrapped snapshot)
+
+`wrap_map.rs`: with no wrap width and a text over 256 KB, a whole-text
+rebuild produces a provisional snapshot of 32-row blocks taken from the
+tab layer's row count, without scanning the text. It is marked
+interpolated until the background wrap job for the real width lands.

@@ -1486,6 +1486,18 @@ mod timing {
                 editor.update(&mut vcx, |e, _| e.apply_wrap_width(Some(super::COLUMN)));
                 let sync = t.elapsed();
                 draw(&mut vcx);
+                // Off, and on again (the wrap map parked and back): the
+                // frame of each, then the job lands.
+                let t = Instant::now();
+                editor.update(&mut vcx, |e, cx| e.set_soft_wrap(false, cx));
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                let off_frame = t.elapsed();
+                let t = Instant::now();
+                editor.update(&mut vcx, |e, cx| e.set_soft_wrap(true, cx));
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                let on_again_frame = t.elapsed();
+                vcx.run_until_parked();
+                draw(&mut vcx);
                 eprintln!(
                     "{name}: soft wrap turned on: frame starting the job {:.1} ms (of which the unwrapped layer {:.1} ms), job + landing on the test executor {:.1} ms, next frame {:.1} ms",
                     ms(start_frame),
@@ -1499,6 +1511,11 @@ mod timing {
                     ms(finish),
                     ms(job),
                     ms(sync),
+                );
+                eprintln!(
+                    "{name}: soft wrap turned off: frame {:.1} ms; on again: frame starting the job {:.1} ms",
+                    ms(off_frame),
+                    ms(on_again_frame),
                 );
             }
             // The caret in the middle of the text, in a paragraph.

@@ -16,7 +16,8 @@
 // bounded amount of text; invisibles, highlighting, tracing and multi-buffer
 // row infos are removed, and the tests run without GPUI. The full list is in
 // third_party/zed/PROVENANCE.md. (2026-11-16): chunks take caller highlights
-// and pass them to the tab layer.
+// and pass them to the tab layer; a large text without a wrap width gets a
+// provisional snapshot instead of a scan of the whole text.
 
 //! The wrap layer: soft-wraps the tab layer's rows at a width.
 //!
@@ -43,6 +44,21 @@
 //!   for unchanged text and leaves edited text unwrapped (the snapshot
 //!   [`is_interpolated`](WrapSnapshot::is_interpolated)), then the edits
 //!   made meanwhile are re-applied to the job's result.
+//!
+//! # Large texts without a width
+//!
+//! Laying out a text without wraps still summarizes every row, which scans
+//! the whole text (some 2.5 ms per MB). For a text over
+//! [`PROVISIONAL_BYTES`], building the whole layer without a width (a new
+//! map, [`WrapMap::set_wrap_width`] to `None`, a new measure or indent, or
+//! a [`sync`](WrapMap::sync) whose edits span the whole text) skips that
+//! scan: the snapshot has the tab layer's rows, exactly, but its character
+//! counts (and so [`WrapSnapshot::longest_row`]) are not known. It is
+//! [interpolated](WrapSnapshot::is_interpolated) and the map
+//! [is rewrapping](WrapMap::is_rewrapping) until a job from
+//! [`WrapMap::begin_rewrap`] (or a new width) is finished. Turning soft
+//! wrap on for a large document, which shows the text unwrapped while the
+//! job for the new width runs, costs no scan.
 
 use std::cmp;
 use std::fmt;
@@ -81,6 +97,11 @@ impl std::ops::Add for WrapRow {
 /// scans a bounded amount of text. (Upstream merges them without limit.)
 const MAX_ISOMORPHIC_ROWS: u32 = 32;
 
+/// The size of text (buffer bytes) over which building the whole layer
+/// without a wrap width is provisional (see the
+/// [module documentation](self)).
+pub const PROVISIONAL_BYTES: usize = 256 * 1024;
+
 const WRAP_TEXT_LEN: usize = 1 + LineWrapper::MAX_INDENT as usize;
 const WRAP_BYTES: [u8; WRAP_TEXT_LEN] = {
     let mut bytes = [b' '; WRAP_TEXT_LEN];
@@ -104,6 +125,8 @@ pub struct WrapMap {
     /// arrived since.
     pending: Option<PendingRewrap>,
     generation: u64,
+    /// See [`PROVISIONAL_BYTES`]; lowered by tests.
+    provisional_bytes: usize,
 }
 
 impl fmt::Debug for WrapMap {
@@ -121,6 +144,9 @@ impl fmt::Debug for WrapMap {
 struct PendingRewrap {
     generation: u64,
     edits: Vec<(TabSnapshot, Vec<TabEdit>)>,
+    /// The snapshot is provisional and no job was handed out: nothing will
+    /// re-apply the edits, so they are not kept.
+    jobless: bool,
 }
 
 /// An immutable view of the wrap layer. Cloning is O(1).
@@ -235,6 +261,7 @@ impl WrapMap {
             indent,
             pending: None,
             generation: 0,
+            provisional_bytes: PROVISIONAL_BYTES,
         };
         this.rewrap_now();
         let snapshot = this.snapshot.clone();
@@ -251,8 +278,9 @@ impl WrapMap {
         self.wrap_width
     }
 
-    /// Whether a [`RewrapJob`] is out: the snapshot is interpolated until
-    /// it is finished.
+    /// Whether a [`RewrapJob`] is out, or the snapshot is provisional (see
+    /// the [module documentation](self)): the snapshot is interpolated
+    /// until a job is finished.
     pub fn is_rewrapping(&self) -> bool {
         self.pending.is_some()
     }
@@ -266,16 +294,25 @@ impl WrapMap {
     /// current input snapshot, re-wrapping the rows they touch, and returns
     /// the new snapshot with the edits in wrap rows.
     ///
-    /// While a re-wrap is out, the edited text is left unwrapped instead
-    /// (see the [module documentation](self)).
+    /// While a re-wrap is out, the edited text is left unwrapped instead,
+    /// and without a width, edits over the whole of a large text give a
+    /// provisional snapshot (see the [module documentation](self)).
     pub fn sync(
         &mut self,
         tab_snapshot: TabSnapshot,
         edits: Vec<TabEdit>,
     ) -> (WrapSnapshot, Vec<WrapEdit>) {
         let wrap_edits = if let Some(pending) = &mut self.pending {
-            pending.edits.push((tab_snapshot.clone(), edits.clone()));
+            if !pending.jobless {
+                pending.edits.push((tab_snapshot.clone(), edits.clone()));
+            }
             self.snapshot.interpolate(tab_snapshot, &edits)
+        } else if self.wrap_width.is_none()
+            && self.is_large(&tab_snapshot)
+            && spans_whole_text(&edits, &tab_snapshot)
+        {
+            let old_snapshot = self.unwrap_provisionally(tab_snapshot);
+            old_snapshot.compute_edits(&edits, &self.snapshot)
         } else {
             self.snapshot.update(
                 tab_snapshot,
@@ -289,14 +326,12 @@ impl WrapMap {
     }
 
     /// Changes the wrap width (`None`: no wrapping) and re-wraps every row
-    /// at once. Returns the edits (one over the whole text, none if the
-    /// width stays the same).
+    /// at once (a large text without a width: provisionally, see the
+    /// [module documentation](self)). Returns the edits (one over the whole
+    /// text, none if the width stays the same).
     pub fn set_wrap_width(&mut self, wrap_width: Option<f32>) -> (WrapSnapshot, Vec<WrapEdit>) {
         match self.defer_wrap_width(wrap_width) {
-            Some(job) => {
-                let pending = self.pending.take();
-                self.install(job, pending)
-            }
+            Some(job) => self.install_now(job),
             None => (self.snapshot.clone(), Vec::new()),
         }
     }
@@ -359,6 +394,7 @@ impl WrapMap {
         self.pending = Some(PendingRewrap {
             generation: self.generation,
             edits: Vec::new(),
+            jobless: false,
         });
         self.snapshot.interpolated = true;
         RewrapJob::new(
@@ -383,8 +419,51 @@ impl WrapMap {
 
     fn rewrap_now(&mut self) -> (WrapSnapshot, Vec<WrapEdit>) {
         let job = self.begin_rewrap();
+        self.install_now(job)
+    }
+
+    /// Installs `job`, just begun, at once; without a width, a large text
+    /// gets a provisional snapshot instead.
+    fn install_now(&mut self, job: RewrapJob) -> (WrapSnapshot, Vec<WrapEdit>) {
+        // Just begun: no edits arrived since.
         let pending = self.pending.take();
+        if job.wrap_width.is_none() && self.is_large(&job.tab_snapshot) {
+            let old_rows = self.snapshot.max_point().row().0 + 1;
+            self.unwrap_provisionally(job.tab_snapshot);
+            let new_rows = self.snapshot.max_point().row().0 + 1;
+            return (
+                self.snapshot.clone(),
+                vec![WrapEdit {
+                    old: WrapRow(0)..WrapRow(old_rows),
+                    new: WrapRow(0)..WrapRow(new_rows),
+                }],
+            );
+        }
         self.install(job, pending)
+    }
+
+    fn is_large(&self, tab_snapshot: &TabSnapshot) -> bool {
+        tab_snapshot.buffer().len() > self.provisional_bytes
+    }
+
+    /// Moves to `tab_snapshot` with every row unwrapped and character
+    /// counts left out, without scanning the text: the snapshot is
+    /// interpolated until a job is finished. Makes any job out stale.
+    /// Returns the old snapshot.
+    fn unwrap_provisionally(&mut self, tab_snapshot: TabSnapshot) -> WrapSnapshot {
+        self.generation += 1;
+        self.pending = Some(PendingRewrap {
+            generation: self.generation,
+            edits: Vec::new(),
+            jobless: true,
+        });
+        let snapshot = WrapSnapshot {
+            transforms: unwrapped_transforms(&tab_snapshot),
+            tab_snapshot,
+            interpolated: true,
+        };
+        snapshot.check_invariants();
+        mem::replace(&mut self.snapshot, snapshot)
     }
 
     fn install(
@@ -414,6 +493,52 @@ impl WrapMap {
             }],
         )
     }
+}
+
+/// Whether `edits` (sorted) span the whole of `tab_snapshot`'s text.
+fn spans_whole_text(edits: &[TabEdit], tab_snapshot: &TabSnapshot) -> bool {
+    match (edits.first(), edits.last()) {
+        (Some(first), Some(last)) => {
+            first.new.start == TabPoint::zero() && last.new.end == tab_snapshot.max_point()
+        }
+        _ => false,
+    }
+}
+
+/// Transforms for every row of `tab_snapshot` unwrapped, in isomorphic
+/// transforms of [`MAX_ISOMORPHIC_ROWS`] rows, built without reading the
+/// text: the rows are exact, the character counts are left at 0 (the last
+/// row's are its length in bytes).
+fn unwrapped_transforms(tab_snapshot: &TabSnapshot) -> SumTree<Transform> {
+    let max_point = tab_snapshot.max_point();
+    let rows = max_point.row();
+    let mut transforms = Vec::with_capacity((rows / MAX_ISOMORPHIC_ROWS) as usize + 2);
+    let mut row = 0;
+    while row < rows {
+        let count = MAX_ISOMORPHIC_ROWS.min(rows - row);
+        push_isomorphic(
+            &mut transforms,
+            TextSummary {
+                lines: Point::new(count, 0),
+                ..TextSummary::default()
+            },
+        );
+        row += count;
+    }
+    let column = max_point.column();
+    if column > 0 {
+        push_isomorphic(
+            &mut transforms,
+            TextSummary {
+                lines: Point::new(0, column),
+                first_line_chars: column,
+                last_line_chars: column,
+                longest_row: 0,
+                longest_row_chars: column,
+            },
+        );
+    }
+    SumTree::from_iter(transforms, ())
 }
 
 /// `NaN` means no wrapping.
@@ -2351,6 +2476,176 @@ mod tests {
                 rows(&snapshot)
             );
         }
+    }
+
+    /// Syncs `wrap_map` to `buffer` after an edit.
+    fn sync_after(
+        buffer: &mut Buffer,
+        replace_map: &mut ReplaceMap,
+        tab_map: &mut TabMap,
+        wrap_map: &mut WrapMap,
+        edit: (Range<usize>, &str),
+    ) -> (TabSnapshot, WrapSnapshot, Vec<WrapEdit>) {
+        let tab_size = NonZeroU32::new(4).unwrap();
+        let summary = buffer.edit([edit]).unwrap();
+        let (replace_snapshot, replace_edits) = replace_map.sync(buffer.snapshot(), &summary);
+        let (tabs, tab_edits) = tab_map.sync(replace_snapshot, replace_edits, tab_size);
+        let (snapshot, edits) = wrap_map.sync(tabs.clone(), tab_edits);
+        (tabs, snapshot, edits)
+    }
+
+    #[test]
+    fn a_large_text_without_a_width_is_unwrapped_provisionally() {
+        let line = "the\tquick brown fox jumps over the lazy dog\n";
+        let text = line.repeat(100);
+        let tab_size = NonZeroU32::new(4).unwrap();
+        let measure = || Box::new(MonospaceMeasure::new(1.0));
+        let (_, replace_snapshot) = ReplaceMap::new(TextSnapshot::new(&text));
+        let (_, tabs) = TabMap::new(replace_snapshot, tab_size);
+        // A new map (`with_indent`) over a text above the limit.
+        let mut wrap_map = WrapMap {
+            snapshot: WrapSnapshot::new(tabs.clone()),
+            wrap_width: None,
+            wrapper: LineWrapper::new(measure()),
+            indent: Arc::new(IndentAdjustment::SameIndent),
+            pending: None,
+            generation: 0,
+            provisional_bytes: text.len() - 1,
+        };
+        let (snapshot, edits) = wrap_map.rewrap_now();
+        assert!(snapshot.is_interpolated());
+        assert!(wrap_map.is_rewrapping());
+        assert_eq!(snapshot.text(), tabs.text());
+        assert_eq!(snapshot.max_point().row(), WrapRow(100));
+        assert_eq!(
+            edits,
+            [WrapEdit {
+                old: WrapRow(0)..WrapRow(1),
+                new: WrapRow(0)..WrapRow(101)
+            }]
+        );
+        let rows: Vec<u32> = snapshot
+            .transforms
+            .iter()
+            .map(|t| t.summary.input.lines.row)
+            .collect();
+        assert!(
+            rows.iter().all(|&rows| rows <= MAX_ISOMORPHIC_ROWS),
+            "{rows:?}"
+        );
+
+        // A width wraps it for real (`set_wrap_width` stays synchronous).
+        let (wrapped, _) = wrap_map.set_wrap_width(Some(20.0));
+        assert!(!wrapped.is_interpolated());
+        assert!(!wrap_map.is_rewrapping());
+        assert_eq!(
+            wrapped.text(),
+            WrapMap::new(tabs.clone(), measure(), Some(20.0)).1.text()
+        );
+
+        // Back without a width: provisional again, and a job (from a
+        // later width) makes it exact.
+        let (unwrapped, _) = wrap_map.set_wrap_width(None);
+        assert!(unwrapped.is_interpolated());
+        assert_eq!(unwrapped.text(), tabs.text());
+        let job = wrap_map.begin_rewrap();
+        let mut wrapper = LineWrapper::new(measure());
+        let mut job = job;
+        job.run_to_end(&mut wrapper);
+        let (exact, _) = wrap_map.finish_rewrap(job).unwrap();
+        assert!(!exact.is_interpolated());
+        assert!(!wrap_map.is_rewrapping());
+        assert_eq!(exact.text(), tabs.text());
+        assert_eq!(
+            exact.transforms.summary(),
+            WrapMap::new(tabs, measure(), None).1.transforms.summary()
+        );
+    }
+
+    #[test]
+    fn soft_wrap_toggled_on_for_a_large_text_unwraps_provisionally_until_the_job_lands() {
+        // What the editor does: soft wrap on, off (the map parked at an
+        // empty text) and on again with the text at once, then a job for
+        // the width.
+        let line = "the quick brown fox jumps over the lazy dog\n";
+        let mut buffer = Buffer::new(&line.repeat(200));
+        let tab_size = NonZeroU32::new(4).unwrap();
+        let (mut replace_map, replace_snapshot) = ReplaceMap::new(buffer.snapshot());
+        let (mut tab_map, tabs) = TabMap::new(replace_snapshot, tab_size);
+        let measure = || Box::new(MonospaceMeasure::new(1.0));
+        let (mut wrap_map, wrapped) = WrapMap::new(tabs.clone(), measure(), Some(30.0));
+        assert!(!wrapped.is_interpolated());
+        wrap_map.provisional_bytes = 1024;
+
+        // Off: parked at an empty text.
+        let (_, empty_replace) = ReplaceMap::new(TextSnapshot::new(""));
+        let (_, empty) = TabMap::new(empty_replace, tab_size);
+        let to_empty = TabEdit {
+            old: TabPoint::zero()..tabs.max_point(),
+            new: TabPoint::zero()..TabPoint::zero(),
+        };
+        wrap_map.sync(empty, vec![to_empty]);
+        let job = wrap_map.begin_rewrap();
+        assert!(wrap_map.finish_rewrap(job).is_some());
+        assert_eq!(wrap_map.set_wrap_width(None).0.text(), "");
+        assert!(!wrap_map.is_rewrapping());
+
+        // On: the whole text without a width, provisionally.
+        let all = TabEdit {
+            old: TabPoint::zero()..TabPoint::zero(),
+            new: TabPoint::zero()..tabs.max_point(),
+        };
+        let (unwrapped, edits) = wrap_map.sync(tabs.clone(), vec![all]);
+        assert!(unwrapped.is_interpolated());
+        assert!(wrap_map.is_rewrapping());
+        assert_eq!(unwrapped.text(), tabs.text());
+        assert_eq!(
+            edits,
+            [WrapEdit {
+                old: WrapRow(0)..WrapRow(1),
+                new: WrapRow(0)..WrapRow(201)
+            }]
+        );
+        let mut job = wrap_map.defer_wrap_width(Some(30.0)).unwrap();
+        assert!(wrap_map.snapshot().is_interpolated());
+
+        // An edit meanwhile is interpolated, then re-applied.
+        let (_, interpolated, _) = sync_after(
+            &mut buffer,
+            &mut replace_map,
+            &mut tab_map,
+            &mut wrap_map,
+            (0..0, "jumping "),
+        );
+        assert!(interpolated.is_interpolated());
+        assert!(
+            interpolated
+                .text()
+                .starts_with("jumping the quick brown fox jumps")
+        );
+        let mut wrapper = LineWrapper::new(measure());
+        job.run_to_end(&mut wrapper);
+        let (finished, _) = wrap_map.finish_rewrap(job).unwrap();
+        assert!(!finished.is_interpolated());
+        assert!(!wrap_map.is_rewrapping());
+        let fresh = WrapMap::new(finished.tab_snapshot().clone(), measure(), Some(30.0)).1;
+        assert_eq!(finished.text(), fresh.text());
+        assert_eq!(finished.transforms.summary(), fresh.transforms.summary());
+
+        // A small edit without a width stays exact.
+        wrap_map.provisional_bytes = usize::MAX;
+        let (exact, _) = wrap_map.set_wrap_width(None);
+        assert!(!exact.is_interpolated());
+        wrap_map.provisional_bytes = 1024;
+        let (_, exact, _) = sync_after(
+            &mut buffer,
+            &mut replace_map,
+            &mut tab_map,
+            &mut wrap_map,
+            (8..8, "x"),
+        );
+        assert!(!exact.is_interpolated());
+        assert!(!wrap_map.is_rewrapping());
     }
 
     #[test]
