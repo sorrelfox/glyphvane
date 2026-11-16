@@ -3146,6 +3146,7 @@ version = "0.0.0"
 dependencies = [
  "criterion",
  "gpui-pre-sum-tree",
+ "gungraun",
  "gv-syntax",
  "gv-text",
  "proptest",

@@ -25,6 +25,10 @@ rand.workspace = true
 # `RandomCharIter` for the ported Zed tests (third_party/zed/PROVENANCE.md).
 zed-test-util = { workspace = true, features = ["test-support"] }
 
+# Instruction counts run under Valgrind, on Linux only.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun.workspace = true
+
 [[bench]]
 name = "typing"
 harness = false
@@ -35,6 +39,11 @@ harness = false
 
 [[bench]]
 name = "blocks"
+harness = false
+
+# Instruction counts (Valgrind); run with `cargo xtask bench-icount`.
+[[bench]]
+name = "icount"
 harness = false
 
 [lints]

@@ -244,6 +244,13 @@ jobs:
             # The base commit may pin another toolchain.
             (cd base && rustup toolchain install && cargo xtask bench-icount --save-baseline base)
             echo "HAVE_BASELINE=1" >> "$GITHUB_ENV"
+            # The base runs its own bench list. A bench it does not have gets
+            # no baseline: gungraun reports it without a comparison.
+            for bench in crates/*/benches/icount.rs; do
+              if [ ! -f "base/$bench" ]; then
+                echo "::notice::The base commit has no $bench; its counts are reported, not compared."
+              fi
+            done
           fi
           labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')
           if printf '%s\n' "$labels" | grep -qx perf-regression-justified; then

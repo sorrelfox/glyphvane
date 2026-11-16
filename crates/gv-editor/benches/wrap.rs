@@ -13,6 +13,8 @@
 //! the Criterion runs. Not run in CI. Run with
 //! `cargo bench -p gv-editor --bench wrap`.
 
+mod common;
+
 use std::hint::black_box;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
@@ -24,35 +26,10 @@ use gv_editor::display_map::{
 use gv_editor::{Editor, Motion};
 use gv_text::{Bias, Buffer};
 
+use common::{COLUMNS, document, make_editor};
+
 const DOC_LEN: usize = 10 * 1024 * 1024;
 const TAB_SIZE: NonZeroU32 = NonZeroU32::new(4).unwrap();
-/// The wrap width in columns of the monospace measure.
-const COLUMNS: f32 = 80.0;
-
-/// A Markdown-like document of about `len` bytes, with short lines, lines
-/// a little over 80 columns and long paragraphs.
-fn document(len: usize) -> String {
-    const PIECES: &[&str] = &[
-        "# Heading with **bold** text\n\n",
-        "A paragraph with *emphasis*, `code`, a [[wikilink]] and a [link](https://example.com).\n",
-        "- [ ] task item with émoji 🎉 and ünïcödé that goes on long enough to wrap once\n",
-        "> quoted line 引用文 with 日本語のテキストが続きます and more words after it\r\n",
-        "| a | b |\n|---|---|\n| 1 | 2 |\n",
-        "Plain prose continues here without anything special at all.\n\n",
-        "A long paragraph line, as in prose written without hard breaks: it runs on \
-         for several hundred characters, so soft wrap breaks it into a few rows at \
-         every width, with words of different lengths, punctuation, and the odd \
-         extraordinarily-long-hyphenated-compound that has to be broken somewhere.\n",
-    ];
-    let mut text = String::with_capacity(len + 512);
-    let mut i = 0usize;
-    while text.len() < len {
-        text.push_str(PIECES[i % PIECES.len()]);
-        i = i.wrapping_mul(31).wrapping_add(7);
-    }
-    text
-}
-
 /// Proportional widths in columns: narrow and wide Latin letters, wide
 /// CJK, as a prose font would measure them.
 #[derive(Clone, Copy, Debug)]
@@ -116,17 +93,6 @@ impl Layers {
             black_box((tabs, tab_edits));
         }
     }
-}
-
-/// An editor in the middle of `text`, wrapped at 80 columns or not.
-fn make_editor(text: &str, wrapped: bool) -> Editor {
-    let mut editor = Editor::new(Buffer::new(text));
-    if wrapped {
-        editor.set_wrap_width(Some(COLUMNS));
-    }
-    editor.set_cursor(text.len() / 2);
-    editor.move_selections(Motion::LineEnd, false);
-    editor
 }
 
 /// Prose with line breaks, so typed lines stay short (as in the typing

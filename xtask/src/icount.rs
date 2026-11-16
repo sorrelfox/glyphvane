@@ -17,7 +17,7 @@ use crate::cargo;
 
 /// The instruction-count bench targets, as `(package, bench)`. Add a line
 /// here when a crate gets an `icount` bench.
-const BENCHES: &[(&str, &str)] = &[("gv-syntax", "icount")];
+const BENCHES: &[(&str, &str)] = &[("gv-syntax", "icount"), ("gv-editor", "icount")];
 
 /// Instruction-count growth against the baseline that fails without an
 /// explanation.
