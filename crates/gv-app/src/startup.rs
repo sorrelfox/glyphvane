@@ -29,6 +29,26 @@ pub fn start() {
     );
 }
 
+/// Gives the trace the window's presentation probe, where there is one, so
+/// it can report when the first frame with content reached the screen.
+/// Does nothing when the trace is off.
+pub fn attach(window: gpui::AnyWindowHandle, cx: &mut gpui::App) {
+    if !gv_ui::reader::startup::enabled() {
+        return;
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(probe) = window
+        .update(cx, |_, window, _| crate::present::Probe::new(window))
+        .ok()
+        .flatten()
+    {
+        gv_ui::reader::startup::set_probe(Box::new(probe));
+        mark("presentation probe attached (wp_presentation)");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = (window, cx);
+}
+
 /// CLOCK_MONOTONIC now, the clock a script reads with
 /// `time.clock_gettime_ns(time.CLOCK_MONOTONIC)`.
 #[cfg(unix)]

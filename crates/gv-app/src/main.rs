@@ -9,6 +9,8 @@ mod gpu;
 mod instance;
 mod latency;
 mod no_gpu_dialog;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod present;
 mod render;
 mod safe_mode;
 mod session;
@@ -204,6 +206,7 @@ fn main() -> ExitCode {
             match opened {
                 Ok(window) => {
                     startup::mark("window created");
+                    startup::attach(window, cx);
                     gpu::report_adapter(window, cx);
                     latency::attach(window, cx);
                     // Documents with unsaved changes from a crash (or a

@@ -164,6 +164,27 @@ Parser test layers:
   shapes; `--engine comrak` runs the same suite against comrak.
 - **Fuzzing.** See [fuzz/README.md](fuzz/README.md).
 
+### Performance
+
+- **Instruction counts.** `cargo xtask bench-icount` runs the parser's
+  instruction-count benchmarks under Valgrind (Linux only; needs `valgrind`
+  and a matching `gungraun-runner`). Save a baseline with
+  `--save-baseline NAME` before your change and compare with
+  `--baseline NAME`; it fails when a benchmark grows by more than 3 %
+  (`--limit PCT`). CI runs it on pull requests.
+- **Start-up.** `GLYPHVANE_DEBUG_STARTUP=1` prints timed milestones from
+  `main()` to the first frame with content on standard error;
+  `GLYPHVANE_DEBUG_STARTUP=exit` also quits after it. On Wayland compositors
+  with presentation feedback the trace includes when that frame reached the
+  screen; elsewhere it ends at a frame callback, which is not the
+  presentation time.
+- **Keystroke latency.** `GLYPHVANE_DEBUG_LATENCY=FILE` logs, for each
+  keystroke in a Source view, when it was handled, drawn, submitted and (on
+  Wayland) presented (`-` writes to standard error).
+  `GLYPHVANE_DEBUG_LATENCY_TYPE=COUNT[:INTERVAL_MS]` types `COUNT`
+  keystrokes itself and quits (open a file with `GLYPHVANE_DEBUG_EDIT=1`).
+  `cargo xtask latency FILE` prints the percentiles of a log.
+
 ## Packaging
 
 Release artifacts are built by `cargo xtask package` with the `dist` profile
