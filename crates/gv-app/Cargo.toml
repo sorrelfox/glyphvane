@@ -67,9 +67,11 @@ extended-description = """\
 Glyphvane is a native Markdown viewer and editor for notes and vaults."""
 section = "editors"
 priority = "optional"
-# $auto runs dpkg-shlibdeps. GPUI loads Wayland, EGL and Vulkan with dlopen(),
-# so those libraries are listed by hand.
-depends = "$auto, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libvulkan1"
+# $auto runs dpkg-shlibdeps (off Debian, `cargo xtask package` supplies an
+# answer computed from the ELF headers). cargo-deb drops libgcc from $auto, so
+# it is listed here. GPUI loads Wayland, EGL and Vulkan with dlopen(), so those
+# libraries are listed by hand too.
+depends = "$auto, libgcc-s1, libwayland-client0, libwayland-egl1, libvulkan1"
 recommends = "libegl1, mesa-vulkan-drivers"
 assets = [
   ["target/release/glyphvane", "usr/bin/", "755"],

@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -124,15 +125,140 @@ pub(super) fn deb(ctx: &Ctx) -> Result<PathBuf> {
         "--profile",
     ])
     .arg(&ctx.profile)
-    .args(["--target", &ctx.target, "--deb-version"])
+    .arg("--deb-version")
     .arg(format!("{version}-1"))
     .arg("-o")
     .arg(&out);
+    if ctx.cross_layout {
+        cmd.args(["--target", &ctx.target]);
+    }
     if ctx.helper_exe.is_some() {
         cmd.args(["--variant", "with-helper"]);
     }
+    if !dpkg_shlibdeps_usable() {
+        // Off Debian (no dpkg database), dpkg-shlibdeps fails and cargo-deb
+        // drops `$auto` with only a warning. Stand in for it with a fixed
+        // answer computed from the binaries' ELF dependencies.
+        let mut depends = Vec::new();
+        for exe in std::iter::once(&ctx.main_exe).chain(ctx.helper_exe.as_ref()) {
+            for dep in fallback_depends(exe)? {
+                if !depends.contains(&dep) {
+                    depends.push(dep);
+                }
+            }
+        }
+        let line = depends.join(", ");
+        eprintln!("note: dpkg-shlibdeps is unusable here; Depends from the ELF headers: {line}");
+        let shim = ctx.scratch("shlibdeps-shim")?;
+        let script = shim.join("dpkg-shlibdeps");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' 'shlibs:Depends={line}'\n"),
+        )?;
+        set_executable(&script)?;
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(shim).chain(std::env::split_paths(&path)))?;
+        cmd.env("PATH", joined);
+    }
     run_checked(&mut cmd, "cargo deb")?;
     Ok(out)
+}
+
+/// Whether dpkg-shlibdeps can resolve libraries to packages: it needs a
+/// dpkg database that knows libc6 (Debian and Ubuntu, not Fedora).
+fn dpkg_shlibdeps_usable() -> bool {
+    let ok = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    ok("dpkg-shlibdeps", &["--version"]) && ok("dpkg-query", &["-W", "libc6"])
+}
+
+/// The newest glibc version below which the Depends floor is never set: the
+/// release build host (ubuntu-22.04).
+const GLIBC_FLOOR: &str = "2.35";
+
+/// Conservative Debian/Ubuntu dependencies for one executable, from its
+/// `NEEDED` entries and glibc symbol versions (`readelf`).
+fn fallback_depends(exe: &Path) -> Result<Vec<String>> {
+    require_tool(
+        "readelf",
+        "--version",
+        "Install binutils (apt-get install binutils, dnf install binutils).",
+    )?;
+    let output = Command::new("readelf")
+        .args(["--wide", "--dynamic", "--version-info"])
+        .arg(exe)
+        .output()
+        .context("running readelf")?;
+    if !output.status.success() {
+        bail!("readelf failed on {}", exe.display());
+    }
+    depends_from_readelf(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Maps `readelf -d -V` output to Debian package relations. An unknown
+/// library is an error, so no dependency is ever dropped silently.
+fn depends_from_readelf(text: &str) -> Result<Vec<String>> {
+    let glibc = text
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter_map(|w| w.strip_prefix("GLIBC_"))
+        .filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.') && !v.is_empty())
+        .chain(std::iter::once(GLIBC_FLOOR))
+        .max_by(|a, b| version_key(a).cmp(&version_key(b)))
+        .unwrap_or(GLIBC_FLOOR)
+        .to_owned();
+    let mut deps = Vec::new();
+    for line in text.lines().filter(|l| l.contains("(NEEDED)")) {
+        let Some(lib) = line.split('[').nth(1).and_then(|r| r.split(']').next()) else {
+            continue;
+        };
+        let dep = match lib {
+            "libc.so.6"
+            | "libm.so.6"
+            | "libdl.so.2"
+            | "libpthread.so.0"
+            | "librt.so.1"
+            | "ld-linux-x86-64.so.2"
+            | "ld-linux-aarch64.so.1" => format!("libc6 (>= {glibc})"),
+            "libgcc_s.so.1" => "libgcc-s1 (>= 3.0)".to_owned(),
+            "libxcb.so.1" => "libxcb1 (>= 1.14)".to_owned(),
+            "libxkbcommon.so.0" => "libxkbcommon0 (>= 1.0.0)".to_owned(),
+            "libxkbcommon-x11.so.0" => "libxkbcommon-x11-0 (>= 1.0.0)".to_owned(),
+            "libwayland-client.so.0" => "libwayland-client0 (>= 1.20.0)".to_owned(),
+            "libwayland-egl.so.1" => "libwayland-egl1 (>= 1.20.0)".to_owned(),
+            "libvulkan.so.1" => "libvulkan1 (>= 1.3.204)".to_owned(),
+            "libEGL.so.1" => "libegl1".to_owned(),
+            "libfontconfig.so.1" => "libfontconfig1 (>= 2.13.1)".to_owned(),
+            "libfreetype.so.6" => "libfreetype6 (>= 2.11.1)".to_owned(),
+            "libz.so.1" => "zlib1g (>= 1:1.2.11)".to_owned(),
+            other => match xcb_extension(other) {
+                Some(pkg) => format!("{pkg} (>= 1.14)"),
+                None => {
+                    bail!("no Debian package known for `{other}`; add it to depends_from_readelf")
+                }
+            },
+        };
+        if !deps.contains(&dep) {
+            deps.push(dep);
+        }
+    }
+    Ok(deps)
+}
+
+/// `libxcb-<ext>.so.<n>` is packaged as `libxcb-<ext><n>`.
+fn xcb_extension(lib: &str) -> Option<String> {
+    let rest = lib.strip_prefix("libxcb-")?;
+    let (ext, soversion) = rest.split_once(".so.")?;
+    (!ext.is_empty() && soversion.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!("libxcb-{ext}{soversion}"))
+}
+
+fn version_key(v: &str) -> Vec<u32> {
+    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
 /// `glyphvane-<version>-1.<arch>.rpm` through cargo-generate-rpm.
@@ -156,12 +282,15 @@ pub(super) fn rpm(ctx: &Ctx) -> Result<PathBuf> {
     let mut cmd = ctx.command(&cargo());
     cmd.args(["generate-rpm", "-p", "crates/gv-app", "--profile"])
         .arg(&ctx.profile)
-        .args(["--target", &ctx.target, "--arch", arch, "--target-dir"])
+        .args(["--arch", arch, "--target-dir"])
         .arg(&ctx.target_dir)
         .arg("--set-metadata")
         .arg(format!("version = \"{version}\""))
         .arg("-o")
         .arg(&out);
+    if ctx.cross_layout {
+        cmd.args(["--target", &ctx.target]);
+    }
     if ctx.helper_exe.is_some() {
         cmd.args(["--variant", "with-helper"]);
     }
@@ -358,5 +487,38 @@ mod tests {
         assert_eq!(elf[0x75], 0);
         assert!(write_elf_section(&mut elf, ".upd_info", &[b'x'; 32]).is_err());
         assert_eq!(elf_section(b"not an elf", ".upd_info"), None);
+    }
+
+    #[test]
+    fn maps_needed_libraries_to_debian_packages() {
+        let readelf = "\
+ 0x0000000000000001 (NEEDED)             Shared library: [libxcb.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libxkbcommon.so.0]
+ 0x0000000000000001 (NEEDED)             Shared library: [libxkbcommon-x11.so.0]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libxcb-xkb.so.1]
+  0x0010:   Name: GLIBC_2.34  Flags: none  Version: 4
+  0x0020:   Name: GLIBC_2.39  Flags: none  Version: 5
+  0x0030:   Name: GLIBC_2.4  Flags: none  Version: 6
+";
+        assert_eq!(
+            depends_from_readelf(readelf).expect("known libraries"),
+            [
+                "libxcb1 (>= 1.14)",
+                "libxkbcommon0 (>= 1.0.0)",
+                "libxkbcommon-x11-0 (>= 1.0.0)",
+                "libgcc-s1 (>= 3.0)",
+                "libc6 (>= 2.39)",
+                "libxcb-xkb1 (>= 1.14)",
+            ]
+        );
+        let old_glibc = " 0x1 (NEEDED) Shared library: [libc.so.6]\n  Name: GLIBC_2.17\n";
+        assert_eq!(
+            depends_from_readelf(old_glibc).expect("known"),
+            ["libc6 (>= 2.35)"]
+        );
+        assert!(depends_from_readelf(" 0x1 (NEEDED) Shared library: [libfoo.so.3]\n").is_err());
     }
 }

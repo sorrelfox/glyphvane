@@ -208,6 +208,10 @@ fn parse_args(args: &[String]) -> Result<Options> {
 pub(crate) struct Ctx {
     pub(crate) root: PathBuf,
     pub(crate) target: String,
+    /// Whether the binaries are below `<target-dir>/<triple>/`, so the cargo
+    /// packaging tools must be given `--target`. A host build without
+    /// `--target` puts them in `<target-dir>/<profile>/` instead.
+    pub(crate) cross_layout: bool,
     pub(crate) profile: String,
     pub(crate) os: Os,
     pub(crate) arch: Arch,
@@ -268,6 +272,7 @@ impl Ctx {
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     let opts = parse_args(args)?;
+    let target_given = opts.target.is_some();
     let target = match opts.target {
         Some(t) => t,
         None => host_triple()?,
@@ -295,7 +300,21 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     } else {
         opts.profile.as_str()
     };
-    let bin_dir = meta.target_dir.join(&target).join(profile_dir);
+    // `cargo build --target T` writes to `<target-dir>/T/<profile>`; a plain
+    // host build writes to `<target-dir>/<profile>`. Accept the latter for
+    // host packaging with --no-build when the former has no binary.
+    let triple_dir = meta.target_dir.join(&target).join(profile_dir);
+    let host_dir = meta.target_dir.join(profile_dir);
+    let main_name = if os == Os::Windows {
+        format!("{MAIN_BIN}.exe")
+    } else {
+        MAIN_BIN.to_owned()
+    };
+    let cross_layout = opts.build
+        || target_given
+        || triple_dir.join(&main_name).is_file()
+        || !host_dir.join(&main_name).is_file();
+    let bin_dir = if cross_layout { triple_dir } else { host_dir };
     let exe = |stem: &str| {
         bin_dir.join(if os == Os::Windows {
             format!("{stem}.exe")
@@ -337,6 +356,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     let ctx = Ctx {
         root: root.to_path_buf(),
         target,
+        cross_layout,
         profile: opts.profile,
         os,
         arch,
