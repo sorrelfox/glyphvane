@@ -11,6 +11,7 @@ pub mod find;
 pub mod icons;
 pub mod inline;
 pub mod keymap;
+pub mod latency;
 pub mod menu;
 pub mod metrics;
 pub mod palette;

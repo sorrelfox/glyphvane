@@ -7,6 +7,7 @@ mod cli;
 mod clipboard;
 mod gpu;
 mod instance;
+mod latency;
 mod no_gpu_dialog;
 mod render;
 mod safe_mode;
@@ -170,6 +171,7 @@ fn main() -> ExitCode {
         move |cx| {
             startup::mark("GPUI application started");
             gv_ui::init(cx, app_settings);
+            latency::install(cx);
             gv_ui::editor::set_html_clipboard(cx, Some(clipboard::system_reader()));
             gv_ui::keymap::install(cx, locations.as_ref());
             // The crash journal and file watching; safe mode keeps both:
@@ -203,6 +205,7 @@ fn main() -> ExitCode {
                 Ok(window) => {
                     startup::mark("window created");
                     gpu::report_adapter(window, cx);
+                    latency::attach(window, cx);
                     // Documents with unsaved changes from a crash (or a
                     // close without saving) reopen with their text. Not in
                     // a window for `--wait`, which quits when its files are

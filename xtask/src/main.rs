@@ -8,6 +8,7 @@ mod deps;
 mod fixtures;
 mod fuzz_seed;
 mod headers;
+mod latency;
 mod package;
 mod pathological;
 mod spec;
@@ -49,6 +50,9 @@ Commands:
                         build); --engine comrak validates the suite itself.
   fuzz-seed             Write the fuzz seed corpora (fuzz/corpus/) from the
                         spec examples.
+  latency LOG [--warm-up N]
+                        Percentiles of a keystroke latency log written with
+                        GLYPHVANE_DEBUG_LATENCY=LOG (default warm-up 20).
   package --format F[,F...] [--target T] [--profile P] [--out DIR] [--no-build]
                         Build release artifacts (deb, rpm, tar.gz, appimage,
                         app, zip, dmg, msi) and SHA256SUMS; see
@@ -102,6 +106,7 @@ fn run() -> Result<bool> {
         "fetch-spec" => fixtures::run(&root, rest),
         "pathological" => pathological::run(&root, rest),
         "fuzz-seed" => fuzz_seed::run(&root, rest),
+        "latency" => latency::run(rest),
         "package" => package::run(&root, rest),
         "size-report" => package::size::run(rest),
         other => {

@@ -118,6 +118,13 @@ rfd = { version = "0.17.2", default-features = false }
 # Windows. The version the tree already has (tempfile, rustix and others use
 # it; MIT OR Apache-2.0).
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+# App (Linux): presentation feedback for the opt-in keystroke latency log
+# (`GLYPHVANE_DEBUG_LATENCY`), on GPUI's Wayland connection through
+# libwayland. The versions GPUI already pulls in (MIT).
+raw-window-handle = "0.6.2"
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client"] }
 # Model (gv-model): Unicode general categories for the heading slug
 # algorithms (letters, marks, numbers, connector punctuation).
 unicode-properties = { version = "0.1.5", default-features = false, features = ["general-category"] }

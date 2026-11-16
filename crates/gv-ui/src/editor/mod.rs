@@ -882,6 +882,7 @@ impl EditorView {
     /// commit on Wayland) can make the compositor drop the composition
     /// (IME spike, Problem 2).
     fn input_changed(&mut self, cx: &mut Context<'_, Self>) {
+        crate::latency::handled();
         self.pump_syntax(cx);
         self.after_edit(cx);
         self.autoscroll = true;

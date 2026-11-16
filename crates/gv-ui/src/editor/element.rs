@@ -1171,6 +1171,7 @@ impl Element for EditorElement {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
         self.register_handlers(&pre.hitbox, window);
+        crate::latency::painted(window, cx);
     }
 }
 

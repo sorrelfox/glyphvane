@@ -33,6 +33,14 @@ url = { workspace = true }
 # `time` and `param` for the start-up trace's clocks.
 rustix = { workspace = true, features = ["param", "time"] }
 
+# The latency log's presentation feedback (`wp_presentation`), on GPUI's own
+# Wayland connection: the versions GPUI already uses.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+raw-window-handle = { workspace = true }
+wayland-backend = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+
 # The clipboard through Wayland's data-control protocol (ext or wlr); without
 # it, or where the compositor lacks it, arboard uses X11 (XWayland).
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
