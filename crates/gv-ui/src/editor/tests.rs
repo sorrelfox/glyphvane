@@ -26,6 +26,7 @@ use crate::metrics::size::{document, editor as editor_size};
 use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
 
+mod code;
 mod find;
 mod fold;
 mod paste;
@@ -1591,6 +1592,89 @@ mod timing {
         cx.run_until_parked();
         drop(cx);
         dispatcher.drain_tasks();
+    }
+
+    /// Typing inside a fenced Rust block in the middle of a generated
+    /// 1 MB document (soft wrap off), with code highlighting off (as
+    /// before it existed) or on: per keystroke, the input event to the
+    /// frame drawn. GPUI's test executor runs background work on this
+    /// thread inside that span, so the highlighting jobs' own time is
+    /// reported apart: in the app it runs on a worker thread.
+    fn run_fence(name: &str, highlight: bool) {
+        use crate::reader::code_highlight::tests::{DISABLED, job_time, jobs_run};
+        DISABLED.store(!highlight, std::sync::atomic::Ordering::Relaxed);
+        let markdown = generated(1 << 20);
+        let dir = temp(&[("doc.md", &markdown)]);
+        let dispatcher = TestDispatcher::new(0);
+        let mut cx = TestAppContext::build_with_text_system(
+            dispatcher.clone(),
+            Some("editor_fence_timing"),
+            platform_text_system(),
+        );
+        {
+            let (window, workspace) = open_workspace(&mut cx, &dir.path().join("doc.md"));
+            let mut vcx = VisualTestContext::from_window(window, &cx);
+            draw(&mut vcx);
+            vcx.simulate_keystrokes("secondary-e");
+            draw(&mut vcx);
+            let editor = workspace
+                .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+                .expect("editor");
+            editor.update(&mut vcx, |e, cx| e.set_soft_wrap(false, cx));
+            draw(&mut vcx);
+            // The caret at the end of a code line in the middle.
+            editor.update(&mut vcx, |e, cx| {
+                let doc = e.doc.as_mut().unwrap();
+                let text = doc.editor.text().clone();
+                let line = text.line_of_offset(text.len() / 2).unwrap();
+                let at = (line..text.line_count())
+                    .find_map(|l| {
+                        let r = text.line_range(l).ok()?;
+                        let s = text.text_for_range(r.clone()).ok()?;
+                        (s == "    x * 2").then_some(r.end)
+                    })
+                    .unwrap();
+                doc.editor.set_cursor(at);
+                e.autoscroll = true;
+                cx.notify();
+            });
+            draw(&mut vcx);
+            let (jobs, time) = (jobs_run(), job_time());
+            let mut samples: Vec<Duration> = Vec::new();
+            let keys = [" ", "+", " ", "x", " ", "/", "/", " ", "c", ";"];
+            for k in 0..400 {
+                let t = Instant::now();
+                vcx.simulate_input(keys[k % keys.len()]);
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+                samples.push(t.elapsed());
+            }
+            let jobs = jobs_run() - jobs;
+            let time = job_time() - time;
+            eprintln!(
+                "{name}: typing in a fence, input to frame drawn: {}; {jobs} highlighting jobs, {:.3} ms each on average (in the app on a worker thread)",
+                percentiles(&samples[20..]),
+                if jobs == 0 {
+                    0.0
+                } else {
+                    time.as_secs_f64() * 1e3 / jobs as f64
+                },
+            );
+        }
+        DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        cx.run_until_parked();
+        cx.update(|cx| cx.quit());
+        cx.run_until_parked();
+        drop(cx);
+        dispatcher.drain_tasks();
+    }
+
+    #[test]
+    #[ignore = "timing run; see the module docs"]
+    fn timing_typing_in_a_fence_in_one_megabyte() {
+        run_fence("generated 1 MB, no wrap, code highlighting off", false);
+        run_fence("generated 1 MB, no wrap, code highlighting on", true);
+        run_fence("generated 1 MB, no wrap, code highlighting off", false);
+        run_fence("generated 1 MB, no wrap, code highlighting on", true);
     }
 
     #[test]

@@ -213,6 +213,8 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Frame {
+        #[cfg(test)]
+        let _frame = crate::reader::code_highlight::tests::FrameGuard::new();
         self.bounds = Some(bounds);
         let mut frame = Frame::new(self.focus.clone());
         let theme = Appearance::current_id(cx);
@@ -317,6 +319,24 @@ impl EditorView {
             if let (Some(&a), Some(&b)) = (run.first(), run.last()) {
                 doc.highlights.ensure(&doc.syntax, links, a..b + 1);
             }
+        }
+        // Fences to highlight: on the background executor, never here.
+        for (key, code) in doc.highlights.code.take_requests() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::reader::code_highlight::highlight(key, &code);
+                    })
+                    .await;
+                this.update(cx, |view, cx| {
+                    if let Some(doc) = view.doc.as_mut() {
+                        doc.highlights.landed(&key);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
         }
 
         let visible = visuals.first().map_or(0, |(_, v)| v.range.start)

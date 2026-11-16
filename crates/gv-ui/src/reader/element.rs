@@ -158,6 +158,37 @@ pub(crate) struct Prepaint {
     over: Vec<Op>,
 }
 
+/// Highlights code blocks on the background executor; as each lands, the
+/// items drawn plain meanwhile are laid out again.
+fn start_highlights(
+    reader: WeakEntity<Reader>,
+    requests: Vec<(gv_highlight::HighlightKey, Arc<gv_render_tree::CodeBlock>)>,
+    cx: &mut App,
+) {
+    for (key, code) in requests {
+        let reader = reader.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    super::code_highlight::highlight(key, &code.text);
+                })
+                .await;
+            reader
+                .update(cx, |reader, cx| {
+                    let mut st = reader.state.borrow_mut();
+                    let items = st.cache.code.landed(&key);
+                    if !items.is_empty() {
+                        st.stale.extend(items);
+                        drop(st);
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+}
+
 pub(crate) struct ReaderElement {
     state: Rc<RefCell<State>>,
     reader: WeakEntity<Reader>,
@@ -316,6 +347,8 @@ impl Element for ReaderElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
+        #[cfg(test)]
+        let _frame = super::code_highlight::tests::FrameGuard::new();
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let mut out = Prepaint {
             hitbox,
@@ -894,6 +927,10 @@ impl Element for ReaderElement {
             }
         }
         cache.end_frame();
+        let requests = cache.code.take_requests();
+        if !requests.is_empty() {
+            start_highlights(self.reader.clone(), requests, cx);
+        }
 
         // The scrollbar: a thumb, no track.
         let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;

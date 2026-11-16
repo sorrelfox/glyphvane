@@ -10,7 +10,9 @@
 //!    and quote markers, `#` runs, fences, setext underlines and thematic
 //!    breaks are markers; a fence's info string is a tag.
 //! 2. **Leaves** ([`walk_range`]): heading text is bold; fenced code lines
-//!    get the code fill, and shell code a small highlighter of its own;
+//!    get the code fill, and fences with a known language the classes of
+//!    the code highlighter ([`FenceCode`]: results come from background
+//!    jobs, never from the UI thread);
 //!    HTML blocks and comments, link reference definitions, front matter
 //!    (YAML and TOML keys and values), callout markers on a quote's first
 //!    line, and pipe tables inside paragraphs (rows whose second line is a
@@ -27,6 +29,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
+use gv_highlight::HighlightKey;
 use gv_render_tree::{LinkStatus, LinkStatusSource, LinkTarget};
 use gv_syntax::inline::{InlineKind, InlineNode, LinkKind as SyntaxLinkKind, LinkRef};
 use gv_syntax::{
@@ -39,6 +42,7 @@ use gv_vault::{PathIndex, ProfileId};
 use super::syntax::Syntax;
 use crate::inline::Token;
 use crate::reader::Resolver;
+use crate::reader::code_highlight::{self, Jobs, LineSpans};
 
 /// How a link target is underlined (SPEC § Link status). Dotted and dashed
 /// lines take the text's colour, the wavy line `status.warning`.
@@ -247,6 +251,74 @@ fn model_kind(kind: SyntaxLinkKind) -> gv_model::LinkKind {
 pub(crate) struct HighlightCache {
     key: Option<(u64, u64)>,
     lines: HashMap<usize, Rc<LineStyle>>,
+    /// The fences' code highlighting.
+    pub code: FenceCode,
+}
+
+/// Code highlighting of fenced code in the Source view.
+///
+/// A fence's content lines are joined with `\n` and looked up in the
+/// shared cache by content ([`code_highlight::key_for`]), so an edit
+/// re-highlights only the fence it changes. A fence not highlighted yet
+/// is coloured with its previous result line by line, or drawn plain, and
+/// a background job is asked for ([`Self::take_requests`]).
+#[derive(Debug, Default)]
+pub(crate) struct FenceCode {
+    jobs: Jobs,
+    /// Jobs to start: the key and the joined text.
+    requests: Vec<(HighlightKey, String)>,
+    /// The last result drawn per fence (by its opening line).
+    last: HashMap<usize, LineSpans>,
+}
+
+/// Fences remembered at most (all are forgotten beyond).
+const FENCES_CAP: usize = 4_096;
+
+impl FenceCode {
+    /// The jobs to start (each key once).
+    pub fn take_requests(&mut self) -> Vec<(HighlightKey, String)> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// The highlighting of fence `leaf` (opened by info string `info`), if
+    /// there is one to draw now.
+    fn spans(&mut self, text: &TextSnapshot, leaf: &Leaf<'_>, info: &str) -> Option<LineSpans> {
+        // The content, unless it is over the cap anyway.
+        let bytes: usize = leaf.lines.iter().map(|l| l.content.len() + 1).sum();
+        if bytes > gv_highlight::Limits::default().max_bytes {
+            return None;
+        }
+        let mut code = String::with_capacity(bytes);
+        let mut lines: Vec<Range<usize>> = Vec::with_capacity(leaf.lines.len());
+        for (i, line) in leaf.lines.iter().enumerate() {
+            if i > 0 {
+                code.push('\n');
+            }
+            let start = code.len();
+            if let Ok(t) = text.text_for_range(line.content.clone()) {
+                code.push_str(&t);
+            }
+            lines.push(start..code.len());
+        }
+        let key = code_highlight::key_for(&code, info)?;
+        if self.last.len() > FENCES_CAP {
+            self.last.clear();
+        }
+        if let Some(h) = code_highlight::cached(&key) {
+            let spans = LineSpans::new(h, lines.into());
+            self.last.insert(leaf.open_line, spans.clone());
+            return Some(spans);
+        }
+        if self.jobs.start(key) {
+            self.requests.push((key, code));
+        }
+        let last = self.last.get(&leaf.open_line).cloned();
+        #[cfg(test)]
+        if last.is_none() {
+            code_highlight::tests::count_pending_draw();
+        }
+        last
+    }
 }
 
 /// Lines highlighted around the ones asked for, so that scrolling a few
@@ -276,9 +348,15 @@ impl HighlightCache {
         if window.is_empty() {
             return;
         }
-        for (line, style) in highlight(tree, text, window, links) {
+        for (line, style) in highlight(tree, text, window, links, &mut self.code) {
             self.lines.entry(line).or_insert_with(|| Rc::new(style));
         }
+    }
+
+    /// The job for `key` ended: its fence is highlighted again.
+    pub fn landed(&mut self, key: &HighlightKey) {
+        self.code.jobs.finish(key);
+        self.lines.clear();
     }
 
     /// The highlighting of `line`, once [`Self::ensure`]d.
@@ -415,6 +493,7 @@ pub(crate) fn highlight(
     text: &TextSnapshot,
     lines: Range<usize>,
     links: &mut LinkStatuses,
+    code: &mut FenceCode,
 ) -> Vec<(usize, LineStyle)> {
     let mut painter = Painter::new(text, lines);
     let range = painter.range();
@@ -442,6 +521,7 @@ pub(crate) fn highlight(
         text,
         painter: &mut painter,
         links,
+        code,
         containers: Vec::new(),
     };
     walk_range(tree, range, &mut leaves);
@@ -453,6 +533,7 @@ struct Leaves<'a, 't> {
     text: &'t TextSnapshot,
     painter: &'a mut Painter<'t>,
     links: &'a mut LinkStatuses,
+    code: &'a mut FenceCode,
     containers: Vec<Container>,
 }
 
@@ -488,11 +569,8 @@ impl Visitor for Leaves<'_, '_> {
                     .clone()
                     .and_then(|r| self.text.text_for_range(r).ok())
                     .unwrap_or_default();
-                let language = info.split_whitespace().next().unwrap_or_default();
-                if is_shell(language) {
-                    for line in leaf.lines {
-                        self.lexed(line.content.clone(), shell_line);
-                    }
+                if let Some(spans) = self.code.spans(self.text, leaf, &info) {
+                    self.fence(leaf, &spans);
                 }
             }
             // `$$` math: TeX, like code.
@@ -697,6 +775,26 @@ impl Leaves<'_, '_> {
         }
     }
 
+    /// Paints the lines of fence `leaf` with the classes of `spans`.
+    fn fence(&mut self, leaf: &Leaf<'_>, spans: &LineSpans) {
+        let window = self.painter.range();
+        for (i, line) in leaf.lines.iter().enumerate() {
+            let c = &line.content;
+            if c.end < window.start || c.start > window.end {
+                continue;
+            }
+            for (r, class) in spans.line(i, c.len()) {
+                let font = class.font_style();
+                let style = Style {
+                    bold: font.bold,
+                    italic: font.italic,
+                    ..Style::of(code_highlight::token_of(class))
+                };
+                self.painter.set(c.start + r.start..c.start + r.end, style);
+            }
+        }
+    }
+
     /// Paints `range` (one line) with the spans `lex` finds in its text.
     fn lexed(&mut self, range: Range<usize>, lex: Lexer) {
         let text = self.text.text_for_range(range.clone()).unwrap_or_default();
@@ -744,13 +842,6 @@ fn callout_marker(text: &str) -> Option<usize> {
     Some(len)
 }
 
-fn is_shell(language: &str) -> bool {
-    matches!(
-        language.to_ascii_lowercase().as_str(),
-        "sh" | "bash" | "shell" | "zsh" | "console" | "shell-session" | "fish"
-    )
-}
-
 /// The style of a value: a quoted string, a number or flag, or a bare
 /// string.
 fn value_style(word: &str) -> Style {
@@ -760,79 +851,6 @@ fn value_style(word: &str) -> Style {
     } else {
         Style::of(Token::SyntaxString)
     }
-}
-
-/// The spans of one line of shell code: command names are keys, flags and
-/// numbers numbers, arguments and quoted text strings, `#` starts a
-/// comment.
-fn shell_line(line: &str) -> Vec<(Range<usize>, Style)> {
-    let mut out = Vec::new();
-    let bytes = line.as_bytes();
-    let mut at = 0;
-    let mut command = true;
-    while at < bytes.len() {
-        let c = bytes[at];
-        if c == b' ' || c == b'\t' {
-            at += 1;
-            continue;
-        }
-        if c == b'#' {
-            out.push((at..bytes.len(), Style::COMMENT));
-            break;
-        }
-        if matches!(c, b'|' | b';' | b'&' | b'>' | b'<' | b'(' | b')') {
-            let start = at;
-            while at < bytes.len() && matches!(bytes[at], b'|' | b';' | b'&' | b'>' | b'<') {
-                at += 1;
-            }
-            at = at.max(start + 1);
-            out.push((start..at, Style::MARKER));
-            command = !matches!(c, b'>' | b'<');
-            continue;
-        }
-        if c == b'"' || c == b'\'' {
-            let start = at;
-            at += 1;
-            while at < bytes.len() && bytes[at] != c {
-                at += if bytes[at] == b'\\' { 2 } else { 1 };
-            }
-            at = (at + 1).min(bytes.len());
-            out.push((start..at, Style::of(Token::SyntaxString)));
-            command = false;
-            continue;
-        }
-        let start = at;
-        while at < bytes.len() && !matches!(bytes[at], b' ' | b'\t' | b'|' | b';' | b'&') {
-            at += 1;
-        }
-        let word = &line[start..at];
-        if command && start == 0 && word == "$" {
-            out.push((start..at, Style::MARKER));
-            continue;
-        }
-        if command && !word.contains('=') {
-            out.push((start..at, Style::of(Token::SyntaxKey)));
-            command = false;
-        } else if word.starts_with('-') || word.parse::<f64>().is_ok() {
-            out.push((start..at, Style::of(Token::SyntaxNumber)));
-        } else {
-            // `path:12` and `path:12:3`: the position is a number.
-            let split = word.find(':').filter(|&i| {
-                i > 0
-                    && word[i + 1..]
-                        .split(':')
-                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-            });
-            match split {
-                Some(i) => {
-                    out.push((start..start + i, Style::of(Token::SyntaxString)));
-                    out.push((start + i..at, Style::of(Token::SyntaxNumber)));
-                }
-                None => out.push((start..at, Style::of(Token::SyntaxString))),
-            }
-        }
-    }
-    out
 }
 
 /// The spans of a value after a key or a list dash.
@@ -942,10 +960,17 @@ mod tests {
         let snapshot = TextSnapshot::new(text);
         let tree = SyntaxTree::parse_with(&snapshot, options);
         let mut links = LinkStatuses::new(None, None, ProfileId::CommonMark);
-        highlight(&tree, &snapshot, 0..snapshot.line_count(), &mut links)
-            .into_iter()
-            .map(|(_, s)| s)
-            .collect()
+        let mut code = FenceCode::default();
+        highlight(
+            &tree,
+            &snapshot,
+            0..snapshot.line_count(),
+            &mut links,
+            &mut code,
+        )
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect()
     }
 
     /// The style of the first occurrence of `needle` on line `line`.
@@ -976,10 +1001,8 @@ mod tests {
         assert_eq!(at(&lines, text, 7, "```"), Style::MARKER);
         assert!(lines[7].code && lines[8].code && lines[9].code);
         assert!(!lines[10].code);
-        assert_eq!(at(&lines, text, 8, "glyphvane").color, Token::SyntaxKey);
-        assert_eq!(at(&lines, text, 8, "notes").color, Token::SyntaxString);
-        assert_eq!(at(&lines, text, 8, ":12").color, Token::SyntaxNumber);
-        assert_eq!(at(&lines, text, 8, "--wait").color, Token::SyntaxNumber);
+        // Not highlighted yet: the code is plain until its job lands.
+        assert_eq!(at(&lines, text, 8, "glyphvane"), Style::PLAIN);
         assert_eq!(at(&lines, text, 10, "note"), Style::COMMENT);
     }
 
@@ -1053,5 +1076,71 @@ mod tests {
         assert_eq!(callout_marker("[!tip]-"), Some(7));
         assert_eq!(callout_marker("[!]"), None);
         assert_eq!(callout_marker("[note]"), None);
+    }
+
+    /// Highlights `text` with `code`, and the requests it made.
+    fn styles_with(text: &str, code: &mut FenceCode) -> Vec<LineStyle> {
+        let snapshot = TextSnapshot::new(text);
+        let tree = SyntaxTree::parse_with(&snapshot, ParseOptions::default());
+        let mut links = LinkStatuses::new(None, None, ProfileId::CommonMark);
+        highlight(&tree, &snapshot, 0..snapshot.line_count(), &mut links, code)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()
+    }
+
+    /// Runs the jobs `code` asks for, as the background executor would.
+    fn run_jobs(code: &mut FenceCode) -> usize {
+        let requests = code.take_requests();
+        for (key, text) in &requests {
+            code_highlight::highlight(*key, text);
+            code.jobs.finish(key);
+        }
+        requests.len()
+    }
+
+    #[test]
+    fn fences_take_the_highlighter_classes_once_their_job_lands() {
+        let text = "Text\n\n```rust\nfn fences_take() -> u32 {\n    \"s\" // c\n}\n```\n\n```nosuchlanguage\nfn x() {}\n```\n";
+        let mut code = FenceCode::default();
+        let lines = styles_with(text, &mut code);
+        // Pending: plain on the code fill, one job asked for (the unknown
+        // language asks for none).
+        assert!(lines[3].code);
+        assert_eq!(at(&lines, text, 3, "fn"), Style::PLAIN);
+        assert_eq!(run_jobs(&mut code), 1);
+        let lines = styles_with(text, &mut code);
+        assert_eq!(code.take_requests().len(), 0, "cached now");
+        let keyword = at(&lines, text, 3, "fn");
+        assert_eq!(keyword.color, Token::SyntaxTag);
+        assert_eq!(at(&lines, text, 3, "fences_take").color, Token::SyntaxKey);
+        assert_eq!(at(&lines, text, 4, "\"s\"").color, Token::SyntaxString);
+        let comment = at(&lines, text, 4, "// c");
+        assert!(comment.italic && comment.color == Token::TextTertiary);
+        // The fence line and the language stay Markdown's.
+        assert_eq!(at(&lines, text, 2, "```"), Style::MARKER);
+        assert_eq!(at(&lines, text, 2, "rust").color, Token::SyntaxTag);
+        // An unknown language stays plain.
+        assert_eq!(at(&lines, text, 9, "fn"), Style::PLAIN);
+        assert!(lines[9].code);
+    }
+
+    #[test]
+    fn an_edit_in_a_fence_rehighlights_that_fence_only() {
+        let one = "```python\ndef an_edit_one(): pass\n```\n\n```js\nconst an_edit = 1;\n```\n";
+        let mut code = FenceCode::default();
+        styles_with(one, &mut code);
+        assert_eq!(run_jobs(&mut code), 2);
+        styles_with(one, &mut code);
+        assert_eq!(code.take_requests().len(), 0);
+        // Typing in the second fence: one job, for that fence; meanwhile it
+        // keeps its previous colours line by line.
+        let two = one.replace("const an_edit = 1;", "const an_edit = 12;");
+        let lines = styles_with(&two, &mut code);
+        let requests = code.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].1.contains("= 12;"));
+        assert_eq!(at(&lines, &two, 5, "const").color, Token::SyntaxTag);
+        assert_eq!(at(&lines, &two, 1, "def").color, Token::SyntaxTag);
     }
 }

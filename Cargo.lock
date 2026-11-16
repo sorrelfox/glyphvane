@@ -3361,6 +3361,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-sum-tree",
  "gv-editor",
+ "gv-highlight",
  "gv-html",
  "gv-inline",
  "gv-math",

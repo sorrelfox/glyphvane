@@ -38,6 +38,7 @@ use std::sync::{Arc, OnceLock};
 
 use gpui::WindowTextSystem;
 use gpui::assets::IconName;
+use gv_highlight::{HighlightKey, TokenClass};
 use gv_inline::{Affinity, Align, Bias, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
 use gv_math::MathEngine;
 use gv_render_tree::{
@@ -48,6 +49,7 @@ use gv_render_tree::{
 use gv_syntax::BlockId;
 use gv_syntax::table::Alignment;
 
+use super::code_highlight::{self, Jobs, LineSpans};
 use super::engine::{Items, TextAnchor};
 use crate::icons::FILE_PLUS_DASHED;
 use crate::inline::{BoxContent, FontFamilies, FontTable, InlineBlock, InlineText, font_of};
@@ -196,59 +198,114 @@ fn inline_block(content: &InlineContent) -> InlineBlock {
     block
 }
 
-/// Appends `text` (from `source`, node-relative) as one code run, with tabs
+/// Appends `text` (from `source`, node-relative) as code runs, with tabs
 /// expanded to the next stop of [`TAB_STOP`] columns. `indent` leading
 /// characters are virtual (a partly consumed tab) and map to the source
-/// start.
+/// start. `spans` (line-relative, sorted, not overlapping) take their own
+/// style; the rest of the line takes `style`.
 fn push_code_line(
     b: &mut ParagraphBuilder,
     text: &str,
     indent: usize,
     source: Range<usize>,
     style: gv_inline::RunStyle,
+    spans: &[(Range<usize>, gv_inline::RunStyle)],
 ) {
     if text.is_empty() {
         return;
     }
     let indent = indent.min(text.len());
-    let mut out = String::with_capacity(text.len());
-    let mut anchors: Vec<(usize, usize)> = Vec::new();
-    out.push_str(&text[..indent]);
-    if indent > 0 {
-        anchors.push((indent, source.start));
-    }
-    let content = &text[indent..];
     // A replaced character makes the line longer than its source: then it
-    // maps as one unit.
-    let exact = content.len() == source.len();
-    let mut column = indent;
-    for (i, ch) in content.char_indices() {
-        if ch == '\t' && exact {
-            let spaces = TAB_STOP - column % TAB_STOP;
-            anchors.push((out.len(), source.start + i));
-            out.extend(std::iter::repeat_n(' ', spaces));
-            anchors.push((out.len(), source.start + i + 1));
-            column += spaces;
-        } else {
-            out.push(ch);
-            column += 1;
+    // maps as one unit, in one run.
+    let exact = text.len() - indent == source.len();
+    // The runs: gaps in `style`, the virtual indent with the first one.
+    let mut runs: Vec<(Range<usize>, gv_inline::RunStyle)> =
+        Vec::with_capacity(2 * spans.len() + 1);
+    let mut at = 0;
+    if exact {
+        for (r, s) in spans {
+            let (start, end) = (r.start.max(at).max(indent), r.end.min(text.len()));
+            if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                continue;
+            }
+            if start > at {
+                runs.push((at..start, style));
+            }
+            runs.push((start..end, *s));
+            at = end;
         }
     }
-    b.text_mapped(&out, style, source, &anchors);
+    if at < text.len() {
+        runs.push((at..text.len(), style));
+    }
+    // Text offset to source offset (exact lines only past the indent).
+    let source_of = |t: usize| {
+        if exact {
+            source.start + t.saturating_sub(indent)
+        } else if t == 0 {
+            source.start
+        } else {
+            source.end
+        }
+    };
+    let mut column = 0;
+    for (r, run_style) in runs {
+        let mut out = String::with_capacity(r.len());
+        let mut anchors: Vec<(usize, usize)> = Vec::new();
+        let run_source = source_of(r.start)..source_of(r.end);
+        let virtual_end = indent.min(r.end);
+        if r.start < virtual_end {
+            out.push_str(&text[r.start..virtual_end]);
+            column += virtual_end - r.start;
+            anchors.push((out.len(), source.start));
+        }
+        let from = r.start.max(virtual_end);
+        for (i, ch) in text[from..r.end].char_indices() {
+            if ch == '\t' && exact {
+                let spaces = TAB_STOP - column % TAB_STOP;
+                let at = source_of(from + i);
+                anchors.push((out.len(), at));
+                out.extend(std::iter::repeat_n(' ', spaces));
+                anchors.push((out.len(), at + 1));
+                column += spaces;
+            } else {
+                out.push(ch);
+                column += 1;
+            }
+        }
+        b.text_mapped(&out, run_style, run_source, &anchors);
+    }
 }
 
-/// The paragraph of code lines `lines` of `code` (node-relative sources).
+/// The paragraph of code lines `lines` of `code` (node-relative sources),
+/// coloured by `highlight` where it has spans.
 pub(crate) fn code_paragraph(
     code: &CodeBlock,
     lines: Range<usize>,
     styles: &StyleTable,
+    highlight: Option<&LineSpans>,
 ) -> Paragraph {
     let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Code));
     if let Some(first) = code.lines.get(lines.start) {
         b.source_anchor(first.source.start);
     }
-    push_code_lines(&mut b, code, lines, styles);
+    push_code_lines(&mut b, code, lines, styles, highlight);
     b.build()
+}
+
+/// The run style of a highlighted class in code.
+fn class_style(styles: &StyleTable, class: TokenClass) -> gv_inline::RunStyle {
+    let font = class.font_style();
+    let mut variant = Variant::PLAIN;
+    if font.bold {
+        variant = variant.with(Variant::STRONG);
+    }
+    if font.italic {
+        variant = variant.with(Variant::ITALIC);
+    }
+    styles
+        .run_style(TextRole::Code, variant)
+        .with_color(code_highlight::token_of(class).role())
 }
 
 /// Appends code lines `lines` of `code`, separated by hard breaks.
@@ -257,8 +314,12 @@ fn push_code_lines(
     code: &CodeBlock,
     lines: Range<usize>,
     styles: &StyleTable,
+    highlight: Option<&LineSpans>,
 ) {
     let style = styles.run_style(TextRole::Code, Variant::PLAIN);
+    let highlight = highlight.filter(|h| !h.is_empty());
+    let mut class_styles: HashMap<TokenClass, gv_inline::RunStyle> = HashMap::new();
+    let mut spans: Vec<(Range<usize>, gv_inline::RunStyle)> = Vec::new();
     let first_line = lines.start;
     for i in lines {
         let Some(line) = code.lines.get(i) else {
@@ -269,12 +330,23 @@ fn push_code_lines(
         {
             b.hard_break(prev.source.end..line.start.max(prev.source.end));
         }
+        let text = code.line(i);
+        spans.clear();
+        if let Some(h) = highlight {
+            spans.extend(h.line(i, text.len()).map(|(r, class)| {
+                let s = *class_styles
+                    .entry(class)
+                    .or_insert_with(|| class_style(styles, class));
+                (r, s)
+            }));
+        }
         push_code_line(
             b,
-            code.line(i),
+            text,
             usize::from(line.indent),
             line.source.clone(),
             style,
+            &spans,
         );
     }
 }
@@ -310,7 +382,7 @@ fn properties_paragraph(code: &CodeBlock, lines: Range<usize>, styles: &StyleTab
                     b.text(&text[k + 1..], value, src.start + k + 1..src.end);
                 }
             }
-            None => push_code_line(&mut b, text, usize::from(line.indent), src, value),
+            None => push_code_line(&mut b, text, usize::from(line.indent), src, value, &[]),
         }
     }
     b.build()
@@ -369,7 +441,7 @@ fn math_block(tree: &RenderTree, node_ix: usize, code: &CodeBlock) -> InlineBloc
             b.text(&e.to_string(), style, source.start..source.start);
             if !code.lines.is_empty() {
                 b.hard_break(source.start..source.start);
-                push_code_lines(&mut b, code, 0..code.lines.len(), styles);
+                push_code_lines(&mut b, code, 0..code.lines.len(), styles, None);
             }
             InlineBlock::new(Arc::new(b.build()))
         }
@@ -544,7 +616,7 @@ fn make_block(item: &Item, node: &BlockNode, styles: &StyleTable) -> Option<Inli
             let code = node.lines()?;
             let range = lines.start as usize..lines.end as usize;
             Some(InlineBlock::new(Arc::new(code_paragraph(
-                code, range, styles,
+                code, range, styles, None,
             ))))
         }
         (ItemKind::Properties { lines, .. }, NodeKind::Properties { lines: code, .. }) => {
@@ -574,6 +646,107 @@ pub(crate) struct ItemCache {
     pub built: u64,
     /// Blocks evicted.
     pub evicted: u64,
+    /// Code highlighting of the code blocks laid out.
+    pub code: CodeHighlights,
+}
+
+/// Code blocks met while drawing.
+#[derive(Debug)]
+struct CodeEntry {
+    /// The node the key was computed for.
+    node: Arc<CodeBlock>,
+    /// Its cache key; `None` when it stays plain.
+    key: Option<HighlightKey>,
+    /// Its lines in the highlighted text.
+    lines: Arc<[Range<usize>]>,
+}
+
+/// Code highlighting in the Reading view: what was asked for while
+/// drawing, and the items to lay out again when a result lands.
+#[derive(Debug, Default)]
+pub(crate) struct CodeHighlights {
+    jobs: Jobs,
+    /// Items laid out while their block's highlighting was pending.
+    waiting: HashMap<HighlightKey, Vec<ItemId>>,
+    /// Jobs to start.
+    requests: Vec<(HighlightKey, Arc<CodeBlock>)>,
+    /// Per block, the code it showed last and its key.
+    blocks: HashMap<BlockId, CodeEntry>,
+    /// Per block, the last result drawn: it colours a newer version of the
+    /// block line by line while that one is highlighted.
+    last: HashMap<BlockId, LineSpans>,
+}
+
+/// Code blocks remembered at most (all are forgotten beyond).
+const CODE_BLOCKS_CAP: usize = 4_096;
+
+impl CodeHighlights {
+    /// What item `item` of code block `block` (`code`) is drawn with: the
+    /// block's highlighting if it is cached, else its previous one while a
+    /// job runs.
+    fn spans(&mut self, block: BlockId, code: &Arc<CodeBlock>, item: ItemId) -> Option<LineSpans> {
+        if self.blocks.len() > CODE_BLOCKS_CAP {
+            self.blocks.clear();
+            self.last.clear();
+        }
+        let entry = match self.blocks.get(&block) {
+            Some(e) if Arc::ptr_eq(&e.node, code) => e,
+            _ => {
+                let info = code.info.as_deref().or(code.language.as_deref());
+                let key = info
+                    .filter(|_| code.fenced)
+                    .and_then(|info| code_highlight::key_for(&code.text, info));
+                let lines: Arc<[Range<usize>]> =
+                    code.lines.iter().map(|l| l.text.clone()).collect();
+                self.blocks.insert(
+                    block,
+                    CodeEntry {
+                        node: Arc::clone(code),
+                        key,
+                        lines,
+                    },
+                );
+                self.blocks.get(&block)?
+            }
+        };
+        let key = entry.key?;
+        if let Some(h) = code_highlight::cached(&key) {
+            let spans = LineSpans::new(h, Arc::clone(&entry.lines));
+            self.last.insert(block, spans.clone());
+            return Some(spans);
+        }
+        let waiting = self.waiting.entry(key).or_default();
+        if !waiting.contains(&item) {
+            waiting.push(item);
+        }
+        if self.jobs.start(key) {
+            self.requests.push((key, Arc::clone(code)));
+        }
+        let last = self.last.get(&block).cloned();
+        #[cfg(test)]
+        if last.is_none() {
+            code_highlight::tests::count_pending_draw();
+        }
+        last
+    }
+
+    /// The jobs to start (each key once).
+    pub fn take_requests(&mut self) -> Vec<(HighlightKey, Arc<CodeBlock>)> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// The job for `key` ended: the items drawn while it ran, to lay out
+    /// again.
+    pub fn landed(&mut self, key: &HighlightKey) -> Vec<ItemId> {
+        self.jobs.finish(key);
+        self.waiting.remove(key).unwrap_or_default()
+    }
+
+    /// Forgets the blocks (another document is shown).
+    pub fn forget_blocks(&mut self) {
+        self.blocks.clear();
+        self.last.clear();
+    }
 }
 
 impl ItemCache {
@@ -634,6 +807,16 @@ impl ItemCache {
             }
             (NodeKind::Paragraph(c) | NodeKind::Heading { content: c, .. }, _) => {
                 Some(content_block(tree, item.node, 0, c, role, None))
+            }
+            (NodeKind::Code(code), ItemKind::Code { lines, .. }) => {
+                let spans = self.code.spans(item.id.block, code, item.id);
+                let range = lines.start as usize..lines.end as usize;
+                Some(InlineBlock::new(Arc::new(code_paragraph(
+                    code,
+                    range,
+                    &tree.options().styles,
+                    spans.as_ref(),
+                ))))
             }
             _ => make_block(item, node, &tree.options().styles),
         }
@@ -1022,7 +1205,7 @@ mod tests {
         let ix = code_item(&t);
         let node = t.node_of(ix).expect("node");
         let code = node.lines().expect("lines");
-        let p = code_paragraph(code, 0..code.lines.len(), &t.options().styles);
+        let p = code_paragraph(code, 0..code.lines.len(), &t.options().styles, None);
         // Tab expanded to the next stop; lines joined by hard breaks.
         assert_eq!(p.text(), "a   b\n\ncd");
         let pieces: Vec<_> = p.items().iter().map(|i| i.kind().clone()).collect();
@@ -1034,6 +1217,40 @@ mod tests {
         assert_eq!(&md[src(7)..src(7) + 2], "cd");
         // Inside the expanded tab: the tab itself.
         assert_eq!(&md[src(2)..src(2) + 1], "\t");
+    }
+
+    #[test]
+    fn highlighted_code_keeps_its_source_map() {
+        let md = "```rust\nlet\tx = \"highlighted_code_keeps\";\n```\n";
+        let t = tree(md);
+        let ix = code_item(&t);
+        let node = t.node_of(ix).expect("node");
+        let code = node.lines().expect("lines");
+        let key = code_highlight::key_for(&code.text, "rust").expect("rust");
+        let lines: Arc<[Range<usize>]> = code.lines.iter().map(|l| l.text.clone()).collect();
+        let spans = LineSpans::new(code_highlight::highlight(key, &code.text), lines);
+        let styles = &t.options().styles;
+        let p = code_paragraph(code, 0..code.lines.len(), styles, Some(&spans));
+        // The tab is expanded as without highlighting.
+        assert_eq!(p.text(), "let x = \"highlighted_code_keeps\";");
+        let colour = |at: usize| {
+            let ix = p.item_at(at).expect("an item");
+            p.items()[ix].style().expect("a run").color
+        };
+        let plain = styles.run_style(TextRole::Code, Variant::PLAIN).color;
+        assert_eq!(colour(0), crate::inline::Token::SyntaxTag.role());
+        assert_eq!(colour(8), crate::inline::Token::SyntaxString.role());
+        assert_eq!(
+            colour(p.text().len() - 1),
+            crate::inline::Token::TextSecondary.role()
+        );
+        assert_eq!(colour(4), plain);
+        // Every run still maps into the document's code text.
+        let src = |logical| node.to_document(p.source_offset(logical, Affinity::Downstream));
+        assert_eq!(&md[src(0)..src(0) + 3], "let");
+        assert_eq!(&md[src(3)..src(3) + 1], "\t");
+        assert_eq!(&md[src(4)..src(4) + 1], "x");
+        assert_eq!(&md[src(8)..src(8) + 3], "\"hi");
     }
 
     #[test]

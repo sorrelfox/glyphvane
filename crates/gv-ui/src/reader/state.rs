@@ -264,6 +264,7 @@ impl State {
         self.engine = Engine::new(self.layout.lead(), OVERDRAW);
         self.sync = None;
         self.cache.clear();
+        self.cache.code.forget_blocks();
         self.selection = None;
         self.hscroll.clear();
         self.hover = Hover::None;

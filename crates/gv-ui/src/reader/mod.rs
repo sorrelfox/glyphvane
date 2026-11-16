@@ -47,6 +47,7 @@
 //! and sets the top of the view as a place in an item.
 
 mod bench;
+pub(crate) mod code_highlight;
 mod element;
 mod engine;
 mod find;
