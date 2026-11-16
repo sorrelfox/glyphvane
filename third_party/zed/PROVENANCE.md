@@ -551,3 +551,72 @@ These go beyond upstream and are our own:
 rebuild produces a provisional snapshot of 32-row blocks taken from the
 tab layer's row count, without scanning the text. It is marked
 interpolated until the background wrap job for the real width lands.
+
+## `gpui-pre-wgpu/`: GPUI's Linux renderer and text system, patched
+
+A `[patch.crates-io]` copy of the published crate `gpui-pre-wgpu 0.3.12`
+(Zed's `crates/gpui_wgpu` at the commit above, Apache-2.0, licence text in
+[`LICENSE-APACHE`](LICENSE-APACHE)), so the whole GPUI pin stays on
+crates.io and only this crate is replaced. It is excluded from the
+workspace members: it keeps its upstream lints and formatting, and xtask's
+header and dependency checks do not apply to it. On macOS and Windows GPUI
+does not use this crate, so the patch changes nothing there.
+
+| | |
+|---|---|
+| Source | `gpui-pre-wgpu-0.3.12.crate` from crates.io (checksum `dc76608d385f6d0dcbad44504b1bf669dac3b7d7ffa2885acdb7c1c358caf852` in Cargo.lock before the patch) |
+| Imported | 2026-11-16 |
+| Why | R-22: variable fonts drew at their default instance (Noto Sans CJK VF hairline-thin, bold equal to regular), and an application could not replace an installed font that the rasterizer cannot draw (a COLRv1-only `NotoColorEmoji`) |
+
+| Path here | Changes |
+|---|---|
+| `src/cosmic_text_system.rs` | patched, see below |
+| `Cargo.toml` (the normalized manifest), `LICENSE-APACHE`, `benches/`, every other file in `src/` | none |
+| `Cargo.toml.orig`, `Cargo.lock`, `.cargo-ok` | not copied (packaging files of the `.crate`) |
+
+SHA-256 of the published `src/cosmic_text_system.rs` and of the patched one:
+
+```
+d2aa5ba630e17613676715ea8c24ccce1a27bfa10a2c78bb68f91e1e120b9566  published
+1cae69ced8671ecc2c7ebb4b96b455ac5c910853f92578985f46fb886c9064b0  patched
+```
+
+### Changes to `cosmic_text_system.rs`
+
+A comment at the top of the file points here. Apart from it, two changes,
+each small enough to offer upstream:
+
+1. **Variable fonts at the requested weight.** A face with a `wght` axis is
+   loaded once per requested weight: `LoadedFont` gains `variable_weight`
+   (`None` for faces without the axis) and `LoadedFontKey` gains `weight`.
+   - `font_id` returns the face's instance for `Font::weight`
+     (`variable_font_instance`); static faces keep one id as before.
+   - Shaping uses that weight (`font_match_properties`), so cosmic-text's
+     shaper and the reported advances match the instance.
+   - Glyphs from fallback faces are mapped back by face *and* weight
+     (`font_id_for_cosmic_id` takes `LayoutGlyph::font_weight`), so a
+     variable fallback face (CJK) follows the run's weight too.
+   - `render_glyph_image` passes the `wght` coordinate to swash's scaler,
+     as cosmic-text's own `swash_image` does.
+   - Not changed: `font_metrics`, `typographic_bounds` and `advance` still
+     read the default instance (`glyph_metrics(&[])`).
+2. **Application fonts replace installed fonts of the same PostScript
+   name.** `add_fonts` reads the PostScript names of the faces it is given,
+   removes installed (file-backed) faces with the same names, then adds the
+   new faces, which reuse the freed database slots. Without this,
+   cosmic-text's fallback keeps choosing the installed face: faces that tie
+   on family, weight and style are ordered by database id. Reusing the slot
+   keeps the replacement where the installed face was in that order, so it
+   is also chosen for bold text, where the weight filter sends emoji to the
+   catch-all stage. Glyphvane relies on it for the bundled colour emoji font
+   (`third_party/noto-emoji/`).
+
+### Updating
+
+On each GPUI upgrade drill: if the new `gpui-pre-wgpu` already contains the
+fixes, delete this folder and the `[patch.crates-io]` entry. Otherwise copy
+the new published crate here, re-apply the two changes (the diff against
+the published file is 115 added and 16 removed lines), bump the
+version in this file, and check text rendering on Linux: regular and bold
+text in a variable font (Noto Sans CJK), and colour emoji on a system whose
+Noto Color Emoji is COLRv1 only.

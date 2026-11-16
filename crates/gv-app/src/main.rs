@@ -5,6 +5,8 @@
 
 mod cli;
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod emoji_font;
 mod gpu;
 mod instance;
 mod latency;
@@ -173,6 +175,8 @@ fn main() -> ExitCode {
         move |cx| {
             startup::mark("GPUI application started");
             gv_ui::init(cx, app_settings);
+            #[cfg(target_os = "linux")]
+            emoji_font::install(cx);
             latency::install(cx);
             gv_ui::editor::set_html_clipboard(cx, Some(clipboard::system_reader()));
             gv_ui::keymap::install(cx, locations.as_ref());

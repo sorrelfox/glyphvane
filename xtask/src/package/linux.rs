@@ -52,6 +52,24 @@ fn add_desktop_files(ctx: &Ctx, tree: &mut Tree, prefix: &str, metainfo_name: &s
     }
 }
 
+/// The bundled colour emoji font and its licence, below `prefix` (`share/`
+/// or `usr/share/`). The app adds it when the installed emoji font cannot be
+/// drawn (R-22) and looks for it in `share/glyphvane/fonts/` next to the
+/// executable or in `../share/glyphvane/fonts/`. The deb and rpm install the
+/// same files through `crates/gv-app/Cargo.toml`.
+fn add_emoji_font(ctx: &Ctx, tree: &mut Tree, prefix: &str) {
+    tree.file(
+        &format!("{prefix}/glyphvane/fonts/NotoColorEmoji.ttf"),
+        &ctx.root.join("third_party/noto-emoji/NotoColorEmoji.ttf"),
+        0o644,
+    );
+    tree.file(
+        &format!("{prefix}/glyphvane/fonts/NotoColorEmoji-OFL.txt"),
+        &ctx.root.join("third_party/noto-emoji/LICENSE"),
+        0o644,
+    );
+}
+
 /// `glyphvane-<version>-<triple>.tar.gz`: both executables at the top, the
 /// licence, notices and desktop files in `share/`.
 pub(super) fn tarball(ctx: &Ctx) -> Result<PathBuf> {
@@ -78,6 +96,7 @@ pub(super) fn tarball(ctx: &Ctx) -> Result<PathBuf> {
         &format!("{top}/share"),
         &format!("{APP_ID}.metainfo.xml"),
     );
+    add_emoji_font(ctx, &mut tree, &format!("{top}/share"));
     let out = ctx.out.join(format!("{top}.tar.gz"));
     tree.write_tar_gz(&out, ctx.epoch)?;
     Ok(out)
@@ -323,6 +342,7 @@ pub(super) fn appimage(ctx: &Ctx) -> Result<PathBuf> {
         "usr/share",
         &format!("{APP_ID}.appdata.xml"),
     );
+    add_emoji_font(ctx, &mut tree, "usr/share");
     tree.file(
         "usr/share/licenses/glyphvane/LICENSE",
         &ctx.root.join("LICENSE"),

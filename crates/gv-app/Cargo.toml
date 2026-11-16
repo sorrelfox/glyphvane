@@ -46,6 +46,12 @@ wayland-protocols = { workspace = true }
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 arboard = { workspace = true, features = ["wayland-data-control"] }
 
+# Colour emoji (Linux): finding the installed emoji font and checking that
+# GPUI's rasterizer can draw it, else the bundled one is added.
+[target.'cfg(target_os = "linux")'.dependencies]
+fontdb = { workspace = true }
+skrifa = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 interprocess = { workspace = true }
 
@@ -65,6 +71,8 @@ workspace = true
 # relative to this crate for cargo-deb and to the workspace root for
 # cargo-generate-rpm. The `with-helper` variants add `glyphvane-helper` in
 # /usr/libexec/glyphvane/; xtask selects them when that binary is built.
+# The colour emoji font in /usr/share/glyphvane/fonts/ is added by the app
+# only when the installed one cannot be drawn (src/emoji_font.rs).
 [package.metadata.deb]
 name = "glyphvane"
 maintainer = "sorrelfox <348316453+sorrelfox@users.noreply.github.com>"
@@ -89,6 +97,8 @@ assets = [
   ["../../packaging/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/io.github.sorrelfox.Glyphvane.png", "644"],
   ["../../packaging/icons/512x512.png", "usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", "644"],
   ["../../packaging/THIRD-PARTY-NOTICES.txt", "usr/share/doc/glyphvane/", "644"],
+  ["../../third_party/noto-emoji/NotoColorEmoji.ttf", "usr/share/glyphvane/fonts/", "644"],
+  ["../../third_party/noto-emoji/LICENSE", "usr/share/glyphvane/fonts/NotoColorEmoji-OFL.txt", "644"],
 ]
 
 [package.metadata.deb.variants.with-helper]
@@ -113,6 +123,8 @@ assets = [
   { source = "packaging/icons/512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
   { source = "LICENSE", dest = "/usr/share/licenses/glyphvane/LICENSE", mode = "644", doc = true },
   { source = "packaging/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/doc/glyphvane/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
+  { source = "third_party/noto-emoji/NotoColorEmoji.ttf", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji.ttf", mode = "644" },
+  { source = "third_party/noto-emoji/LICENSE", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji-OFL.txt", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]
@@ -138,4 +150,6 @@ assets = [
   { source = "packaging/icons/512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.sorrelfox.Glyphvane.png", mode = "644" },
   { source = "LICENSE", dest = "/usr/share/licenses/glyphvane/LICENSE", mode = "644", doc = true },
   { source = "packaging/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/doc/glyphvane/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
+  { source = "third_party/noto-emoji/NotoColorEmoji.ttf", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji.ttf", mode = "644" },
+  { source = "third_party/noto-emoji/LICENSE", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji-OFL.txt", mode = "644" },
 ]

@@ -7,6 +7,9 @@ members = [
   "third_party/zed/rope",
   "third_party/zed/test-shims/*",
 ]
+# Patched crates (see [patch.crates-io] below) are not members: they keep
+# their upstream lints and formatting.
+exclude = ["third_party/zed/gpui-pre-wgpu"]
 default-members = ["crates/*"]
 
 [workspace.package]
@@ -172,6 +175,10 @@ skrifa = "0.44.0"
 # Math golden tests: CPU rasterizer (the version GPUI already pulls in;
 # BSD-3-Clause).
 tiny-skia = "0.11.4"
+# App (gv-app, Linux): the font database GPUI's text stack already uses
+# (same version and default features; MIT), to find the installed colour
+# emoji font and decide whether the bundled one is needed (R-22).
+fontdb = "0.23.0"
 # App (gv-app): the clipboard's HTML flavor for smart paste, which GPUI's
 # clipboard does not carry (MIT OR Apache-2.0). Without the default
 # `image-data` feature: no image decoder. gv-app adds Wayland data-control.
@@ -226,3 +233,11 @@ strip = "symbols"
 
 [profile.dev.package."*"]
 opt-level = 1
+
+# Patched upstream crates (ADR-014; third_party/zed/PROVENANCE.md). Each is a
+# verbatim copy of the published version with a small, upstreamable fix, so
+# the version here must equal the one in Cargo.lock.
+[patch.crates-io]
+# GPUI's Linux text system: variable fonts at the requested weight, and
+# application fonts that replace installed fonts of the same name (R-22).
+gpui-pre-wgpu = { path = "third_party/zed/gpui-pre-wgpu" }
