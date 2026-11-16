@@ -27,7 +27,7 @@ macro_rules! command_actions {
             }
         )+
 
-        /// Every command's action, by command id, in registry order.
+        /// Every command's action, by command id, grouped by area.
         const ACTIONS: &[(&str, Build)] = &[
             $( $( ($id, build::<$area::$action>), )+ )+
         ];
@@ -40,12 +40,44 @@ command_actions! {
         Settings = "app.settings",
         About = "app.about",
         OpenMenu = "app.open_menu",
+        KeymapCheatsheet = "app.keymap_cheatsheet",
+        OpenDocumentation = "app.open_documentation",
+        CheckForUpdates = "app.check_for_updates",
+        CopyDebugInfo = "app.copy_debug_info",
+        Licenses = "app.licenses",
+        InstallCli = "app.install_cli",
+    }
+    settings {
+        Import = "settings.import",
+        Export = "settings.export",
     }
     file {
         NewNote = "file.new_note",
         Save = "file.save",
         SaveAs = "file.save_as",
         Open = "file.open",
+        OpenFolder = "file.open_folder",
+        OpenRecent = "file.open_recent",
+        Revert = "file.revert",
+        NewFolder = "file.new_folder",
+        Rename = "file.rename",
+        Move = "file.move",
+        Duplicate = "file.duplicate",
+        Delete = "file.delete",
+        RevealInFileManager = "file.reveal_in_file_manager",
+        OpenWithDefaultApp = "file.open_with_default_app",
+        History = "file.history",
+        ExportHtml = "file.export_html",
+        ExportPdf = "file.export_pdf",
+        Print = "file.print",
+        OpenInBrowser = "file.open_in_browser",
+    }
+    notes {
+        DailyNote = "notes.daily_note",
+        InsertTemplate = "notes.insert_template",
+    }
+    bookmarks {
+        Toggle = "bookmarks.toggle",
     }
     tabs {
         New = "tabs.new",
@@ -61,6 +93,22 @@ command_actions! {
         FocusPreviousPane = "workspace.focus_previous_pane",
         RevealInTree = "workspace.reveal_in_tree",
         ContextMenu = "workspace.context_menu",
+        NewWindow = "workspace.new_window",
+        ShowFiles = "workspace.show_files",
+        ShowTags = "workspace.show_tags",
+        ShowBookmarks = "workspace.show_bookmarks",
+        ShowRecent = "workspace.show_recent",
+        ShowSyncConflicts = "workspace.show_sync_conflicts",
+        ShowOutline = "workspace.show_outline",
+        ShowBacklinks = "workspace.show_backlinks",
+        ShowOutgoingLinks = "workspace.show_outgoing_links",
+        ShowLinkChecker = "workspace.show_link_checker",
+    }
+    window {
+        Minimize = "window.minimize",
+        Zoom = "window.zoom",
+        BringAllToFront = "window.bring_all_to_front",
+        ToggleFullScreen = "window.toggle_full_screen",
     }
     view {
         ToggleMode = "view.toggle_mode",
@@ -68,6 +116,7 @@ command_actions! {
         Preview = "view.preview",
         Edit = "view.edit",
         Split = "view.split",
+        ToggleViewerMode = "view.toggle_viewer_mode",
         CycleTheme = "view.cycle_theme",
         ZoomIn = "view.zoom_in",
         ZoomOut = "view.zoom_out",
@@ -79,6 +128,9 @@ command_actions! {
         FoldLevel1 = "view.fold_level_1",
         FoldLevel2 = "view.fold_level_2",
         FoldLevel3 = "view.fold_level_3",
+        FoldLevel4 = "view.fold_level_4",
+        FoldLevel5 = "view.fold_level_5",
+        FoldLevel6 = "view.fold_level_6",
         ToggleSoftWrap = "view.toggle_soft_wrap",
     }
     navigation {
@@ -103,6 +155,21 @@ command_actions! {
         OpenInNewWindow = "links.open_in_new_window",
         Preview = "links.preview",
         List = "links.list",
+        CopyLink = "links.copy_link",
+        CopyResolvedPath = "links.copy_resolved_path",
+        CopyUrl = "links.copy_url",
+        RevealInTree = "links.reveal_in_tree",
+        RevealInFileManager = "links.reveal_in_file_manager",
+        ShowTrace = "links.show_trace",
+        Fix = "links.fix",
+        CreateNote = "links.create_note",
+        CopyLinkToHeading = "links.copy_link_to_heading",
+        CheckNote = "links.check_note",
+        CheckFolder = "links.check_folder",
+        CheckVault = "links.check_vault",
+    }
+    refactor {
+        RenameHeading = "refactor.rename_heading",
     }
     editor {
         Undo = "editor.undo",
@@ -110,6 +177,7 @@ command_actions! {
         Cut = "editor.cut",
         Copy = "editor.copy",
         CopyAsMarkdown = "editor.copy_as_markdown",
+        CopyAsRichText = "editor.copy_as_rich_text",
         Paste = "editor.paste",
         PastePlain = "editor.paste_plain",
         SelectAll = "editor.select_all",
@@ -158,6 +226,10 @@ command_actions! {
         TableMoveColumnRight = "editor.table_move_column_right",
         TableSortByColumn = "editor.table_sort_by_column",
     }
+    spell {
+        AddToDictionary = "spell.add_to_dictionary",
+        Ignore = "spell.ignore",
+    }
 }
 
 /// The action of the command `id`, or `None` for an unknown command.
@@ -177,7 +249,7 @@ pub fn command_of(action: &dyn Action) -> Option<&'static str> {
         .map(|(id, _)| *id)
 }
 
-/// Every command id that has an action, in registry order.
+/// Every command id that has an action, grouped by area.
 pub fn command_ids() -> impl Iterator<Item = &'static str> {
     ACTIONS.iter().map(|(id, _)| *id)
 }

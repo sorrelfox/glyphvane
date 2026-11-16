@@ -12,7 +12,7 @@ use gpui::{
 };
 use gv_settings::keymap::{CommandRegistry, Keymap, Platform};
 
-use super::model::{Entry, Role, SystemEntry, app_menus};
+use super::model::{ContextMenu, Entry, Role, SystemEntry, app_menus, context_menu};
 use super::native_menus;
 use crate::chrome::WindowChrome;
 use crate::keymap::action_for;
@@ -41,31 +41,92 @@ fn the_menus_follow_each_platform() {
             titles(platform),
             ["File", "Edit", "Format", "View", "Go", "Help"]
         );
+        let file = items(platform, "File");
+        assert_eq!(file[file.len() - 2..], ["app.settings", "app.quit"]);
         assert_eq!(
-            items(platform, "File"),
+            items(platform, "Help"),
             [
-                "tabs.new",
-                "file.open",
-                "file.save",
-                "file.save_as",
-                "tabs.close",
-                "tabs.reopen_closed",
-                "app.quit"
+                "app.keymap_cheatsheet",
+                "app.open_documentation",
+                "app.copy_debug_info",
+                "app.licenses",
+                "app.check_for_updates",
+                "app.about"
             ]
         );
-        assert_eq!(items(platform, "Help"), ["app.about"]);
     }
     let mac = Platform::MacOs;
     assert_eq!(
         titles(mac),
-        ["Glyphvane", "File", "Edit", "Format", "View", "Go"]
+        [
+            "Glyphvane",
+            "File",
+            "Edit",
+            "Format",
+            "View",
+            "Go",
+            "Window",
+            "Help"
+        ]
     );
     assert_eq!(
         items(mac, "Glyphvane"),
-        ["app.about", "app.settings", "app.quit"]
+        [
+            "app.about",
+            "app.check_for_updates",
+            "app.settings",
+            "app.install_cli",
+            "app.quit"
+        ]
     );
-    assert!(!items(mac, "File").contains(&"app.quit"));
+    assert_eq!(
+        items(mac, "Window"),
+        [
+            "window.minimize",
+            "window.zoom",
+            "window.bring_all_to_front"
+        ]
+    );
+    assert_eq!(
+        items(mac, "Help"),
+        [
+            "app.keymap_cheatsheet",
+            "app.open_documentation",
+            "app.copy_debug_info",
+            "app.licenses"
+        ]
+    );
+    let file = items(mac, "File");
+    assert!(!file.contains(&"app.quit") && !file.contains(&"app.settings"));
+    const FILE: [&str; 24] = [
+        "file.new_note",
+        "tabs.new",
+        "workspace.new_window",
+        "file.open",
+        "file.open_folder",
+        "file.open_recent",
+        "file.save",
+        "file.save_as",
+        "file.revert",
+        "file.rename",
+        "file.move",
+        "file.duplicate",
+        "file.delete",
+        "workspace.reveal_in_tree",
+        "file.reveal_in_file_manager",
+        "file.open_with_default_app",
+        "bookmarks.toggle",
+        "file.history",
+        "file.export_html",
+        "file.export_pdf",
+        "file.open_in_browser",
+        "file.print",
+        "tabs.close",
+        "tabs.reopen_closed",
+    ];
+    assert_eq!(items(mac, "File"), FILE);
     for platform in Platform::ALL {
+        assert_eq!(items(platform, "File")[..FILE.len()], FILE);
         assert_eq!(
             items(platform, "Edit"),
             [
@@ -74,10 +135,24 @@ fn the_menus_follow_each_platform() {
                 "editor.cut",
                 "editor.copy",
                 "editor.copy_as_markdown",
+                "editor.copy_as_rich_text",
+                "links.copy_link_to_heading",
                 "editor.paste",
+                "editor.paste_plain",
                 "editor.select_all",
+                "editor.expand_selection",
+                "editor.shrink_selection",
                 "search.find",
-                "search.replace"
+                "search.replace",
+                "search.find_next",
+                "search.find_previous",
+                "search.vault",
+                "editor.move_line_up",
+                "editor.move_line_down",
+                "editor.duplicate_line",
+                "editor.join_lines",
+                "editor.sort_lines",
+                "editor.change_case",
             ]
         );
         assert_eq!(
@@ -97,10 +172,15 @@ fn the_menus_follow_each_platform() {
                 "editor.heading_6",
                 "editor.paragraph",
                 "editor.quote",
+                "editor.insert_callout",
                 "editor.toggle_task",
                 "editor.indent",
                 "editor.outdent",
                 "editor.renumber_list",
+                "editor.insert_footnote",
+                "editor.table",
+                "notes.insert_template",
+                "editor.toggle_comment",
             ]
         );
         assert_eq!(
@@ -109,8 +189,20 @@ fn the_menus_follow_each_platform() {
                 "view.preview",
                 "view.edit",
                 "view.split",
+                "view.toggle_mode",
+                "view.toggle_split",
+                "view.toggle_viewer_mode",
                 "workspace.toggle_sidebar",
                 "workspace.toggle_panel",
+                "workspace.show_files",
+                "workspace.show_tags",
+                "workspace.show_bookmarks",
+                "workspace.show_recent",
+                "workspace.show_sync_conflicts",
+                "workspace.show_outline",
+                "workspace.show_backlinks",
+                "workspace.show_outgoing_links",
+                "workspace.show_link_checker",
                 "editor.toggle_whitespace",
                 "view.toggle_soft_wrap",
                 "view.fold",
@@ -121,34 +213,163 @@ fn the_menus_follow_each_platform() {
                 "view.zoom_in",
                 "view.zoom_out",
                 "view.zoom_reset",
+                "window.toggle_full_screen",
             ]
         );
         assert_eq!(
             items(platform, "Go"),
-            ["navigation.back", "navigation.forward"]
+            [
+                "navigation.back",
+                "navigation.forward",
+                "workspace.quick_switcher",
+                "navigation.go_to_line",
+                "navigation.go_to_heading",
+                "navigation.go_to_footnote",
+                "links.follow",
+                "links.open_in_new_tab",
+                "links.open_in_split",
+                "links.open_in_new_window",
+                "links.preview",
+                "links.list",
+                "notes.daily_note",
+                "navigation.next_misspelling",
+                "workspace.focus_next_pane",
+                "workspace.focus_previous_pane",
+            ]
         );
     }
+}
+
+fn context_items(kind: ContextMenu) -> Vec<&'static str> {
+    context_menu(kind).items().map(|i| i.command).collect()
+}
+
+#[test]
+fn the_context_menus_hold_their_commands() {
+    assert_eq!(
+        context_items(ContextMenu::Link),
+        [
+            "links.follow",
+            "links.open_in_new_tab",
+            "links.open_in_split",
+            "links.open_in_new_window",
+            "links.copy_link",
+            "links.copy_resolved_path",
+            "links.copy_url",
+            "links.reveal_in_tree",
+            "links.reveal_in_file_manager",
+            "links.show_trace",
+            "links.fix",
+        ]
+    );
+    let editor = context_items(ContextMenu::Editor);
+    assert_eq!(
+        editor[..7],
+        [
+            "editor.cut",
+            "editor.copy",
+            "editor.copy_as_markdown",
+            "editor.paste",
+            "editor.paste_plain",
+            "spell.add_to_dictionary",
+            "spell.ignore",
+        ]
+    );
+    // Every table command, Insert or format table first.
+    let registry = CommandRegistry::builtin();
+    let tables: Vec<&str> = registry
+        .iter()
+        .map(|c| c.id().as_str())
+        .filter(|id| id.starts_with("editor.table"))
+        .collect();
+    assert_eq!(editor[7..], tables[..]);
+    assert_eq!(
+        context_items(ContextMenu::FileTree),
+        [
+            "file.new_note",
+            "file.new_folder",
+            "file.rename",
+            "file.move",
+            "file.duplicate",
+            "file.delete",
+            "file.reveal_in_file_manager",
+            "file.open_with_default_app",
+        ]
+    );
+}
+
+/// Every menu on every platform, and every context menu.
+fn all_menus() -> Vec<super::model::Menu> {
+    let mut menus: Vec<_> = Platform::ALL.into_iter().flat_map(app_menus).collect();
+    menus.extend(
+        [
+            ContextMenu::Link,
+            ContextMenu::Editor,
+            ContextMenu::FileTree,
+        ]
+        .into_iter()
+        .map(context_menu),
+    );
+    menus
 }
 
 #[test]
 fn every_item_names_a_command() {
     let registry = CommandRegistry::builtin();
-    for platform in Platform::ALL {
-        for menu in app_menus(platform) {
-            for item in menu.items() {
-                assert!(registry.get(item.command).is_some(), "{}", item.command);
-                assert!(action_for(item.command).is_some(), "{}", item.command);
-            }
-            // No separator at either end or twice in a row.
-            let separators: Vec<bool> = menu
-                .entries
-                .iter()
-                .map(|e| matches!(e, Entry::Separator))
-                .collect();
-            assert!(!separators.first().copied().unwrap_or(true));
-            assert!(!separators.last().copied().unwrap_or(true));
-            assert!(!separators.windows(2).any(|w| w[0] && w[1]));
+    for menu in all_menus() {
+        let mut seen = std::collections::HashSet::new();
+        for item in menu.items() {
+            assert!(registry.get(item.command).is_some(), "{}", item.command);
+            assert!(action_for(item.command).is_some(), "{}", item.command);
+            assert!(seen.insert(item.command), "{} twice", item.command);
         }
+        // No separator at either end or twice in a row.
+        let separators: Vec<bool> = menu
+            .entries
+            .iter()
+            .map(|e| matches!(e, Entry::Separator))
+            .collect();
+        assert!(!separators.first().copied().unwrap_or(true));
+        assert!(!separators.last().copied().unwrap_or(true));
+        assert!(!separators.windows(2).any(|w| w[0] && w[1]));
+    }
+}
+
+/// Every command is in some menu, except those reached by keys, the
+/// palette or a view's own controls only.
+#[test]
+fn every_command_is_in_a_menu_or_left_out_on_purpose() {
+    const NOT_IN_MENUS: &[&str] = &[
+        "app.open_menu",
+        "settings.import",
+        "settings.export",
+        "workspace.command_palette",
+        "workspace.context_menu",
+        "view.fold_level_1",
+        "view.fold_level_2",
+        "view.fold_level_3",
+        "view.fold_level_4",
+        "view.fold_level_5",
+        "view.fold_level_6",
+        "links.create_note",
+        "links.check_note",
+        "links.check_folder",
+        "links.check_vault",
+        "refactor.rename_heading",
+        "editor.newline",
+        "editor.newline_plain",
+    ];
+    let in_menus: std::collections::HashSet<&str> = all_menus()
+        .iter()
+        .flat_map(|m| m.items().map(|i| i.command).collect::<Vec<_>>())
+        .collect();
+    for command in CommandRegistry::builtin().iter() {
+        let id = command.id().as_str();
+        assert_ne!(
+            in_menus.contains(id),
+            NOT_IN_MENUS.contains(&id),
+            "{id}: in a menu, or listed as left out, but not both"
+        );
     }
 }
 
@@ -172,6 +393,7 @@ fn shortcut_labels_follow_the_platform() {
         [
             "Settings… ⌘,",
             "Quit Glyphvane ⌘Q",
+            "New note ⌘N",
             "Save ⌘S",
             "Save as… ⇧⌘S",
             "Close tab ⌘W",
@@ -181,9 +403,17 @@ fn shortcut_labels_follow_the_platform() {
             "Cut ⌘X",
             "Copy ⌘C",
             "Paste ⌘V",
+            "Paste as plain text ⇧⌘V",
             "Select all ⌘A",
+            "Expand selection ⌃⇧⌘→",
+            "Shrink selection ⌃⇧⌘←",
             "Find ⌘F",
             "Replace ⌥⌘F",
+            "Find next ⌘G",
+            "Find previous ⇧⌘G",
+            "Search in vault ⇧⌘F",
+            "Move line up ⌥↑",
+            "Move line down ⌥↓",
             "Bold ⌘B",
             "Italic ⌘I",
             "Strikethrough ⇧⌘X",
@@ -201,28 +431,49 @@ fn shortcut_labels_follow_the_platform() {
             "Toggle task ⌘L",
             "Indent ⇥",
             "Outdent ⇧⇥",
+            "Insert or format table ⌥⌘T",
+            "Toggle comment ⌘/",
+            "Toggle Preview and Edit ⌘E",
+            "Toggle split view ⌥⌘E",
             "Cycle theme ⌘K ⌘T",
             "Zoom in ⌘=",
             "Zoom out ⌘-",
             "Reset zoom ⌘0",
             "Back ⌘[",
             "Forward ⌘]",
+            "Quick switcher… ⌘O",
+            "Go to line… ⌃G",
+            "Go to heading… ⇧⌘O",
+            "Follow link ⌥↩",
+            "Open link in new tab ⌥⌘↩",
+            "Next pane F6",
+            "Previous pane ⇧F6",
         ]
     );
-    let others = [
+    let linux = [
+        "New note Ctrl+N",
         "Save Ctrl+S",
         "Save as… Ctrl+Shift+S",
         "Close tab Ctrl+W",
         "Reopen closed tab Ctrl+Shift+T",
+        "Settings… Ctrl+,",
         "Quit Ctrl+Q",
         "Undo Ctrl+Z",
         "Redo Ctrl+Shift+Z",
         "Cut Ctrl+X",
         "Copy Ctrl+C",
         "Paste Ctrl+V",
+        "Paste as plain text Ctrl+Shift+V",
         "Select all Ctrl+A",
+        "Expand selection Alt+Shift+→",
+        "Shrink selection Alt+Shift+←",
         "Find Ctrl+F",
         "Replace Ctrl+H",
+        "Find next F3",
+        "Find previous Shift+F3",
+        "Search in vault Ctrl+Shift+F",
+        "Move line up Alt+↑",
+        "Move line down Alt+↓",
         "Bold Ctrl+B",
         "Italic Ctrl+I",
         "Strikethrough Ctrl+Shift+X",
@@ -240,22 +491,52 @@ fn shortcut_labels_follow_the_platform() {
         "Toggle task Ctrl+L",
         "Indent Tab",
         "Outdent Shift+Tab",
+        "Toggle comment Ctrl+/",
+        "Toggle Preview and Edit Ctrl+E",
+        "Toggle split view Ctrl+Alt+E",
         "Cycle theme Ctrl+K Ctrl+T",
         "Zoom in Ctrl+=",
         "Zoom out Ctrl+-",
         "Reset zoom Ctrl+0",
         "Back Alt+←",
         "Forward Alt+→",
+        "Quick switcher… Ctrl+O",
+        "Go to line… Ctrl+G",
+        "Go to heading… Ctrl+Shift+O",
+        "Follow link Alt+Enter",
+        "Open link in new tab Ctrl+Alt+Enter",
+        "Next pane F6",
+        "Previous pane Shift+F6",
     ];
-    assert_eq!(labels(Platform::Linux), others);
-    assert_eq!(labels(Platform::Windows), others);
+    assert_eq!(labels(Platform::Linux), linux);
+    // Windows also has Insert table (Ctrl+Alt+T opens a terminal on Linux).
+    let mut windows = linux.to_vec();
+    let outdent = windows
+        .iter()
+        .position(|l| *l == "Outdent Shift+Tab")
+        .unwrap();
+    windows.insert(outdent + 1, "Insert or format table Ctrl+Alt+T");
+    assert_eq!(labels(Platform::Windows), windows);
 }
 
 #[test]
 fn the_macos_menu_bar_carries_the_commands_actions() {
     let menus = native_menus(Platform::MacOs);
     let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-    assert_eq!(names, ["Glyphvane", "File", "Edit", "Format", "View", "Go"]);
+    // The system fills the menu named Window with the window list.
+    assert_eq!(
+        names,
+        [
+            "Glyphvane",
+            "File",
+            "Edit",
+            "Format",
+            "View",
+            "Go",
+            "Window",
+            "Help"
+        ]
+    );
     let app = &menus[0];
     assert!(app.items.iter().any(|i| matches!(
         i,
@@ -279,7 +560,17 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         actions(app),
         [
             ("About Glyphvane".to_owned(), "app::About", false),
+            (
+                "Check for updates".to_owned(),
+                "app::CheckForUpdates",
+                false
+            ),
             ("Settings…".to_owned(), "app::Settings", false),
+            (
+                "Install glyphvane command…".to_owned(),
+                "app::InstallCli",
+                false
+            ),
             ("Hide Glyphvane".to_owned(), "app_menu::Hide", false),
             ("Hide others".to_owned(), "app_menu::HideOthers", false),
             ("Show all".to_owned(), "app_menu::ShowAll", false),
@@ -287,7 +578,7 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         ]
     );
     assert_eq!(
-        actions(&menus[2]),
+        actions(&menus[2])[..10],
         [
             ("Undo".to_owned(), "editor::Undo", true),
             ("Redo".to_owned(), "editor::Redo", true),
@@ -298,10 +589,23 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
                 "editor::CopyAsMarkdown",
                 false
             ),
+            (
+                "Copy as rich text".to_owned(),
+                "editor::CopyAsRichText",
+                false
+            ),
+            (
+                "Copy link to heading".to_owned(),
+                "links::CopyLinkToHeading",
+                false
+            ),
             ("Paste".to_owned(), "editor::Paste", true),
+            (
+                "Paste as plain text".to_owned(),
+                "editor::PastePlain",
+                false
+            ),
             ("Select all".to_owned(), "editor::SelectAll", true),
-            ("Find".to_owned(), "search::Find", false),
-            ("Replace".to_owned(), "search::Replace", false),
         ]
     );
     let roles: Vec<Option<Role>> = app_menus(Platform::MacOs)[2]
@@ -309,19 +613,21 @@ fn the_macos_menu_bar_carries_the_commands_actions() {
         .map(|i| i.role)
         .collect();
     assert_eq!(
-        roles,
+        roles[..10],
         [
             Some(Role::Undo),
             Some(Role::Redo),
             Some(Role::Cut),
             Some(Role::Copy),
             None,
-            Some(Role::Paste),
-            Some(Role::SelectAll),
             None,
-            None
+            None,
+            Some(Role::Paste),
+            None,
+            Some(Role::SelectAll),
         ]
     );
+    assert!(roles[10..].iter().all(Option::is_none));
 }
 
 // --- The popover ----------------------------------------------------------------
@@ -524,8 +830,9 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     // File, Edit, Format, View: open View; its first item is highlighted.
     f.keys("down down down right");
     assert!(f.bounds("app-menu-item:view.preview").is_some());
-    // Preview, Edit, Split, Toggle sidebar.
-    f.keys("down down down enter");
+    // Preview, Edit, Split, Toggle Preview and Edit, Toggle split view,
+    // Toggle sidebar (Viewer mode has no handler yet and is skipped).
+    f.keys("down down down down down enter");
     assert!(!f.is_open());
     assert!(f.sidebar_open());
     assert!(f.reader_focused());
@@ -550,7 +857,8 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(f.bounds("app-menu-item:editor.bold").is_some());
     f.keys("right");
     assert!(f.bounds("app-menu-item:view.cycle_theme").is_some());
-    // Up wraps to the last enabled item, Cycle theme (zoom is disabled).
+    // Up wraps to the last enabled item, Cycle theme (zoom and full
+    // screen are disabled).
     f.keys("up enter");
     assert!(!f.is_open());
     assert_eq!(

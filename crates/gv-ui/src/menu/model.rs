@@ -1,25 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! What the application menu holds, per platform. Its contents are not
-//! designed: they follow the platforms' usual menus, trimmed to the commands
-//! the application has.
+//! What the application menu and the context menus hold, per platform.
+//! Their contents are not designed: they follow the platforms' usual menus
+//! and hold every command the application is to have.
 //!
 //! Items name commands of the keymap, so a menu runs exactly what the keys
 //! run and shows their keys. Items whose command nothing handles where the
-//! focus is are shown disabled: Open file, Save as (no file dialog yet),
-//! About and zoom always; Undo, Redo, Cut, Paste, Show whitespace, Soft
-//! wrap, the fold items and the Format menu outside the editor (in Preview); in the editor, the Format items that
-//! cannot run in the tab's profile (strikethrough, highlight and task boxes
-//! in CommonMark) or at the carets (bold in a code block). In viewer mode
-//! Edit and Split are disabled, and so is everything that edits.
+//! focus is are shown disabled, so the menus already list commands that are
+//! not built yet: they stay greyed until a view handles them. Besides
+//! those, Undo, Redo, Cut, Paste, Show whitespace, Soft wrap, the fold
+//! items and the Format menu are disabled outside the editor (in Preview);
+//! in the editor, the Format items that cannot run in the tab's profile
+//! (strikethrough, highlight and task boxes in CommonMark) or at the carets
+//! (bold in a code block). In viewer mode Edit and Split are disabled, and
+//! so is everything that edits.
 
 use gv_settings::keymap::Platform;
 
 use crate::shell::ViewMode;
 
-/// A menu: File, Edit, Format, View, Go, Help, and on macOS the
-/// application menu.
+/// A menu: File, Edit, Format, View, Go, Help, on macOS the application
+/// and Window menus, or a context menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
     pub title: &'static str,
@@ -182,8 +184,11 @@ const fn with_role(command: &'static str, title: &'static str, role: Role) -> En
 const SEPARATOR: Entry = Entry::Separator;
 
 /// The application's menus on `platform`, in menu bar order. On macOS the
-/// application menu comes first and holds About, Settings and Quit; on
-/// Windows and Linux, Quit ends the File menu and About is under Help.
+/// application menu comes first and holds About, Check for updates,
+/// Settings, the command-line install and Quit, and a Window menu comes
+/// before Help (the system adds its window list). On Windows and Linux,
+/// Settings and Quit end the File menu, and About and Check for updates
+/// are under Help.
 pub fn app_menus(platform: Platform) -> Vec<Menu> {
     let mac = platform == Platform::MacOs;
     let mut menus = Vec::new();
@@ -192,8 +197,10 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             "Glyphvane",
             [
                 item("app.about", "About Glyphvane"),
+                item("app.check_for_updates", "Check for updates"),
                 SEPARATOR,
                 item("app.settings", "Settings…"),
+                item("app.install_cli", "Install glyphvane command…"),
                 SEPARATOR,
                 Entry::System(SystemEntry::Services),
                 SEPARATOR,
@@ -206,17 +213,44 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
         ));
     }
     let mut file = vec![
+        item("file.new_note", "New note"),
         item("tabs.new", "New tab"),
+        item("workspace.new_window", "New window"),
+        SEPARATOR,
         item("file.open", "Open file…"),
+        item("file.open_folder", "Open folder…"),
+        item("file.open_recent", "Open recent…"),
         SEPARATOR,
         item("file.save", "Save"),
         item("file.save_as", "Save as…"),
+        item("file.revert", "Revert"),
+        SEPARATOR,
+        item("file.rename", "Rename…"),
+        item("file.move", "Move to…"),
+        item("file.duplicate", "Duplicate"),
+        item("file.delete", "Move to trash"),
+        SEPARATOR,
+        item("workspace.reveal_in_tree", "Reveal in file tree"),
+        item("file.reveal_in_file_manager", "Reveal in file manager"),
+        item("file.open_with_default_app", "Open with default app"),
+        item("bookmarks.toggle", "Bookmark"),
+        item("file.history", "File history"),
+        SEPARATOR,
+        item("file.export_html", "Export as HTML…"),
+        item("file.export_pdf", "Export as PDF…"),
+        item("file.open_in_browser", "Open in browser"),
+        item("file.print", "Print…"),
         SEPARATOR,
         item("tabs.close", "Close tab"),
         item("tabs.reopen_closed", "Reopen closed tab"),
     ];
     if !mac {
-        file.extend([SEPARATOR, item("app.quit", "Quit")]);
+        file.extend([
+            SEPARATOR,
+            item("app.settings", "Settings…"),
+            SEPARATOR,
+            item("app.quit", "Quit"),
+        ]);
     }
     menus.push(Menu::new("File", file));
     menus.push(Menu::new(
@@ -228,11 +262,27 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             with_role("editor.cut", "Cut", Role::Cut),
             with_role("editor.copy", "Copy", Role::Copy),
             item("editor.copy_as_markdown", "Copy as Markdown"),
+            item("editor.copy_as_rich_text", "Copy as rich text"),
+            item("links.copy_link_to_heading", "Copy link to heading"),
             with_role("editor.paste", "Paste", Role::Paste),
+            item("editor.paste_plain", "Paste as plain text"),
             with_role("editor.select_all", "Select all", Role::SelectAll),
+            SEPARATOR,
+            item("editor.expand_selection", "Expand selection"),
+            item("editor.shrink_selection", "Shrink selection"),
             SEPARATOR,
             item("search.find", "Find"),
             item("search.replace", "Replace"),
+            item("search.find_next", "Find next"),
+            item("search.find_previous", "Find previous"),
+            item("search.vault", "Search in vault"),
+            SEPARATOR,
+            item("editor.move_line_up", "Move line up"),
+            item("editor.move_line_down", "Move line down"),
+            item("editor.duplicate_line", "Duplicate line"),
+            item("editor.join_lines", "Join lines"),
+            item("editor.sort_lines", "Sort lines"),
+            item("editor.change_case", "Change case"),
         ],
     ));
     menus.push(Menu::new(
@@ -255,11 +305,18 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             item("editor.paragraph", "Paragraph"),
             SEPARATOR,
             item("editor.quote", "Quote"),
+            item("editor.insert_callout", "Insert callout…"),
             item("editor.toggle_task", "Toggle task"),
             SEPARATOR,
             item("editor.indent", "Indent"),
             item("editor.outdent", "Outdent"),
             item("editor.renumber_list", "Renumber list"),
+            SEPARATOR,
+            item("editor.insert_footnote", "Insert footnote"),
+            item("editor.table", "Insert or format table"),
+            item("notes.insert_template", "Insert template…"),
+            SEPARATOR,
+            item("editor.toggle_comment", "Toggle comment"),
         ],
     ));
     menus.push(Menu::new(
@@ -269,8 +326,23 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             mode_item("view.edit", "Edit", ViewMode::Edit),
             mode_item("view.split", "Split", ViewMode::Split),
             SEPARATOR,
+            item("view.toggle_mode", "Toggle Preview and Edit"),
+            item("view.toggle_split", "Toggle split view"),
+            item("view.toggle_viewer_mode", "Viewer mode"),
+            SEPARATOR,
             item("workspace.toggle_sidebar", "Toggle sidebar"),
             item("workspace.toggle_panel", "Toggle right panel"),
+            SEPARATOR,
+            item("workspace.show_files", "Files"),
+            item("workspace.show_tags", "Tags"),
+            item("workspace.show_bookmarks", "Bookmarks"),
+            item("workspace.show_recent", "Recent"),
+            item("workspace.show_sync_conflicts", "Sync conflicts"),
+            SEPARATOR,
+            item("workspace.show_outline", "Outline"),
+            item("workspace.show_backlinks", "Backlinks"),
+            item("workspace.show_outgoing_links", "Outgoing links"),
+            item("workspace.show_link_checker", "Link checker"),
             SEPARATOR,
             item("editor.toggle_whitespace", "Show whitespace"),
             item("view.toggle_soft_wrap", "Soft wrap"),
@@ -285,6 +357,8 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             item("view.zoom_in", "Zoom in"),
             item("view.zoom_out", "Zoom out"),
             item("view.zoom_reset", "Reset zoom"),
+            SEPARATOR,
+            item("window.toggle_full_screen", "Full screen"),
         ],
     ));
     menus.push(Menu::new(
@@ -292,12 +366,130 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
         [
             requiring("navigation.back", "Back", Requirement::CanGoBack),
             requiring("navigation.forward", "Forward", Requirement::CanGoForward),
+            SEPARATOR,
+            item("workspace.quick_switcher", "Quick switcher…"),
+            item("navigation.go_to_line", "Go to line…"),
+            item("navigation.go_to_heading", "Go to heading…"),
+            item("navigation.go_to_footnote", "Go to footnote or back"),
+            SEPARATOR,
+            item("links.follow", "Follow link"),
+            item("links.open_in_new_tab", "Open link in new tab"),
+            item("links.open_in_split", "Open link in split"),
+            item("links.open_in_new_window", "Open link in new window"),
+            item("links.preview", "Preview link"),
+            item("links.list", "Links in this note…"),
+            SEPARATOR,
+            item("notes.daily_note", "Today's note"),
+            item("navigation.next_misspelling", "Next misspelling"),
+            SEPARATOR,
+            item("workspace.focus_next_pane", "Next pane"),
+            item("workspace.focus_previous_pane", "Previous pane"),
         ],
     ));
-    // On macOS About is in the application menu, which leaves Help empty
-    // until there is help to show.
-    if !mac {
-        menus.push(Menu::new("Help", [item("app.about", "About Glyphvane")]));
+    if mac {
+        menus.push(Menu::new(
+            "Window",
+            [
+                item("window.minimize", "Minimize"),
+                item("window.zoom", "Zoom"),
+                SEPARATOR,
+                item("window.bring_all_to_front", "Bring all to front"),
+            ],
+        ));
     }
+    let mut help = vec![
+        item("app.keymap_cheatsheet", "Keyboard shortcuts"),
+        item("app.open_documentation", "Documentation"),
+        SEPARATOR,
+        item("app.copy_debug_info", "Copy debug info"),
+        item("app.licenses", "Third-party licenses"),
+    ];
+    if !mac {
+        help.extend([
+            SEPARATOR,
+            item("app.check_for_updates", "Check for updates"),
+            item("app.about", "About Glyphvane"),
+        ]);
+    }
+    menus.push(Menu::new("Help", help));
     menus
+}
+
+/// The context menus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenu {
+    /// On a link, in Preview and in the editor.
+    Link,
+    /// In the editor, off a link. The spelling items apply to a misspelled
+    /// word and the table items inside a table; the view that shows the
+    /// menu may leave them out elsewhere.
+    Editor,
+    /// On an entry of the file tree.
+    FileTree,
+}
+
+/// The items of a context menu. They are the same on every platform.
+pub fn context_menu(kind: ContextMenu) -> Menu {
+    match kind {
+        ContextMenu::Link => Menu::new(
+            "Link",
+            [
+                item("links.follow", "Open"),
+                item("links.open_in_new_tab", "Open in new tab"),
+                item("links.open_in_split", "Open in split"),
+                item("links.open_in_new_window", "Open in new window"),
+                SEPARATOR,
+                item("links.copy_link", "Copy link"),
+                item("links.copy_resolved_path", "Copy resolved path"),
+                item("links.copy_url", "Copy URL"),
+                SEPARATOR,
+                item("links.reveal_in_tree", "Reveal in file tree"),
+                item("links.reveal_in_file_manager", "Reveal in file manager"),
+                SEPARATOR,
+                item("links.show_trace", "Show resolution trace"),
+                item("links.fix", "Fix link…"),
+            ],
+        ),
+        ContextMenu::Editor => Menu::new(
+            "Editor",
+            [
+                with_role("editor.cut", "Cut", Role::Cut),
+                with_role("editor.copy", "Copy", Role::Copy),
+                item("editor.copy_as_markdown", "Copy as Markdown"),
+                with_role("editor.paste", "Paste", Role::Paste),
+                item("editor.paste_plain", "Paste as plain text"),
+                SEPARATOR,
+                item("spell.add_to_dictionary", "Add to dictionary"),
+                item("spell.ignore", "Ignore"),
+                SEPARATOR,
+                item("editor.table", "Format table"),
+                item("editor.table_insert_row_above", "Insert row above"),
+                item("editor.table_insert_row_below", "Insert row below"),
+                item("editor.table_insert_column_left", "Insert column left"),
+                item("editor.table_insert_column_right", "Insert column right"),
+                item("editor.table_delete_row", "Delete row"),
+                item("editor.table_delete_column", "Delete column"),
+                item("editor.table_move_row_up", "Move row up"),
+                item("editor.table_move_row_down", "Move row down"),
+                item("editor.table_move_column_left", "Move column left"),
+                item("editor.table_move_column_right", "Move column right"),
+                item("editor.table_sort_by_column", "Sort by column"),
+            ],
+        ),
+        ContextMenu::FileTree => Menu::new(
+            "File tree",
+            [
+                item("file.new_note", "New note"),
+                item("file.new_folder", "New folder"),
+                SEPARATOR,
+                item("file.rename", "Rename…"),
+                item("file.move", "Move to…"),
+                item("file.duplicate", "Duplicate"),
+                item("file.delete", "Move to trash"),
+                SEPARATOR,
+                item("file.reveal_in_file_manager", "Reveal in file manager"),
+                item("file.open_with_default_app", "Open with default app"),
+            ],
+        ),
+    }
 }
