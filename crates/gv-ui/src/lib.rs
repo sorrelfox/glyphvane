@@ -18,6 +18,7 @@ pub mod palette;
 pub mod profile;
 pub mod reader;
 pub mod settings;
+pub mod settings_window;
 pub mod shell;
 pub mod split;
 pub mod theme;
@@ -66,6 +67,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(find::key_bindings());
     menu::init(cx);
     palette::init(cx);
+    settings_window::init(cx);
     keymap::init(cx);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {

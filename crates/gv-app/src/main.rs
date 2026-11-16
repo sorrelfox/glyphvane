@@ -135,6 +135,9 @@ fn main() -> ExitCode {
     let settings_file = settings::load(locations.as_ref());
     let watched = settings_file.as_ref().map(|file| file.path().to_path_buf());
     let mut app_settings = AppSettings::new(settings_file, cli.theme.map(ThemeChoice::from));
+    if let Some(locations) = &locations {
+        app_settings = app_settings.with_locations(locations.clone());
+    }
     if safe_mode {
         app_settings = app_settings.with_safe_mode();
     }

@@ -3,9 +3,19 @@
 
 //! The settings in effect, as a GPUI global, and how they reach the UI.
 //!
-//! Only the global layer (`settings.toml` in the config dir) is used until
-//! vaults exist. Changes apply at once: a reloaded file and a theme picked
-//! with the theme chord both update every open window without a restart.
+//! The global layer (`settings.toml` in the config dir) is always used. The
+//! layers of one vault are used on top of it: its overlay in the app data
+//! dir ("this vault", written by the settings window) and its in-vault
+//! `.glyphvane/settings.toml` (read only; it can only tighten
+//! security-relevant settings). The vault is the one of the main window
+//! focused last ([`AppSettings::open_vault`]); every window uses it until
+//! settings are resolved per window. Changes apply at once: a reloaded file,
+//! a theme picked with the theme chord and an edit in the settings window
+//! all update every open window without a restart.
+//!
+//! **Vault ids** (the overlay's folder name in the data dir) are
+//! [`vault_id`]: the vault folder's name and a hash of its absolute path.
+//! The vault model has no ids of its own yet.
 //!
 //! **Theme precedence**, highest first:
 //!
@@ -24,9 +34,13 @@
 //! the theme chord changes the theme for that run only.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use gpui::{App, Global};
-use gv_settings::{Change, Effective, Layer, LayerKind, SettingsFile, SettingsStack, Severity};
+use gv_settings::{
+    Change, Diagnostic, Effective, Layer, LayerKind, Locations, Scope, SettingsFile, SettingsStack,
+    Severity,
+};
 
 use crate::appearance::Appearance;
 use crate::theme::{PreferredLight, ThemeChoice};
@@ -99,9 +113,108 @@ pub struct AppSettings {
     global_file: Option<SettingsFile>,
     theme_override: Option<ThemeChoice>,
     safe_mode: bool,
+    /// Where vault overlays live; `None` without a home directory (and in
+    /// tests), when vault overlays are kept in memory only.
+    locations: Option<Locations>,
+    /// The vault whose layers are in use.
+    vault: Option<VaultSettings>,
 }
 
 impl Global for AppSettings {}
+
+/// Which settings an edit changes: the settings window's scope switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Target {
+    /// The global `settings.toml` ("All vaults").
+    #[default]
+    AllVaults,
+    /// The open vault's overlay in the app data dir ("this vault").
+    Vault,
+}
+
+impl Target {
+    /// The layer an edit goes to.
+    pub fn layer(self) -> LayerKind {
+        match self {
+            Self::AllVaults => LayerKind::Global,
+            Self::Vault => LayerKind::Vault,
+        }
+    }
+}
+
+/// The settings layers of one vault.
+#[derive(Debug, Clone)]
+pub struct VaultSettings {
+    root: PathBuf,
+    name: String,
+    id: String,
+    /// The overlay in the app data dir; `None` without locations.
+    overlay: Option<SettingsFile>,
+}
+
+impl VaultSettings {
+    /// The vault's root folder.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The vault's name: its folder's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The vault id that keys its overlay.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The overlay file, when settings are saved.
+    pub fn overlay(&self) -> Option<&SettingsFile> {
+        self.overlay.as_ref()
+    }
+}
+
+/// The id of the vault at `root`: its folder name (letters, digits, `-`
+/// and `_` only, at most 48 of them) and 16 hex digits of an FNV-1a hash of
+/// its absolute path, so two vaults with the same folder name differ.
+pub fn vault_id(root: &Path) -> String {
+    let absolute = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in absolute.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let name: String = absolute
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    if name.is_empty() {
+        format!("vault-{hash:016x}")
+    } else {
+        format!("{name}-{hash:016x}")
+    }
+}
+
+/// Why an edit from the settings window was not made, as a sentence for
+/// the row's inline error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditRefused(pub String);
+
+impl fmt::Display for EditRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 impl fmt::Debug for AppSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,7 +239,25 @@ impl AppSettings {
             global_file,
             theme_override,
             safe_mode: false,
+            locations: None,
+            vault: None,
         }
+    }
+
+    /// Where vault overlays are read and written.
+    pub fn with_locations(mut self, locations: Locations) -> Self {
+        self.locations = Some(locations);
+        self
+    }
+
+    /// The app's locations, when known.
+    pub fn locations(&self) -> Option<&Locations> {
+        self.locations.as_ref()
+    }
+
+    /// The vault whose layers are in use.
+    pub fn vault(&self) -> Option<&VaultSettings> {
+        self.vault.as_ref()
     }
 
     /// Safe mode for this run: the theme settings give way to the built-in
@@ -240,11 +371,216 @@ impl AppSettings {
         Self::apply(cx);
     }
 
+    /// Uses the layers of the vault at `root`: its overlay in the app data
+    /// dir and its in-vault `.glyphvane/settings.toml`. Nothing happens when
+    /// that vault is already in use. Changed settings apply at once.
+    pub fn open_vault(cx: &mut App, root: &Path) {
+        let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+        let this = cx.global_mut::<Self>();
+        if this.vault.as_ref().is_some_and(|v| v.root == root) {
+            return;
+        }
+        let id = vault_id(&root);
+        let name = root.file_name().map_or_else(
+            || root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let overlay = this
+            .locations
+            .as_ref()
+            .and_then(|l| l.vault_settings_file(&id).ok())
+            .and_then(|path| match SettingsFile::load(path, LayerKind::Vault) {
+                Ok(file) => Some(file),
+                Err(err) => {
+                    tracing::warn!("settings: cannot read the vault settings: {err}");
+                    None
+                }
+            });
+        let in_vault = SettingsFile::load(
+            gv_settings::in_vault_settings_file(&root),
+            LayerKind::InVault,
+        )
+        .map(|file| file.layer().clone())
+        .unwrap_or_else(|err| {
+            tracing::warn!("settings: cannot read the vault's shared settings: {err}");
+            Layer::empty(LayerKind::InVault)
+        });
+        let overlay_layer = overlay
+            .as_ref()
+            .map_or_else(|| Layer::empty(LayerKind::Vault), |f| f.layer().clone());
+        this.stack.set_layer(in_vault);
+        this.stack.set_layer(overlay_layer);
+        this.vault = Some(VaultSettings {
+            root,
+            name,
+            id,
+            overlay,
+        });
+        log_diagnostics(this.stack.effective());
+        Self::apply(cx);
+        cx.refresh_windows();
+    }
+
+    /// The settings as `target` sees them: the global file over the
+    /// defaults for all vaults, everything in effect for the vault.
+    pub fn effective_for(&self, target: Target) -> Effective {
+        match target {
+            Target::AllVaults => gv_settings::resolve(self.stack.layer(LayerKind::Global)),
+            Target::Vault => self.stack.effective().clone(),
+        }
+    }
+
+    /// Whether the layer of `target` sets `key` itself.
+    pub fn sets(&self, target: Target, key: &str) -> bool {
+        self.stack
+            .layer(target.layer())
+            .is_some_and(|layer| layer.get(key).is_some())
+    }
+
+    /// The problems of `key` in the layers `target` shows: a value that is
+    /// invalid or was ignored.
+    pub fn problems(&self, target: Target, key: &str) -> Vec<Diagnostic> {
+        let layers: &[LayerKind] = match target {
+            Target::AllVaults => &[LayerKind::Global],
+            Target::Vault => &[LayerKind::Global, LayerKind::InVault, LayerKind::Vault],
+        };
+        self.stack
+            .effective()
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.severity >= Severity::Warning
+                    && d.key.as_deref() == Some(key)
+                    && layers.contains(&d.layer)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The file edits of `target` go to, if settings are saved.
+    pub fn file_of(&self, target: Target) -> Option<&SettingsFile> {
+        match target {
+            Target::AllVaults => self.global_file.as_ref(),
+            Target::Vault => self.vault.as_ref()?.overlay.as_ref(),
+        }
+    }
+
+    /// Sets `key` to `value` for `target` and applies it at once. The value
+    /// is checked against the schema first. It is saved in the target's
+    /// file (keeping the file's comments and layout); in safe mode, or when
+    /// there is no file, it applies for this session only.
+    pub fn set_value(
+        cx: &mut App,
+        target: Target,
+        key: &str,
+        value: &toml::Value,
+    ) -> Result<(), EditRefused> {
+        let spec = gv_settings::spec(key)
+            .ok_or_else(|| EditRefused(format!("`{key}` is not a setting")))?;
+        if spec.scope == Scope::GlobalOnly && target == Target::Vault {
+            return Err(EditRefused(
+                "This setting applies to all vaults only.".to_owned(),
+            ));
+        }
+        let value = spec
+            .check_owned(value)
+            .map_err(|e| EditRefused(sentence(&e.message)))?;
+        let this = cx.global_mut::<Self>();
+        if target == Target::Vault && this.vault.is_none() {
+            return Err(EditRefused("No vault is open.".to_owned()));
+        }
+        this.edit(
+            target,
+            |file| file.set_value(key, &value),
+            |text| gv_settings::set_value(text, key, &value),
+        )?;
+        if key == THEME_KEY {
+            this.theme_override = None;
+        }
+        Self::after_edit(cx);
+        Ok(())
+    }
+
+    /// Removes `key` from the layer of `target`, so the layer below applies
+    /// again.
+    pub fn reset_value(cx: &mut App, target: Target, key: &str) -> Result<(), EditRefused> {
+        let this = cx.global_mut::<Self>();
+        if target == Target::Vault && this.vault.is_none() {
+            return Err(EditRefused("No vault is open.".to_owned()));
+        }
+        this.edit(
+            target,
+            |file| file.remove(key),
+            |text| gv_settings::remove_value(text, key),
+        )?;
+        if key == THEME_KEY {
+            this.theme_override = None;
+        }
+        Self::after_edit(cx);
+        Ok(())
+    }
+
+    /// Edits the target's file, or its layer in memory in safe mode and
+    /// when there is no file.
+    fn edit(
+        &mut self,
+        target: Target,
+        in_file: impl FnOnce(&mut SettingsFile) -> Result<(), gv_settings::SettingsError>,
+        in_memory: impl FnOnce(&str) -> Result<String, gv_settings::EditError>,
+    ) -> Result<(), EditRefused> {
+        let kind = target.layer();
+        let safe_mode = self.safe_mode;
+        let file = match target {
+            Target::AllVaults => self.global_file.as_mut(),
+            Target::Vault => self.vault.as_mut().and_then(|v| v.overlay.as_mut()),
+        };
+        match file {
+            Some(file) if !safe_mode => {
+                in_file(file).map_err(|e| EditRefused(e.to_string()))?;
+                let layer = file.layer().clone();
+                self.stack.set_layer(layer);
+            }
+            _ => {
+                let text = self
+                    .stack
+                    .layer(kind)
+                    .map(|l| l.text().to_owned())
+                    .unwrap_or_default();
+                let text = in_memory(&text).map_err(|e| EditRefused(e.to_string()))?;
+                let path = self
+                    .stack
+                    .layer(kind)
+                    .and_then(|l| l.path().map(Path::to_path_buf));
+                self.stack
+                    .set_layer(Layer::parse(kind, path.as_deref(), &text));
+            }
+        }
+        Ok(())
+    }
+
+    fn after_edit(cx: &mut App) {
+        Self::apply(cx);
+        cx.refresh_windows();
+    }
+
     /// Pushes the settings in effect into the UI.
     pub(crate) fn apply(cx: &mut App) {
         let (choice, preferred_light) = cx.global::<Self>().theme_preference();
         Appearance::set_preference(cx, choice, preferred_light);
     }
+}
+
+/// "expected a boolean" → "Expected a boolean.", for inline errors.
+fn sentence(message: &str) -> String {
+    let mut chars = message.chars();
+    let mut text: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !text.ends_with('.') {
+        text.push('.');
+    }
+    text
 }
 
 #[cfg(test)]

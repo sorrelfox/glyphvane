@@ -63,6 +63,7 @@ const COMMAND_BINDING: KeyBindingMetaIndex = KeyBindingMetaIndex(0x676b);
 /// actions are available whatever has the focus.
 pub const APP_COMMANDS: &[&str] = &[
     "app.quit",
+    "app.settings",
     "app.open_menu",
     "workspace.command_palette",
     "view.cycle_theme",
