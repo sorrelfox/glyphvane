@@ -30,6 +30,14 @@
 //! | [`Heading`](MarkdownCommand::Heading), [`Paragraph`](MarkdownCommand::Paragraph) | Sets the lines to an ATX heading of the level, or back to a paragraph (escaping text that would start another block). |
 //! | [`Quote`](MarkdownCommand::Quote) | Adds a `> ` level to the blocks the selections cover, or removes the innermost one when they are directly in a quote. |
 //! | [`MarkdownCommands::backspace`] (Backspace) | A caret right after a task box removes the box; right after a list marker (and its padding) removes the marker, keeping the text, and renumbers the rest of a sequential ordered list; right after the item indentation of a continuation line removes it (outdent); right after a `> ` removes it. Other selections delete as usual. |
+//! | [`MoveLineUp`](MarkdownCommand::MoveLineUp), [`MoveLineDown`](MarkdownCommand::MoveLineDown) (Alt+↑ / Alt+↓) | The lines the selections cover change places with the line above or below. A caret (or a selection on one line) on a list item's marker line moves the whole item with its children, past the whole sibling item; on the opening fence of a code or math block it moves the whole block. Line endings stay in place. Nothing moves when a line is at the edge of the document. |
+//! | [`DuplicateLine`](MarkdownCommand::DuplicateLine) | Copies the lines the selections cover below them; the selections move onto the copy. |
+//! | [`JoinLines`](MarkdownCommand::JoinLines) | Joins the covered lines (a caret: its line and the next) with one space, dropping the next lines' container prefixes and leading whitespace. |
+//! | [`SortLines`](MarkdownCommand::SortLines) | Sorts the covered lines by their text after the list marker, ignoring case; a caret sorts its list (or paragraph). The numbers of an ordered list stay in place. |
+//! | [`ChangeCase`](MarkdownCommand::ChangeCase) | Cycles the selections (a caret: its word) through lower case → UPPER CASE → Title Case, from the primary selection's case. |
+//! | [`ToggleComment`](MarkdownCommand::ToggleComment) (Mod+/) | `%%…%%` in Obsidian, `<!-- … -->` elsewhere: removes the comment around the selection, else wraps the selection (on one line) or the lines. |
+//! | [`MarkdownCommands::insert_callout`] | `> [!type]` around the covered blocks (Obsidian callouts, GitHub alerts); in a callout, changes its type. |
+//! | [`MarkdownCommands::expand_selection`], [`MarkdownCommands::shrink_selection`] | By syntax node: word → inline → block → section ([`SelectionHistory`]). |
 //! | [`MarkdownCommands::type_text`] (typing) | Smart pairs: brackets, quotes and backticks pair at a caret, wrap a selection together with the emphasis delimiters, and a paired closer is typed over. Backspace between a pair deletes both. Never while an input method composes. |
 //!
 //! Continuation and renumbering keep the CommonMark structure exact: column
@@ -44,12 +52,17 @@
 //! ([`Availability`]), to disable menu entries and buttons.
 
 mod block;
+mod callout;
+mod comment;
 mod context;
 mod doc;
+mod expand;
 mod flavor;
 mod inline;
+mod line_ops;
 mod lines;
 mod list;
+mod navigate;
 mod pairs;
 mod settings;
 
@@ -62,7 +75,10 @@ use self::context::ctx_at;
 use self::doc::Doc;
 use self::inline::Span;
 
+pub use self::callout::{ALERTS, OBSIDIAN_CALLOUTS, callout_types};
+pub use self::expand::SelectionHistory;
 pub use self::flavor::Flavor;
+pub use self::navigate::{HeadingEntry, line_target_offset, parse_line_target};
 pub use self::settings::{CommandSettings, EmphasisStyle, IndentUnit, LinkStyle, Numbering};
 
 /// A syntax tree and the text it is the parse of.
@@ -125,11 +141,25 @@ pub enum MarkdownCommand {
     Paragraph,
     /// Toggle a block quote.
     Quote,
+    /// Move the line (item, block) up.
+    MoveLineUp,
+    /// Move the line (item, block) down.
+    MoveLineDown,
+    /// Duplicate the lines.
+    DuplicateLine,
+    /// Join the lines.
+    JoinLines,
+    /// Sort the lines.
+    SortLines,
+    /// Cycle lower, upper and title case.
+    ChangeCase,
+    /// Toggle a comment.
+    ToggleComment,
 }
 
 impl MarkdownCommand {
     /// Every command.
-    pub const ALL: [MarkdownCommand; 20] = [
+    pub const ALL: [MarkdownCommand; 27] = [
         MarkdownCommand::Newline,
         MarkdownCommand::NewlinePlain,
         MarkdownCommand::Indent,
@@ -150,6 +180,13 @@ impl MarkdownCommand {
         MarkdownCommand::Heading(6),
         MarkdownCommand::Paragraph,
         MarkdownCommand::Quote,
+        MarkdownCommand::MoveLineUp,
+        MarkdownCommand::MoveLineDown,
+        MarkdownCommand::DuplicateLine,
+        MarkdownCommand::JoinLines,
+        MarkdownCommand::SortLines,
+        MarkdownCommand::ChangeCase,
+        MarkdownCommand::ToggleComment,
     ];
 
     /// The command id (`editor.bold`, …). `editor.newline` is bound to
@@ -176,6 +213,13 @@ impl MarkdownCommand {
             MarkdownCommand::Heading(_) => "editor.heading_6",
             MarkdownCommand::Paragraph => "editor.paragraph",
             MarkdownCommand::Quote => "editor.quote",
+            MarkdownCommand::MoveLineUp => "editor.move_line_up",
+            MarkdownCommand::MoveLineDown => "editor.move_line_down",
+            MarkdownCommand::DuplicateLine => "editor.duplicate_line",
+            MarkdownCommand::JoinLines => "editor.join_lines",
+            MarkdownCommand::SortLines => "editor.sort_lines",
+            MarkdownCommand::ChangeCase => "editor.change_case",
+            MarkdownCommand::ToggleComment => "editor.toggle_comment",
         }
     }
 
@@ -261,9 +305,15 @@ impl MarkdownCommands {
         if !self.in_flavor(command) {
             return Outcome::NotInFlavor;
         }
-        if editor.is_composing() && matches!(command, MarkdownCommand::Newline) {
-            // No list continuation while an input method composes.
-            return outcome(editor.newline());
+        if editor.is_composing() {
+            // No list continuation while an input method composes, and no
+            // other command.
+            if command == MarkdownCommand::Newline {
+                return outcome(editor.newline());
+            }
+            if !matches!(command, MarkdownCommand::NewlinePlain) {
+                return Outcome::Unchanged;
+            }
         }
         let mut doc = Doc::new(editor, syntax, self.flavor);
         let settings = &self.settings;
@@ -287,8 +337,107 @@ impl MarkdownCommands {
             MarkdownCommand::Heading(level) => block::set_heading(&mut doc, level),
             MarkdownCommand::Paragraph => block::set_heading(&mut doc, 0),
             MarkdownCommand::Quote => block::toggle_quote(&mut doc),
+            MarkdownCommand::MoveLineUp => line_ops::move_lines(&mut doc, true),
+            MarkdownCommand::MoveLineDown => line_ops::move_lines(&mut doc, false),
+            MarkdownCommand::DuplicateLine => line_ops::duplicate_lines(&mut doc),
+            MarkdownCommand::JoinLines => line_ops::join_lines(&mut doc),
+            MarkdownCommand::SortLines => line_ops::sort_lines(&mut doc),
+            MarkdownCommand::ChangeCase => line_ops::change_case(&mut doc),
+            MarkdownCommand::ToggleComment => comment::toggle_comment(&mut doc),
         }
         outcome(doc.commit(editor))
+    }
+
+    /// Whether the flavor has callouts or alerts
+    /// ([`callout_types`]).
+    pub fn has_callouts(&self) -> bool {
+        !callout_types(self.flavor).is_empty()
+    }
+
+    /// Insert callout of type `kind` (one of [`callout_types`]; another
+    /// name is written as given) at every selection, or change the type of
+    /// the callout a caret is in. One undo step.
+    pub fn insert_callout(
+        &self,
+        editor: &mut Editor,
+        syntax: Option<SyntaxRef<'_>>,
+        kind: &str,
+    ) -> Outcome {
+        if !self.has_callouts() {
+            return Outcome::NotInFlavor;
+        }
+        if editor.is_composing() {
+            return Outcome::Unchanged;
+        }
+        let mut doc = Doc::new(editor, syntax, self.flavor);
+        callout::insert_callout(&mut doc, kind);
+        outcome(doc.commit(editor))
+    }
+
+    /// Expand selection: every selection grows to the next syntax node
+    /// around it (see the module documentation). Returns whether a
+    /// selection changed. Nothing changes while an input method composes.
+    pub fn expand_selection(
+        &self,
+        editor: &mut Editor,
+        syntax: Option<SyntaxRef<'_>>,
+        history: &mut SelectionHistory,
+    ) -> bool {
+        self.select_step(editor, syntax, history, true)
+    }
+
+    /// Shrink selection: back through the expansions `history` recorded,
+    /// else to the largest syntax node inside each selection.
+    pub fn shrink_selection(
+        &self,
+        editor: &mut Editor,
+        syntax: Option<SyntaxRef<'_>>,
+        history: &mut SelectionHistory,
+    ) -> bool {
+        self.select_step(editor, syntax, history, false)
+    }
+
+    fn select_step(
+        &self,
+        editor: &mut Editor,
+        syntax: Option<SyntaxRef<'_>>,
+        history: &mut SelectionHistory,
+        grow: bool,
+    ) -> bool {
+        if editor.is_composing() {
+            return false;
+        }
+        let revision = editor.text().revision();
+        let mut doc = Doc::new(editor, syntax, self.flavor);
+        let changed = if grow {
+            expand::expand(&mut doc, history, revision)
+        } else {
+            expand::shrink(&mut doc, history, revision)
+        };
+        if changed {
+            doc.commit(editor);
+            history.remember(revision, editor.selections().specs());
+        }
+        changed
+    }
+
+    /// The headings of the document, in order.
+    pub fn headings(&self, editor: &Editor, syntax: Option<SyntaxRef<'_>>) -> Vec<HeadingEntry> {
+        let doc = Doc::new(editor, syntax, self.flavor);
+        navigate::headings(&doc)
+    }
+
+    /// Go to footnote: from the `[^label]` reference at the primary caret
+    /// to its definition, or from a definition to its first reference. The
+    /// target `[^label]`'s range; `None` if the caret is not on a footnote
+    /// label or the other end does not exist.
+    pub fn footnote_target(
+        &self,
+        editor: &Editor,
+        syntax: Option<SyntaxRef<'_>>,
+    ) -> Option<std::ops::Range<usize>> {
+        let doc = Doc::new(editor, syntax, self.flavor);
+        navigate::footnote_target(&doc, editor.selections().primary().head())
     }
 
     /// Backspace at every selection, where a caret is right after a list
@@ -368,7 +517,22 @@ impl MarkdownCommands {
                 MarkdownCommand::Newline
                 | MarkdownCommand::NewlinePlain
                 | MarkdownCommand::Indent
-                | MarkdownCommand::Outdent => true,
+                | MarkdownCommand::Outdent
+                | MarkdownCommand::MoveLineUp
+                | MarkdownCommand::MoveLineDown
+                | MarkdownCommand::DuplicateLine
+                | MarkdownCommand::JoinLines
+                | MarkdownCommand::SortLines
+                | MarkdownCommand::ChangeCase => true,
+                MarkdownCommand::ToggleComment => !leaf.is_some_and(|leaf| {
+                    matches!(
+                        leaf.kind,
+                        LeafKind::FencedCode
+                            | LeafKind::IndentedCode
+                            | LeafKind::FrontMatter { .. }
+                            | LeafKind::MathBlock
+                    )
+                }),
                 MarkdownCommand::RenumberList => ctx.innermost_item().is_some_and(|ii| {
                     ii > 0 && ctx.chain[ii - 1].list().is_some_and(|list| list.ordered)
                 }),

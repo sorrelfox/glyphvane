@@ -8,6 +8,7 @@ pub mod chrome;
 pub mod editor;
 pub mod files;
 pub mod find;
+pub mod goto;
 pub mod icons;
 pub mod inline;
 pub mod keymap;
@@ -68,6 +69,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(find::key_bindings());
     menu::init(cx);
     palette::init(cx);
+    goto::init(cx);
     settings_window::init(cx);
     keymap::init(cx);
     cx.on_window_closed(|cx, _| {

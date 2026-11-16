@@ -17,6 +17,10 @@
 //!   above a blank line while the item went on after it (an item may start
 //!   with at most one blank line, so the rest of the old item is read anew);
 //! - a CRLF document stays CRLF;
+//! - the line commands (move, duplicate, join, sort, toggle comment) are
+//!   checked for the properties above and below but not for structure:
+//!   rearranging lines changes what they are; change case keeps the
+//!   structure exactly; insert callout is checked like Quote;
 //! - the editor's text is the command's own result (checked inside the
 //!   crate on every commit in debug builds).
 
@@ -75,12 +79,25 @@ const LINES: &[&str] = &[
 /// A transaction's replacements: old range and new length.
 type Replacements = Vec<(std::ops::Range<usize>, usize)>;
 
-/// The commands under test: every command, plus insert link with a URL.
-fn command(index: usize) -> (MarkdownCommand, Option<&'static str>) {
+/// A command under test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Under {
+    /// A command of [`MarkdownCommand::ALL`].
+    Command(MarkdownCommand),
+    /// Insert link with a URL.
+    LinkWithUrl,
+    /// Insert callout of a type.
+    Callout,
+}
+
+/// The commands under test: every command, plus insert link with a URL
+/// and insert callout.
+fn command(index: usize) -> Under {
     let all = MarkdownCommand::ALL;
     match all.get(index) {
-        Some(&command) => (command, None),
-        None => (MarkdownCommand::InsertLink, Some("https://example.com/a")),
+        Some(&command) => Under::Command(command),
+        None if index == all.len() => Under::LinkWithUrl,
+        None => Under::Callout,
     }
 }
 
@@ -323,7 +340,13 @@ fn run_case(
     command_index: usize,
     flavor: Flavor,
 ) -> Result<(), TestCaseError> {
-    let (command, url) = command(command_index);
+    let under = command(command_index);
+    let command = match under {
+        Under::Command(command) => command,
+        Under::LinkWithUrl => MarkdownCommand::InsertLink,
+        // Quote is what callout is checked like.
+        Under::Callout => MarkdownCommand::Quote,
+    };
     let mut editor = Editor::with_config(
         Buffer::new(text),
         EditorConfig::default(),
@@ -348,10 +371,20 @@ fn run_case(
     let tree = SyntaxTree::parse_with(&snapshot, flavor.parse_options());
     let commands = MarkdownCommands::new(flavor, CommandSettings::default());
     let syntax = Some(SyntaxRef::new(&tree, &snapshot));
-    if command == MarkdownCommand::InsertLink {
-        commands.insert_link(&mut editor, syntax, url);
-    } else {
-        commands.run(command, &mut editor, syntax);
+    match under {
+        Under::LinkWithUrl => {
+            commands.insert_link(&mut editor, syntax, Some("https://example.com/a"));
+        }
+        Under::Callout => {
+            let kind = gv_editor::commands::callout_types(flavor)
+                .first()
+                .copied()
+                .unwrap_or("note");
+            commands.insert_callout(&mut editor, syntax, kind);
+        }
+        Under::Command(command) => {
+            commands.run(command, &mut editor, syntax);
+        }
     }
     let after = editor.text().to_string();
     editor.unobserve(observer);
@@ -375,10 +408,11 @@ fn run_case(
         })
     });
     let marked: Vec<(usize, usize)> = specs.iter().map(|spec| (spec.tail, spec.head)).collect();
-    let label = format!(
-        "{flavor} {} on {text:?} with {marked:?} gave {after:?}",
-        command.id()
-    );
+    let name = match under {
+        Under::Callout => "insert_callout",
+        _ => command.id(),
+    };
+    let label = format!("{flavor} {name} on {text:?} with {marked:?} gave {after:?}");
     editor
         .selections()
         .check(editor.text())
@@ -474,6 +508,17 @@ fn run_case(
         | MarkdownCommand::InsertLink => Some(true),
         MarkdownCommand::Indent | MarkdownCommand::Outdent => Some(!in_items),
         MarkdownCommand::Newline => Some(ends_item),
+        // Line commands rearrange, join or comment out lines: what the
+        // lines become is the text's (a fence moved up opens a code block),
+        // so only the undo, selection and line-ending properties apply.
+        MarkdownCommand::MoveLineUp
+        | MarkdownCommand::MoveLineDown
+        | MarkdownCommand::DuplicateLine
+        | MarkdownCommand::JoinLines
+        | MarkdownCommand::SortLines
+        | MarkdownCommand::ToggleComment => None,
+        // Changing the case of letters never changes the block structure.
+        MarkdownCommand::ChangeCase => Some(false),
         _ => Some(false),
     };
     if let Some(separated) =
@@ -496,7 +541,7 @@ proptest! {
     fn commands_are_patches_and_undo_exactly(
         text in document(),
         picks in prop::collection::vec((any::<Index>(), any::<u8>()), 1..4),
-        command_index in 0..=MarkdownCommand::ALL.len(),
+        command_index in 0..=MarkdownCommand::ALL.len() + 1,
         flavor in prop::sample::select(Flavor::ALL.to_vec()),
     ) {
         let picks: Vec<(usize, u8)> = picks
@@ -519,7 +564,7 @@ fn every_caret_of_nested_documents() {
     ];
     for text in docs {
         for offset in 0..=text.len() {
-            for command_index in 0..=MarkdownCommand::ALL.len() {
+            for command_index in 0..=MarkdownCommand::ALL.len() + 1 {
                 for flavor in [Flavor::CommonMark, Flavor::Obsidian] {
                     if let Err(e) = run_case(text, &[(offset, 0)], command_index, flavor) {
                         panic!("{e}");

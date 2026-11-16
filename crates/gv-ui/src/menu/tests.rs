@@ -903,12 +903,14 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
         ThemeChoice::SemiLight
     );
 
-    // Go: nothing to go back to, so both items are disabled.
+    // Go: nothing to go back to, so Back and Forward are disabled; the
+    // first enabled item is Go to heading, which opens the Go popover.
     f.click("app-menu");
     f.keys("end up right enter");
-    assert!(f.is_open(), "no enabled item to run");
-    f.keys("escape");
     assert!(!f.is_open());
+    assert!(f.bounds("goto-popover").is_some());
+    f.keys("escape");
+    assert!(f.bounds("goto-popover").is_none());
 }
 
 /// In a short window a tall submenu moves up to stay inside it, keeping a

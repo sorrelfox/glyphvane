@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The Markdown commands in the Source view: Enter, Shift+Enter, Tab,
-//! Shift+Tab, inline formatting, headings, quotes, links, task boxes and
-//! renumbering ([`gv_editor::commands`]).
+//! Shift+Tab, inline formatting, headings, quotes, links, task boxes,
+//! renumbering, the line commands (move, duplicate, join, sort, change
+//! case) and toggle comment ([`gv_editor::commands`]).
 //!
 //! - **Dispatch.** Each command's keymap action runs
 //!   [`MarkdownCommands::run`] on every selection with the view's current
@@ -101,7 +102,7 @@ impl Availabilities {
 
 /// The view's tree with its text, if it is the complete parse of the
 /// editor's text.
-fn current_syntax(doc: &Doc) -> Option<SyntaxRef<'_>> {
+pub(super) fn current_syntax(doc: &Doc) -> Option<SyntaxRef<'_>> {
     let (tree, text) = doc.syntax.shown();
     let syntax = SyntaxRef::new(tree, text);
     syntax.is_parse_of(doc.editor.text()).then_some(syntax)
@@ -153,7 +154,14 @@ impl EditorView {
         let root = on::<actions::Heading5>(root, MarkdownCommand::Heading(5), a, cx);
         let root = on::<actions::Heading6>(root, MarkdownCommand::Heading(6), a, cx);
         let root = on::<actions::Paragraph>(root, MarkdownCommand::Paragraph, a, cx);
-        on::<actions::Quote>(root, MarkdownCommand::Quote, a, cx)
+        let root = on::<actions::Quote>(root, MarkdownCommand::Quote, a, cx);
+        let root = on::<actions::MoveLineUp>(root, MarkdownCommand::MoveLineUp, a, cx);
+        let root = on::<actions::MoveLineDown>(root, MarkdownCommand::MoveLineDown, a, cx);
+        let root = on::<actions::DuplicateLine>(root, MarkdownCommand::DuplicateLine, a, cx);
+        let root = on::<actions::JoinLines>(root, MarkdownCommand::JoinLines, a, cx);
+        let root = on::<actions::SortLines>(root, MarkdownCommand::SortLines, a, cx);
+        let root = on::<actions::ChangeCase>(root, MarkdownCommand::ChangeCase, a, cx);
+        on::<actions::ToggleComment>(root, MarkdownCommand::ToggleComment, a, cx)
     }
 
     /// Runs `command` at every selection. A command that cannot run at the

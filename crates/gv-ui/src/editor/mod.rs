@@ -63,6 +63,15 @@
 //!   Alt-drag selects a column (07 § Buffer, selections and undo); the
 //!   wheel scrolls, sideways with Shift.
 //!
+//! # Line commands and Go
+//!
+//! Move line up and down (Alt+↑ / Alt+↓), duplicate, join and sort lines,
+//! change case and toggle comment (Mod+/) are Markdown commands like the
+//! others ([`markdown`]). [`go`]: Go to line (Ctrl+G) and Go to heading
+//! (Mod+Shift+O) open the Go popover ([`crate::goto`]), whose choice the
+//! caret follows until Esc puts it back; Go to footnote or back; the
+//! callout type picker; Expand and Shrink selection (Shift+Alt+→ / ←).
+//!
 //! # Find and replace
 //!
 //! [`find`]: Mod+F and Ctrl+H (Cmd+Alt+F) open the find popover with the
@@ -96,6 +105,7 @@ mod element;
 mod file;
 mod find;
 mod fold;
+mod go;
 mod highlight;
 mod input;
 mod layout;
@@ -381,6 +391,8 @@ pub struct EditorView {
     commands: MarkdownCommands,
     /// Which of them can run now.
     availabilities: Availabilities,
+    /// The selections before each Expand selection, for Shrink.
+    selection_history: gv_editor::commands::SelectionHistory,
     /// The profile smart paste writes HTML for.
     paste_profile: gv_html::Profile,
     /// Viewer mode: the text cannot be changed.
@@ -456,6 +468,7 @@ impl EditorView {
             options,
             commands: MarkdownCommands::for_profile(gv_profile::ProfileId::CommonMark.as_str()),
             availabilities: Availabilities::default(),
+            selection_history: gv_editor::commands::SelectionHistory::default(),
             paste_profile: paste_profile(gv_profile::ProfileId::CommonMark.as_str()),
             read_only: false,
             stats: stats::Stats::default(),
@@ -1393,6 +1406,7 @@ impl Render for EditorView {
                 }),
             );
         let root = fold_handlers(root, cx);
+        let root = self.go_handlers(root, cx);
         // Viewer mode: nothing that changes the text has a handler, so its
         // menu items are disabled and its keys do nothing.
         let root = if self.read_only {

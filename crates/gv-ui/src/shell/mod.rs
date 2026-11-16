@@ -20,6 +20,9 @@ mod menus_tests;
 mod navigation_tests;
 mod outline_panel;
 mod panels;
+mod panes;
+#[cfg(test)]
+mod panes_tests;
 mod profile_chip;
 #[cfg(test)]
 mod profile_chip_tests;
@@ -1750,6 +1753,7 @@ impl Render for Workspace {
             .map(|root| self.menu_actions(root, cx))
             .map(|root| self.file_actions(root, cx))
             .map(|root| self.panel_actions(root, cx))
+            .map(|root| self.pane_actions(root, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
