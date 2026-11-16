@@ -8,6 +8,7 @@ mod deps;
 mod fixtures;
 mod fuzz_seed;
 mod headers;
+mod icount;
 mod latency;
 mod package;
 mod pathological;
@@ -60,6 +61,10 @@ Commands:
   size-report --bin-dir DIR [--baseline FILE] [--json FILE]
                         Executable sizes against the NFR-SIZE budgets and a
                         baseline (fails on > 3 % growth).
+  bench-icount [--save-baseline NAME] [--baseline NAME [--limit PCT]]
+                        Instruction-count benchmarks under Valgrind (Linux);
+                        fails on > 3 % growth against the baseline; see
+                        `cargo xtask bench-icount --help`.
 ";
 
 fn main() -> ExitCode {
@@ -109,6 +114,7 @@ fn run() -> Result<bool> {
         "latency" => latency::run(rest),
         "package" => package::run(&root, rest),
         "size-report" => package::size::run(rest),
+        "bench-icount" => icount::run(&root, rest),
         other => {
             eprint!("unknown command `{other}`\n\n{HELP}");
             Ok(false)

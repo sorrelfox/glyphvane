@@ -178,6 +178,94 @@ jobs:
           path: binary-size.json
           retention-days: 90
 
+  # NFR-PERF gate: instruction counts of the parser benchmarks (full parse,
+  # keystroke reparse, fence at the top) under Valgrind, with gungraun. A pull
+  # request is measured against its base commit in the same job, so both runs
+  # share the machine, toolchain and Valgrind. More than 3 % growth in any
+  # benchmark fails unless the pull request carries the
+  # `perf-regression-justified` label (re-run the job after adding it).
+  icount:
+    name: Instruction counts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Read the pull request's labels.
+      pull-requests: read
+    env:
+      # Shared by the base and head runs: dependencies build once, and the
+      # head run finds the base run's baseline.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: icount
+
+      # After the cache step, so the base's Cargo.lock does not change the cache key.
+      - name: Check out the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      # The runner must be the version of the `gungraun` library in Cargo.lock.
+      - name: Install gungraun-runner
+        run: |
+          version=$(grep -A1 '^name = "gungraun"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          echo "GUNGRAUN_VERSION=$version" >> "$GITHUB_ENV"
+          cargo install gungraun-runner --version "$version" --locked
+
+      - name: Baseline from the base commit
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          base_version=$(grep -A1 '^name = "gungraun"$' base/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p' || true)
+          if [ ! -f base/crates/gv-syntax/benches/icount.rs ]; then
+            echo "::notice::The base commit has no instruction-count benches; nothing to compare."
+          elif [ "$base_version" != "$GUNGRAUN_VERSION" ]; then
+            echo "::notice::gungraun changed ($base_version -> $GUNGRAUN_VERSION); nothing to compare."
+          else
+            # The base commit may pin another toolchain.
+            (cd base && rustup toolchain install && cargo xtask bench-icount --save-baseline base)
+            echo "HAVE_BASELINE=1" >> "$GITHUB_ENV"
+          fi
+          labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx perf-regression-justified; then
+            echo "ALLOW_REGRESSION=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Instruction counts
+        shell: bash
+        run: |
+          args=()
+          if [ -n "${HAVE_BASELINE:-}" ]; then args+=(--baseline base); fi
+          if [ -n "${ALLOW_REGRESSION:-}" ]; then args+=(--allow-regression); fi
+          status=0
+          cargo xtask bench-icount "${args[@]}" 2>&1 | tee icount.txt || status=$?
+          {
+            echo '### Instruction counts'
+            echo '```'
+            grep -E '^[a-z_]+::|Instructions:|regressed|exceeds limit|Gungraun result' icount.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

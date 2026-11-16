@@ -21,8 +21,17 @@ proptest.workspace = true
 serde_json = { workspace = true }
 toml = { workspace = true }
 
+# Instruction counts run under Valgrind, on Linux only.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun.workspace = true
+
 [[bench]]
 name = "parse"
+harness = false
+
+# Instruction counts (Valgrind); run with `cargo xtask bench-icount`.
+[[bench]]
+name = "icount"
 harness = false
 
 [lints]

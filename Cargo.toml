@@ -71,6 +71,11 @@ unicode-segmentation = "1.10"
 # Tests and benchmarks.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 ctor = "1.0.12"
+# Instruction-count benchmarks (Valgrind/Callgrind; Linux CI gate). The
+# library must match the `gungraun-runner` binary exactly, so this is an
+# exact pin; bump both together (`cargo xtask bench-icount` prints the
+# install command). Apache-2.0 OR MIT.
+gungraun = "=0.20.0"
 proptest = "1.12.0"
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
 toml = "1.2"
