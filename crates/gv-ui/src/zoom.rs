@@ -15,8 +15,9 @@
 //!   (120 in, 110 out). **Limits**: the setting's range, 50 to 300.
 //!   Reset zoom returns to 100.
 //! - **What scales**: the Reading view (type, spacing and the readable
-//!   column) and the Split view's preview pane. The interface does not.
-//!   The status bar shows the zoom in Preview.
+//!   column), the Source view (text, rows, line numbers, caret and the
+//!   column, [`crate::editor`]) and both panes of the Split view. The
+//!   interface does not. The status bar shows the zoom in Preview.
 
 use gpui::App;
 use gv_settings::Kind;

@@ -35,7 +35,7 @@ use super::highlight::Underline;
 use super::input::Columns;
 use super::rows::RowEnv;
 use super::wrap::RowMap;
-use super::{EditorLayout, EditorView, LINE, Top};
+use super::{EditorLayout, EditorView, Top};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::inline::{Palette, Token};
@@ -43,7 +43,7 @@ use crate::metrics::size::{
     CARET_WIDTH, SCROLLBAR_MIN_THUMB, SCROLLBAR_THUMB, editor as editor_size, split,
 };
 use crate::metrics::spacing::{inline, scrollbar};
-use crate::metrics::{HAIRLINE, icon, radius, text};
+use crate::metrics::{HAIRLINE, icon, radius};
 
 /// Pointer travel (px) after which an Alt-press selects a column instead of
 /// adding a caret.
@@ -141,6 +141,8 @@ pub(crate) struct Probe {
 /// Everything one paint draws.
 pub(crate) struct Frame {
     focus: FocusHandle,
+    /// The row height.
+    line: f32,
     /// Code fill and current line, under everything.
     under: Vec<PaintQuad>,
     /// Find matches, under the selections.
@@ -167,9 +169,10 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    fn new(focus: FocusHandle) -> Self {
+    fn new(focus: FocusHandle, line: f32) -> Self {
         Self {
             focus,
+            line,
             under: Vec::new(),
             matches: Vec::new(),
             chips: Vec::new(),
@@ -192,17 +195,17 @@ fn bounds_of(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
     Bounds::new(point(px(x), px(y)), size(px(w.max(0.0)), px(h.max(0.0))))
 }
 
-/// The baseline of a row whose top is `top`, as `ShapedLine::paint`
-/// centres it.
-fn baseline(line: &ShapedLine, top: f32) -> f32 {
+/// The baseline of a row `row_h` tall whose top is `top`, as
+/// `ShapedLine::paint` centres it.
+fn baseline(line: &ShapedLine, top: f32, row_h: f32) -> f32 {
     let (ascent, descent) = (f32::from(line.ascent), f32::from(line.descent));
-    top + (LINE - ascent - descent) / 2.0 + ascent
+    top + (row_h - ascent - descent) / 2.0 + ascent
 }
 
-/// The total height of the content: the display rows between the top
-/// padding `pad` and as much again below.
-fn content_height(rows: usize, pad: f32) -> f64 {
-    2.0 * f64::from(pad) + rows as f64 * f64::from(LINE)
+/// The total height of the content: `rows` display rows `row_h` tall
+/// between the top padding `pad` and as much again below.
+fn content_height(rows: usize, row_h: f32, pad: f32) -> f64 {
+    2.0 * f64::from(pad) + rows as f64 * f64::from(row_h)
 }
 
 impl EditorView {
@@ -216,7 +219,9 @@ impl EditorView {
         #[cfg(test)]
         let _frame = crate::reader::code_highlight::tests::FrameGuard::new();
         self.bounds = Some(bounds);
-        let mut frame = Frame::new(self.focus.clone());
+        let metrics = self.metrics.clone();
+        let line_px = metrics.line;
+        let mut frame = Frame::new(self.focus.clone(), line_px);
         let theme = Appearance::current_id(cx);
         let palette = Palette::of(theme);
         let focused = self.focus.is_focused(window);
@@ -255,13 +260,13 @@ impl EditorView {
             self.scroll_y = if row == 0 {
                 0.0
             } else {
-                f64::from(pad_top) + row as f64 * f64::from(LINE)
+                f64::from(pad_top) + row as f64 * f64::from(line_px)
             };
         }
         if std::mem::take(&mut self.autoscroll) {
             self.scroll_into_view(&columns, viewport, space, window, cx);
         }
-        let max_y = (content_height(rows_total, pad_top) - f64::from(viewport)).max(0.0);
+        let max_y = (content_height(rows_total, line_px, pad_top) - f64::from(viewport)).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         let max_x = if wrapping {
             0.0
@@ -272,11 +277,11 @@ impl EditorView {
 
         let scroll_y = self.scroll_y;
         let pad = f64::from(pad_top);
-        let first_row = ((scroll_y - pad) / f64::from(LINE)).floor().max(0.0) as usize;
+        let row_h = f64::from(line_px);
+        let first_row = ((scroll_y - pad) / row_h).floor().max(0.0) as usize;
         let last_row =
-            ((((scroll_y - pad + f64::from(viewport)) / f64::from(LINE)).ceil()).max(0.0) as usize
-                + 1)
-            .min(rows_total);
+            ((((scroll_y - pad + f64::from(viewport)) / row_h).ceil()).max(0.0) as usize + 1)
+                .min(rows_total);
         let origin_x = self.text_origin_x(&columns);
         let whitespace = self.show_whitespace;
         let layout = self.layout;
@@ -373,7 +378,7 @@ impl EditorView {
             columns: Some(columns),
             ..Probe::default()
         };
-        let row_top = |row: usize| columns.top + (row as f64 * f64::from(LINE) - scroll_y) as f32;
+        let row_top = |row: usize| columns.top + (row as f64 * row_h - scroll_y) as f32;
 
         for (line_row, visual) in &visuals {
             let (line_row, line) = (*line_row, visual.first);
@@ -424,7 +429,7 @@ impl EditorView {
                 .map(|(_, h)| local(*h))
                 .collect();
             let line_top = row_top(line_row);
-            let line_h = row.segments.len() as f32 * LINE;
+            let line_h = row.segments.len() as f32 * line_px;
 
             if row.code {
                 #[cfg(test)]
@@ -479,7 +484,7 @@ impl EditorView {
                     }
                     let x0 = row.x_in(k, a);
                     let x1 = row.x_in(k, b) + if past_end { space } else { 0.0 };
-                    let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                    let rect = bounds_of(origin_x + x0, top, x1 - x0, line_px);
                     #[cfg(test)]
                     probe.matches.push((rect, *current));
                     if *current {
@@ -504,7 +509,7 @@ impl EditorView {
                     }
                     let x0 = row.x_in(k, a);
                     let x1 = row.x_in(k, b) + if past_end { space } else { 0.0 };
-                    let rect = bounds_of(origin_x + x0, top, x1 - x0, LINE);
+                    let rect = bounds_of(origin_x + x0, top, x1 - x0, line_px);
                     #[cfg(test)]
                     probe.selections.push(rect);
                     frame.selections.push(fill(rect, color(Token::Selection)));
@@ -517,7 +522,7 @@ impl EditorView {
                 } else {
                     row.with_selection(k, &selected, &fonts, &palette, window)
                 };
-                let base = baseline(&shaped, top);
+                let base = baseline(&shaped, top, line_px);
                 let seg_x = origin_x + segment.indent;
 
                 // Link underlines.
@@ -583,19 +588,19 @@ impl EditorView {
                         continue;
                     }
                     let x = origin_x + row.x_in(k, column);
-                    let y = top + (LINE - editor_size::CARET_HEIGHT) / 2.0;
-                    let rect = bounds_of(x, y, CARET_WIDTH, editor_size::CARET_HEIGHT);
+                    let y = top + (line_px - metrics.caret_height) / 2.0;
+                    let rect = bounds_of(x, y, CARET_WIDTH, metrics.caret_height);
                     #[cfg(test)]
                     probe.carets.push(rect);
                     frame.carets.push(fill(rect, color(Token::AccentDefault)));
                 }
                 // Fold placeholders: a chip under the `⋯`.
                 for mark in &visual.marks {
-                    let Some((x0, x1)) = fold::chip_span(row, k, mark) else {
+                    let Some((x0, x1)) = fold::chip_span(row, k, mark, metrics.chip_inset) else {
                         continue;
                     };
-                    let h = editor_size::FOLD_CHIP_HEIGHT;
-                    let rect = bounds_of(origin_x + x0, top + (LINE - h) / 2.0, x1 - x0, h);
+                    let h = metrics.chip_height;
+                    let rect = bounds_of(origin_x + x0, top + (line_px - h) / 2.0, x1 - x0, h);
                     #[cfg(test)]
                     probe.chips.push((rect, mark.buffer.clone()));
                     // On the code fill or the current line `surface.sunken`
@@ -640,7 +645,7 @@ impl EditorView {
                 };
                 let number = window.text_system().shape_line(
                     SharedString::from(label),
-                    px(text::EDITOR_LINE_NUMBER.size),
+                    px(metrics.number_size),
                     &[run],
                     None,
                 );
@@ -663,7 +668,7 @@ impl EditorView {
                 let size = icon::TINY;
                 let rect = bounds_of(
                     columns.numbers_right + split::CHEVRON_GAP,
-                    top + (LINE - size) / 2.0,
+                    top + (line_px - size) / 2.0,
                     size,
                     size,
                 );
@@ -676,7 +681,7 @@ impl EditorView {
                     columns.numbers_right,
                     top,
                     fold::chevron_slot(),
-                    LINE,
+                    line_px,
                 ));
             }
         }
@@ -703,7 +708,7 @@ impl EditorView {
 
         // The scrollbar: a thumb, no track.
         self.scrollbar = None;
-        let content = content_height(rows_total, pad_top);
+        let content = content_height(rows_total, line_px, pad_top);
         if content > f64::from(viewport) {
             let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
             let track_h = viewport - 2.0 * scrollbar::INSET_Y;
@@ -769,11 +774,12 @@ impl EditorView {
         let display_row = first + segment;
         let pad_top = self.layout.pad_top();
         let pad = f64::from(pad_top);
-        let row_h = f64::from(LINE);
+        let row_px = self.metrics.line;
+        let row_h = f64::from(row_px);
         let top = pad + display_row as f64 * row_h;
         let wanted_top = if display_row == 0 { 0.0 } else { top - row_h };
         let wanted_bottom = if display_row + 1 >= rows {
-            content_height(rows, pad_top)
+            content_height(rows, row_px, pad_top)
         } else {
             top + 2.0 * row_h
         };
@@ -961,7 +967,7 @@ impl EditorView {
     }
 
     fn scroll_wheel(&mut self, e: &ScrollEvent, cx: &mut Context<'_, Self>) {
-        let delta = e.delta.pixel_delta(px(LINE));
+        let delta = e.delta.pixel_delta(px(self.metrics.line));
         let (mut dx, mut dy) = (f32::from(delta.x), f32::from(delta.y));
         if e.modifiers.shift && dx == 0.0 {
             (dx, dy) = (dy, 0.0);
@@ -992,7 +998,7 @@ impl EditorView {
         }
         let top = f32::from(position.y - bar.track.top()) - grab;
         let ratio = f64::from((top / room).clamp(0.0, 1.0));
-        let max_y = (content_height(rows, self.layout.pad_top())
+        let max_y = (content_height(rows, self.metrics.line, self.layout.pad_top())
             - f64::from(f32::from(bounds.size.height)))
         .max(0.0);
         self.scroll_y = ratio * max_y;
@@ -1145,6 +1151,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) {
         let frame = &mut pre.frame;
+        let row_h = frame.line;
         window.handle_input(
             &frame.focus,
             ElementInputHandler::new(bounds, self.view.clone()),
@@ -1170,7 +1177,7 @@ impl Element for EditorElement {
                 }
                 for (line, origin) in &frame.rows {
                     // A line that cannot be painted (a full atlas) is skipped.
-                    let _ = line.paint(*origin, px(LINE), TextAlign::Left, None, window, cx);
+                    let _ = line.paint(*origin, px(row_h), TextAlign::Left, None, window, cx);
                 }
                 for line in frame.lines.drain(..) {
                     match line {
@@ -1201,7 +1208,7 @@ impl Element for EditorElement {
                 }
             });
             for (number, origin) in &frame.numbers {
-                let _ = number.paint(*origin, px(LINE), TextAlign::Left, None, window, cx);
+                let _ = number.paint(*origin, px(row_h), TextAlign::Left, None, window, cx);
             }
             for (bounds, path, color) in frame.icons.drain(..) {
                 // An icon missing from the assets draws nothing.

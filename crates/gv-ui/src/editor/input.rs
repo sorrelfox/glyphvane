@@ -26,7 +26,7 @@ use gv_text::{Bias, OffsetUtf16};
 use super::fold::VisualLine;
 use super::rows::{Row, RowEnv};
 use super::wrap::RowMap;
-use super::{EditorLayout, EditorView, LINE};
+use super::{EditorLayout, EditorView};
 use crate::appearance::Appearance;
 use crate::inline::Palette;
 use crate::metrics::size::{SCROLLBAR_THUMB, document, editor, split};
@@ -51,7 +51,8 @@ pub(crate) struct Columns {
 
 impl Columns {
     /// The columns in `bounds` for `lines` lines, with `digit` the advance
-    /// of a line-number digit.
+    /// of a line-number digit and `column_max` the widest the centred
+    /// column gets.
     ///
     /// - [`EditorLayout::Column`]: the Reading view's text column, centred;
     ///   the line numbers are 26 wide, 14 before the text, and grow to the
@@ -60,7 +61,13 @@ impl Columns {
     ///   numbers are 28 wide and grow to the right, then the fold
     ///   chevron's slot ([`super::fold`]) and the text, which ends clear
     ///   of the scrollbar.
-    pub fn new(bounds: Bounds<Pixels>, lines: usize, digit: f32, layout: EditorLayout) -> Self {
+    pub fn new(
+        bounds: Bounds<Pixels>,
+        lines: usize,
+        digit: f32,
+        layout: EditorLayout,
+        column_max: f32,
+    ) -> Self {
         let left = f32::from(bounds.left());
         let width = f32::from(bounds.size.width);
         let digits = lines.max(1).ilog10() + 1;
@@ -69,7 +76,8 @@ impl Columns {
         match layout {
             EditorLayout::Column => {
                 let column = (width - 2.0 * document::PAD_X)
-                    .clamp(1.0, document::COLUMN_MAX)
+                    .min(column_max)
+                    .max(1.0)
                     .floor();
                 let numbers_w = editor::LINE_NUMBER_WIDTH.max(digits_w);
                 let gutter = numbers_w + editor::GUTTER_GAP;
@@ -126,12 +134,13 @@ impl EditorView {
         let bounds = bounds.or(self.bounds)?;
         let lines = self.doc.as_ref()?.editor.text().line_count();
         let (digit, _) = self.advances(window);
-        Some(Columns::new(bounds, lines, digit, self.layout))
+        let column_max = self.metrics.column_max;
+        Some(Columns::new(bounds, lines, digit, self.layout, column_max))
     }
 
     /// The top of display row `row` in window coordinates.
     pub(crate) fn row_top(&self, columns: &Columns, row: usize) -> f32 {
-        let y = row as f64 * f64::from(LINE) - self.scroll_y;
+        let y = row as f64 * f64::from(self.metrics.line) - self.scroll_y;
         columns.top + y as f32
     }
 
@@ -199,7 +208,7 @@ impl EditorView {
             if y < 0.0 {
                 return Some(0);
             }
-            let row = (y / f64::from(LINE)).floor() as usize;
+            let row = (y / f64::from(self.metrics.line)).floor() as usize;
             let len = self.doc.as_ref()?.editor.text().len();
             (map.row_count(), map.line_of_row(row), len, row)
         };
@@ -245,7 +254,7 @@ impl EditorView {
         let top = self.row_top(&columns, first + segment);
         Some(Bounds::from_corners(
             point(px(x + x0), px(top)),
-            point(px(x + x1.max(x0)), px(top + LINE)),
+            point(px(x + x1.max(x0)), px(top + self.metrics.line)),
         ))
     }
 

@@ -32,6 +32,7 @@ mod fold;
 mod paste;
 mod rows;
 mod table;
+mod zoom;
 
 const WIDTH: f32 = 1280.0;
 const HEIGHT: f32 = 800.0;
@@ -1452,7 +1453,11 @@ mod timing {
                 // A new width, phase by phase, the job on a real thread
                 // with its own measure.
                 let (defer, job, finish, rows) = editor.update(&mut vcx, |e, cx| {
-                    let measure = EditorMeasure::new(cx.text_system().clone(), e.fonts.regular());
+                    let measure = EditorMeasure::new(
+                        cx.text_system().clone(),
+                        e.fonts.regular(),
+                        e.metrics.text_size,
+                    );
                     let width = e.doc.as_ref().unwrap().editor.wrap_width().unwrap() - 100.0;
                     let t = Instant::now();
                     let pending = e
@@ -1518,6 +1523,29 @@ mod timing {
                     "{name}: soft wrap turned off: frame {:.1} ms; on again: frame starting the job {:.1} ms",
                     ms(off_frame),
                     ms(on_again_frame),
+                );
+                // A zoom: the frame that starts the re-wrap with the new
+                // measure (UI thread), then the job with its landing.
+                let mut zoom_to = |zoom: f32| {
+                    let appearance = gv_settings::Appearance::default();
+                    let metrics =
+                        super::super::metrics::EditorMetrics::from_settings(&appearance, zoom);
+                    let t = Instant::now();
+                    editor.update(&mut vcx, |e, cx| e.set_metrics(metrics, cx));
+                    vcx.update(|window, cx| window.draw(cx).clear(cx));
+                    let frame = t.elapsed();
+                    let t = Instant::now();
+                    vcx.run_until_parked();
+                    let job = t.elapsed();
+                    draw(&mut vcx);
+                    (frame, job)
+                };
+                let (zoom_frame, zoom_job) = zoom_to(1.1);
+                zoom_to(1.0);
+                eprintln!(
+                    "{name}: zoom to 110 %: frame starting the re-wrap {:.1} ms, job + landing on the test executor {:.1} ms",
+                    ms(zoom_frame),
+                    ms(zoom_job),
                 );
             }
             // The caret in the middle of the text, in a paragraph.

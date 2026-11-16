@@ -355,6 +355,15 @@ impl WrapMap {
         self.rewrap_now()
     }
 
+    /// Measures with `measure` from now on without re-wrapping yet:
+    /// returns the job that re-wraps every row with it (see
+    /// [`begin_rewrap`](Self::begin_rewrap)). Run the job with a
+    /// [`LineWrapper`] that measures like `measure`.
+    pub fn defer_measure(&mut self, measure: Box<dyn TextMeasure>) -> RewrapJob {
+        self.wrapper = LineWrapper::new(measure);
+        self.begin_rewrap()
+    }
+
     /// Chooses continuation indents with `indent` from now on and re-wraps
     /// every row at once.
     pub fn set_indent(&mut self, indent: Arc<dyn WrapIndent>) -> (WrapSnapshot, Vec<WrapEdit>) {

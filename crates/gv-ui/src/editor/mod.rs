@@ -87,6 +87,12 @@
 //! level 1 to 3. Rows are visual lines: a folded line and the rest of the
 //! line its fold ends on.
 //!
+//! # Sizes
+//!
+//! [`metrics`]: the text size, the row height and the Edit mode column
+//! follow the editor font settings, the readable line width and the zoom
+//! ([`crate::zoom`]), live.
+//!
 //! # The status bar
 //!
 //! [`stats`]: the primary caret's line and column, the characters
@@ -110,6 +116,7 @@ mod highlight;
 mod input;
 mod layout;
 mod markdown;
+mod metrics;
 mod paste;
 mod rows;
 mod stats;
@@ -124,7 +131,8 @@ use std::sync::Arc;
 use gpui::{
     App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Task, Window, div, px,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    px,
 };
 use gv_editor::display_map::MarkdownHangingIndent;
 use gv_editor::{DeleteUnit, Editor, EditorEvent, MarkdownCommands, Motion};
@@ -137,12 +145,12 @@ use crate::appearance::Appearance;
 use crate::files::watch::WatchHandle;
 use crate::files::worker::{Msg, Worker};
 use crate::files::{self, ExecutorClock};
-use crate::inline::FontFamilies;
 use crate::keymap::actions::editor as commands;
 use crate::keymap::actions::view as view_commands;
 use crate::metrics::size::{document, split};
 use crate::metrics::spacing::document as spacing;
 use crate::metrics::text;
+use crate::settings::AppSettings;
 use element::{EditorElement, Press, Scrollbar};
 pub use file::DocEvent;
 pub(crate) use file::SaveAsTarget;
@@ -151,6 +159,7 @@ pub use find::DEBUG_REPLACE_ENV;
 pub use fold::DEBUG_FOLD_ENV;
 use highlight::{HighlightCache, LinkStatuses};
 use markdown::Availabilities;
+use metrics::EditorMetrics;
 pub use paste::{ClipboardHtml, HtmlClipboard, set_html_clipboard};
 use rows::{Fonts, RowCache};
 pub use stats::EditorFacts;
@@ -419,9 +428,11 @@ pub struct EditorView {
     widest: f32,
     show_whitespace: bool,
     links: LinkStatuses,
+    /// The sizes from the Appearance settings and the zoom ([`metrics`]).
+    metrics: EditorMetrics,
     fonts: Fonts,
     /// The advance of a digit at the line number size and of a space at
-    /// the text size, measured once.
+    /// the text size, measured once per size.
     advances: Option<(f32, f32)>,
     press: Press,
     /// The scrollbar as last drawn.
@@ -442,6 +453,8 @@ pub struct EditorView {
     _rewrap_wait: Option<Task<()>>,
     /// The wait before the foldable regions are found again.
     _foldable: Option<Task<()>>,
+    /// Follows the Appearance settings and the zoom.
+    _settings: Subscription,
 }
 
 impl std::fmt::Debug for EditorView {
@@ -457,7 +470,9 @@ impl std::fmt::Debug for EditorView {
 impl EditorView {
     /// A view with nothing loaded.
     pub fn new(options: ParseOptions, cx: &mut Context<'_, Self>) -> Self {
-        let families = FontFamilies::from_app(cx);
+        let metrics = EditorMetrics::from_app(cx);
+        let families = metrics.families(&cx.text_system().all_font_names());
+        let fonts = Fonts::new(&families, metrics.text_size);
         Self {
             focus: cx.focus_handle(),
             path: None,
@@ -482,7 +497,8 @@ impl EditorView {
             widest: 0.0,
             show_whitespace: false,
             links: LinkStatuses::new(None, None, gv_profile::ProfileId::CommonMark),
-            fonts: Fonts::new(&families),
+            metrics,
+            fonts,
             advances: None,
             press: Press::None,
             scrollbar: None,
@@ -496,6 +512,7 @@ impl EditorView {
             _rewrap: None,
             _rewrap_wait: None,
             _foldable: None,
+            _settings: cx.observe_global::<AppSettings>(|this, cx| this.sync_metrics(cx)),
         }
     }
 
@@ -817,7 +834,7 @@ impl EditorView {
 
     /// The line of the first row that is at least half visible.
     fn top_line(&self) -> usize {
-        let row = (self.scroll_y - f64::from(self.layout.pad_top())) / f64::from(LINE);
+        let row = (self.scroll_y - f64::from(self.layout.pad_top())) / f64::from(self.metrics.line);
         let row = row.round().max(0.0) as usize;
         self.row_map().map_or(row, |map| map.line_of_row(row))
     }
@@ -861,7 +878,7 @@ impl EditorView {
         if self.scroll_y < pad {
             return Some(self.scroll_y / pad.max(1.0) - 1.0);
         }
-        let row = (self.scroll_y - pad) / f64::from(LINE);
+        let row = (self.scroll_y - pad) / f64::from(self.metrics.line);
         let line = map.line_of_row(row.floor() as usize);
         let (first, rows) = line_rows(map, line);
         Some(line as f64 + ((row - first as f64) / rows as f64).clamp(0.0, 1.0))
@@ -883,7 +900,7 @@ impl EditorView {
             let line = (position.floor() as usize).min(lines.saturating_sub(1));
             let (first, rows) = line_rows(map, line);
             let frac = (position - line as f64).clamp(0.0, 1.0);
-            pad + (first as f64 + frac * rows as f64) * f64::from(LINE)
+            pad + (first as f64 + frac * rows as f64) * f64::from(self.metrics.line)
         };
         self.pending_top = None;
         if (y - self.scroll_y).abs() > f64::EPSILON {
@@ -973,10 +990,15 @@ impl EditorView {
         f: impl FnOnce(&mut Editor, &mut Extra),
     ) {
         let page = self.page_rows();
+        let line = self.metrics.line;
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
-        let mut extra = Extra { page, scroll: 0.0 };
+        let mut extra = Extra {
+            page,
+            line,
+            scroll: 0.0,
+        };
         f(&mut doc.editor, &mut extra);
         self.scroll_y += extra.scroll;
         self.changed(window, cx);
@@ -985,7 +1007,9 @@ impl EditorView {
     /// Rows in a page: the view's height less one row.
     fn page_rows(&self) -> u32 {
         let height = self.bounds.map_or(0.0, |b| f32::from(b.size.height));
-        ((height / LINE).floor() as u32).saturating_sub(1).max(1)
+        ((height / self.metrics.line).floor() as u32)
+            .saturating_sub(1)
+            .max(1)
     }
 
     fn motion(
@@ -1009,7 +1033,7 @@ impl EditorView {
                 Motion::UpRows(rows)
             };
             editor.move_selections(motion, extend);
-            let px = f64::from(rows) * f64::from(LINE);
+            let px = f64::from(rows) * f64::from(extra.line);
             extra.scroll = if down { px } else { -px };
         });
     }
@@ -1168,8 +1192,8 @@ impl EditorView {
             )
         };
         let advances = (
-            width("0", text::EDITOR_LINE_NUMBER.size),
-            width(" ", text::EDITOR.size),
+            width("0", self.metrics.number_size),
+            width(" ", self.metrics.text_size),
         );
         self.advances = Some(advances);
         advances
@@ -1209,6 +1233,8 @@ fn fold_handlers(
 pub(crate) struct Extra {
     /// Rows in a page.
     page: u32,
+    /// The row height.
+    line: f32,
     /// Scroll the view by this many px.
     scroll: f64,
 }
@@ -1244,7 +1270,9 @@ fn split_for_carets(text: &str, lengths: Option<&[usize]>, count: usize) -> Opti
     (lines.len() == count).then(|| lines.into_iter().map(str::to_owned).collect())
 }
 
-/// The row height.
+/// The row height at the design's sizes (100 %, the default editor
+/// font size).
+#[cfg(test)]
 const LINE: f32 = text::EDITOR.line;
 
 /// The first display row of the visual line of `line` and its number of

@@ -35,28 +35,35 @@ use crate::inline::{FontFamilies, Palette, Token, font_of};
 use crate::metrics::{HAIRLINE, text};
 use crate::theme::ThemeId;
 
-/// The four faces of the editor font.
+/// The four faces of the editor font, and the text size.
 #[derive(Debug, Clone)]
 pub(crate) struct Fonts {
     regular: Font,
     bold: Font,
     italic: Font,
     bold_italic: Font,
+    size: f32,
 }
 
 impl Fonts {
-    pub fn new(families: &FontFamilies) -> Self {
+    /// The editor family of `families` at `size` px.
+    pub fn new(families: &FontFamilies, size: f32) -> Self {
         let face = |weight, italic| font_of(families.mono.clone(), weight, italic);
         Self {
             regular: face(text::weight::REGULAR, false),
             bold: face(text::weight::BOLD, false),
             italic: face(text::weight::REGULAR, true),
             bold_italic: face(text::weight::BOLD, true),
+            size,
         }
     }
 
     pub fn regular(&self) -> &Font {
         &self.regular
+    }
+
+    pub fn set_size(&mut self, size: f32) {
+        self.size = size;
     }
 
     fn of(&self, style: &Style) -> &Font {
@@ -256,6 +263,7 @@ impl Row {
         let display = self.segments[segment].display.clone();
         shape(
             window,
+            fonts.size,
             &self.text.display[display.clone()],
             &slice_runs(&runs, display),
         )
@@ -300,13 +308,10 @@ fn closest_index(line: &ShapedLine, x: f32) -> usize {
     best.0
 }
 
-fn shape(window: &Window, display: &str, runs: &[TextRun]) -> ShapedLine {
-    window.text_system().shape_line(
-        SharedString::from(display.to_owned()),
-        px(text::EDITOR.size),
-        runs,
-        None,
-    )
+fn shape(window: &Window, size: f32, display: &str, runs: &[TextRun]) -> ShapedLine {
+    window
+        .text_system()
+        .shape_line(SharedString::from(display.to_owned()), px(size), runs, None)
 }
 
 /// What a display byte is drawn as.
@@ -573,7 +578,7 @@ fn make_row(
             columns: 0..content.len(),
             display: 0..text.display.len(),
             indent: 0.0,
-            shaped: shape(window, &text.display, &all_runs),
+            shaped: shape(window, env.fonts.size, &text.display, &all_runs),
         }]
     } else {
         breaks
@@ -590,6 +595,7 @@ fn make_row(
                 let display = text.to_display(b.column).min(display_end)..display_end;
                 let shaped = shape(
                     window,
+                    env.fonts.size,
                     &text.display[display.clone()],
                     &slice_runs(&all_runs, display.clone()),
                 );

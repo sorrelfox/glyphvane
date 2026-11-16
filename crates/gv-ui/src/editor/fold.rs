@@ -47,7 +47,7 @@ use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
 use super::highlight::{HighlightCache, LineStyle, Style};
 use super::wrap::RowMap;
-use super::{EditorLayout, EditorView, LINE};
+use super::{EditorLayout, EditorView};
 use crate::metrics::size::split;
 
 /// How long the text must rest after a reparse before the foldable regions
@@ -449,7 +449,8 @@ impl EditorView {
             if y < 0.0 {
                 return None;
             }
-            (map.row_count(), (y / f64::from(LINE)).floor() as usize)
+            let line = f64::from(self.metrics.line);
+            (map.row_count(), (y / line).floor() as usize)
         };
         if row >= rows {
             return None;
@@ -480,8 +481,9 @@ impl EditorView {
         let (first, vl, shaped) = self.line_row(line, window, cx)?;
         let segment = row.checked_sub(first)?;
         let x = x - self.text_origin_x(&columns);
+        let inset = self.metrics.chip_inset;
         vl.marks.iter().find_map(|mark| {
-            let (a, b) = chip_span(&shaped, segment, mark)?;
+            let (a, b) = chip_span(&shaped, segment, mark, inset)?;
             (a <= x && x < b).then(|| FoldHit::Chip(mark.buffer.clone()))
         })
     }
@@ -494,9 +496,14 @@ pub(crate) fn chevron_slot() -> f32 {
 }
 
 /// The x span (from the left of the text) of placeholder `mark`'s chip in
-/// segment `segment` of `row`, if the placeholder is on that segment.
-pub(crate) fn chip_span(row: &super::rows::Row, segment: usize, mark: &Mark) -> Option<(f32, f32)> {
-    use crate::metrics::size::editor::FOLD_CHIP_INSET_X;
+/// segment `segment` of `row`, if the placeholder is on that segment; the
+/// chip is `inset` in from the ends of the `⋯` and its spaces.
+pub(crate) fn chip_span(
+    row: &super::rows::Row,
+    segment: usize,
+    mark: &Mark,
+    inset: f32,
+) -> Option<(f32, f32)> {
     let (start, end) = (
         row.text.column_of_input(mark.input.start),
         row.text.column_of_input(mark.input.end),
@@ -506,10 +513,7 @@ pub(crate) fn chip_span(row: &super::rows::Row, segment: usize, mark: &Mark) -> 
     }
     let x0 = row.x_in(segment, start);
     let x1 = row.x_in(segment, end);
-    Some((
-        x0 + FOLD_CHIP_INSET_X,
-        (x1 - FOLD_CHIP_INSET_X).max(x0 + 1.0),
-    ))
+    Some((x0 + inset, (x1 - inset).max(x0 + 1.0)))
 }
 
 #[cfg(test)]

@@ -239,3 +239,37 @@ fn settings_change_the_reading_view(cx: &mut TestAppContext) {
         .update(|window, _| f32::from(window.bounds().size.width));
     assert!(f.column(&reader) > 1000.0 && f.column(&reader) <= width - 2.0 * document::PAD_X);
 }
+
+#[gpui::test]
+fn the_source_view_and_the_split_editor_follow_the_zoom(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    f.keys("secondary-e");
+    let editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("the tab has an editor");
+    let line = |f: &mut Fixture, editor: &Entity<crate::editor::EditorView>| {
+        editor.read_with(&f.vcx, |e, _| e.metrics().line)
+    };
+    assert_eq!(line(&mut f, &editor), 20.0);
+
+    // Mod+= five times in Edit mode: 150 %, rows 30 px tall.
+    f.keys("secondary-= secondary-= secondary-= secondary-= secondary-=");
+    assert_eq!(f.percent(), 150);
+    assert_eq!(line(&mut f, &editor), 30.0);
+
+    // The Split view's editor side follows too, and Mod+0 resets it.
+    f.workspace
+        .update(&mut f.vcx, |ws, cx| ws.show_mode(ViewMode::Split, cx));
+    draw(&mut f.vcx);
+    let split_editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, cx| {
+            ws.active_tab().split().map(|s| s.read(cx).editor().clone())
+        })
+        .expect("the tab has a split view");
+    assert_eq!(line(&mut f, &split_editor), 30.0);
+    f.keys("secondary-0");
+    assert_eq!(f.percent(), 100);
+    assert_eq!(line(&mut f, &split_editor), 20.0);
+}

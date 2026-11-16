@@ -468,6 +468,24 @@ impl DisplayLayers {
         }]
     }
 
+    /// Like [`set_measure`](Self::set_measure), except that while soft
+    /// wrap is on the re-wrap is handed out as a job instead of done: the
+    /// rows are interpolated until it is finished.
+    fn defer_measure(&mut self, measure: Box<dyn TextMeasure>) -> Option<RewrapJob> {
+        match self.wrap.as_mut() {
+            Some(wrap) => {
+                let job = wrap.map.defer_measure(measure);
+                // The same rows, now interpolated.
+                wrap.snapshot = wrap.map.snapshot();
+                Some(job)
+            }
+            None => {
+                self.set_measure(measure);
+                None
+            }
+        }
+    }
+
     /// Returns the wrap edits if soft wrap is on.
     fn set_measure(&mut self, measure: Box<dyn TextMeasure>) -> Option<Vec<WrapEdit>> {
         match (&mut self.wrap, &mut self.parked) {
@@ -794,6 +812,25 @@ impl Editor {
             self.wrap_changed(&edits);
             self.after_blocks_changed(block_changes);
         }
+    }
+
+    /// Like [`set_measure`](Self::set_measure), but while soft wrap is on
+    /// the re-wrap is handed out as a [`RewrapJob`] instead of done, as
+    /// [`defer_wrap_width`](Self::defer_wrap_width) does: the old wraps
+    /// show (interpolated) until the job is handed back to
+    /// [`finish_rewrap`](Self::finish_rewrap). Run the job with a
+    /// [`LineWrapper`](crate::display_map::LineWrapper) that measures like
+    /// `measure`. Returns `None`, with the measure in place, while soft
+    /// wrap is off.
+    pub fn defer_measure(&mut self, measure: Box<dyn TextMeasure>) -> Option<RewrapJob> {
+        let job = self.display.defer_measure(measure);
+        if job.is_some() {
+            // The rows are the same but interpolated now: the block layer
+            // takes the new snapshot.
+            let block_changes = self.sync_blocks(&[], &[], None);
+            self.after_blocks_changed(block_changes);
+        }
+        job
     }
 
     /// Chooses the indent of soft-wrapped continuation rows with `indent`
@@ -2977,6 +3014,42 @@ mod tests {
             }
         });
         events
+    }
+
+    #[test]
+    fn a_deferred_measure_equals_a_synchronous_one() {
+        let text = sample();
+        let mut sync = editor_of(&text);
+        let mut deferred = editor_of(&text);
+        sync.set_wrap_width(Some(24.0));
+        deferred.set_wrap_width(Some(24.0));
+        let before = shown(&deferred);
+
+        // Characters twice as wide (a larger font): the old wraps show
+        // until the job lands.
+        sync.set_measure(Box::new(MonospaceMeasure::new(2.0)));
+        let mut job = deferred
+            .defer_measure(Box::new(MonospaceMeasure::new(2.0)))
+            .expect("a job while soft wrap is on");
+        assert!(deferred.is_rewrapping());
+        assert!(deferred.wrap().is_some_and(WrapSnapshot::is_interpolated));
+        assert_eq!(shown(&deferred), before);
+        let mut wrapper = LineWrapper::new(Box::new(MonospaceMeasure::new(2.0)));
+        while !job.run(&mut wrapper, 7) {}
+        assert!(deferred.finish_rewrap(job));
+        assert_ne!(shown(&sync), before);
+        assert_eq!(shown(&deferred), shown(&sync));
+
+        // Soft wrap off: the measure is taken at once, for when it is on
+        // again.
+        deferred.set_wrap_width(None);
+        assert!(
+            deferred
+                .defer_measure(Box::new(MonospaceMeasure::new(1.0)))
+                .is_none()
+        );
+        deferred.set_wrap_width(Some(24.0));
+        assert_eq!(shown(&deferred), before);
     }
 
     #[test]

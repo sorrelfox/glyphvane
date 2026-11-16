@@ -5,7 +5,7 @@
 //!
 //! The editor's wrap layer breaks lines at the width of the text column,
 //! measured with [`EditorMeasure`] (GPUI's text system, the editor font at
-//! the editor size), and gives list items and quotes a hanging indent of
+//! the view's text size, [`super::metrics`]), and gives list items and quotes a hanging indent of
 //! two characters
 //! ([`MarkdownHangingIndent`](gv_editor::display_map::MarkdownHangingIndent)). The view paints wrap rows:
 //! each buffer line is shaped in one piece per wrap row ([`super::rows`]),
@@ -24,8 +24,12 @@
 //!   starts; a newer job cancels the one running.
 //! - **Large-file mode** (the `editor.large_file_*` settings) keeps wrap
 //!   off: long lines then scroll sideways.
+//! - **A new font or size** (the zoom, the editor font settings) re-wraps
+//!   the same way with a new measure: at once up to
+//!   [`SYNC_REWRAP_BYTES`], else in the background
+//!   ([`gv_editor::Editor::defer_measure`]).
 //! - The scroll position is kept by line: the line at the top stays at
-//!   the top when the rows above it change.
+//!   the top when the rows above it change, or get taller.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,9 +43,8 @@ use gv_editor::display_map::{
 };
 use gv_text::TextSnapshot;
 
+use super::EditorView;
 use super::fold::{PLACEHOLDER_CHAR, VisualLine};
-use super::{EditorView, LINE};
-use crate::metrics::text;
 
 /// The largest document re-wrapped on the UI thread as soon as the width
 /// changes. About 3 ms of wrapping (some 11 ms per MB); larger documents
@@ -88,13 +91,13 @@ impl std::fmt::Debug for EditorMeasure {
 }
 
 impl EditorMeasure {
-    /// Measures `font` at the editor size.
-    pub fn new(text_system: Arc<TextSystem>, font: &Font) -> Self {
+    /// Measures `font` at `size` px.
+    pub fn new(text_system: Arc<TextSystem>, font: &Font, size: f32) -> Self {
         let id = text_system.resolve_font(font);
         Self {
             text_system,
             font: id,
-            size: px(text::EDITOR.size),
+            size: px(size),
             ascii: [f32::NAN; 128],
             other: HashMap::new(),
             em: f32::NAN,
@@ -428,7 +431,11 @@ impl EditorView {
             return;
         }
         if wanted.is_some() && !self.wrap.ready {
-            let measure = EditorMeasure::new(cx.text_system().clone(), self.fonts.regular());
+            let measure = EditorMeasure::new(
+                cx.text_system().clone(),
+                self.fonts.regular(),
+                self.metrics.text_size,
+            );
             doc.editor.set_measure(Box::new(measure));
             self.wrap.ready = true;
         }
@@ -480,7 +487,11 @@ impl EditorView {
     /// The editor shows interpolated rows until the job lands.
     pub(crate) fn start_rewrap(&mut self, width: f32, cx: &mut Context<'_, Self>) {
         // Measured on the worker like the editor's own measure.
-        let measure = EditorMeasure::new(cx.text_system().clone(), self.fonts.regular());
+        let measure = EditorMeasure::new(
+            cx.text_system().clone(),
+            self.fonts.regular(),
+            self.metrics.text_size,
+        );
         let job = self
             .keep_top_line(|editor| editor.defer_wrap_width(Some(width)))
             .flatten();
@@ -488,48 +499,52 @@ impl EditorView {
         let Some(job) = job else {
             return;
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&cancel);
-        let task = cx.spawn(async move |this, cx| {
-            let job = cx
-                .background_executor()
-                .spawn(async move { run_rewrap(job, measure, &stop) })
-                .await;
-            let Some(job) = job else {
-                return;
-            };
-            this.update(cx, |view, cx| {
-                view.keep_top_line(|editor| editor.finish_rewrap(job));
-                cx.notify();
-            })
-            .ok();
-        });
-        self._rewrap = Some(Rewrap {
-            _task: task,
-            cancel,
-        });
+        self.spawn_rewrap(job, measure, cx);
     }
 
     /// Runs `change` on the editor, keeping the line at the top in place
     /// (and the offset into it, within its new rows).
     pub(super) fn keep_top_line<R>(&mut self, change: impl FnOnce(&mut Editor) -> R) -> Option<R> {
+        let line = self.metrics.line;
+        self.keep_top_line_across(line, line, change)
+    }
+
+    /// Like [`Self::keep_top_line`], for rows that were `old_px` tall and
+    /// are `new_px` tall after `change` (the offset into the line scales
+    /// with them).
+    pub(super) fn keep_top_line_across<R>(
+        &mut self,
+        old_px: f32,
+        new_px: f32,
+        change: impl FnOnce(&mut Editor) -> R,
+    ) -> Option<R> {
         let pad = f64::from(self.layout.pad_top());
-        let row_px = f64::from(LINE);
+        let (old_px, new_px) = (f64::from(old_px), f64::from(new_px));
         let doc = self.doc.as_mut()?;
         let (line, delta) = {
             let map = RowMap::of(&doc.editor);
-            let row = ((self.scroll_y - pad) / row_px).floor().max(0.0) as usize;
+            let row = ((self.scroll_y - pad) / old_px).floor().max(0.0) as usize;
             let line = map.line_of_row(row);
-            let line_top = pad + map.first_row(line) as f64 * row_px;
-            (line, self.scroll_y - line_top)
+            let line_top = pad + map.first_row(line) as f64 * old_px;
+            // Into the line's rows: scaled with them; above the first row
+            // (the top padding, which does not scale): kept.
+            let delta = self.scroll_y - line_top;
+            (
+                line,
+                if delta > 0.0 {
+                    delta * new_px / old_px
+                } else {
+                    delta
+                },
+            )
         };
         let result = change(&mut doc.editor);
         if self.scroll_y > 0.0 {
             let map = RowMap::of(&doc.editor);
             let first = map.first_row(line);
             let rows = map.row_end(line).saturating_sub(first).max(1) as f64;
-            let line_top = pad + first as f64 * row_px;
-            self.scroll_y = (line_top + delta.min(rows * row_px - 1.0)).max(0.0);
+            let line_top = pad + first as f64 * new_px;
+            self.scroll_y = (line_top + delta.min(rows * new_px - 1.0)).max(0.0);
         }
         Some(result)
     }
@@ -539,6 +554,16 @@ impl EditorView {
 pub(crate) struct Rewrap {
     _task: Task<()>,
     cancel: Arc<AtomicBool>,
+}
+
+impl Rewrap {
+    /// The re-wrap `task` runs, which gives up once `cancel` is set.
+    pub(super) fn new(task: Task<()>, cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            _task: task,
+            cancel,
+        }
+    }
 }
 
 impl Drop for Rewrap {
