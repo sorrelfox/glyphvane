@@ -168,13 +168,20 @@ const TABLES: &[&str] = &[
     "> | a |\n> | - |\n",
     "[t]: /u\n| h |\n| - |\n",
     "~~strike~~ www.x.com a@b.co\n",
+    // Math (the GFM file and Extended profiles).
+    "$$\n",
+    "$$ a\n",
+    "b $$\n",
+    "$$x$$\n",
+    "$x$ and $$y$$ and $`z`$\n",
+    "> $$\n",
 ];
 
 /// Strings typed or pasted by edits.
 const TYPED: &[&str] = &[
     "x", " ", "\n", "\r", "\r\n", "\t", ">", "-", "*", "+", "#", "`", "```", "~~~", "1.", "2)",
     "[", "]", ":", "=", "<", "<div>", "    ", "> ", "- ", "\u{e9}", "\n\n", "]: /u", "-->", "\"",
-    "---", "\n---\n", "...", "+++\n", "|", "| - |",
+    "---", "\n---\n", "...", "+++\n", "|", "| - |", "$", "$$", "$$\n",
 ];
 
 fn fragment() -> impl Strategy<Value = String> {
@@ -188,7 +195,8 @@ fn document(max: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(fragment(), 0..max).prop_map(|v| v.concat())
 }
 
-/// A document for GFM tests: the usual fragments and table fragments.
+/// A document for GFM tests: the usual fragments and table (and math)
+/// fragments.
 fn gfm_document(max: usize) -> impl Strategy<Value = String> {
     let piece = prop_oneof![
         2 => fragment(),
@@ -205,12 +213,12 @@ fn fm_document(max: usize) -> impl Strategy<Value = String> {
 /// The options of the `gfm-file` profile (YAML front matter, tables,
 /// strikethrough, extended autolinks).
 fn gfm() -> ParseOptions {
-    ParseOptions::for_profile("gfm-file").expect("built-in profile")
+    ParseOptions::builtin(gv_syntax::ProfileId::GfmFile)
 }
 
 /// The options of the `extended` profile (YAML and TOML front matter).
 fn extended() -> ParseOptions {
-    ParseOptions::for_profile("extended").expect("built-in profile")
+    ParseOptions::builtin(gv_syntax::ProfileId::Extended)
 }
 
 #[derive(Clone, Debug)]

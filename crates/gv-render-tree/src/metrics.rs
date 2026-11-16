@@ -46,7 +46,8 @@ pub struct Metrics {
     /// Headings by level: H1 0/6 and H2 4/8 (designed); H3 to H6 like H2
     /// (not designed).
     pub headings: [Spacing; 6],
-    /// Code and HTML blocks: 0/12 (not designed; as paragraphs).
+    /// Code and HTML blocks, and tables: 0/12 (not designed; as
+    /// paragraphs).
     pub code: Spacing,
     /// Thematic breaks: 12/12 around a 1 px rule (not designed).
     pub rule: Spacing,
@@ -72,6 +73,15 @@ pub struct Metrics {
     pub code_padding_x: f32,
     /// Code block border: 1.
     pub code_border: f32,
+    /// Table cells' horizontal padding: 10.
+    pub table_padding_x: f32,
+    /// Header cells' vertical padding: 4.
+    pub table_header_padding_y: f32,
+    /// Body cells' vertical padding: 5.
+    pub table_padding_y: f32,
+    /// A table's frame and the lines between its rows: 1, in
+    /// `border.default`, with a radius of 6.
+    pub table_border: f32,
     /// Widest an image is laid out: the text column, 680. Wider images
     /// are scaled down to it, keeping their aspect ratio.
     pub image_max_width: f32,
@@ -109,6 +119,10 @@ impl Default for Metrics {
             code_padding_y: 8.0,
             code_padding_x: 12.0,
             code_border: 1.0,
+            table_padding_x: 10.0,
+            table_header_padding_y: 4.0,
+            table_padding_y: 5.0,
+            table_border: 1.0,
             image_max_width: 680.0,
             wrap_code: false,
         }
@@ -140,6 +154,10 @@ impl Metrics {
             code_padding_y: self.code_padding_y * f,
             code_padding_x: self.code_padding_x * f,
             code_border: self.code_border * f,
+            table_padding_x: self.table_padding_x * f,
+            table_header_padding_y: self.table_header_padding_y * f,
+            table_padding_y: self.table_padding_y * f,
+            table_border: self.table_border * f,
             image_max_width: self.image_max_width * f,
             ..self
         }

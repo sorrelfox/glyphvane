@@ -1024,9 +1024,11 @@ impl Workspace {
     ) -> Option<Entity<Reader>> {
         let path = self.tabs.get(index)?.path.clone()?;
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
+        let profile = self.tab_profile(index, cx).compiled;
         let reader = cx.new(|cx| {
             let mut reader = Reader::new(cx);
             reader.set_index(snapshot, cx);
+            reader.set_profile(profile, cx);
             reader.open(path, scroll, cx);
             reader
         });
@@ -1254,8 +1256,14 @@ impl Workspace {
             return;
         };
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
-        let target =
-            crate::reader::navigation(&file, snapshot.as_ref(), request.kind, &request.destination);
+        let profile = reader.read(cx).profile();
+        let target = crate::reader::navigation(
+            &file,
+            snapshot.as_ref(),
+            profile,
+            request.kind,
+            &request.destination,
+        );
         tracing::debug!(?target, "follow link");
         let (path, fragment) = match target {
             Navigation::External(url) => {

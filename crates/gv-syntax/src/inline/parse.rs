@@ -22,14 +22,15 @@
 
 use std::cell::RefCell;
 
-use super::api::{InlineOptions, InlineTree, RefLookup};
+use super::api::{DollarMath, InlineOptions, InlineTree, RefLookup};
 use super::scan;
 use super::tree::{self, ANode, InlineKind as K, LinkData, LinkKind, NIL, Segs, Str};
 use super::unicode;
 
-/// Bytes that end a text run: CommonMark's, plus `~` with strikethrough
-/// and `:` and `w` with extended autolinks.
-const fn special(tilde: bool, autolink: bool) -> [bool; 256] {
+/// Bytes that end a text run: CommonMark's, plus `~` with strikethrough,
+/// `:` and `w` with extended autolinks and `$` with math. `flags`: bit 0
+/// strikethrough, bit 1 autolinks, bit 2 math.
+const fn special(flags: usize) -> [bool; 256] {
     let mut t = [false; 256];
     let specials = b"\n\r`\\&<*_[]!";
     let mut i = 0;
@@ -37,16 +38,23 @@ const fn special(tilde: bool, autolink: bool) -> [bool; 256] {
         t[specials[i] as usize] = true;
         i += 1;
     }
-    t[b'~' as usize] = tilde;
-    t[b':' as usize] = autolink;
-    t[b'w' as usize] = autolink;
+    t[b'~' as usize] = flags & 1 != 0;
+    t[b':' as usize] = flags & 2 != 0;
+    t[b'w' as usize] = flags & 2 != 0;
+    t[b'$' as usize] = flags & 4 != 0;
     t
 }
 
-static SPECIAL: [bool; 256] = special(false, false);
-static SPECIAL_TILDE: [bool; 256] = special(true, false);
-static SPECIAL_AUTOLINK: [bool; 256] = special(false, true);
-static SPECIAL_GFM: [bool; 256] = special(true, true);
+static SPECIALS: [[bool; 256]; 8] = [
+    special(0),
+    special(1),
+    special(2),
+    special(3),
+    special(4),
+    special(5),
+    special(6),
+    special(7),
+];
 
 /// An entry of the delimiter stack (a doubly linked list over a vector, in
 /// push order: a larger index is later in the text).
@@ -155,13 +163,12 @@ fn parse_with(
         refs,
         backticks: None,
         html_skip: 0,
+        dollars: None,
+        bracket_closers: [None; 2],
         opts,
-        special: match (opts.strikethrough, opts.autolinks) {
-            (false, false) => &SPECIAL,
-            (true, false) => &SPECIAL_TILDE,
-            (false, true) => &SPECIAL_AUTOLINK,
-            (true, true) => &SPECIAL_GFM,
-        },
+        special: &SPECIALS[usize::from(opts.strikethrough)
+            | usize::from(opts.autolinks) << 1
+            | usize::from(opts.math != DollarMath::Off || opts.math_code) << 2],
     };
     p.run();
     let flat = tree::flatten(
@@ -217,6 +224,14 @@ struct Parser<'a> {
     /// sorted: built on first use, so closers are found in O(log n).
     backticks: Option<Vec<(u32, u32)>>,
     html_skip: u8,
+    /// Runs of one or two `$` that can close math after the first opener,
+    /// as `(length, start)`, sorted: built on first use, so closers are
+    /// found in O(log n).
+    dollars: Option<Vec<(u32, u32)>>,
+    /// The last search for `\)` and `\]` (index 0 and 1): where it started
+    /// and what it found. Openers come in increasing order, so the
+    /// searches never overlap.
+    bracket_closers: [Option<(usize, Option<usize>)>; 2],
     opts: InlineOptions,
     /// The bytes that end a text run.
     special: &'static [bool; 256],
@@ -249,6 +264,7 @@ impl Parser<'_> {
                 b'<' => self.pointy(),
                 c @ (b'*' | b'_') => self.delimiter_run(c),
                 b'~' if self.opts.strikethrough => self.delimiter_run(b'~'),
+                b'$' if self.special[usize::from(b'$')] => self.dollar(),
                 b'w' if self.opts.autolinks => self.www_autolink(),
                 b':' if self.opts.autolinks => self.url_autolink(),
                 b'[' => {
@@ -393,6 +409,14 @@ impl Parser<'_> {
         let p = self.pos;
         if p + 1 < self.end {
             let c = self.b[p + 1];
+            if self.opts.math_brackets && matches!(c, b'(' | b'[') && self.bracket_math(p) {
+                return;
+            }
+            // GitHub finds math before Markdown escapes: `\$x$` is a
+            // backslash and math.
+            if c == b'$' && self.opts.math == DollarMath::GitHub && self.math_at(p + 1) {
+                return;
+            }
             if scan::is_escapable(c) {
                 self.add(K::Escape, p, p + 2, 0);
                 self.pos = p + 2;
@@ -471,6 +495,167 @@ impl Parser<'_> {
         let key = (n as u32, from as u32);
         let i = runs.partition_point(|&r| r < key);
         runs.get(i).filter(|r| r.0 == key.0).map(|r| r.1 as usize)
+    }
+
+    // -----------------------------------------------------------------------
+    // Math
+
+    /// `$`: math, or literal dollars.
+    fn dollar(&mut self) {
+        let p = self.pos;
+        if !self.math_at(p) {
+            let mut q = p;
+            while q < self.end && self.b[q] == b'$' {
+                q += 1;
+            }
+            self.pos = q;
+        }
+    }
+
+    /// Math starting at the `$` at `p`: `` $`…`$ ``, `$…$` or `$$…$$`.
+    /// Adds the node, moves past it and returns true; false if `p` opens
+    /// none.
+    fn math_at(&mut self, p: usize) -> bool {
+        let (b, end) = (self.b, self.end);
+        let mut q = p;
+        while q < end && b[q] == b'$' {
+            q += 1;
+        }
+        let n = q - p;
+        if n == 1 && self.opts.math_code && q < end && b[q] == b'`' {
+            let mut a = q;
+            while a < end && b[a] == b'`' {
+                a += 1;
+            }
+            let m = a - q;
+            if let Some(close) = self.closing_backticks(a, m)
+                && close + m < end
+                && b[close + m] == b'$'
+            {
+                let z = close + m + 1;
+                self.add_math(K::InlineMath, p, z, 1 + m, m + 1);
+                return true;
+            }
+        }
+        if self.opts.math == DollarMath::Off || n > 2 || q >= end {
+            return false;
+        }
+        if n == 1 && is_cmark_space(b[q]) {
+            return false;
+        }
+        let Some(close) = self.dollar_closer(q, n) else {
+            return false;
+        };
+        let kind = if n == 1 {
+            K::InlineMath
+        } else {
+            K::DisplayMath
+        };
+        self.add_math(kind, p, close + n, n, n);
+        true
+    }
+
+    /// The first run of exactly `n` dollars at or after `from` that can
+    /// close math.
+    fn dollar_closer(&mut self, from: usize, n: usize) -> Option<usize> {
+        let (b, end) = (self.b, self.end);
+        let github = self.opts.math == DollarMath::GitHub;
+        let runs = self.dollars.get_or_insert_with(|| {
+            let mut runs = Vec::new();
+            let mut j = from;
+            while let Some(k) = memchr::memchr(b'$', &b[j..end]) {
+                let s = j + k;
+                let mut e = s;
+                while e < end && b[e] == b'$' {
+                    e += 1;
+                }
+                j = e;
+                let mut slashes = 0;
+                while s > slashes && b[s - slashes - 1] == b'\\' {
+                    slashes += 1;
+                }
+                if slashes % 2 == 1 {
+                    continue;
+                }
+                let closes = match e - s {
+                    // Not after a blank; not before a letter or digit
+                    // (GitHub) or a digit (Pandoc).
+                    1 => {
+                        s > 0
+                            && !is_cmark_space(b[s - 1])
+                            && (e >= end
+                                || if github {
+                                    !b[e].is_ascii_alphanumeric()
+                                } else {
+                                    !b[e].is_ascii_digit()
+                                })
+                    }
+                    2 => true,
+                    _ => false,
+                };
+                if closes {
+                    runs.push(((e - s) as u32, s as u32));
+                }
+            }
+            runs.sort_unstable();
+            runs
+        });
+        let key = (n as u32, from as u32);
+        let i = runs.partition_point(|&r| r < key);
+        runs.get(i).filter(|r| r.0 == key.0).map(|r| r.1 as usize)
+    }
+
+    /// `\(…\)` or `\[…\]` at the backslash `p`: adds the node and returns
+    /// true if it closes.
+    fn bracket_math(&mut self, p: usize) -> bool {
+        let display = self.b[p + 1] == b'[';
+        let closer = if display { b']' } else { b')' };
+        let slot = usize::from(display);
+        let from = p + 2;
+        let found = match self.bracket_closers[slot] {
+            Some((_, Some(c))) if c >= from => Some(c),
+            Some((start, None)) if start <= from => None,
+            _ => {
+                let (b, end) = (self.b, self.end);
+                let mut j = from;
+                let mut found = None;
+                while let Some(k) = memchr::memchr(b'\\', &b[j..end]) {
+                    let s = j + k;
+                    if s + 1 < end && b[s + 1] == closer {
+                        found = Some(s);
+                        break;
+                    }
+                    j = s + 1;
+                }
+                self.bracket_closers[slot] = Some((from, found));
+                found
+            }
+        };
+        let Some(close) = found else {
+            return false;
+        };
+        let kind = if display {
+            K::DisplayMath
+        } else {
+            K::InlineMath
+        };
+        self.add_math(kind, p, close + 2, 2, 2);
+        true
+    }
+
+    /// Appends a math node over `start..end` with markers of `open` and
+    /// `close` bytes, and moves past it.
+    fn add_math(&mut self, kind: K, start: usize, end: usize, open: usize, close: usize) {
+        let data = open as u32 | (close as u32) << 16;
+        self.add_wrapped(
+            kind,
+            start,
+            end,
+            (start + open, end - close),
+            K::MathText,
+            data,
+        );
+        self.pos = end;
     }
 
     /// `<`: autolink, raw HTML or a literal `<`.

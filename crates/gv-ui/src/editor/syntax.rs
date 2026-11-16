@@ -225,6 +225,12 @@ impl Syntax {
         true
     }
 
+    /// Hands the whole tree off next time, as for a new document (the
+    /// profile changed: the follower builds everything again).
+    pub fn restart_handoff(&mut self) {
+        self.handed = None;
+    }
+
     /// A background reparse finished with the tree of `text`.
     pub fn finished(&mut self, tree: SyntaxTree, text: TextSnapshot, changes: &Changes) {
         self.note(changes);

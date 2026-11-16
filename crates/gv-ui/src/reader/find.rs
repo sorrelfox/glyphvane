@@ -557,7 +557,9 @@ pub(super) fn reveal_current(st: &mut State, column: f32, ts: &WindowTextSystem)
             let w = text_width(item, column, &metrics, wrapped);
             let layout = text.borrow_mut().layout(&mut block.borrow_mut(), w, ts);
             let start = layout.caret_for_source(local, Bias::Left);
-            if is_code(&item.kind) && !wrapped {
+            let sideways = matches!(item.kind, gv_render_tree::ItemKind::TableRow { .. })
+                || (is_code(&item.kind) && !wrapped);
+            if sideways {
                 let end = layout.caret_for_source(local_end, Bias::Right);
                 let inner = (column - item.content_x(&metrics)) - 2.0 * code_inset(&metrics);
                 let x = hscroll.get(&item.id.block).copied().unwrap_or(0.0);

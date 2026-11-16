@@ -36,17 +36,23 @@
 //!   (long and wide tables, delimiter-like lines, tilde runs, autolink
 //!   triggers); the comrak engine skips them.
 //!
+//! - `math:` cases run with GitHub math, then with Pandoc math and
+//!   `\(…\)` brackets (`$` runs, openers without closers, `$$` lines).
+//!
 //! TODO(profiles): the other profile-specific extras of the test plan (10k
 //! `[[` on one line, an unclosed `%%` at the top, 10k footnotes, 1 MB front
-//! matter, 10k `$` signs, embed fan-out) need the Obsidian renderer; add
-//! them as `profile:` cases when it exists.
+//! matter, embed fan-out) need the Obsidian renderer; add them as
+//! `profile:` cases when it exists.
 
 mod support;
 
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use gv_syntax::harness::{IS_PLACEHOLDER, render_commonmark_html, render_gfm_html};
+use gv_syntax::harness::{
+    IS_PLACEHOLDER, render_commonmark_html, render_gfm_html, render_html_with,
+};
+use gv_syntax::{ParseOptions, ProfileId};
 
 type Make = fn(usize) -> String;
 type Check = fn(&str, usize) -> bool;
@@ -563,6 +569,78 @@ fn gfm_cases() -> Vec<Case> {
     ]
 }
 
+/// Math shapes: `$` runs, openers without closers, `$`-backtick openers,
+/// `$$` lines and `\(` openers, rendered with GitHub math and with Pandoc
+/// math plus brackets (see [`render_math_github`], [`render_math_pandoc`]).
+fn math_cases() -> Vec<Case> {
+    vec![
+        case("math: a run of $", 200_000, |k| "$".repeat(k), None),
+        case(
+            "math: $ runs of 1 to 3",
+            50_000,
+            |k| "$ $$ $$$ ".repeat(k),
+            None,
+        ),
+        case(
+            "math: openers without closers",
+            50_000,
+            |k| "$a ".repeat(k),
+            Some(|o, _| !o.contains("data-math")),
+        ),
+        case(
+            "math: $5 and $10",
+            30_000,
+            |k| "$5 and $10 ".repeat(k),
+            None,
+        ),
+        case(
+            "math: closers before digits",
+            50_000,
+            |k| "$a$1 ".repeat(k),
+            None,
+        ),
+        case(
+            "math: many formulas",
+            50_000,
+            |k| "$x$ ".repeat(k),
+            Some(|o, k| o.matches("data-math-style=\"inline\"").count() == k),
+        ),
+        case("math: $$ openers", 50_000, |k| "a $$b ".repeat(k), None),
+        case("math: escaped dollars", 50_000, |k| "\\$a ".repeat(k), None),
+        case("math: $` openers", 50_000, |k| "$`a ".repeat(k), None),
+        case("math: $`` openers", 50_000, |k| "$``a` ".repeat(k), None),
+        case("math: \\( openers", 50_000, |k| "\\(a ".repeat(k), None),
+        case("math: \\[ openers", 50_000, |k| "\\[a \\) ".repeat(k), None),
+        case("math: $$ block lines", 50_000, |k| "$$\n".repeat(k), None),
+        case(
+            "math: unclosed $$ block",
+            50_000,
+            |k| format!("$$\n{}", "a $ b\n\n".repeat(k)),
+            None,
+        ),
+        case(
+            "math: $$ lines in a list",
+            20_000,
+            |k| "- $$ a\n  b $$\n".repeat(k),
+            None,
+        ),
+    ]
+}
+
+fn render_math_github(src: &str) -> String {
+    render_html_with(src, ParseOptions::builtin(ProfileId::GfmFile))
+}
+
+fn render_math_pandoc(src: &str) -> String {
+    render_html_with(
+        src,
+        ParseOptions {
+            math_brackets: true,
+            ..ParseOptions::builtin(ProfileId::Obsidian)
+        },
+    )
+}
+
 /// Renders with the GFM renderer and every extension on.
 fn render_gfm(src: &str) -> String {
     render_gfm_html(src, &["table", "strikethrough", "autolink", "tagfilter"])
@@ -729,6 +807,18 @@ fn pathological_gv_syntax() {
     }
     run_suite("gv-syntax", render_commonmark_html, cases(), fixed_cases());
     run_suite("gv-syntax (GFM)", render_gfm, gfm_cases(), Vec::new());
+    run_suite(
+        "gv-syntax (GitHub math)",
+        render_math_github,
+        math_cases(),
+        Vec::new(),
+    );
+    run_suite(
+        "gv-syntax (Pandoc math, brackets)",
+        render_math_pandoc,
+        math_cases(),
+        Vec::new(),
+    );
 }
 
 #[test]
@@ -746,7 +836,7 @@ fn pathological_comrak() {
 /// what they should (cheap; runs on every `cargo test`).
 #[test]
 fn generators_and_matchers() {
-    for c in cases().into_iter().chain(gfm_cases()) {
+    for c in cases().into_iter().chain(gfm_cases()).chain(math_cases()) {
         let small = (c.make)((c.n / 1000).max(3));
         assert!(!small.is_empty(), "{}", c.name);
     }

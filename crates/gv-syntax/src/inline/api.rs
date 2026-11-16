@@ -9,6 +9,7 @@ use std::hash::BuildHasher;
 
 use super::tree::{LinkData, Node, Segs};
 use super::{dump, html, parse, scan, tree};
+pub use crate::options::DollarMath;
 
 /// The content of one leaf block.
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +98,13 @@ pub struct InlineOptions {
     /// [`InlineKind::Autolink`](super::InlineKind::Autolink) nodes without
     /// angle brackets.
     pub autolinks: bool,
+    /// `$x$` inline math and `$$x$$` display math, with the given `$` rule
+    /// (see [`DollarMath`]).
+    pub math: DollarMath,
+    /// `` $`x`$ `` inline math.
+    pub math_code: bool,
+    /// `\(x\)` inline and `\[x\]` display math.
+    pub math_brackets: bool,
 }
 
 impl InlineOptions {
@@ -105,6 +113,9 @@ impl InlineOptions {
         strikethrough: false,
         strikethrough_single: false,
         autolinks: false,
+        math: DollarMath::Off,
+        math_code: false,
+        math_brackets: false,
     };
 
     /// The GFM extensions.
@@ -112,6 +123,7 @@ impl InlineOptions {
         strikethrough: true,
         strikethrough_single: true,
         autolinks: true,
+        ..InlineOptions::COMMONMARK
     };
 }
 

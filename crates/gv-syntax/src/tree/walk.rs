@@ -108,6 +108,11 @@ pub enum LeafKind {
     /// set and `has_content` not) and the body rows; see [`crate::table`]
     /// for splitting them into cells.
     Table,
+    /// A `$$` display math block. Its lines hold the TeX: the text after
+    /// the opening `$$` (when there is any), the lines between (blank ones
+    /// included), and the text before the closing `$$` (when there is
+    /// any).
+    MathBlock,
 }
 
 /// One line of a leaf block.
@@ -726,6 +731,26 @@ fn emit_leaf(
                     range,
                 });
             }
+        }
+        BlockKind::MathBlock => {
+            // Every line, without the delimiter lines that hold no TeX.
+            let mut lines = &f.lines[..];
+            if lines.first().is_some_and(|l| !l.has_content) {
+                lines = &lines[1..];
+            }
+            if lines.len() > 1 && lines.last().is_some_and(|l| l.marker && !l.has_content) {
+                lines = &lines[..lines.len() - 1];
+            }
+            v.leaf(&Leaf {
+                id: f.id,
+                kind: LeafKind::MathBlock,
+                lines,
+                info: None,
+                open_line: f.line,
+                start_line: f.line,
+                end_line: f.lines.last().map_or(f.line, |l| l.line),
+                range,
+            });
         }
         _ => {
             // The body of a fenced block: without the opening line, and

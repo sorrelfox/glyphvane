@@ -102,6 +102,16 @@ pub fn render_gfm_html(src: &str, extensions: &[&str]) -> String {
     to_gfm_html(&SyntaxTree::parse_with(src, options), src, html)
 }
 
+/// Renders `src` with `options` through the GFM-exact HTML emitter (math
+/// nodes as comrak's math markup).
+pub fn render_html_with(src: &str, options: ParseOptions) -> String {
+    to_gfm_html(
+        &SyntaxTree::parse_with(src, options),
+        src,
+        GfmHtmlOptions::default(),
+    )
+}
+
 /// The deterministic S-expression dump of the CST of `src` (the `cst` format
 /// of `glyphvane render`, documented in [`crate::cst_dump`]). Two parses are
 /// structurally equal iff their dumps are equal.

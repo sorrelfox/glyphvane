@@ -3,8 +3,8 @@
 
 //! Flavor profiles in the windows: which profile a tab's document uses and
 //! why ([`TabProfile`]), the overrides set from the status bar's profile
-//! chip ([`ProfileOverrides`]), and what the compiled profile means for
-//! the parser.
+//! chip ([`ProfileOverrides`]). The parser, the render tree and link
+//! resolution read the compiled profile itself.
 //!
 //! Detection follows [`gv_profile::detect`]. The settings give the default
 //! profile (`profiles.default_profile`) and a vault override
@@ -19,9 +19,8 @@ use std::sync::Arc;
 
 use gpui::{App, Global};
 use gv_profile::detect::{DetectOptions, Overrides};
-use gv_profile::switches::TildeSingle;
 use gv_profile::{CompiledProfile, Detection, ProfileId, Reason, Requested};
-use gv_syntax::{FrontMatterOptions, ParseOptions};
+use gv_syntax::ParseOptions;
 
 use crate::AppSettings;
 
@@ -148,40 +147,8 @@ impl TabProfile {
 
     /// The parse options of the compiled profile.
     pub fn parse_options(&self) -> ParseOptions {
-        parse_options(&self.compiled)
+        ParseOptions::from_profile(&self.compiled)
     }
-}
-
-/// The options the parser takes today, from a compiled profile.
-///
-/// The parser keeps its own per-profile table
-/// ([`ParseOptions::for_profile`]) of the constructs it implements so
-/// far; that is the base, so a profile never turns on a construct the
-/// parser would read with another profile's meaning (Extended's `~x~` is
-/// subscript, not GFM strikethrough). Switches changed by tuning or
-/// `.glyphvane.toml` are applied on top where the parser has an option
-/// for them. Once the parser takes a [`CompiledProfile`] itself, this
-/// mapping goes.
-pub fn parse_options(profile: &CompiledProfile) -> ParseOptions {
-    let mut options = ParseOptions::for_profile(profile.id.as_str()).unwrap_or_default();
-    let s = &profile.switches;
-    for key in &profile.changed {
-        match *key {
-            "front_matter_yaml" | "front_matter_toml" => {
-                options.front_matter = FrontMatterOptions {
-                    yaml: s.front_matter.yaml,
-                    toml: s.front_matter.toml,
-                };
-            }
-            "tables" => options.tables = s.tables,
-            "tilde_single" | "tilde_double" => {
-                options.strikethrough = s.tilde_single == TildeSingle::Strike;
-            }
-            "extended_autolinks" => options.autolinks = s.extended_autolinks,
-            _ => {}
-        }
-    }
-    options
 }
 
 /// The detection settings: the default profile and the vault override
@@ -249,44 +216,5 @@ fn overrides_for(path: &Path, settings_vault: Option<ProfileId>, cx: &App) -> Ov
             .map(|(folder, id)| (folder.clone(), *id))
             .collect(),
         vault: ProfileOverrides::get(cx, path, Scope::Vault).or(settings_vault),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_options_follow_the_front_matter_switches() {
-        for id in ProfileId::ALL {
-            let compiled = gv_profile::compile_builtin(id);
-            assert_eq!(
-                Some(parse_options(&compiled)),
-                ParseOptions::for_profile(id.as_str()),
-                "{id}"
-            );
-        }
-    }
-
-    #[test]
-    fn switch_overrides_reach_the_parser_options() {
-        use gv_profile::{SwitchOverrides, SwitchValue, Tuning};
-        let mut overrides = SwitchOverrides::new();
-        overrides
-            .insert("front_matter_toml", SwitchValue::Bool(true))
-            .expect("valid");
-        overrides
-            .insert("tables", SwitchValue::Bool(true))
-            .expect("valid");
-        overrides
-            .insert("tilde_single", SwitchValue::Word("strike".into()))
-            .expect("valid");
-        let options = parse_options(&gv_profile::compile(
-            ProfileId::CommonMark,
-            Tuning::default(),
-            &overrides,
-        ));
-        assert!(options.front_matter.toml && !options.front_matter.yaml);
-        assert!(options.tables && options.strikethrough && !options.autolinks);
     }
 }

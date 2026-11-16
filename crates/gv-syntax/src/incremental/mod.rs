@@ -52,9 +52,9 @@ use std::time::Instant;
 use gv_text::{EditSummary, TextSource};
 use sum_tree::Bias;
 
-use crate::block::BlockParser;
 use crate::block::front_matter;
 use crate::block::state::{Interner, Kind, RefMode, StateId};
+use crate::block::{BlockOptions, BlockParser};
 use crate::tree::chunk::{Bytes, CHUNK_LINES, ChunkBuilder, LineRec, Lines};
 use crate::tree::event::{BlockId, BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
 use crate::tree::{LineCursor, SyntaxTree, TreeData};
@@ -354,7 +354,8 @@ impl SyntaxTree {
         let state = base
             .line(&restart)
             .map_or(crate::block::state::ROOT, |l| l.state);
-        let mut parser = BlockParser::from_checkpoint(&base.interner, state, base.options.tables);
+        let mut parser =
+            BlockParser::from_checkpoint(&base.interner, state, BlockOptions::of(base.options));
         if parser.needs_pending_text() {
             parser.set_pending_text(pending_text_before(base, &restart, text));
         }
@@ -464,7 +465,7 @@ impl ReparseTask {
     fn restart_at_zero(&mut self) {
         let base = &self.base.0;
         self.restart = base.cursor_at_line(0);
-        self.parser = BlockParser::with_tables(base.options.tables);
+        self.parser = BlockParser::with_options(BlockOptions::of(base.options));
         self.lines.clear();
         self.sink.events.clear();
         self.sink.ids.clear();
@@ -932,6 +933,7 @@ impl ReparseTask {
             (Kind::Item { .. }, Kind::Item { .. })
             | (Kind::Paragraph { .. }, Kind::Paragraph { .. })
             | (Kind::FencedCode { .. }, Kind::FencedCode { .. })
+            | (Kind::MathBlock { .. }, Kind::MathBlock { .. })
             | (Kind::FrontMatter { .. }, Kind::FrontMatter { .. }) => true,
             (a, b) => a == b,
         };
@@ -1015,6 +1017,7 @@ fn phantom_kind(k: Kind) -> BlockKind {
         Kind::Item { .. } => BlockKind::Item,
         Kind::FencedCode { .. } => BlockKind::FencedCode,
         Kind::IndentedCode => BlockKind::IndentedCode,
+        Kind::MathBlock { .. } => BlockKind::MathBlock,
         Kind::Html { ty } => BlockKind::Html { kind: ty },
         Kind::Heading => BlockKind::AtxHeading { level: 1 },
         Kind::ThematicBreak => BlockKind::ThematicBreak,

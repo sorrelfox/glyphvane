@@ -3,24 +3,37 @@
 
 //! Parser switches of a flavor profile.
 //!
-//! [`ParseOptions`] is the part of a flavor profile that the parser
-//! reads: block switches (front matter, tables) and inline switches
-//! (strikethrough, extended autolinks, see [`InlineOptions`]). It is
-//! deliberately small: every field is a switch some built-in profile sets
-//! differently, and the default is CommonMark exactly. A tree remembers the
-//! options it was parsed with ([`SyntaxTree::options`]), and incremental
-//! reparses keep them.
+//! [`ParseOptions`] is the part of a compiled flavor profile
+//! ([`gv_profile::CompiledProfile`]) that the parser reads: block switches
+//! (front matter, tables, `$$` math blocks) and inline switches
+//! (strikethrough, extended autolinks, math; see [`InlineOptions`]). It is
+//! small and `Copy`, so a tree can remember the options it was parsed with
+//! ([`SyntaxTree::options`]) and incremental reparses keep them. The
+//! default is CommonMark exactly.
 //!
-//! | Profile id | Front matter | GFM tables, strikethrough, extended autolinks |
-//! |---|---|---|
-//! | `commonmark` | none (`---` at the top is a thematic break) | no |
-//! | `gfm-file`, `gfm-comment` | YAML | yes |
-//! | `obsidian` | YAML (JSON objects use the same `---` delimiters) | not yet |
-//! | `extended` | YAML and TOML | not yet |
+//! [`ParseOptions::from_profile`] derives the options from a compiled
+//! profile's switches, so tuning and `.glyphvane.toml` overrides reach the
+//! parser. Switches for constructs the parser does not implement yet are
+//! ignored; a construct whose meaning the profile changes is never parsed
+//! with another profile's meaning: Extended reads `~x~` as subscript, which
+//! is not parsed yet, so a single tilde stays text there rather than
+//! becoming GFM strikethrough.
+//!
+//! | Switch | Option |
+//! |---|---|
+//! | `front_matter_yaml`, `front_matter_toml` | [`ParseOptions::front_matter`] |
+//! | `tables`, `table_min_dashes` | [`ParseOptions::tables`], [`ParseOptions::table_min_dashes`] |
+//! | `tilde_double`, `tilde_single = strike` | [`ParseOptions::strikethrough`], [`ParseOptions::strikethrough_single`] |
+//! | `extended_autolinks` | [`ParseOptions::autolinks`] |
+//! | `math` | [`ParseOptions::math`]: `github` is [`DollarMath::GitHub`] with `` $`…`$ ``, `obsidian` is [`DollarMath::Pandoc`]; `$$` blocks with either |
+//! | `math_brackets` | [`ParseOptions::math_brackets`] |
 //!
 //! [`InlineOptions`]: crate::inline::InlineOptions
 //!
 //! [`SyntaxTree::options`]: crate::SyntaxTree::options
+
+use gv_profile::switches::{Math, TildeSingle};
+use gv_profile::{CompiledProfile, ProfileId, Switches};
 
 /// Which front matter syntaxes the parser recognizes at byte 0 (after an
 /// optional BOM). See [`crate::BlockKind::FrontMatter`].
@@ -56,10 +69,32 @@ impl FrontMatterOptions {
     }
 }
 
+/// The rules for `$…$` inline math (see [`crate::inline::InlineKind::InlineMath`]).
+///
+/// Both rules need a non-blank character right after the opening `$` and
+/// right before the closing one, and an unescaped closer; a `$` preceded by
+/// an odd number of backslashes is no closer. They differ in what may
+/// follow the closer, and in escapes before the opener.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DollarMath {
+    /// No `$` math (`$` is text).
+    #[default]
+    Off,
+    /// GitHub: the closer is not followed by an ASCII letter or digit, so
+    /// `$5 and $10` is not math. A backslash does not stop an opener:
+    /// `\$x$` is a literal backslash and the formula `x`, as GitHub finds
+    /// math before Markdown escapes.
+    GitHub,
+    /// Pandoc's `tex_math_dollars` (Obsidian's rule until checked against
+    /// Obsidian): the closer is not followed by an ASCII digit; `\$` is an
+    /// escaped dollar.
+    Pandoc,
+}
+
 /// Parser switches (see the [module documentation](self)).
 ///
 /// The default parses CommonMark 0.31.2 exactly.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ParseOptions {
     /// Front matter at the start of the document.
     pub front_matter: FrontMatterOptions,
@@ -67,6 +102,8 @@ pub struct ParseOptions {
     /// under a paragraph's last line turns that line into a table header
     /// ([`LeafKind::Table`](crate::LeafKind::Table)).
     pub tables: bool,
+    /// The fewest dashes each cell of a delimiter row needs (1 in GFM).
+    pub table_min_dashes: u8,
     /// GFM strikethrough with two tildes: `~~x~~` (the `strikethrough`
     /// extension).
     pub strikethrough: bool,
@@ -77,6 +114,20 @@ pub struct ParseOptions {
     /// GFM extended autolinks: `www.`, `http://`, `https://`, `ftp://` and
     /// bare email addresses (the `autolink` extension).
     pub autolinks: bool,
+    /// `$…$` inline math. Any rule other than [`DollarMath::Off`] also
+    /// turns on `$$…$$` display math inside paragraphs and `$$` math
+    /// blocks ([`LeafKind::MathBlock`](crate::LeafKind::MathBlock)).
+    pub math: DollarMath,
+    /// `` $`…`$ `` inline math (GitHub).
+    pub math_code: bool,
+    /// `\(…\)` inline and `\[…\]` display math.
+    pub math_brackets: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self::COMMONMARK
+    }
 }
 
 impl ParseOptions {
@@ -84,21 +135,60 @@ impl ParseOptions {
     pub const COMMONMARK: ParseOptions = ParseOptions {
         front_matter: FrontMatterOptions::NONE,
         tables: false,
+        table_min_dashes: 1,
         strikethrough: false,
         strikethrough_single: false,
         autolinks: false,
+        math: DollarMath::Off,
+        math_code: false,
+        math_brackets: false,
     };
 
     /// The GFM extensions of the GFM spec (tables, strikethrough, extended
-    /// autolinks), without front matter: what cmark-gfm parses with
-    /// `-e table -e strikethrough -e autolink`.
+    /// autolinks), without front matter or math: what cmark-gfm parses
+    /// with `-e table -e strikethrough -e autolink`.
     pub const GFM: ParseOptions = ParseOptions {
-        front_matter: FrontMatterOptions::NONE,
         tables: true,
         strikethrough: true,
         strikethrough_single: true,
         autolinks: true,
+        ..ParseOptions::COMMONMARK
     };
+
+    /// The options of a compiled profile (its switches after tuning and
+    /// overrides).
+    pub fn from_profile(profile: &CompiledProfile) -> ParseOptions {
+        Self::from_switches(&profile.switches)
+    }
+
+    /// The options of built-in profile `id`, without tuning or overrides.
+    pub fn builtin(id: ProfileId) -> ParseOptions {
+        Self::from_switches(&gv_profile::definition(id).switches)
+    }
+
+    /// The options of a switch set.
+    pub fn from_switches(s: &Switches) -> ParseOptions {
+        let (math, math_code) = match s.math {
+            Math::Off => (DollarMath::Off, false),
+            Math::GitHub => (DollarMath::GitHub, true),
+            Math::Obsidian => (DollarMath::Pandoc, false),
+        };
+        let strike_single = s.tilde_single == TildeSingle::Strike;
+        ParseOptions {
+            front_matter: FrontMatterOptions {
+                yaml: s.front_matter.yaml,
+                toml: s.front_matter.toml,
+            },
+            tables: s.tables,
+            table_min_dashes: s.table_min_dashes.max(1),
+            strikethrough: s.tilde_double || strike_single,
+            strikethrough_single: strike_single,
+            autolinks: s.extended_autolinks,
+            math,
+            math_code,
+            math_brackets: s.math_brackets,
+        }
+    }
 
     /// The inline part of the options.
     pub fn inline(self) -> crate::inline::InlineOptions {
@@ -106,32 +196,15 @@ impl ParseOptions {
             strikethrough: self.strikethrough,
             strikethrough_single: self.strikethrough_single,
             autolinks: self.autolinks,
+            math: self.math,
+            math_code: self.math_code,
+            math_brackets: self.math_brackets,
         }
     }
 
-    /// The options of a built-in profile, by profile id (`commonmark`,
-    /// `gfm-file`, `gfm-comment`, `obsidian`, `extended`); `None` for an
-    /// unknown id.
-    pub fn for_profile(id: &str) -> Option<ParseOptions> {
-        Some(match id {
-            "commonmark" => ParseOptions::COMMONMARK,
-            "gfm-file" | "gfm-comment" => ParseOptions {
-                front_matter: FrontMatterOptions::YAML,
-                ..ParseOptions::GFM
-            },
-            "obsidian" => ParseOptions {
-                front_matter: FrontMatterOptions::YAML,
-                ..ParseOptions::COMMONMARK
-            },
-            "extended" => ParseOptions {
-                front_matter: FrontMatterOptions {
-                    yaml: true,
-                    toml: true,
-                },
-                ..ParseOptions::COMMONMARK
-            },
-            _ => return None,
-        })
+    /// Whether `$$` math blocks open.
+    pub fn math_blocks(self) -> bool {
+        self.math != DollarMath::Off
     }
 }
 
@@ -140,19 +213,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profiles() {
+    fn builtin_profiles() {
         assert_eq!(ParseOptions::default(), ParseOptions::COMMONMARK);
         assert_eq!(
-            ParseOptions::for_profile("commonmark"),
-            Some(ParseOptions::COMMONMARK)
+            ParseOptions::builtin(ProfileId::CommonMark),
+            ParseOptions::COMMONMARK
         );
-        let ext = ParseOptions::for_profile("extended").expect("known");
+        let ext = ParseOptions::builtin(ProfileId::Extended);
         assert!(ext.front_matter.yaml && ext.front_matter.toml);
-        let gfm = ParseOptions::for_profile("gfm-file").expect("known");
+        assert!(ext.tables && ext.strikethrough && !ext.strikethrough_single);
+        assert_eq!((ext.math, ext.math_code), (DollarMath::GitHub, true));
+        let gfm = ParseOptions::builtin(ProfileId::GfmFile);
         assert_eq!(gfm.front_matter, FrontMatterOptions::YAML);
-        assert!(gfm.tables && gfm.strikethrough && gfm.autolinks);
+        assert!(gfm.tables && gfm.strikethrough && gfm.strikethrough_single && gfm.autolinks);
+        assert_eq!(gfm.math, DollarMath::GitHub);
+        assert_eq!(
+            ParseOptions {
+                front_matter: FrontMatterOptions::NONE,
+                math: DollarMath::Off,
+                math_code: false,
+                ..gfm
+            },
+            ParseOptions::GFM
+        );
+        assert_eq!(ParseOptions::builtin(ProfileId::GfmComment), gfm);
+        let ob = ParseOptions::builtin(ProfileId::Obsidian);
+        assert!(ob.tables && ob.table_min_dashes == 2);
+        assert!(ob.strikethrough && !ob.strikethrough_single && ob.autolinks);
+        assert_eq!((ob.math, ob.math_code), (DollarMath::Pandoc, false));
         let cm = ParseOptions::COMMONMARK;
-        assert!(!cm.tables && !cm.strikethrough && !cm.autolinks);
-        assert_eq!(ParseOptions::for_profile("nope"), None);
+        assert!(!cm.tables && !cm.strikethrough && !cm.autolinks && !cm.math_blocks());
+    }
+
+    #[test]
+    fn overrides_reach_the_options() {
+        use gv_profile::{SwitchOverrides, SwitchValue, Tuning};
+        let mut overrides = SwitchOverrides::new();
+        for (key, value) in [
+            ("front_matter_toml", SwitchValue::Bool(true)),
+            ("tables", SwitchValue::Bool(true)),
+            ("tilde_single", SwitchValue::Word("strike".into())),
+            ("math", SwitchValue::Word("obsidian".into())),
+            ("math_brackets", SwitchValue::Bool(true)),
+        ] {
+            overrides.insert(key, value).expect("valid");
+        }
+        let profile = gv_profile::compile(ProfileId::CommonMark, Tuning::default(), &overrides);
+        let o = ParseOptions::from_profile(&profile);
+        assert!(o.front_matter.toml && !o.front_matter.yaml);
+        assert!(o.tables && o.strikethrough && o.strikethrough_single && !o.autolinks);
+        assert_eq!(o.math, DollarMath::Pandoc);
+        assert!(o.math_brackets && o.math_blocks());
     }
 }

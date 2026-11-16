@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gv-profile.workspace = true
 gv-text.workspace = true
 memchr.workspace = true
 sum_tree.workspace = true

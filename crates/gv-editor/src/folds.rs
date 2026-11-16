@@ -189,7 +189,8 @@ impl Visitor for Collector<'_> {
                 }
                 return;
             }
-            LeafKind::FencedCode => FoldKind::FencedCode,
+            // A `$$` math block folds like a fence.
+            LeafKind::FencedCode | LeafKind::MathBlock => FoldKind::FencedCode,
             LeafKind::IndentedCode => FoldKind::IndentedCode,
             LeafKind::Html { .. } => FoldKind::Html,
             LeafKind::FrontMatter { .. } => FoldKind::FrontMatter,

@@ -102,6 +102,39 @@ const INSERTS: &[&str] = &[
     "(",
 ];
 
+/// Lines of GFM documents: tables, strikethrough, math.
+const GFM_LINES: &[&str] = &[
+    "| a | b |",
+    "| - | :-: |",
+    "|--|--:|",
+    "| [link](exact.md) | $x$ | extra |",
+    "| ![img](small.png) |",
+    "a ~~b~~ c ~d~",
+    "$$",
+    "$x^2$ and $$y$$ and $`z`$",
+    "$$ q $$",
+    "$$ open",
+    "close $$",
+    "www.example.com and a@b.co",
+];
+
+/// Edits of GFM documents.
+const GFM_INSERTS: &[&str] = &["|", "$", "$$\n", "| - |\n", "~~", "| x |\n"];
+
+fn gfm_doc() -> impl Strategy<Value = String> {
+    prop::collection::vec(0..LINES.len() + GFM_LINES.len(), 0..40).prop_map(|v| {
+        let line = |i: usize| {
+            LINES
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| GFM_LINES[i - LINES.len()])
+        };
+        let mut s = v.iter().map(|&i| line(i)).collect::<Vec<_>>().join("\n");
+        s.push('\n');
+        s
+    })
+}
+
 fn status_of(t: &LinkTarget<'_>) -> LinkStatus {
     match t.destination {
         "exact.md" => LinkStatus::Exact,
@@ -271,6 +304,39 @@ proptest! {
                 sources(),
             );
             prop_assert_eq!(common::canonical(&d.render), common::canonical(&full));
+            common::check(&d);
+        }
+    }
+
+    #[test]
+    fn gfm_update_equals_full_build(
+        text in gfm_doc(),
+        edits in prop::collection::vec((edit(), any::<bool>()), 1..5),
+    ) {
+        let profile = gv_syntax::ProfileId::GfmFile;
+        let mut d = common::build_with(
+            &text,
+            ParseOptions::builtin(profile),
+            RenderOptions::builtin(profile),
+            sources(),
+        );
+        common::check(&d);
+        for (e, gfm) in edits {
+            let range = e.range(&d.text);
+            let insert = if gfm {
+                GFM_INSERTS[e.insert % GFM_INSERTS.len()]
+            } else {
+                INSERTS[e.insert]
+            };
+            d.edit(range, insert, sources());
+            let full = RenderTree::build(
+                &d.tree,
+                &d.model,
+                d.text.as_str(),
+                RenderOptions::builtin(profile),
+                sources(),
+            );
+            prop_assert_eq!(common::canonical(&d.render), common::canonical(&full), "text {:?}", d.text);
             common::check(&d);
         }
     }

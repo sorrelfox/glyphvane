@@ -19,6 +19,7 @@ use std::sync::Arc;
 use gv_inline::Paragraph;
 use gv_model::LinkKind;
 use gv_syntax::inline::RefDef;
+use gv_syntax::table::Alignment;
 use gv_syntax::{BlockId, FrontMatterKind};
 
 use crate::status::{ImageSize, LinkStatus};
@@ -121,6 +122,9 @@ pub struct BlockNode {
     pub(crate) top: Range<usize>,
     /// Reference labels its inlines looked up.
     pub(crate) lookups: Option<Lookups>,
+    /// A GFM table (it shares its block id with the paragraph before it
+    /// in the same text block).
+    pub(crate) table: bool,
 }
 
 impl BlockNode {
@@ -141,6 +145,29 @@ impl BlockNode {
             NodeKind::Paragraph(c) | NodeKind::Heading { content: c, .. } => Some(c),
             _ => None,
         }
+    }
+
+    /// The inline content an item of this node lays out: a table row's,
+    /// or the paragraph's or heading's.
+    pub fn item_inline(&self, kind: &crate::ItemKind) -> Option<&Arc<InlineContent>> {
+        match (&self.kind, kind) {
+            (NodeKind::Table(t), crate::ItemKind::TableRow { row, .. }) => {
+                t.rows.get(*row as usize).map(|r| &r.content)
+            }
+            _ => self.inline(),
+        }
+    }
+
+    /// Every inline content of the node: a paragraph's or heading's, or
+    /// each table row's.
+    pub fn inlines(&self) -> impl Iterator<Item = &Arc<InlineContent>> + '_ {
+        let rows = match &self.kind {
+            NodeKind::Table(t) => &t.rows[..],
+            _ => &[],
+        };
+        self.inline()
+            .into_iter()
+            .chain(rows.iter().map(|r| &r.content))
     }
 
     /// The lines of a code block, HTML block, math block or front matter.
@@ -169,10 +196,13 @@ pub enum NodeKind {
     },
     /// A fenced or indented code block.
     Code(Arc<CodeBlock>),
-    /// Display math from a ` ```math ` fence (profiles with math): the
-    /// fence's lines are the TeX source, joined in [`CodeBlock::text`].
+    /// Display math from a ` ```math ` fence or a `$$` block (profiles
+    /// with math): the TeX source lines, joined in [`CodeBlock::text`].
     /// Copy and find see the source.
     Math(Arc<CodeBlock>),
+    /// A GFM table: one virtual item per row (the delimiter row is part of
+    /// the header row's source).
+    Table(Arc<TableBlock>),
     /// A thematic break.
     ThematicBreak,
     /// An HTML block. Raw HTML is rendered natively in a later milestone;
@@ -204,6 +234,7 @@ impl NodeKind {
             Self::Heading { .. } => "heading",
             Self::Code(_) => "code",
             Self::Math(_) => "math",
+            Self::Table(_) => "table",
             Self::ThematicBreak => "thematic-break",
             Self::Html { .. } => "html",
             Self::Properties { .. } => "properties",
@@ -225,6 +256,8 @@ pub struct InlineContent {
     pub links: Box<[LinkInfo]>,
     /// Images, in order.
     pub images: Box<[ImageInfo]>,
+    /// Inline and display math, in order.
+    pub math: Box<[MathInfo]>,
     /// The content holds raw inline HTML, shown as text until the HTML
     /// pipeline renders it.
     pub raw_html_pending: bool,
@@ -261,6 +294,13 @@ pub enum InlineRole {
     /// box's id is [`BoxRef::LinkSuffix`] of the link index). Not content:
     /// copy and find skip it.
     LinkSuffix,
+    /// A formula box (index into [`InlineContent::math`]); the box's id is
+    /// [`BoxRef::Math`] of the same index. Copy and find see its TeX.
+    Math(u32),
+    /// The space before table column `col` of a row (`col` = the column
+    /// count: after the last cell); the box's id is [`BoxRef::Cell`]. Copy
+    /// and find see a tab between two cells, nothing at the row's ends.
+    CellGap(u32),
 }
 
 /// What an inline box of a paragraph stands for, as encoded in its
@@ -273,26 +313,37 @@ pub enum BoxRef {
     Image(u32),
     /// The status icon after link `i` of [`InlineContent::links`].
     LinkSuffix(u32),
+    /// Formula `i` of [`InlineContent::math`].
+    Math(u32),
+    /// The gap before table column `i` of a row.
+    Cell(u32),
 }
 
 impl BoxRef {
-    /// The tag bit of link suffixes (indices stay below it).
+    /// The tag bits (indices stay below them).
+    const TAGS: u32 = 3 << 30;
     const LINK_SUFFIX: u32 = 1 << 31;
+    const MATH: u32 = 1 << 30;
+    const CELL: u32 = 3 << 30;
 
     /// The box id.
     pub const fn id(self) -> u32 {
         match self {
-            Self::Image(i) => i & !Self::LINK_SUFFIX,
-            Self::LinkSuffix(i) => i | Self::LINK_SUFFIX,
+            Self::Image(i) => i & !Self::TAGS,
+            Self::LinkSuffix(i) => (i & !Self::TAGS) | Self::LINK_SUFFIX,
+            Self::Math(i) => (i & !Self::TAGS) | Self::MATH,
+            Self::Cell(i) => (i & !Self::TAGS) | Self::CELL,
         }
     }
 
     /// What box id `id` stands for.
     pub const fn from_id(id: u32) -> Self {
-        if id & Self::LINK_SUFFIX == 0 {
-            Self::Image(id)
-        } else {
-            Self::LinkSuffix(id & !Self::LINK_SUFFIX)
+        let i = id & !Self::TAGS;
+        match id & Self::TAGS {
+            0 => Self::Image(i),
+            Self::LINK_SUFFIX => Self::LinkSuffix(i),
+            Self::MATH => Self::Math(i),
+            _ => Self::Cell(i),
         }
     }
 }
@@ -302,6 +353,40 @@ impl InlineRole {
     pub fn is_content(self) -> bool {
         !matches!(self, Self::LinkSuffix | Self::Image(_))
     }
+}
+
+/// A formula of a paragraph, heading or table cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MathInfo {
+    /// The TeX between the delimiters.
+    pub tex: Arc<str>,
+    /// `$$…$$` or `\[…\]` inside a paragraph: display style.
+    pub display: bool,
+    /// The whole construct, relative to the node's start.
+    pub source: Range<usize>,
+}
+
+/// A GFM table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableBlock {
+    /// The column alignments, from the delimiter row.
+    pub aligns: Box<[Alignment]>,
+    /// The header row, then the body rows.
+    pub rows: Box<[TableRow]>,
+}
+
+/// One row of a [`TableBlock`]: its cells' inline content in one
+/// paragraph, each cell after a [`BoxRef::Cell`] gap box and a last gap
+/// box after the last cell. The gaps are 0 wide: the view sets them from
+/// the column widths it measures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRow {
+    /// The header row.
+    pub header: bool,
+    pub content: Arc<InlineContent>,
+    /// The row's line, relative to the node's start (the header row's
+    /// also covers the delimiter row).
+    pub source: Range<usize>,
 }
 
 /// A link or autolink of a block.

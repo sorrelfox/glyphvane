@@ -18,11 +18,17 @@
 //! - Images of known size are boxes, sized to fit the column; others show
 //!   their alt text.
 //! - Raw inline HTML is shown as text until the HTML pipeline exists.
+//! - Strikethrough is a line through the text in its colour.
+//! - Inline and display math are formula boxes ([`BoxRef::Math`]) with an
+//!   estimated size; the view typesets them and sets the real size.
+//! - A table row is one paragraph: before each cell a gap box
+//!   ([`BoxRef::Cell`], 0 wide until the view knows the column widths),
+//!   then the cell's inlines, and a last gap box after the last cell.
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use gv_inline::{BoxAlign, BoxKind, InlineBox, ParagraphBuilder, RunStyle};
+use gv_inline::{BoxAlign, BoxKind, InlineBox, ParagraphBuilder, RunStyle, Strikethrough};
 use gv_model::LinkKind;
 use gv_syntax::BlockId;
 use gv_syntax::inline::{
@@ -31,7 +37,7 @@ use gv_syntax::inline::{
 
 use crate::metrics::Metrics;
 use crate::node::{
-    BoxRef, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, Measure, Units,
+    BoxRef, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, MathInfo, Measure, Units,
 };
 use crate::status::{ImageSize, LinkTarget, Sources};
 use crate::style::{ColorToken, Family, LinkSuffix, StyleTable, TextRole, Variant, link_decor};
@@ -51,37 +57,42 @@ pub(crate) fn build(
     role: TextRole,
     cx: &InlineCx<'_>,
 ) -> InlineContent {
-    let mut b = Builder {
-        cx,
-        role,
-        base,
-        para: ParagraphBuilder::new(cx.styles.paragraph_style(role)),
-        spans: Vec::new(),
-        links: Vec::new(),
-        images: Vec::new(),
-        run: None,
-        lines: Vec::new(),
-        line: Units::default(),
-        extra_height: 0.0,
-        line_height: cx.styles.role(role).line_height,
-        raw_html: false,
-    };
+    let mut b = Builder::new(cx, role, base);
     b.para
         .source_anchor(tree.source_range().start.saturating_sub(base));
     b.walk(tree.top_level());
-    b.flush();
-    b.lines.push(b.line);
-    InlineContent {
-        paragraph: Arc::new(b.para.build()),
-        spans: b.spans.into_boxed_slice(),
-        links: b.links.into_boxed_slice(),
-        images: b.images.into_boxed_slice(),
-        raw_html_pending: b.raw_html,
-        measure: Measure {
-            lines: b.lines.into_boxed_slice(),
-            extra_height: b.extra_height,
-        },
+    b.finish()
+}
+
+/// Builds the content of a table row whose node starts at `base`: per
+/// column a gap box and the cell's inlines (`cells[i]` is the cell's
+/// document range and tree; missing cells are empty), then the last gap
+/// at `end` (absolute).
+pub(crate) fn build_row(
+    cells: &[(Range<usize>, Option<InlineTree>)],
+    columns: usize,
+    end: usize,
+    base: usize,
+    role: TextRole,
+    cx: &InlineCx<'_>,
+) -> InlineContent {
+    let mut b = Builder::new(cx, role, base);
+    let first = cells.first().map_or(end, |c| c.0.start);
+    b.para.source_anchor(first.saturating_sub(base));
+    let mut at = first;
+    for col in 0..columns {
+        let (range, tree) = match cells.get(col) {
+            Some((r, t)) => (r.clone(), t.as_ref()),
+            None => (at..at, None),
+        };
+        at = range.end.max(at);
+        b.cell_gap(col, range.start);
+        if let Some(tree) = tree {
+            b.walk(tree.top_level());
+        }
     }
+    b.cell_gap(columns, end.max(at));
+    b.finish()
 }
 
 /// The style state at a point of the walk.
@@ -91,6 +102,8 @@ struct State {
     link: Option<u32>,
     /// Inside the alt text of this image (shown in place of the image).
     alt: Option<u32>,
+    /// Struck through.
+    strike: bool,
 }
 
 /// What ends when a subtree ends.
@@ -134,6 +147,45 @@ struct Builder<'c, 'a> {
     extra_height: f32,
     line_height: f32,
     raw_html: bool,
+    math: Vec<MathInfo>,
+}
+
+impl<'c, 'a> Builder<'c, 'a> {
+    fn new(cx: &'c InlineCx<'a>, role: TextRole, base: usize) -> Self {
+        Builder {
+            cx,
+            role,
+            base,
+            para: ParagraphBuilder::new(cx.styles.paragraph_style(role)),
+            spans: Vec::new(),
+            links: Vec::new(),
+            images: Vec::new(),
+            run: None,
+            lines: Vec::new(),
+            line: Units::default(),
+            extra_height: 0.0,
+            line_height: cx.styles.role(role).line_height,
+            raw_html: false,
+            math: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> InlineContent {
+        self.flush();
+        self.lines.push(self.line);
+        InlineContent {
+            paragraph: Arc::new(self.para.build()),
+            spans: self.spans.into_boxed_slice(),
+            links: self.links.into_boxed_slice(),
+            images: self.images.into_boxed_slice(),
+            math: self.math.into_boxed_slice(),
+            raw_html_pending: self.raw_html,
+            measure: Measure {
+                lines: self.lines.into_boxed_slice(),
+                extra_height: self.extra_height,
+            },
+        }
+    }
 }
 
 impl Builder<'_, '_> {
@@ -148,6 +200,7 @@ impl Builder<'_, '_> {
             variant: Variant::PLAIN,
             link: None,
             alt: None,
+            strike: false,
         };
         let mut stack: Vec<(Children<'_>, Option<Exit>)> = vec![(top, None)];
         while let Some((iter, _)) = stack.last_mut() {
@@ -174,11 +227,12 @@ impl Builder<'_, '_> {
                     });
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
-                // No strikethrough style yet: its text renders plain.
                 InlineKind::Strikethrough => {
                     let saved = state;
+                    state.strike = true;
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
+                InlineKind::InlineMath | InlineKind::DisplayMath => self.math_box(&node, state),
                 InlineKind::Link if state.alt.is_none() => {
                     let saved = state;
                     let link = self.link(&node);
@@ -240,6 +294,7 @@ impl Builder<'_, '_> {
                 | InlineKind::CodeText
                 | InlineKind::HtmlText
                 | InlineKind::AutolinkText
+                | InlineKind::MathText
                 | InlineKind::LinkDestination
                 | InlineKind::LinkTitle
                 | InlineKind::LinkLabel => {}
@@ -341,7 +396,55 @@ impl Builder<'_, '_> {
         {
             style = styles.link_style(style, info.status);
         }
+        if key.state.strike && style.strikethrough.is_none() {
+            style = style.with_strikethrough(Strikethrough {
+                color: style.color,
+                thickness: styles.zoom(),
+            });
+        }
         style
+    }
+
+    /// A formula: a box of estimated size (the view typesets it).
+    fn math_box(&mut self, node: &InlineNode<'_>, state: State) {
+        let Some(tex) = node.math() else {
+            return;
+        };
+        let display = node.kind() == InlineKind::DisplayMath;
+        if state.alt.is_some() {
+            // In an image's alt text: the TeX as alt text.
+            let key = self.key(state, InlineRole::Text);
+            self.piece(tex, node.range(), false, key);
+            return;
+        }
+        let em =
+            self.cx.styles.role(self.role).size * if display { MATH_DISPLAY_SCALE } else { 1.0 };
+        let chars = tex.chars().filter(|c| !c.is_whitespace()).count().max(1);
+        #[allow(clippy::cast_precision_loss)]
+        let width = (chars as f32 * MATH_EM_PER_CHAR * em).min(self.cx.metrics.image_max_width);
+        let (ascent, descent) = if display {
+            (1.2 * em, 0.6 * em)
+        } else {
+            (0.8 * em, 0.25 * em)
+        };
+        let index = u32::try_from(self.math.len()).unwrap_or(u32::MAX);
+        let source = node.range();
+        self.math.push(MathInfo {
+            tex: Arc::from(tex),
+            display,
+            source: self.rel(source.clone()),
+        });
+        let b =
+            InlineBox::new(BoxKind::Math, width, ascent, descent).with_id(BoxRef::Math(index).id());
+        self.push_box(b, source, InlineRole::Math(index), state.link);
+    }
+
+    /// The gap box before table column `col` (`col` = the column count:
+    /// after the last cell), at `at` (absolute).
+    fn cell_gap(&mut self, col: usize, at: usize) {
+        let col = u32::try_from(col).unwrap_or(u32::MAX);
+        let b = InlineBox::new(BoxKind::Other, 0.0, 0.0, 0.0).with_id(BoxRef::Cell(col).id());
+        self.push_box(b, at..at, InlineRole::CellGap(col), None);
     }
 
     fn push_box(
@@ -561,6 +664,14 @@ impl Builder<'_, '_> {
         }
     }
 }
+
+/// Display math is this much larger than the text around it (KaTeX's
+/// 1.21).
+pub const MATH_DISPLAY_SCALE: f32 = 1.21;
+
+/// Estimated formula width per character of TeX, in em (until the view
+/// typesets it).
+const MATH_EM_PER_CHAR: f32 = 0.45;
 
 /// Splits a token's gathered text at line endings into exact pieces and a
 /// space for each line ending. A token is either all real (its text is its

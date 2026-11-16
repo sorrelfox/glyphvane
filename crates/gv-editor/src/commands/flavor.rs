@@ -71,7 +71,8 @@ impl Flavor {
     /// The parser options of the profile (used when a command has to parse
     /// the text itself).
     pub fn parse_options(self) -> ParseOptions {
-        ParseOptions::for_profile(self.id()).unwrap_or_default()
+        gv_syntax::ProfileId::from_id(self.id())
+            .map_or(ParseOptions::COMMONMARK, ParseOptions::builtin)
     }
 
     /// Whether `~~text~~` is strikethrough.
@@ -115,7 +116,7 @@ mod tests {
     fn ids_round_trip() {
         for flavor in Flavor::ALL {
             assert_eq!(Flavor::from_id(flavor.id()), Some(flavor));
-            assert!(ParseOptions::for_profile(flavor.id()).is_some());
+            assert!(gv_syntax::ProfileId::from_id(flavor.id()).is_some());
         }
         assert_eq!(Flavor::from_id("mkdocs"), None);
         assert_eq!(Flavor::from_id_or_extended("mkdocs"), Flavor::Extended);

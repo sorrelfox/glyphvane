@@ -144,10 +144,12 @@ impl Workspace {
             .clone()
             .unwrap_or_else(|| PathBuf::from(tab.label.name.as_ref()));
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
+        let profile = self.tab_profile(index, cx).compiled;
         let split = cx.new(|cx| SplitView::new(editor, path, snapshot, cx));
         // A link followed in the preview pane goes where it goes from
         // Preview.
         let reader = split.read(cx).reader().clone();
+        reader.update(cx, |r, cx| r.set_profile(profile, cx));
         cx.subscribe(&reader, |ws, reader, event: &ReaderEvent, cx| {
             ws.follow_split_link(&reader, event.clone(), cx);
         })

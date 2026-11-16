@@ -31,11 +31,15 @@
 //!
 //! # Profiles
 //!
-//! This version covers the CommonMark profile. Raw HTML (blocks and inline)
-//! is shown as text and flagged `raw_html_pending` until the HTML pipeline
-//! exists; front matter is a properties placeholder (or hidden). The node,
-//! frame, marker and item kinds leave room for tables, task lists,
-//! callouts, math and embeds.
+//! Inline content is parsed with the syntax tree's profile switches
+//! ([`gv_syntax::ParseOptions`]): GFM tables (one item per row, cells
+//! separated by gap boxes the view sizes from the column widths),
+//! strikethrough, extended autolinks and math (formula boxes, ` ```math `
+//! and `$$` blocks; [`RenderTree::math_macros`] runs the document's macro
+//! pass). Raw HTML (blocks and inline) is shown as text and flagged
+//! `raw_html_pending` until the HTML pipeline exists; front matter is a
+//! properties placeholder (or hidden). The node, frame, marker and item
+//! kinds leave room for task lists, callouts and embeds.
 //!
 //! # Coordinates
 //!
@@ -57,11 +61,12 @@ mod tree;
 
 pub use build::MAX_FRAMES;
 pub use find::{FindError, FindIndex, Finder, Matches};
+pub use inline::MATH_DISPLAY_SCALE;
 pub use item::{Estimate, Item, ItemId, ItemKind, indent};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
     BlockNode, BoxRef, CodeBlock, CodeLine, Context, Frame, FrameKind, ImageInfo, InlineContent,
-    InlineRole, InlineSpan, LinkInfo, ListMarker, NodeKind, Units,
+    InlineRole, InlineSpan, LinkInfo, ListMarker, MathInfo, NodeKind, TableBlock, TableRow, Units,
 };
 pub use status::{
     AllPending, ImageSize, ImageSizeSource, LinkStatus, LinkStatusSource, LinkTarget, NoImageSizes,

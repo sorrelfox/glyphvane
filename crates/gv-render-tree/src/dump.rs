@@ -26,7 +26,7 @@ impl RenderTree {
     pub fn item_paragraph(&self, ix: usize) -> Option<Arc<Paragraph>> {
         let item = self.items().get(ix)?;
         let node = self.nodes().get(item.node)?;
-        if let Some(c) = node.inline() {
+        if let Some(c) = node.item_inline(&item.kind) {
             return Some(Arc::clone(&c.paragraph));
         }
         let code = node.lines()?;
@@ -75,6 +75,12 @@ impl RenderTree {
             dump_item(ix, item, &mut out);
             if item.kind.chunk().0 == 0 {
                 dump_node(node, &mut out);
+            }
+            if let (NodeKind::Table(t), ItemKind::TableRow { row, .. }) = (&node.kind, &item.kind)
+                && let Some(r) = t.rows.get(*row as usize)
+            {
+                let _ = writeln!(out, "  row {row}{}", if r.header { " header" } else { "" });
+                dump_inline(&r.content, &mut out);
             }
             if let (Some(code), Some(lines)) = (node.lines(), item.kind.lines()) {
                 for i in lines.start as usize..lines.end as usize {
@@ -212,7 +218,10 @@ fn dump_node(node: &BlockNode, out: &mut String) {
             let _ = writeln!(out, "  front matter {kind:?} lines={}", lines.lines.len());
         }
         NodeKind::Math(code) => {
-            let _ = writeln!(out, "  math lines={}", code.lines.len());
+            let _ = writeln!(out, "  math lines={} tex={:?}", code.lines.len(), code.text);
+        }
+        NodeKind::Table(t) => {
+            let _ = writeln!(out, "  table aligns={:?} rows={}", t.aligns, t.rows.len());
         }
         NodeKind::ThematicBreak | NodeKind::EmptyItem | NodeKind::EmptyQuote => {}
     }
@@ -232,6 +241,8 @@ fn dump_inline(c: &InlineContent, out: &mut String) {
             InlineRole::Image(i) => format!("image[{i}]"),
             InlineRole::ImageAlt(i) => format!("alt[{i}]"),
             InlineRole::LinkSuffix => "suffix".to_owned(),
+            InlineRole::Math(i) => format!("math[{i}]"),
+            InlineRole::CellGap(i) => format!("gap[{i}]"),
         };
         let link = span.link.map(|l| format!(" link[{l}]")).unwrap_or_default();
         let what = match it.kind() {
@@ -283,6 +294,15 @@ fn dump_inline(c: &InlineContent, out: &mut String) {
             out,
             "  link[{i}] {:?} {:?} {} {:?}",
             l.kind, &*l.destination, l.status, l.source
+        );
+    }
+    for (i, m) in c.math.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "  math[{i}] {:?}{} {:?}",
+            &*m.tex,
+            if m.display { " display" } else { "" },
+            m.source
         );
     }
     for (i, im) in c.images.iter().enumerate() {

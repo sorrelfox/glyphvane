@@ -49,6 +49,13 @@ pub enum InlineKind {
     /// extended autolink (`www.example.com`, `https://…`, a bare email
     /// address) has only the text.
     Autolink,
+    /// Inline math: `$x$`, `` $`x`$ `` or `\(x\)` (profiles with math): a
+    /// marker, [`MathText`](Self::MathText) tokens, a marker. The TeX is
+    /// [`InlineNode::math`].
+    InlineMath,
+    /// Display math inside a paragraph: `$$x$$` or `\[x\]`. Same shape as
+    /// [`InlineMath`](Self::InlineMath).
+    DisplayMath,
     /// Raw inline HTML: one or more [`HtmlText`](Self::HtmlText) tokens.
     RawHtml,
     /// Literal text.
@@ -75,6 +82,8 @@ pub enum InlineKind {
     HtmlText,
     /// The address of an autolink.
     AutolinkText,
+    /// The TeX of inline or display math.
+    MathText,
     /// A link destination as written (including `<` and `>`).
     LinkDestination,
     /// A link title as written (including its quotes or parentheses).
@@ -101,6 +110,8 @@ impl InlineKind {
             Self::Link => "Link",
             Self::Image => "Image",
             Self::Autolink => "Autolink",
+            Self::InlineMath => "InlineMath",
+            Self::DisplayMath => "DisplayMath",
             Self::RawHtml => "RawHtml",
             Self::Text => "Text",
             Self::Escape => "Escape",
@@ -112,6 +123,7 @@ impl InlineKind {
             Self::CodeText => "CodeText",
             Self::HtmlText => "HtmlText",
             Self::AutolinkText => "AutolinkText",
+            Self::MathText => "MathText",
             Self::LinkDestination => "LinkDestination",
             Self::LinkTitle => "LinkTitle",
             Self::LinkLabel => "LinkLabel",
@@ -193,7 +205,8 @@ pub(super) struct Node {
     pub(super) next: u32,
     /// Kind-specific: entity value (see [`ENTITY_NAMED`]), backtick count of
     /// a code span, index into the link table of links, images and
-    /// autolinks.
+    /// autolinks; for math, the opening marker's length in the low 16 bits
+    /// and the closing one's in the high 16.
     pub(super) data: u32,
 }
 
@@ -831,6 +844,15 @@ impl<'a> InlineNode<'a> {
         self.tree.link_ref(self.node())
     }
 
+    /// The TeX of an [`InlineMath`](InlineKind::InlineMath) or
+    /// [`DisplayMath`](InlineKind::DisplayMath) node, as gathered (line
+    /// endings kept); `None` for other nodes.
+    pub fn math(&self) -> Option<&'a str> {
+        let n = self.node();
+        matches!(n.kind, InlineKind::InlineMath | InlineKind::DisplayMath)
+            .then(|| math_tex(self.tree, n))
+    }
+
     /// Appends a text projection of this node and its descendants (see
     /// [`TextProjection`]; the projection of an image's own description
     /// with [`TextProjection::TextContent`] is empty).
@@ -849,6 +871,14 @@ impl<'a> InlineNode<'a> {
             out,
         );
     }
+}
+
+/// The TeX between a math node's markers.
+pub(super) fn math_tex<'t>(tree: &'t InlineTree, n: &Node) -> &'t str {
+    let open = n.data & 0xFFFF;
+    let close = n.data >> 16;
+    let start = (n.start + open).min(n.end);
+    tree.slice(start, n.end.saturating_sub(close).max(start))
 }
 
 /// Iterator over sibling nodes.

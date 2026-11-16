@@ -12,9 +12,17 @@
 //!   `text.secondary`.
 //! - A display math block becomes a centred paragraph of one math box,
 //!   typeset by the shared [`math_engine`] with the document's macros
-//!   (MathJax scope: definitions flow to later formulas). A formula that
-//!   does not render shows the error in `status.error` above its source in
-//!   the code style.
+//!   (MathJax scope: definitions flow to later formulas, from the render
+//!   tree's one pass over all formulas). A formula that does not render
+//!   shows the error in `status.error` above its source in the code style.
+//! - Inline formulas are typeset the same way and their boxes resized; one
+//!   that does not render keeps its estimated box, drawn as a placeholder
+//!   (not designed).
+//! - A table row is one paragraph laid out without wrapping: its gap boxes
+//!   are set from the table's column widths, measured from the cells of
+//!   its first rows ([`TABLE_SAMPLE`]) and widened when a later row is
+//!   wider (a one-time reflow of the rows laid out). Columns align per
+//!   the delimiter row.
 //! - Thematic breaks, empty list items and empty quotes have fixed heights.
 //!
 //! Paragraph source offsets are relative to the node's start, as in the
@@ -31,11 +39,14 @@ use std::sync::{Arc, OnceLock};
 use gpui::WindowTextSystem;
 use gpui::assets::IconName;
 use gv_inline::{Affinity, Align, Bias, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
-use gv_math::{MacroLimits, MacroPass, MacroSet, MathEngine};
+use gv_math::MathEngine;
 use gv_render_tree::{
-    BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, Item, ItemId, ItemKind, LinkSuffix,
-    Metrics, NodeKind, RenderTree, StatusIcon, StyleTable, TextRole, Variant, link_decor,
+    BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, InlineRole, Item, ItemId, ItemKind,
+    LinkSuffix, MATH_DISPLAY_SCALE, Metrics, NodeKind, RenderTree, StatusIcon, StyleTable,
+    TableBlock, TextRole, Variant, link_decor,
 };
+use gv_syntax::BlockId;
+use gv_syntax::table::Alignment;
 
 use super::engine::{Items, TextAnchor};
 use crate::icons::FILE_PLUS_DASHED;
@@ -50,6 +61,10 @@ const CACHE_CAP: usize = 1_000;
 
 /// Columns of a tab stop in code.
 const TAB_STOP: usize = 4;
+
+/// Rows of a table whose cells set its column widths before any is shown
+/// (later rows widen a column when they need to).
+pub(crate) const TABLE_SAMPLE: usize = 100;
 
 /// The font of every style of `styles`: the text family for prose, the
 /// mono family for code.
@@ -70,6 +85,14 @@ pub(crate) fn is_code(kind: &ItemKind) -> bool {
     matches!(kind, ItemKind::Code { .. } | ItemKind::Html { .. })
 }
 
+/// The vertical padding of a table row's cells.
+pub(crate) fn table_padding_y(kind: &ItemKind, m: &Metrics) -> f32 {
+    match kind {
+        ItemKind::TableRow { row: 0, .. } => m.table_header_padding_y,
+        _ => m.table_padding_y,
+    }
+}
+
 /// The chunk position of a code item: (first, last).
 pub(crate) fn chunk_ends(kind: &ItemKind) -> (bool, bool) {
     let (k, n) = kind.chunk();
@@ -79,6 +102,14 @@ pub(crate) fn chunk_ends(kind: &ItemKind) -> (bool, bool) {
 /// Height of a code item's frame: border, head and padding on the first
 /// chunk, padding and border on the last.
 pub(crate) fn chrome_height(kind: &ItemKind, m: &Metrics) -> f32 {
+    if let ItemKind::TableRow { .. } = kind {
+        // The frame's top border or the line above the row, the padding,
+        // and the frame's bottom border under the last row.
+        let last = chunk_ends(kind).1;
+        return m.table_border
+            + 2.0 * table_padding_y(kind, m)
+            + if last { m.table_border } else { 0.0 };
+    }
     if !is_code(kind) {
         return 0.0;
     }
@@ -99,6 +130,9 @@ pub(crate) fn text_top(item: &Item, m: &Metrics) -> f32 {
     if is_code(&item.kind) && chunk_ends(&item.kind).0 {
         y += m.code_border + m.code_head + m.code_padding_y;
     }
+    if let ItemKind::TableRow { .. } = item.kind {
+        y += m.table_border + table_padding_y(&item.kind, m);
+    }
     y
 }
 
@@ -110,6 +144,9 @@ pub(crate) fn code_inset(m: &Metrics) -> f32 {
 /// The width an item's text is laid out at, for a column `column` wide.
 pub(crate) fn text_width(item: &Item, column: f32, m: &Metrics, wrapped: bool) -> f32 {
     let content = (column - item.content_x(m)).max(1.0);
+    if let ItemKind::TableRow { .. } = item.kind {
+        return NO_WRAP;
+    }
     if is_code(&item.kind) {
         if wrapped {
             (content - 2.0 * code_inset(m)).max(1.0)
@@ -279,9 +316,6 @@ fn properties_paragraph(code: &CodeBlock, lines: Range<usize>, styles: &StyleTab
     b.build()
 }
 
-/// Display math is this much larger than the body text (KaTeX's 1.21).
-const MATH_SCALE: f32 = 1.21;
-
 /// The process-wide math engine: its layout cache is shared by every view
 /// (layouts are in em and theme-independent).
 pub(crate) fn math_engine() -> &'static MathEngine {
@@ -289,33 +323,18 @@ pub(crate) fn math_engine() -> &'static MathEngine {
     ENGINE.get_or_init(MathEngine::default)
 }
 
-/// The macros in force for math node `node`: those defined by the math
-/// nodes before it, in document order.
-fn math_macros(tree: &RenderTree, node: &BlockNode) -> MacroSet {
-    let mut pass = MacroPass::new(MacroLimits::default());
-    for n in tree.nodes() {
-        if let NodeKind::Math(code) = &n.kind {
-            let set = pass.next(&code.text);
-            if n.id == node.id {
-                return set;
-            }
-        }
-    }
-    MacroSet::empty()
-}
-
-/// The block of a display math item: one centred math box, or the error
-/// above the source.
-fn math_block(tree: &RenderTree, node: &BlockNode, code: &CodeBlock) -> InlineBlock {
+/// The block of a display math item (of node `node_ix`): one centred math
+/// box, or the error above the source.
+fn math_block(tree: &RenderTree, node_ix: usize, code: &CodeBlock) -> InlineBlock {
     let styles = &tree.options().styles;
-    let macros = math_macros(tree, node);
+    let macros = tree.math_macros(node_ix, 0);
     let source = match (code.lines.first(), code.lines.last()) {
         (Some(a), Some(b)) => a.source.start..b.source.end.max(a.source.start),
         _ => 0..0,
     };
     match math_engine().render(&code.text, true, &macros) {
         Ok(layout) => {
-            let em = styles.role(TextRole::Body).size * MATH_SCALE;
+            let em = styles.role(TextRole::Body).size * MATH_DISPLAY_SCALE;
             let style = styles
                 .paragraph_style(TextRole::Body)
                 .with_align(Align::Center);
@@ -357,6 +376,164 @@ fn math_block(tree: &RenderTree, node: &BlockNode, code: &CodeBlock) -> InlineBl
     }
 }
 
+/// The formulas of `content` typeset, its boxes sized to them: the
+/// paragraph and the boxes' contents, or `None` without formulas.
+/// `first` is the index of its first formula among the node's (see
+/// [`RenderTree::math_macros`]); `role` is its text role.
+fn typeset_math(
+    tree: &RenderTree,
+    node: usize,
+    first: usize,
+    content: &InlineContent,
+    role: TextRole,
+) -> Option<(Paragraph, Vec<(u32, BoxContent)>)> {
+    if content.math.is_empty() {
+        return None;
+    }
+    let size = tree.options().styles.role(role).size;
+    let mut p = (*content.paragraph).clone();
+    let mut boxes = Vec::new();
+    for (ix, (item, span)) in content
+        .paragraph
+        .items()
+        .iter()
+        .zip(content.spans.iter())
+        .enumerate()
+    {
+        let (InlineRole::Math(i), Some(old)) = (span.role, item.inline_box()) else {
+            continue;
+        };
+        let Some(m) = content.math.get(i as usize) else {
+            continue;
+        };
+        let macros = tree.math_macros(node, first + i as usize);
+        // A formula that does not render keeps its estimated box (drawn as
+        // a placeholder; not designed).
+        let Ok(layout) = math_engine().render(&m.tex, m.display, &macros) else {
+            continue;
+        };
+        let em = size * if m.display { MATH_DISPLAY_SCALE } else { 1.0 };
+        p.replace_box(
+            ix,
+            InlineBox {
+                width: layout.width * em,
+                ascent: layout.height * em,
+                descent: layout.depth * em,
+                ..*old
+            },
+        );
+        boxes.push((
+            BoxRef::Math(i).id(),
+            BoxContent::Math {
+                layout,
+                em,
+                color: role.color().role(),
+                text_font: gpui::font(crate::metrics::font::SYSTEM_FALLBACK),
+            },
+        ));
+    }
+    Some((p, boxes))
+}
+
+/// The block of inline content `content` (of node `node`, whose formulas
+/// before it number `first`): its paragraph with formulas typeset, the
+/// link status icons, and `gaps` (a table row's gap box widths by column)
+/// applied.
+fn content_block(
+    tree: &RenderTree,
+    node: usize,
+    first: usize,
+    content: &InlineContent,
+    role: TextRole,
+    gaps: Option<&[f32]>,
+) -> InlineBlock {
+    let math = typeset_math(tree, node, first, content, role);
+    let mut block = inline_block(content);
+    let mut paragraph = math.as_ref().map(|(p, _)| p.clone());
+    if let Some(gaps) = gaps {
+        let p = paragraph.get_or_insert_with(|| (*content.paragraph).clone());
+        for (ix, span) in content.spans.iter().enumerate() {
+            if let (InlineRole::CellGap(col), Some(old)) =
+                (span.role, content.paragraph.items()[ix].inline_box())
+                && let Some(&w) = gaps.get(col as usize)
+            {
+                p.replace_box(
+                    ix,
+                    InlineBox {
+                        width: w.max(0.0),
+                        ..*old
+                    },
+                );
+            }
+        }
+    }
+    if let Some(p) = paragraph {
+        block.set_paragraph(Arc::new(p));
+    }
+    for (id, b) in math.map(|(_, b)| b).unwrap_or_default() {
+        block.set_box_content(id, b);
+    }
+    block
+}
+
+/// The text role of an item's inline content.
+fn content_role(kind: &ItemKind) -> TextRole {
+    match kind {
+        ItemKind::Heading { level } => TextRole::heading(*level),
+        ItemKind::TableRow { row: 0, .. } => TextRole::TableHeader,
+        ItemKind::TableRow { .. } => TextRole::TableCell,
+        _ => TextRole::Body,
+    }
+}
+
+/// The formulas of table `t` before row `row`.
+fn formulas_before(t: &TableBlock, row: usize) -> usize {
+    t.rows.iter().take(row).map(|r| r.content.math.len()).sum()
+}
+
+/// Column widths of a table: the widest cell content per column, and the
+/// cell widths of the rows measured.
+#[derive(Debug, Default)]
+pub(crate) struct TableWidths {
+    pub columns: Vec<f32>,
+    rows: HashMap<u32, Rc<[f32]>>,
+}
+
+impl TableWidths {
+    /// The gap box widths of a row with cell widths `cells`: padding, and
+    /// the room the column alignments leave.
+    fn gaps(&self, cells: &[f32], aligns: &[Alignment], pad: f32) -> Vec<f32> {
+        let n = self.columns.len();
+        let offset = |c: usize| {
+            let room = (self.columns[c] - cells.get(c).copied().unwrap_or(0.0)).max(0.0);
+            match aligns.get(c) {
+                Some(Alignment::Center) => room / 2.0,
+                Some(Alignment::Right) => room,
+                _ => 0.0,
+            }
+        };
+        let rest = |c: usize| {
+            (self.columns[c] - cells.get(c).copied().unwrap_or(0.0)).max(0.0) - offset(c)
+        };
+        (0..=n)
+            .map(|c| {
+                if c == 0 {
+                    pad + if n > 0 { offset(0) } else { 0.0 }
+                } else if c < n {
+                    rest(c - 1) + 2.0 * pad + offset(c)
+                } else {
+                    rest(c - 1) + pad
+                }
+            })
+            .collect()
+    }
+
+    /// The table's width: its columns with their padding.
+    pub fn width(&self, pad: f32) -> f32 {
+        self.columns.iter().map(|w| w + 2.0 * pad).sum()
+    }
+}
+
 /// The text block of an item, if it has text.
 fn make_block(item: &Item, node: &BlockNode, styles: &StyleTable) -> Option<InlineBlock> {
     match (&item.kind, &node.kind) {
@@ -390,6 +567,8 @@ struct Cached {
 #[derive(Debug, Default)]
 pub(crate) struct ItemCache {
     items: HashMap<ItemId, Cached>,
+    /// Column widths of the tables laid out, by table block.
+    tables: HashMap<BlockId, TableWidths>,
     tick: u64,
     /// Blocks made (each is shaped on first layout).
     pub built: u64,
@@ -400,13 +579,24 @@ pub(crate) struct ItemCache {
 impl ItemCache {
     pub fn clear(&mut self) {
         self.items.clear();
+        self.tables.clear();
     }
 
-    /// Forgets the layouts of `ids` (their content changed).
+    /// Forgets the layouts of `ids` (their content changed), and the
+    /// column widths of their tables.
     pub fn forget(&mut self, ids: impl IntoIterator<Item = ItemId>) {
         for id in ids {
             self.items.remove(&id);
+            if self.tables.remove(&id.block).is_some() {
+                self.items
+                    .retain(|k, _| k.block != id.block || k.chunk == 0);
+            }
         }
+    }
+
+    /// The column widths of table `block`, once measured.
+    pub fn table(&self, block: BlockId) -> Option<&TableWidths> {
+        self.tables.get(&block)
     }
 
     pub fn len(&self) -> usize {
@@ -422,8 +612,29 @@ impl ItemCache {
             return c.block.clone();
         }
         let node = tree.node_of(ix)?;
-        let block = match &node.kind {
-            NodeKind::Math(code) => Some(math_block(tree, node, code)),
+        let role = content_role(&item.kind);
+        let block = match (&node.kind, &item.kind) {
+            (NodeKind::Math(code), _) => Some(math_block(tree, item.node, code)),
+            (NodeKind::Table(t), ItemKind::TableRow { row, .. }) => {
+                let content = &t.rows.get(*row as usize)?.content;
+                let first = formulas_before(t, *row as usize);
+                let widths = self.tables.get(&item.id.block);
+                let cells = widths.and_then(|w| w.rows.get(row).cloned());
+                let gaps = widths.zip(cells).map(|(w, cells)| {
+                    let pad = tree.options().metrics.table_padding_x;
+                    w.gaps(&cells, &t.aligns, pad)
+                });
+                let block = content_block(tree, item.node, first, content, role, gaps.as_deref());
+                if gaps.is_none() {
+                    // Not measured yet: laid out without its column widths,
+                    // and not kept.
+                    return Some(Rc::new(RefCell::new(block)));
+                }
+                Some(block)
+            }
+            (NodeKind::Paragraph(c) | NodeKind::Heading { content: c, .. }, _) => {
+                Some(content_block(tree, item.node, 0, c, role, None))
+            }
             _ => make_block(item, node, &tree.options().styles),
         }
         .map(|b| Rc::new(RefCell::new(b)));
@@ -478,6 +689,95 @@ impl DocItems<'_> {
     fn is_wrapped(&self, item: &Item) -> bool {
         self.tree.code_wrap(item.id.block)
     }
+
+    /// Measures what item `ix` needs before it is laid out: when it is a
+    /// table row, the cells of its row and, the first time, the column
+    /// widths of its table from the first [`TABLE_SAMPLE`] rows. A row
+    /// wider than the columns widens them, and the rows laid out before
+    /// are laid out again.
+    pub(crate) fn prepare(&mut self, ix: usize) {
+        let tree = self.tree;
+        let Some(item) = tree.items().get(ix) else {
+            return;
+        };
+        let ItemKind::TableRow { row, rows } = item.kind else {
+            return;
+        };
+        let Some(node) = tree.node_of(ix) else {
+            return;
+        };
+        let NodeKind::Table(t) = &node.kind else {
+            return;
+        };
+        let id = item.id.block;
+        if self
+            .cache
+            .tables
+            .get(&id)
+            .is_some_and(|w| w.rows.contains_key(&row))
+        {
+            return;
+        }
+        let mut widths = self.cache.tables.remove(&id).unwrap_or_default();
+        let first_time = widths.rows.is_empty();
+        let n = t.aligns.len();
+        widths.columns.resize(n, 0.0);
+        let sample = u32::try_from(TABLE_SAMPLE).unwrap_or(u32::MAX);
+        let measure: Vec<u32> = if first_time {
+            (0..rows.min(sample)).chain(std::iter::once(row)).collect()
+        } else {
+            vec![row]
+        };
+        let mut grew = false;
+        for r in measure {
+            if widths.rows.contains_key(&r) {
+                continue;
+            }
+            let cells = self.cell_widths(t, item.node, r as usize);
+            for (c, &w) in cells.iter().enumerate().take(n) {
+                if w > widths.columns[c] + 0.01 {
+                    widths.columns[c] = w;
+                    grew = true;
+                }
+            }
+            widths.rows.insert(r, cells.into());
+        }
+        if grew && !first_time {
+            self.cache
+                .items
+                .retain(|k, _| k.block != id || k.chunk == 0);
+        }
+        self.cache.tables.insert(id, widths);
+    }
+
+    /// The content widths of the cells of row `row` of table `t` (of node
+    /// `node`), laid out without wrapping.
+    fn cell_widths(&mut self, t: &TableBlock, node: usize, row: usize) -> Vec<f32> {
+        let Some(r) = t.rows.get(row) else {
+            return Vec::new();
+        };
+        let role = if r.header {
+            TextRole::TableHeader
+        } else {
+            TextRole::TableCell
+        };
+        let first = formulas_before(t, row);
+        let mut block = content_block(self.tree, node, first, &r.content, role, None);
+        let layout = self.text.borrow_mut().layout(&mut block, NO_WRAP, self.ts);
+        let items = layout.paragraph().items();
+        let xs: Vec<f32> = r
+            .content
+            .spans
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| matches!(s.role, InlineRole::CellGap(_)))
+            .filter_map(|(ix, _)| {
+                let at = items.get(ix)?.range().start;
+                Some(layout.caret(at, Affinity::Downstream).x)
+            })
+            .collect();
+        xs.windows(2).map(|w| (w[1] - w[0]).max(0.0)).collect()
+    }
 }
 
 impl Items for DocItems<'_> {
@@ -498,6 +798,7 @@ impl Items for DocItems<'_> {
     }
 
     fn measure(&mut self, ix: usize, width: f32) -> f32 {
+        self.prepare(ix);
         let item = &self.tree.items()[ix];
         let m = *self.metrics();
         let content = match self.cache.block(self.tree, ix) {
@@ -535,6 +836,7 @@ impl Items for DocItems<'_> {
     }
 
     fn offset_of(&mut self, ix: usize, anchor: &TextAnchor, width: f32) -> Option<f32> {
+        self.prepare(ix);
         let item = &self.tree.items()[ix];
         let node = self.tree.node_of(ix)?;
         let m = *self.metrics();
@@ -605,15 +907,62 @@ mod tests {
     }
 
     fn math_tree(md: &str) -> RenderTree {
-        let syntax = gv_syntax::parse(md);
+        let profile = gv_profile::ProfileId::GfmFile;
+        let syntax = gv_syntax::parse_with(md, gv_syntax::ParseOptions::builtin(profile));
         let model = gv_model::DocModel::build(&syntax, md);
         RenderTree::build(
             &syntax,
             &model,
             md,
-            gv_render_tree::RenderOptions::for_profile("gfm-file"),
+            gv_render_tree::RenderOptions::builtin(profile),
             gv_render_tree::Sources::default(),
         )
+    }
+
+    #[test]
+    fn inline_formulas_are_typeset_with_the_macros_before_them() {
+        let md = "$$\\gdef\\R{\\mathbb{R}}x$$\n\nLet $x \\in \\R$ and $\\frac{1}{2$.\n";
+        let t = math_tree(md);
+        let mut cache = ItemCache::default();
+        let block = cache.block(&t, 1).expect("the paragraph");
+        let block = block.borrow();
+        let p = block.paragraph();
+        let boxes: Vec<_> = p.items().iter().filter_map(|i| i.inline_box()).collect();
+        assert_eq!(boxes.len(), 2);
+        // `\R` is defined by the math block before: it renders.
+        let id = BoxRef::Math(0).id();
+        let Some(BoxContent::Math { layout, em, .. }) = block.box_content(id) else {
+            panic!("the first formula renders")
+        };
+        assert!((layout.width * em - boxes[0].width).abs() < 0.01);
+        // The second does not: it keeps its estimated box, without content.
+        assert!(block.box_content(BoxRef::Math(1).id()).is_none());
+    }
+
+    #[test]
+    fn gaps_place_cells_in_their_columns() {
+        let w = TableWidths {
+            columns: vec![10.0, 20.0, 30.0],
+            rows: HashMap::new(),
+        };
+        let aligns = [Alignment::Left, Alignment::Center, Alignment::Right];
+        let gaps = w.gaps(&[4.0, 10.0, 6.0], &aligns, 2.0);
+        // Left: right after the padding; centred: 5 of 10 spare before;
+        // right-aligned: all 24 spare before.
+        assert_eq!(
+            gaps,
+            vec![2.0, 6.0 + 4.0 + 5.0, 5.0 + 4.0 + 24.0, 0.0 + 2.0]
+        );
+        // Cells end where their columns say.
+        let mut x = 0.0;
+        let cells = [4.0, 10.0, 6.0];
+        let mut ends = Vec::new();
+        for (g, c) in gaps.iter().zip(cells) {
+            x += g + c;
+            ends.push(x);
+        }
+        assert_eq!(ends, vec![6.0, 31.0, 70.0]);
+        assert_eq!(x + gaps[3], w.width(2.0));
     }
 
     fn math_items(t: &RenderTree) -> Vec<Rc<RefCell<InlineBlock>>> {

@@ -114,6 +114,17 @@ pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
                 }
                 next = n.next as usize;
             }
+            K::InlineMath | K::DisplayMath => {
+                // comrak's math markup.
+                out.push_str(if n.kind == K::InlineMath {
+                    "<span data-math-style=\"inline\">"
+                } else {
+                    "<span data-math-style=\"display\">"
+                });
+                escape_html(out, super::tree::math_tex(tree, &n));
+                out.push_str("</span>");
+                next = n.next as usize;
+            }
             K::RawHtml => {
                 let raw = tree.slice(n.start, n.end);
                 if opts.tagfilter {
@@ -128,6 +139,7 @@ pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
             | K::CodeText
             | K::HtmlText
             | K::AutolinkText
+            | K::MathText
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel => {}
@@ -226,6 +238,10 @@ pub(super) fn plain_text(
                 push(out, tree.slice(n.start, n.end));
                 next = n.next as usize;
             }
+            K::InlineMath | K::DisplayMath => {
+                push(out, super::tree::math_tex(tree, &n));
+                next = n.next as usize;
+            }
             K::Autolink => {
                 if let Some(l) = tree.links.get(n.data as usize) {
                     push(out, tree.autolink_text(l));
@@ -242,6 +258,7 @@ pub(super) fn plain_text(
             | K::CodeText
             | K::HtmlText
             | K::AutolinkText
+            | K::MathText
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel => {}
@@ -280,6 +297,11 @@ pub(super) fn project(
                 next = n.next as usize;
             }
             K::Image if !with_alt => next = n.next as usize,
+            // The TeX as written.
+            K::InlineMath | K::DisplayMath => {
+                push_raw(out, super::tree::math_tex(tree, &n));
+                next = n.next as usize;
+            }
             K::RawHtml => next = n.next as usize,
             // Containers: their text children follow; syntax tokens render
             // nothing.
@@ -293,6 +315,7 @@ pub(super) fn project(
             | K::CodeText
             | K::HtmlText
             | K::AutolinkText
+            | K::MathText
             | K::LinkDestination
             | K::LinkTitle
             | K::LinkLabel => {}

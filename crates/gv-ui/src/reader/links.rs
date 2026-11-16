@@ -27,9 +27,6 @@ use gv_vault::{
     resolve_with_probe,
 };
 
-/// The profile documents are read with (profile detection comes later).
-pub(crate) const PROFILE: ProfileId = ProfileId::CommonMark;
-
 /// File extensions opened in the Reading view.
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdx"];
 
@@ -81,6 +78,8 @@ fn vault_path(file: &Path, root: &Path) -> Option<VaultPath> {
 pub(crate) struct Resolver {
     index: PathIndex,
     source: VaultPath,
+    /// The document's profile and its resolution parameters.
+    profile: ProfileId,
     params: ProfileParams,
     /// Exact-name checks while the index builds.
     probe: Option<FsProbe>,
@@ -93,6 +92,7 @@ impl fmt::Debug for Resolver {
         f.debug_struct("Resolver")
             .field("root", &self.index.root())
             .field("source", &self.source)
+            .field("profile", &self.profile)
             .field("complete", &self.index.is_complete())
             .field("vault", &self.vault)
             .finish_non_exhaustive()
@@ -100,23 +100,24 @@ impl fmt::Debug for Resolver {
 }
 
 impl Resolver {
-    fn in_vault(file: &Path, index: &PathIndex) -> Option<Self> {
+    fn in_vault(file: &Path, index: &PathIndex, profile: ProfileId) -> Option<Self> {
         let source = vault_path(file, index.root())?;
         let probe = (!index.is_complete())
             .then(|| FsProbe::new(index.root().to_path_buf(), PlatformRules::host()));
         Some(Self {
             index: index.clone(),
             source,
-            params: ProfileParams::for_profile(PROFILE),
+            profile,
+            params: ProfileParams::for_profile(profile),
             probe,
             vault: true,
         })
     }
 
-    /// The statuses of `file`'s links: through `index` (the window's vault)
-    /// when the file is in it; otherwise URLs only.
-    pub fn statuses(file: &Path, index: Option<&PathIndex>) -> Self {
-        if let Some(r) = index.and_then(|i| Self::in_vault(file, i)) {
+    /// The statuses of the links of `file` (in `profile`): through `index`
+    /// (the window's vault) when the file is in it; otherwise URLs only.
+    pub fn statuses(file: &Path, index: Option<&PathIndex>, profile: ProfileId) -> Self {
+        if let Some(r) = index.and_then(|i| Self::in_vault(file, i, profile)) {
             return r;
         }
         let folder = std::path::absolute(file)
@@ -131,17 +132,27 @@ impl Resolver {
         Self {
             index: PathIndex::new_building(folder, IndexConfig::default()),
             source: name,
-            params: ProfileParams::for_profile(PROFILE),
+            profile,
+            params: ProfileParams::for_profile(profile),
             probe: None,
             vault: false,
+        }
+    }
+
+    /// The same resolver for a document in `profile`.
+    pub fn with_profile(self, profile: ProfileId) -> Self {
+        Self {
+            profile,
+            params: ProfileParams::for_profile(profile),
+            ..self
         }
     }
 
     /// Follows a link of `file`: through `index` when the file is in it,
     /// otherwise with direct file system checks below the folder the vault
     /// would have.
-    pub fn for_click(file: &Path, index: Option<&PathIndex>) -> Self {
-        if let Some(r) = index.and_then(|i| Self::in_vault(file, i)) {
+    pub fn for_click(file: &Path, index: Option<&PathIndex>, profile: ProfileId) -> Self {
+        if let Some(r) = index.and_then(|i| Self::in_vault(file, i, profile)) {
             return r;
         }
         let root = gv_vault::detect_root(file).root;
@@ -150,7 +161,8 @@ impl Resolver {
             probe: Some(FsProbe::new(root.clone(), PlatformRules::host())),
             index: PathIndex::new_building(root, IndexConfig::default()),
             source,
-            params: ProfileParams::for_profile(PROFILE),
+            profile,
+            params: ProfileParams::for_profile(profile),
             vault: true,
         }
     }
@@ -160,7 +172,7 @@ impl Resolver {
     }
 
     pub fn resolve(&self, kind: LinkKind, destination: &str) -> Resolution {
-        let link = LinkRef::new(kind, destination, self.source.clone(), PROFILE);
+        let link = LinkRef::new(kind, destination, self.source.clone(), self.profile);
         match &self.probe {
             Some(probe) => resolve_with_probe(&self.index, &link, &self.params, probe),
             None => resolve(&self.index, &link, &self.params),
@@ -228,14 +240,16 @@ fn same_file(a: &Path, b: &Path) -> bool {
     matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
-/// What following the link `destination` (of `kind`) in `file` does.
+/// What following the link `destination` (of `kind`) in `file`, a
+/// document in `profile`, does.
 pub(crate) fn navigation(
     file: &Path,
     index: Option<&PathIndex>,
+    profile: ProfileId,
     kind: gv_model::LinkKind,
     destination: &str,
 ) -> Navigation {
-    let resolver = Resolver::for_click(file, index);
+    let resolver = Resolver::for_click(file, index, profile);
     let res = resolver.resolve(resolver_kind(kind, false), destination);
     let refused = |why: &str| Navigation::Refused(format!("{destination:?}: {why}"));
     match res.status {
@@ -348,7 +362,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let file = dir.path().join("a.md");
         std::fs::write(&file, "x").expect("write");
-        let r = Resolver::statuses(&file, None);
+        let r = Resolver::statuses(&file, None, ProfileId::CommonMark);
         for local in ["b.md", "./b.md", "/b.md", "missing", "a.md#x", "#x"] {
             let status = r.status(&target(local));
             assert!(
@@ -375,7 +389,15 @@ mod tests {
         for f in ["a.md", "b.md", "sub/c.md", "pic.png"] {
             std::fs::write(dir.path().join(f), "# Title\n").expect("write");
         }
-        let go = |dest: &str| navigation(&file, None, gv_model::LinkKind::Inline, dest);
+        let go = |dest: &str| {
+            navigation(
+                &file,
+                None,
+                ProfileId::CommonMark,
+                gv_model::LinkKind::Inline,
+                dest,
+            )
+        };
         assert!(matches!(go("b.md"), Navigation::Open { path, .. } if path.ends_with("b.md")));
         assert!(
             matches!(go("sub/c.md#title"), Navigation::Open { path, fragment: Some(f) }

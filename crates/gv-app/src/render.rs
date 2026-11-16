@@ -13,6 +13,8 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use gv_profile::{PlannedProfile, ProfileId};
+use gv_syntax::{GfmHtmlOptions, ParseOptions, SyntaxTree};
 use gv_text::{DecodeStatus, Decoded, LossReason};
 
 use crate::cli::{RenderArgs, RenderFormat};
@@ -24,11 +26,6 @@ const EXIT_IO: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 /// Exit status: the input did not decode exactly and `--strict` was given.
 const EXIT_LOSSY: u8 = 3;
-
-/// Profiles `render` can use.
-const SUPPORTED_PROFILES: &[&str] = &["commonmark"];
-/// Built-in profiles that exist but cannot render yet.
-const PLANNED_PROFILES: &[&str] = &["gfm-file", "gfm-comment", "obsidian", "extended"];
 
 /// Why the command failed: the message for standard error and the status.
 struct Failure {
@@ -57,7 +54,7 @@ pub fn run(args: &RenderArgs) -> ExitCode {
 }
 
 fn render(args: &RenderArgs) -> Result<(), Failure> {
-    check_profile(&args.profile)?;
+    let profile = check_profile(&args.profile)?;
     let name = display_name(&args.input);
     let bytes = read_input(&args.input)
         .map_err(|err| Failure::new(EXIT_IO, format!("cannot read {name}: {err}")))?;
@@ -76,12 +73,24 @@ fn render(args: &RenderArgs) -> Result<(), Failure> {
     }
 
     let src = decoded.text.as_str();
+    let options = ParseOptions::builtin(profile);
     let output = match args.format {
         // `html` has no emitter of its own yet; see `RenderFormat::Html`.
-        RenderFormat::Html | RenderFormat::CommonmarkHtml => {
+        RenderFormat::Html | RenderFormat::CommonmarkHtml if profile == ProfileId::CommonMark => {
             gv_syntax::harness::render_commonmark_html(src)
         }
-        RenderFormat::Cst => gv_syntax::harness::cst_dump(src),
+        // The other profiles' extensions (tables, strikethrough, autolinks,
+        // math, front matter) through the GFM emitter, which writes the
+        // CommonMark constructs exactly as the CommonMark one; GitHub's
+        // profiles filter raw HTML as GitHub does.
+        RenderFormat::Html | RenderFormat::CommonmarkHtml => gv_syntax::to_gfm_html(
+            &SyntaxTree::parse_with(src, options),
+            src,
+            GfmHtmlOptions {
+                tagfilter: matches!(profile, ProfileId::GfmFile | ProfileId::GfmComment),
+            },
+        ),
+        RenderFormat::Cst => gv_syntax::harness::cst_dump_with(src, options),
     };
 
     match args.output.as_deref() {
@@ -93,26 +102,19 @@ fn render(args: &RenderArgs) -> Result<(), Failure> {
     }
 }
 
-fn check_profile(profile: &str) -> Result<(), Failure> {
-    if SUPPORTED_PROFILES.contains(&profile) {
-        Ok(())
-    } else if PLANNED_PROFILES.contains(&profile) {
-        Err(Failure::new(
-            EXIT_USAGE,
-            format!(
-                "profile `{profile}` is not supported yet; available: {}",
-                SUPPORTED_PROFILES.join(", ")
-            ),
-        ))
-    } else {
-        Err(Failure::new(
-            EXIT_USAGE,
-            format!(
-                "unknown profile `{profile}`; available: {}",
-                SUPPORTED_PROFILES.join(", ")
-            ),
-        ))
+/// The built-in profile named `profile`; a usage error for a planned
+/// profile (detected, not shipped yet) or an unknown one.
+fn check_profile(profile: &str) -> Result<ProfileId, Failure> {
+    if let Some(id) = ProfileId::from_id(profile) {
+        return Ok(id);
     }
+    let available = ProfileId::ALL.map(ProfileId::as_str).join(", ");
+    let message = if PlannedProfile::from_id(profile).is_some() {
+        format!("profile `{profile}` is not supported yet; available: {available}")
+    } else {
+        format!("unknown profile `{profile}`; available: {available}")
+    };
+    Err(Failure::new(EXIT_USAGE, message))
 }
 
 /// The input as named in messages.
@@ -233,8 +235,10 @@ mod tests {
 
     #[test]
     fn profiles_are_checked() {
-        assert!(check_profile("commonmark").is_ok());
-        for profile in ["gfm-file", "obsidian", "nope", ""] {
+        for id in ProfileId::ALL {
+            assert_eq!(check_profile(id.as_str()).ok(), Some(id));
+        }
+        for profile in ["mkdocs", "pandoc", "nope", ""] {
             let Err(failure) = check_profile(profile) else {
                 panic!("{profile} is accepted");
             };

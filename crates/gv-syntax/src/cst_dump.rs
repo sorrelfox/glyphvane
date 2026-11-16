@@ -154,6 +154,7 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
                     BlockKind::IndentedCode => String::from("indented-code"),
                     BlockKind::Html { kind } => format!("html {kind}"),
                     BlockKind::FrontMatter { kind } => format!("front-matter {}", kind.name()),
+                    BlockKind::MathBlock => String::from("math-block"),
                 };
                 let _ = writeln!(out, "{indent}({head} {off}..{}", ends[i]);
                 stack.push(id);

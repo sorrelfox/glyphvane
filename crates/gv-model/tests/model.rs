@@ -380,7 +380,8 @@ fn empty_and_tiny_documents() {
 }
 
 fn model_with(profile: &str, src: &str) -> DocModel {
-    let options = gv_syntax::ParseOptions::for_profile(profile).expect("built-in profile");
+    let id = gv_syntax::ProfileId::from_id(profile).expect("built-in profile");
+    let options = gv_syntax::ParseOptions::builtin(id);
     DocModel::build(&gv_syntax::parse_with(src, options), src)
 }
 

@@ -131,8 +131,8 @@ pub fn row_cells(line: &[u8]) -> Option<Vec<Range<usize>>> {
 }
 
 /// Whether `line` matches cmark-gfm's `table_start` (the delimiter row
-/// syntax).
-fn is_delimiter_row(s: &[u8]) -> bool {
+/// syntax), with at least `min_dashes` dashes in every cell.
+fn is_delimiter_row(s: &[u8], min_dashes: u8) -> bool {
     let len = s.len();
     let mut i = 0;
     if s.first() == Some(&b'|') {
@@ -154,6 +154,9 @@ fn is_delimiter_row(s: &[u8]) -> bool {
         }
         if j == dashes {
             break;
+        }
+        if j - dashes < usize::from(min_dashes) {
+            return false;
         }
         if j < len && s[j] == b':' {
             j += 1;
@@ -181,7 +184,7 @@ fn is_delimiter_row(s: &[u8]) -> bool {
 
 /// The column alignments if `line` is a delimiter row.
 pub fn delimiter_row(line: &[u8]) -> Option<Vec<Alignment>> {
-    if !is_delimiter_row(line) {
+    if !is_delimiter_row(line, 1) {
         return None;
     }
     let mut out = Vec::new();
@@ -199,9 +202,10 @@ pub fn delimiter_row(line: &[u8]) -> Option<Vec<Alignment>> {
     Some(out)
 }
 
-/// The number of columns if `line` is a delimiter row, else 0.
-pub(crate) fn delimiter_columns(line: &[u8]) -> usize {
-    if is_delimiter_row(line) {
+/// The number of columns if `line` is a delimiter row with at least
+/// `min_dashes` dashes per cell, else 0.
+pub(crate) fn delimiter_columns(line: &[u8], min_dashes: u8) -> usize {
+    if is_delimiter_row(line, min_dashes) {
         cell_count(line)
     } else {
         0
@@ -272,7 +276,9 @@ mod tests {
         assert_eq!(delimiter_row(b"-- -"), None);
         assert_eq!(delimiter_row(b"::"), None);
         assert_eq!(delimiter_row(b"|-||-|"), None);
-        assert_eq!(delimiter_columns(b"--|--"), 2);
+        assert_eq!(delimiter_columns(b"--|--", 1), 2);
+        assert_eq!(delimiter_columns(b"--|--", 2), 2);
+        assert_eq!(delimiter_columns(b"--|-:", 2), 0);
     }
 
     #[test]

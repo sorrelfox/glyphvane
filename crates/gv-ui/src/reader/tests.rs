@@ -676,6 +676,121 @@ fn statuses_follow_the_vault_once_it_exists(cx: &mut TestAppContext) {
     );
 }
 
+/// The left edges of the cells of table row items, by row: the caret x
+/// of each cell's first character (`cells` gives the needles per row).
+fn cell_lefts(st: &State, cells: &[&[&str]]) -> Vec<Vec<f32>> {
+    let doc = st.doc.as_ref().expect("loaded");
+    let rows: Vec<_> = st
+        .geometry
+        .items
+        .iter()
+        .filter(|g| {
+            matches!(
+                doc.tree.items()[g.ix].kind,
+                gv_render_tree::ItemKind::TableRow { .. }
+            )
+        })
+        .collect();
+    assert_eq!(rows.len(), cells.len(), "table rows on screen");
+    rows.iter()
+        .zip(cells)
+        .map(|(g, needles)| {
+            let item = &doc.tree.items()[g.ix];
+            let node = doc.tree.node_of(g.ix).expect("node");
+            let block = g.text.as_ref().expect("a row block");
+            needles
+                .iter()
+                .map(|n| {
+                    let at = item.source.start
+                        + doc.text[item.source.clone()].find(n).expect("cell text");
+                    let caret = block
+                        .borrow()
+                        .caret_bounds(at - node.source.start, Bias::Left)
+                        .expect("painted");
+                    f32::from(caret.origin.x)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn profile_changes_rerender_and_table_columns_line_up(cx: &mut TestAppContext) {
+    let md = "| a | bbbbbb |\n|:-|:-:|\n| cccc | d |\n\nx ~~y~~ $z$\n";
+    let dir = temp(&[("t.md", md)]);
+    let file = dir.path().join("t.md");
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let set = |vcx: &mut VisualTestContext, profile| {
+        vcx.update(|_, cx| {
+            crate::profile::ProfileOverrides::set(
+                cx,
+                &file,
+                crate::profile::Scope::File,
+                Some(profile),
+            );
+        });
+        draw(vcx);
+        draw(vcx);
+    };
+    let kinds = |vcx: &mut VisualTestContext| -> Vec<&'static str> {
+        let st = state(&reader, vcx);
+        let s = st.borrow();
+        let doc = s.doc.as_ref().expect("loaded");
+        doc.tree.items().iter().map(|i| i.kind.name()).collect()
+    };
+
+    // CommonMark from the chip: no table.
+    set(&mut vcx, gv_profile::ProfileId::CommonMark);
+    assert_eq!(
+        reader.read_with(&vcx, |r, _| r.profile()),
+        gv_profile::ProfileId::CommonMark
+    );
+    assert_eq!(kinds(&mut vcx), ["paragraph", "paragraph"]);
+
+    // GFM: one item per row, the columns line up (left, then centred), and
+    // the paragraph's formula and strikethrough render.
+    set(&mut vcx, gv_profile::ProfileId::GfmFile);
+    assert_eq!(kinds(&mut vcx), ["table-row", "table-row", "paragraph"]);
+    let st = state(&reader, &mut vcx);
+    let lefts = cell_lefts(&st.borrow(), &[&["a", "bbbbbb"], &["cccc", "d"]]);
+    assert!((lefts[0][0] - lefts[1][0]).abs() < 0.5, "{lefts:?}");
+    assert!(lefts[1][1] > lefts[0][1] + 1.0, "centred: {lefts:?}");
+    {
+        let s = st.borrow();
+        let doc = s.doc.as_ref().expect("loaded");
+        let widths = s
+            .cache
+            .table(doc.tree.items()[0].id.block)
+            .expect("measured");
+        assert_eq!(widths.columns.len(), 2);
+        assert!(
+            widths.columns[1] > widths.columns[0],
+            "{:?}",
+            widths.columns
+        );
+        let para = doc.tree.items().len() - 1;
+        let content = doc.tree.item_inline(para).expect("inline").clone();
+        assert_eq!(content.math.len(), 1);
+        let g = s
+            .geometry
+            .items
+            .iter()
+            .find(|g| g.ix == para)
+            .expect("drawn");
+        let block = g.text.as_ref().expect("text").borrow();
+        let id = gv_render_tree::BoxRef::Math(0).id();
+        assert!(
+            matches!(
+                block.box_content(id),
+                Some(crate::inline::BoxContent::Math { .. })
+            ),
+            "the formula is typeset"
+        );
+    }
+}
+
 mod find_tests;
 
 /// Timing runs with the platform's real text system (Linux), for the

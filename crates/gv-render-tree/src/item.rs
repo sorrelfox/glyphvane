@@ -6,9 +6,12 @@
 //!
 //! - A paragraph, heading, thematic break or empty container is one item;
 //!   code blocks, HTML blocks and front matter are split into chunks of at
-//!   most [`RenderOptions::chunk_lines`](crate::RenderOptions) lines.
+//!   most [`RenderOptions::chunk_lines`](crate::RenderOptions) lines; a
+//!   table is one item per row.
 //! - [`ItemId`]s are the block's id plus the chunk index, so they survive
-//!   edits elsewhere in the document.
+//!   edits elsewhere in the document. Table rows count chunks from 1: a
+//!   table shares its block id with the paragraph before it in the same
+//!   text block.
 //! - Each item carries its containers ([`Item::context`]) and how they
 //!   meet its neighbours: [`Item::gap_before`] is the collapsed margin
 //!   above its content; the innermost [`Item::opens`] frames start at this
@@ -77,6 +80,11 @@ pub enum ItemKind {
     Math {
         lines: Range<u32>,
     },
+    /// Row `row` of a table of `rows` rows (row 0 is the header).
+    TableRow {
+        row: u32,
+        rows: u32,
+    },
     ThematicBreak,
     /// A list item without content: its marker.
     EmptyItem,
@@ -91,6 +99,7 @@ impl ItemKind {
             Self::Code { chunk, chunks, .. }
             | Self::Html { chunk, chunks, .. }
             | Self::Properties { chunk, chunks, .. } => (*chunk, *chunks),
+            Self::TableRow { row, rows } => (*row, *rows),
             _ => (0, 1),
         }
     }
@@ -124,6 +133,7 @@ impl ItemKind {
             Self::Html { .. } => "html",
             Self::Properties { .. } => "properties",
             Self::Math { .. } => "math",
+            Self::TableRow { .. } => "table-row",
             Self::ThematicBreak => "thematic-break",
             Self::EmptyItem => "empty-item",
             Self::EmptyQuote => "empty-quote",
@@ -287,6 +297,48 @@ impl Flatten<'_> {
                 let lines = 0..to_u32(code.lines.len());
                 out.push(mk(0, ItemKind::Math { lines }, node.source.clone(), e));
             }
+            NodeKind::Table(table) => {
+                let rows = to_u32(table.rows.len());
+                for (k, row) in table.rows.iter().enumerate() {
+                    let k32 = to_u32(k);
+                    let role = if row.header {
+                        TextRole::TableHeader
+                    } else {
+                        TextRole::TableCell
+                    };
+                    let spec = self.styles.role(role);
+                    let pad = if row.header {
+                        m.table_header_padding_y
+                    } else {
+                        m.table_padding_y
+                    };
+                    let columns = table.aligns.len().max(1);
+                    #[allow(clippy::cast_precision_loss)]
+                    let width = row
+                        .content
+                        .measure
+                        .lines
+                        .iter()
+                        .map(|u| self.advance(u))
+                        .sum::<f32>()
+                        + 2.0 * m.table_padding_x * columns as f32;
+                    let last = k + 1 == table.rows.len();
+                    let e = Estimate {
+                        fixed: 2.0 * pad
+                            + m.table_border
+                            + if last { m.table_border } else { 0.0 }
+                            + row.content.measure.extra_height,
+                        line_height: spec.line_height,
+                        inset,
+                        wrap: false,
+                        widths: Arc::from([width]),
+                    };
+                    let kind = ItemKind::TableRow { row: k32, rows };
+                    let source =
+                        node.to_document(row.source.start)..node.to_document(row.source.end);
+                    out.push(mk(k32 + 1, kind, source, e));
+                }
+            }
             NodeKind::ThematicBreak => {
                 out.push(mk(
                     0,
@@ -428,7 +480,7 @@ fn own_spacing(item: &Item, m: &Metrics) -> Spacing {
         ItemKind::Paragraph if in_tight_item(&item.context) => Spacing::default(),
         ItemKind::Paragraph => m.paragraph,
         ItemKind::Heading { level } => m.heading(*level),
-        ItemKind::Code { .. } | ItemKind::Html { .. } => m.code,
+        ItemKind::Code { .. } | ItemKind::Html { .. } | ItemKind::TableRow { .. } => m.code,
         ItemKind::Properties { .. } => m.properties,
         ItemKind::Math { .. } => m.paragraph,
         ItemKind::ThematicBreak => m.rule,

@@ -68,8 +68,7 @@ fn blank(text: &str, ranges: &[Range<usize>]) -> String {
 
 /// Parses a note as Obsidian does: with YAML front matter.
 fn parse(text: &str) -> (SyntaxTree, DocModel) {
-    let options =
-        ParseOptions::for_profile(ProfileId::Obsidian.as_str()).expect("built-in profile");
+    let options = ParseOptions::builtin(ProfileId::Obsidian);
     let tree = gv_syntax::parse_with(text, options);
     let model = DocModel::build(&tree, text);
     (tree, model)

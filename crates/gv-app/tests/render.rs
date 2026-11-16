@@ -166,8 +166,45 @@ fn output_file_is_replaced_atomically() {
 }
 
 #[test]
+fn every_shipped_profile_renders() {
+    let md = b"| a |\n| - |\n| ~~b~~ |\n\n$x$\n";
+    let html = |profile: &str| {
+        let output = run(&["render", "-", "--profile", profile], md);
+        assert_status(&output, 0);
+        stdout(&output).to_owned()
+    };
+    let cm = html("commonmark");
+    assert!(cm.contains("<p>| a |"), "{cm}");
+    for profile in ["gfm-file", "gfm-comment", "extended"] {
+        let out = html(profile);
+        assert!(out.contains("<table>"), "{profile}: {out}");
+        assert!(out.contains("<del>b</del>"), "{profile}: {out}");
+        assert!(
+            out.contains("<span data-math-style=\"inline\">x</span>"),
+            "{profile}: {out}"
+        );
+    }
+    // Obsidian: tables need two dashes per cell, `$` math is Pandoc's.
+    let ob = html("obsidian");
+    assert!(
+        !ob.contains("<table>") && ob.contains("data-math-style"),
+        "{ob}"
+    );
+    let output = run(
+        &["render", "-", "--profile", "gfm-file", "--format", "cst"],
+        md,
+    );
+    assert_status(&output, 0);
+    assert!(
+        stdout(&output).contains("(text table"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
 fn usage_errors_and_unsupported_profiles_exit_with_2() {
-    for profile in ["gfm-file", "obsidian", "extended"] {
+    for profile in ["mkdocs", "pandoc", "gitlab"] {
         let output = run(&["render", "-", "--profile", profile], b"x");
         assert_status(&output, 2);
         assert!(output.stdout.is_empty());

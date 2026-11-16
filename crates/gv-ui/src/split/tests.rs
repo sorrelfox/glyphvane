@@ -831,11 +831,7 @@ mod timing {
         let mut full = Vec::new();
         for _ in 0..5 {
             let t = Instant::now();
-            let syntax = gv_syntax::parse_with(
-                &*markdown,
-                gv_syntax::ParseOptions::for_profile(crate::reader::PROFILE.as_str())
-                    .unwrap_or_default(),
-            );
+            let syntax = gv_syntax::parse_with(&*markdown, gv_syntax::ParseOptions::default());
             let model = gv_model::DocModel::build(&syntax, &*markdown);
             let tree = gv_render_tree::RenderTree::build(
                 &syntax,

@@ -71,6 +71,11 @@ pub(crate) enum Kind {
         offset: u32,
     },
     IndentedCode,
+    /// A `$$` math block; `offset`: the opener's indentation, removed from
+    /// its lines like a fenced code block's.
+    MathBlock {
+        offset: u32,
+    },
     Html {
         ty: u8,
     },
@@ -114,6 +119,7 @@ impl Kind {
                 | Kind::Heading
                 | Kind::FencedCode { .. }
                 | Kind::IndentedCode
+                | Kind::MathBlock { .. }
                 | Kind::Html { .. }
                 | Kind::FrontMatter { .. }
         )

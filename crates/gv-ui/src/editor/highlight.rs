@@ -34,7 +34,7 @@ use gv_syntax::{
     Visitor, walk_range,
 };
 use gv_text::TextSnapshot;
-use gv_vault::PathIndex;
+use gv_vault::{PathIndex, ProfileId};
 
 use super::syntax::Syntax;
 use crate::inline::Token;
@@ -127,6 +127,8 @@ impl LineStyle {
 /// The resolution statuses of link targets, asked once per destination.
 pub(crate) struct LinkStatuses {
     resolver: Option<Resolver>,
+    /// The document's profile (link resolution mode).
+    profile: ProfileId,
     cache: HashMap<(gv_model::LinkKind, bool, String), LinkStatus>,
     /// Bumped when the statuses may have changed (a new index).
     generation: u64,
@@ -143,12 +145,13 @@ impl std::fmt::Debug for LinkStatuses {
 }
 
 impl LinkStatuses {
-    /// The statuses of the links of `file`, through the window's `index`
-    /// when there is one (see [`Resolver::statuses`]). Without a file every
-    /// link is pending.
-    pub fn new(file: Option<&Path>, index: Option<&PathIndex>) -> Self {
+    /// The statuses of the links of `file` in `profile`, through the
+    /// window's `index` when there is one (see [`Resolver::statuses`]).
+    /// Without a file every link is pending.
+    pub fn new(file: Option<&Path>, index: Option<&PathIndex>, profile: ProfileId) -> Self {
         Self {
-            resolver: file.map(|f| Resolver::statuses(f, index)),
+            resolver: file.map(|f| Resolver::statuses(f, index, profile)),
+            profile,
             cache: HashMap::new(),
             generation: 0,
         }
@@ -156,7 +159,20 @@ impl LinkStatuses {
 
     /// Resolves again with a new index.
     pub fn reset(&mut self, file: Option<&Path>, index: Option<&PathIndex>) {
-        self.resolver = file.map(|f| Resolver::statuses(f, index));
+        self.resolver = file.map(|f| Resolver::statuses(f, index, self.profile));
+        self.cache.clear();
+        self.generation += 1;
+    }
+
+    /// The profile links are resolved in.
+    pub fn profile(&self) -> ProfileId {
+        self.profile
+    }
+
+    /// Resolves again in `profile`.
+    pub fn set_profile(&mut self, profile: ProfileId) {
+        self.profile = profile;
+        self.resolver = self.resolver.take().map(|r| r.with_profile(profile));
         self.cache.clear();
         self.generation += 1;
     }
@@ -479,6 +495,8 @@ impl Visitor for Leaves<'_, '_> {
                     }
                 }
             }
+            // `$$` math: TeX, like code.
+            LeafKind::MathBlock => self.painter.code(leaf.range.clone()),
             LeafKind::IndentedCode | LeafKind::ThematicBreak => {}
             LeafKind::Html { kind } => {
                 let style = if kind == 2 {
@@ -535,7 +553,10 @@ impl Leaves<'_, '_> {
                 };
                 node.children().for_each(|c| self.inline(c, ctx));
             }
-            InlineKind::CodeSpan | InlineKind::Strikethrough => {
+            InlineKind::CodeSpan
+            | InlineKind::Strikethrough
+            | InlineKind::InlineMath
+            | InlineKind::DisplayMath => {
                 node.children().for_each(|c| self.inline(c, ctx));
             }
             // Raw HTML, or a comment (which may run over several lines).
@@ -573,7 +594,9 @@ impl Leaves<'_, '_> {
                 }
             }
             InlineKind::Marker => self.painter.set(range, Style::MARKER),
-            InlineKind::CodeText => self.painter.paint(range, |s| s.color = Token::SyntaxCode),
+            InlineKind::CodeText | InlineKind::MathText => {
+                self.painter.paint(range, |s| s.color = Token::SyntaxCode);
+            }
             InlineKind::HtmlText => self.painter.set(range, Style::of(Token::TextSecondary)),
             InlineKind::AutolinkText | InlineKind::LinkDestination | InlineKind::LinkLabel => {
                 let style = ctx.target.unwrap_or(Style::of(Token::AccentDefault));
@@ -918,7 +941,7 @@ mod tests {
     fn styles(text: &str, options: ParseOptions) -> Vec<LineStyle> {
         let snapshot = TextSnapshot::new(text);
         let tree = SyntaxTree::parse_with(&snapshot, options);
-        let mut links = LinkStatuses::new(None, None);
+        let mut links = LinkStatuses::new(None, None, ProfileId::CommonMark);
         highlight(&tree, &snapshot, 0..snapshot.line_count(), &mut links)
             .into_iter()
             .map(|(_, s)| s)
@@ -963,7 +986,7 @@ mod tests {
     #[test]
     fn front_matter_keys_and_values() {
         let text = "---\ntitle: Notes\ncount: 3\ntags: [a, b]\n---\n# H\n";
-        let options = ParseOptions::for_profile("gfm-file").unwrap();
+        let options = ParseOptions::builtin(gv_profile::ProfileId::GfmFile);
         let lines = styles(text, options);
         assert_eq!(at(&lines, text, 0, "---"), Style::MARKER);
         assert_eq!(at(&lines, text, 1, "title").color, Token::SyntaxKey);

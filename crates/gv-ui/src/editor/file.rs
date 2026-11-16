@@ -790,7 +790,7 @@ impl EditorView {
                 None => watch.cancel_write(&path),
             }
         }
-        self.links = super::LinkStatuses::new(Some(&path), None);
+        self.links = super::LinkStatuses::new(Some(&path), None, self.links.profile());
         self.path = Some(path);
         self.untitled = None;
         cx.emit(DocEvent::Saved);

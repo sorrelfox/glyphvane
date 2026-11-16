@@ -36,7 +36,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+use gv_math::{MacroLimits, MacroPass, MacroSet};
 use gv_model::{DocModel, SlugAlgorithm};
+use gv_profile::switches::Math;
+use gv_profile::{CompiledProfile, ProfileId};
 use gv_syntax::inline::RefLookup;
 use gv_syntax::{BlockId, Changes, Container, Leaf, LeafKind, RefMap, SyntaxTree, Visitor};
 use gv_text::TextSource;
@@ -73,6 +76,16 @@ pub struct RenderOptions {
     pub math_fences: bool,
 }
 
+/// The macros in force for every formula of a tree, from one pass over
+/// the formulas in document order (see [`RenderTree::math_macros`]).
+#[derive(Debug, Default)]
+struct MacroTable {
+    /// Per node, the index of its first formula in `sets` (and one more
+    /// entry: the total).
+    starts: Vec<u32>,
+    sets: Vec<MacroSet>,
+}
+
 impl RenderOptions {
     /// The CommonMark profile's options: GitHub anchors, the Preview type,
     /// 50-line chunks.
@@ -87,12 +100,30 @@ impl RenderOptions {
         }
     }
 
-    /// The options of profile `id` (`commonmark`, `gfm-file`, …): the
-    /// CommonMark options with the profile's math syntax.
-    pub fn for_profile(id: &str) -> Self {
+    /// The options of a compiled profile: the CommonMark options with the
+    /// profile's math syntax (` ```math ` fences with GitHub math).
+    pub fn for_profile(profile: &CompiledProfile) -> Self {
         Self {
-            math_fences: matches!(id, "gfm-file" | "gfm-comment" | "extended"),
+            math_fences: profile.switches.math == Math::GitHub,
             ..Self::commonmark()
+        }
+    }
+
+    /// The options of built-in profile `id`, without tuning or overrides.
+    pub fn builtin(id: ProfileId) -> Self {
+        Self {
+            math_fences: gv_profile::definition(id).switches.math == Math::GitHub,
+            ..Self::commonmark()
+        }
+    }
+
+    /// These options with the profile's settings of `profile` (its math
+    /// syntax), keeping the type scale and metrics.
+    #[must_use]
+    pub fn with_profile(self, profile: &CompiledProfile) -> Self {
+        Self {
+            math_fences: Self::for_profile(profile).math_fences,
+            ..self
         }
     }
 
@@ -140,6 +171,8 @@ pub struct RenderTree {
     items: Vec<Item>,
     refs: Option<Arc<RefMap>>,
     index: OnceLock<HashMap<ItemId, usize>>,
+    /// The document's math macros, from the first query on.
+    macros: OnceLock<Arc<MacroTable>>,
     /// Per-block soft wrap of code blocks.
     code_wrap: HashMap<BlockId, bool>,
 }
@@ -173,9 +206,11 @@ impl RenderTree {
             items: Vec::new(),
             refs: Some(Arc::clone(&refs)),
             index: OnceLock::new(),
+            macros: OnceLock::new(),
             code_wrap,
         };
-        let mut b = NodeBuilder::new(text, refs, &t.opts, sources, None);
+        let inline_opts = tree.options().inline();
+        let mut b = NodeBuilder::new(text, refs, &t.opts, inline_opts, sources, None);
         gv_syntax::walk(tree, &mut b);
         let nodes = std::mem::take(&mut b.nodes);
         t.nodes = nodes;
@@ -273,14 +308,20 @@ impl RenderTree {
             by_id: self.nodes[a..b]
                 .iter()
                 .enumerate()
-                .map(|(i, n)| (n.id, (a + i, n)))
+                .map(|(i, n)| ((n.id, n.table), (a + i, n)))
                 .collect(),
             window: w.clone(),
             delta,
             same_refs,
         };
-        let mut builder =
-            NodeBuilder::new(text, Arc::clone(&refs), &self.opts, sources, Some(reuse));
+        let mut builder = NodeBuilder::new(
+            text,
+            Arc::clone(&refs),
+            &self.opts,
+            tree.options().inline(),
+            sources,
+            Some(reuse),
+        );
         walk_region(tree, s..e, &mut builder);
         let built = builder.built;
         let reused = builder.reused;
@@ -364,6 +405,7 @@ impl RenderTree {
         }
         self.assign_anchors(model);
         self.index = OnceLock::new();
+        self.macros = OnceLock::new();
         report
     }
 
@@ -400,37 +442,37 @@ impl RenderTree {
     ) -> UpdateReport {
         let mut stale = Vec::new();
         for (k, n) in self.nodes.iter().enumerate() {
-            let Some(c) = n.inline() else {
-                continue;
-            };
-            let link_changed = || {
-                c.links.iter().any(|l| {
-                    let target = LinkTarget {
-                        kind: l.kind,
-                        image: false,
-                        destination: &l.destination,
-                        title: l.title.as_deref(),
-                        range: n.to_document(l.source.start)..n.to_document(l.source.end),
-                        block: n.id,
-                    };
-                    which(&target) && sources.links.status(&target) != l.status
-                })
-            };
-            let image_changed = || {
-                c.images.iter().any(|i| {
-                    let target = LinkTarget {
-                        kind: i.kind,
-                        image: true,
-                        destination: &i.destination,
-                        title: i.title.as_deref(),
-                        range: n.to_document(i.source.start)..n.to_document(i.source.end),
-                        block: n.id,
-                    };
-                    which(&target) && sources.images.size(&target) != i.size
-                })
-            };
-            if link_changed() || image_changed() {
-                stale.push(k);
+            for c in n.inlines() {
+                let link_changed = || {
+                    c.links.iter().any(|l| {
+                        let target = LinkTarget {
+                            kind: l.kind,
+                            image: false,
+                            destination: &l.destination,
+                            title: l.title.as_deref(),
+                            range: n.to_document(l.source.start)..n.to_document(l.source.end),
+                            block: n.id,
+                        };
+                        which(&target) && sources.links.status(&target) != l.status
+                    })
+                };
+                let image_changed = || {
+                    c.images.iter().any(|i| {
+                        let target = LinkTarget {
+                            kind: i.kind,
+                            image: true,
+                            destination: &i.destination,
+                            title: i.title.as_deref(),
+                            range: n.to_document(i.source.start)..n.to_document(i.source.end),
+                            block: n.id,
+                        };
+                        which(&target) && sources.images.size(&target) != i.size
+                    })
+                };
+                if link_changed() || image_changed() {
+                    stale.push(k);
+                    break;
+                }
             }
         }
         let mut report = UpdateReport::default();
@@ -518,7 +560,15 @@ impl RenderTree {
         let old = &self.nodes[k];
         let mut finder = LeafFinder {
             id: old.id,
-            builder: NodeBuilder::new(text, refs, &self.opts, sources, None),
+            table: old.table,
+            builder: NodeBuilder::new(
+                text,
+                refs,
+                &self.opts,
+                tree.options().inline(),
+                sources,
+                None,
+            ),
             found: None,
         };
         gv_syntax::walk_range(tree, old.block.clone(), &mut finder);
@@ -545,6 +595,7 @@ impl RenderTree {
             return false;
         }
         self.nodes[k] = node;
+        self.macros = OnceLock::new();
         for (slot, new) in self.items[ia..ib].iter_mut().zip(items) {
             *slot = Item {
                 gap_before: slot.gap_before,
@@ -648,6 +699,13 @@ impl RenderTree {
         self.items.get(ix).and_then(|it| self.nodes.get(it.node))
     }
 
+    /// The inline content item `ix` lays out (a paragraph's, a heading's
+    /// or a table row's).
+    pub fn item_inline(&self, ix: usize) -> Option<&Arc<crate::InlineContent>> {
+        let item = self.items.get(ix)?;
+        self.nodes.get(item.node)?.item_inline(&item.kind)
+    }
+
     /// The index of the item with id `id`.
     pub fn index_of(&self, id: ItemId) -> Option<usize> {
         self.index
@@ -692,6 +750,47 @@ impl RenderTree {
         let end = range.end.max(range.start + 1);
         let b = self.items.partition_point(|it| it.source.start < end);
         a..b.max(a)
+    }
+
+    /// The math macros in force for formula `k` of node `node` (a math
+    /// block's formula is 0; a paragraph's, heading's or table's are its
+    /// [`InlineContent::math`](crate::InlineContent::math) in order, row by
+    /// row): the definitions of the formulas before it in document order
+    /// (MathJax's document-wide scope). The pass over all formulas runs
+    /// once per tree, on the first query.
+    pub fn math_macros(&self, node: usize, k: usize) -> MacroSet {
+        let table = self.macros.get_or_init(|| Arc::new(self.macro_table()));
+        let Some(&start) = table.starts.get(node) else {
+            return MacroSet::empty();
+        };
+        table
+            .sets
+            .get(start as usize + k)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn macro_table(&self) -> MacroTable {
+        let mut pass = MacroPass::new(MacroLimits::default());
+        let mut t = MacroTable {
+            starts: Vec::with_capacity(self.nodes.len() + 1),
+            sets: Vec::new(),
+        };
+        for n in &self.nodes {
+            t.starts
+                .push(u32::try_from(t.sets.len()).unwrap_or(u32::MAX));
+            if let NodeKind::Math(code) = &n.kind {
+                t.sets.push(pass.next(&code.text));
+            }
+            for c in n.inlines() {
+                for m in &c.math {
+                    t.sets.push(pass.next(&m.tex));
+                }
+            }
+        }
+        t.starts
+            .push(u32::try_from(t.sets.len()).unwrap_or(u32::MAX));
+        t
     }
 
     /// The item of the heading with anchor `anchor`.
@@ -821,13 +920,19 @@ fn walk_region(tree: &SyntaxTree, r: Range<usize>, v: &mut impl Visitor) {
 /// Builds the node of one leaf found by id.
 struct LeafFinder<'a, S: TextSource + ?Sized> {
     id: BlockId,
+    /// The table of the block (else its paragraph or other leaf).
+    table: bool,
     builder: NodeBuilder<'a, S>,
     found: Option<BlockNode>,
 }
 
 impl<S: TextSource + ?Sized> Visitor for LeafFinder<'_, S> {
     fn leaf(&mut self, leaf: &Leaf<'_>) {
-        if leaf.id == self.id && leaf.kind != LeafKind::LinkRefDef && self.found.is_none() {
+        if leaf.id == self.id
+            && leaf.kind != LeafKind::LinkRefDef
+            && (leaf.kind == LeafKind::Table) == self.table
+            && self.found.is_none()
+        {
             self.builder.leaf(leaf);
             self.found = self.builder.nodes.pop();
         }

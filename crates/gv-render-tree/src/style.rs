@@ -190,11 +190,16 @@ pub enum TextRole {
     Properties,
     /// Counts next to inline status icons: 11.5, 600.
     Badge,
+    /// Table header cells: 12, 600, in `text.secondary` (line height not
+    /// designed: 16).
+    TableHeader,
+    /// Table body cells: 13.5/20.
+    TableCell,
 }
 
 impl TextRole {
     /// Every role, in id order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Body,
         Self::H1,
         Self::H2,
@@ -206,6 +211,8 @@ impl TextRole {
         Self::CodeLabel,
         Self::Properties,
         Self::Badge,
+        Self::TableHeader,
+        Self::TableCell,
     ];
 
     /// The role of a heading level (clamped to 1..=6).
@@ -234,13 +241,15 @@ impl TextRole {
             Self::CodeLabel => "code-label",
             Self::Properties => "properties",
             Self::Badge => "badge",
+            Self::TableHeader => "table-header",
+            Self::TableCell => "table-cell",
         }
     }
 
     /// The colour of plain text in this role.
     pub fn color(self) -> ColorToken {
         match self {
-            Self::CodeLabel => ColorToken::TextSecondary,
+            Self::CodeLabel | Self::TableHeader => ColorToken::TextSecondary,
             Self::Badge => ColorToken::StatusWarning,
             _ => ColorToken::TextPrimary,
         }
@@ -349,8 +358,9 @@ impl Default for StyleTable {
 
 impl StyleTable {
     /// The Preview mode's type: body 15/24, H1 26/32 700 -0.02em, H2 18/24
-    /// 600 -0.01em, code 12.5/20, properties 12.5/22. H3 to H6 are not
-    /// designed; they step down from H2 to the body size.
+    /// 600 -0.01em, code 12.5/20, properties 12.5/22, table header cells
+    /// 12/16 600, table body cells 13.5/20. H3 to H6 are not designed; they
+    /// step down from H2 to the body size.
     pub fn preview() -> Self {
         use Family::{Mono, Text};
         Self {
@@ -366,6 +376,8 @@ impl StyleTable {
                 StyleSpec::new(Mono, 11.0, 16.0, 400),
                 StyleSpec::new(Text, 12.5, 22.0, 400),
                 StyleSpec::new(Text, 11.5, 16.0, 600),
+                StyleSpec::new(Text, 12.0, 16.0, 600),
+                StyleSpec::new(Text, 13.5, 20.0, 400),
             ],
             zoom: 1.0,
         }

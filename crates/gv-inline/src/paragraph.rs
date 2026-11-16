@@ -237,6 +237,22 @@ impl Paragraph {
         &self.items
     }
 
+    /// Replaces the box of item `ix` with `inline_box` (its size, for
+    /// example, once the content is known). Returns false, changing
+    /// nothing, if item `ix` is not a box.
+    pub fn replace_box(&mut self, ix: usize, inline_box: InlineBox) -> bool {
+        match self.items.get_mut(ix) {
+            Some(Item {
+                kind: kind @ ItemKind::Box(_),
+                ..
+            }) => {
+                *kind = ItemKind::Box(inline_box.sanitized());
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Logical text of item `ix` (U+FFFC for a box, `\n` for a hard break).
     pub fn item_text(&self, ix: usize) -> &str {
         &self.text[self.items[ix].range.clone()]
@@ -616,6 +632,22 @@ mod tests {
         assert_eq!(p.item_at(p.len()), Some(3));
         let breaks: Vec<_> = p.break_opportunities().collect();
         assert!(breaks.contains(&(6, true)), "{breaks:?}");
+    }
+
+    #[test]
+    fn boxes_are_replaced_in_place() {
+        let mut b = builder();
+        b.text("ab", body(), 0..2);
+        b.inline_box(InlineBox::new(BoxKind::Math, 5.0, 5.0, 1.0), 2..7);
+        let mut p = b.build();
+        assert!(!p.replace_box(0, InlineBox::new(BoxKind::Math, 1.0, 1.0, 0.0)));
+        assert!(p.replace_box(1, InlineBox::new(BoxKind::Math, 9.0, 4.0, 2.0)));
+        let replaced = p.items()[1].inline_box().copied().expect("a box");
+        assert_eq!(
+            (replaced.width, replaced.ascent, replaced.descent),
+            (9.0, 4.0, 2.0)
+        );
+        assert!(!p.replace_box(5, InlineBox::new(BoxKind::Math, 1.0, 1.0, 0.0)));
     }
 
     #[test]

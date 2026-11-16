@@ -17,7 +17,7 @@
 //!   link specification;
 //! - **front matter** ([`DocModel::front_matter`]): where the metadata
 //!   block is and its syntax, when the tree was parsed with front matter
-//!   enabled (`gv_syntax::ParseOptions::for_profile`). Its properties are
+//!   enabled (`gv_syntax::ParseOptions::from_profile`). Its properties are
 //!   not parsed yet.
 //!
 //! The model is an immutable `Arc` snapshot. [`DocModel::update`] builds

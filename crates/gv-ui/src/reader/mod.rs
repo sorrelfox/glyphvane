@@ -73,6 +73,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
     Styled as _, Task, Window, div, px,
 };
+use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{CopyOptions, RenderOptions, StyleTable};
 use gv_vault::{Fragment, PathIndex, ProfileParams};
 
@@ -93,7 +94,7 @@ pub use state::ReaderLayout;
 
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
-pub(crate) use links::{Navigation, PROFILE, Resolver, navigation};
+pub(crate) use links::{Navigation, Resolver, navigation};
 
 /// Copy the selection as plain text (`editor.copy`) or as Markdown
 /// (`editor.copy_as_markdown`), and select the whole document
@@ -218,6 +219,9 @@ pub struct Reader {
     find: find::FindState,
     /// What documents are built with: the type scale and the metrics.
     options: RenderOptions,
+    /// The tab's profile: what documents are parsed, rendered and resolved
+    /// with.
+    profile: Arc<CompiledProfile>,
     /// Following an editor's text (the Split view's preview).
     live: live::Live,
     _load: Option<Task<()>>,
@@ -257,10 +261,39 @@ impl Reader {
             target: None,
             find: find::FindState::default(),
             options: RenderOptions::commonmark(),
+            profile: Arc::new(gv_profile::compile_builtin(ProfileId::CommonMark)),
             live: live::Live::default(),
             _load: None,
             _refresh: None,
         }
+    }
+
+    /// Sets the tab's profile. A document shown from a file is built again
+    /// from its text, where the view is; one that follows an editor is
+    /// built again from the editor's next hand-off (the editor restarts it
+    /// when its profile changes).
+    pub fn set_profile(&mut self, profile: Arc<CompiledProfile>, cx: &mut Context<'_, Self>) {
+        if *self.profile == *profile {
+            return;
+        }
+        self.profile = profile;
+        self.options = self.options.clone().with_profile(&self.profile);
+        if self.is_building() || self.live.shown_stamp().is_some() {
+            self.live.restart();
+            return;
+        }
+        let text = self.state.borrow().doc.as_ref().map(|d| d.text.clone());
+        if let (Some(path), Some(text)) = (self.path.clone(), text)
+            && self.status == LoadStatus::Ready
+        {
+            let at = self.position();
+            self.open_text(path, text, at, cx);
+        }
+    }
+
+    /// The profile documents are read with.
+    pub fn profile(&self) -> ProfileId {
+        self.profile.id
     }
 
     /// Where the view puts its text column.
@@ -297,12 +330,13 @@ impl Reader {
         self.target = target;
         self._refresh = None;
         self.live.forget();
-        let resolver = Resolver::statuses(&path, self.index.as_ref());
+        let resolver = Resolver::statuses(&path, self.index.as_ref(), self.profile.id);
         self.statuses_from = index_key(self.index.as_ref());
         let options = self.options.clone();
+        let profile = Arc::clone(&self.profile);
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load::load(&path, &resolver, options) })
+                .background_spawn(async move { load::load(&path, &resolver, options, &profile) })
                 .await;
             this.update(cx, |reader, cx| reader.finish_load(revision, result, cx))
                 .ok();
@@ -333,14 +367,15 @@ impl Reader {
         self.target = target;
         self._refresh = None;
         self.live.forget();
-        let resolver = Resolver::statuses(&path, self.index.as_ref());
+        let resolver = Resolver::statuses(&path, self.index.as_ref(), self.profile.id);
         self.statuses_from = index_key(self.index.as_ref());
         let options = self.options.clone();
+        let profile = Arc::clone(&self.profile);
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(
-                    async move { Ok(load::load_text(&path, text, &resolver, options)) },
-                )
+                .background_spawn(async move {
+                    Ok(load::load_text(&path, text, &resolver, options, &profile))
+                })
                 .await;
             this.update(cx, |reader, cx| reader.finish_load(revision, result, cx))
                 .ok();
@@ -418,7 +453,7 @@ impl Reader {
             };
             (doc, st.revision)
         };
-        let resolver = Resolver::statuses(&path, self.index.as_ref());
+        let resolver = Resolver::statuses(&path, self.index.as_ref(), doc.profile);
         self.statuses_from = index_key(self.index.as_ref());
         self._refresh = Some(cx.spawn(async move |this, cx| {
             let (doc, changed) = cx
@@ -606,7 +641,7 @@ fn jump(st: &mut State, target: &ScrollTarget) {
     let last = doc.tree.items().len().checked_sub(1);
     let ix = match target {
         ScrollTarget::Fragment(fragment) => {
-            let params = ProfileParams::for_profile(PROFILE);
+            let params = ProfileParams::for_profile(doc.profile);
             let ix = links::fragment_item(fragment, &params, &doc.model, &doc.tree, &doc.text);
             if ix.is_none() {
                 tracing::info!(

@@ -15,11 +15,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gv_model::DocModel;
+use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{LinkTarget, NoImageSizes, RenderOptions, RenderTree, Sources, UpdateReport};
 use gv_syntax::{Changes, ParseOptions, SyntaxTree};
 use gv_text::{DecodeStatus, TextSnapshot};
 
-use super::links::{PROFILE, Resolver};
+use super::links::Resolver;
 use super::startup;
 
 /// A loaded document. Cloning is cheap.
@@ -39,6 +40,8 @@ pub(crate) struct Loaded {
     /// The editor's text the document was built from, when it follows an
     /// editor: its line index serves scroll sync.
     pub lines: Option<TextSnapshot>,
+    /// The profile it was read with.
+    pub profile: ProfileId,
 }
 
 /// Where loading spent its time.
@@ -58,12 +61,13 @@ impl Timings {
     }
 }
 
-/// Reads and builds the document at `path`. Link statuses come from
-/// `links`. Errors are messages for the reader.
+/// Reads and builds the document at `path` in `profile`. Link statuses
+/// come from `links`. Errors are messages for the reader.
 pub(crate) fn load(
     path: &Path,
     links: &Resolver,
     options: RenderOptions,
+    profile: &CompiledProfile,
 ) -> Result<Loaded, String> {
     // The start-up trace follows the documents loaded while it runs.
     let trace = startup::enabled().then(|| {
@@ -102,6 +106,7 @@ pub(crate) fn load(
         trace.as_deref(),
         links,
         options,
+        profile,
     ))
 }
 
@@ -113,15 +118,17 @@ pub(crate) fn load_text(
     text: Arc<str>,
     links: &Resolver,
     options: RenderOptions,
+    profile: &CompiledProfile,
 ) -> Loaded {
     let timings = Timings {
         bytes: text.len(),
         ..Timings::default()
     };
-    build(path, text, None, timings, None, links, options)
+    build(path, text, None, timings, None, links, options, profile)
 }
 
-/// Parses `text` and builds its model and render tree.
+/// Parses `text` in `profile` and builds its model and render tree.
+#[allow(clippy::too_many_arguments)]
 fn build(
     path: &Path,
     text: Arc<str>,
@@ -130,9 +137,10 @@ fn build(
     trace: Option<&str>,
     links: &Resolver,
     options: RenderOptions,
+    profile: &CompiledProfile,
 ) -> Loaded {
     let t = Instant::now();
-    let parse_options = ParseOptions::for_profile(PROFILE.as_str()).unwrap_or_default();
+    let parse_options = ParseOptions::from_profile(profile);
     let syntax = gv_syntax::parse_with(&*text, parse_options);
     timings.parse = t.elapsed();
     mark(trace, format_args!("parsed"));
@@ -160,17 +168,19 @@ fn build(
         lossy,
         timings,
         lines: None,
+        profile: profile.id,
     }
 }
 
-/// Builds the document at `path` from an editor's text and its syntax
-/// tree: the model and the render tree, without parsing.
+/// Builds the document at `path` (in `profile`) from an editor's text and
+/// its syntax tree: the model and the render tree, without parsing.
 pub(crate) fn build_tree(
     path: &Path,
     syntax: SyntaxTree,
     text: TextSnapshot,
     links: &Resolver,
     options: RenderOptions,
+    profile: ProfileId,
 ) -> Loaded {
     let mut timings = Timings {
         bytes: text.len(),
@@ -196,6 +206,7 @@ pub(crate) fn build_tree(
         lossy: None,
         timings,
         lines: Some(text),
+        profile,
     }
 }
 
@@ -235,6 +246,7 @@ pub(crate) fn update_tree(
         lossy: None,
         timings,
         lines: Some(text),
+        profile: base.profile,
     };
     (loaded, report)
 }

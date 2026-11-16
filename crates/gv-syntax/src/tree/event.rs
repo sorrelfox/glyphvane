@@ -167,6 +167,12 @@ pub enum BlockKind {
         /// Its syntax.
         kind: FrontMatterKind,
     },
+    /// A `$$` display math block (with
+    /// [`ParseOptions::math`](crate::ParseOptions::math)): opened by a line
+    /// starting with `$$`, closed by a line ending with `$$` (possibly the
+    /// same line). Like a fenced code block, it may hold blank lines and
+    /// runs to the end of its container when unclosed.
+    MathBlock,
 }
 
 impl BlockKind {
@@ -184,6 +190,7 @@ impl BlockKind {
             BlockKind::IndentedCode => 7,
             BlockKind::Html { .. } => 8,
             BlockKind::FrontMatter { .. } => 9,
+            BlockKind::MathBlock => 10,
         }
     }
 
@@ -261,6 +268,7 @@ const K_FENCED: u8 = 7;
 const K_INDENTED: u8 = 8;
 const K_HTML: u8 = 9;
 const K_FRONT: u8 = 10;
+const K_MATH: u8 = 11;
 
 /// A packed event: 8 bytes. The BlockId of an `Open` lives in a parallel
 /// array.
@@ -309,6 +317,7 @@ impl Ev {
             BlockKind::IndentedCode => (K_INDENTED, 0, 0),
             BlockKind::Html { kind } => (K_HTML, u16::from(kind), 0),
             BlockKind::FrontMatter { kind } => (K_FRONT, kind as u16, 0),
+            BlockKind::MathBlock => (K_MATH, 0, 0),
         };
         Ev {
             tag: T_OPEN,
@@ -430,6 +439,7 @@ impl Ev {
             K_BREAK => BlockKind::ThematicBreak,
             K_FENCED => BlockKind::FencedCode,
             K_INDENTED => BlockKind::IndentedCode,
+            K_MATH => BlockKind::MathBlock,
             K_FRONT => BlockKind::FrontMatter {
                 kind: if self.b == FrontMatterKind::Toml as u16 {
                     FrontMatterKind::Toml
@@ -512,6 +522,7 @@ mod tests {
             BlockKind::FrontMatter {
                 kind: FrontMatterKind::Toml,
             },
+            BlockKind::MathBlock,
         ];
         for k in kinds {
             assert_eq!(Ev::open(k).open_kind(), Some(k));

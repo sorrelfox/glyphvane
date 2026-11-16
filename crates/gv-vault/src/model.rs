@@ -176,7 +176,7 @@ mod tests {
 
     /// A note parsed with the options of `profile` (front matter).
     fn model_for(profile: ProfileId, text: &str) -> DocModel {
-        let options = gv_syntax::ParseOptions::for_profile(profile.as_str()).unwrap();
+        let options = gv_syntax::ParseOptions::builtin(profile);
         DocModel::build(&gv_syntax::parse_with(text, options), text)
     }
 

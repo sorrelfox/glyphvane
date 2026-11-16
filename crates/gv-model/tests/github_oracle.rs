@@ -87,7 +87,7 @@ struct Outcome {
 
 fn compare(md: &str, html: &str) -> Outcome {
     // GitHub's README rendering: YAML front matter is not Markdown.
-    let options = gv_syntax::ParseOptions::for_profile("gfm-file").expect("built-in profile");
+    let options = gv_syntax::ParseOptions::builtin(gv_syntax::ProfileId::GfmFile);
     let tree = gv_syntax::parse_with(md, options);
     let m = DocModel::build(&tree, md);
     let slugs = m.slugs(SlugAlgorithm::GitHub);

@@ -35,7 +35,7 @@ use gv_syntax::inline::InlineKind;
 use gv_syntax::{Leaf, LeafKind, SyntaxTree, TokenKind, Visitor, walk_range};
 
 use crate::item::{Item, ItemKind};
-use crate::node::{BlockNode, CodeBlock, FrameKind, InlineContent, ListMarker};
+use crate::node::{BlockNode, CodeBlock, FrameKind, InlineContent, InlineRole, ListMarker};
 use crate::tree::RenderTree;
 
 /// Where a run of the text comes from: text offset `text` maps to source
@@ -149,16 +149,36 @@ impl TextBuilder {
 
 fn paragraph_text(c: &InlineContent, base: usize, b: &mut TextBuilder) {
     let p: &Paragraph = &c.paragraph;
+    let last = p.items().len().saturating_sub(1);
     for (ix, (item, span)) in p.items().iter().zip(c.spans.iter()).enumerate() {
         if !span.role.is_content() {
             continue;
+        }
+        let src = item.source();
+        match span.role {
+            InlineRole::Math(i) => {
+                // The formula's TeX, as one unit.
+                if let Some(m) = c.math.get(i as usize) {
+                    b.push(&m.tex, base + src.start);
+                    b.end_at(base + src.end);
+                }
+                continue;
+            }
+            InlineRole::CellGap(col) => {
+                // A tab between two cells (TSV).
+                if col > 0 && ix < last {
+                    b.push("\t", base + src.start);
+                    b.end_at(base + src.end);
+                }
+                continue;
+            }
+            _ => {}
         }
         let text = if item.is_hard_break() {
             "\n"
         } else {
             p.item_text(ix)
         };
-        let src = item.source();
         if text.len() == src.len() || item.is_hard_break() {
             b.push(text, base + src.start);
         } else {
@@ -255,7 +275,7 @@ impl RenderTree {
             text: String::new(),
             segs: Vec::new(),
         };
-        if let Some(c) = node.inline() {
+        if let Some(c) = node.item_inline(&item.kind) {
             paragraph_text(c, node.source.start, &mut b);
         } else if let (Some(code), Some(lines)) = (node.lines(), item.kind.lines()) {
             lines_text(code, lines.start as usize..lines.end as usize, node, &mut b);

@@ -304,8 +304,53 @@ pub(crate) struct BlockParser {
     /// blocks between it and the last matched one *before* the unmatched
     /// ones; `usize::MAX` otherwise.
     backup: usize,
-    /// GFM tables are on.
-    tables: bool,
+    /// The block switches.
+    opts: BlockOptions,
+}
+
+/// The block switches of [`crate::ParseOptions`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockOptions {
+    /// GFM tables.
+    pub tables: bool,
+    /// Dashes a delimiter row cell needs at least.
+    pub table_min_dashes: u8,
+    /// `$$` math blocks.
+    pub math_blocks: bool,
+}
+
+impl BlockOptions {
+    pub(crate) fn of(options: crate::ParseOptions) -> Self {
+        BlockOptions {
+            tables: options.tables,
+            table_min_dashes: options.table_min_dashes,
+            math_blocks: options.math_blocks(),
+        }
+    }
+}
+
+/// A `$$` math block opener: `s` is the line from its first non-space
+/// byte to the end of its content. `Some(false)`: the block continues on
+/// later lines; `Some(true)`: it closes on this line (`$$x$$`). A line
+/// with another `$$` before its end does not open a block (`$$a$$ b` is
+/// inline display math in a paragraph), nor does a run of three or more
+/// dollars.
+fn math_block_open(s: &[u8]) -> Option<bool> {
+    if !s.starts_with(b"$$") || s.get(2) == Some(&b'$') {
+        return None;
+    }
+    let rest = &s[2..trim_end(s, 2, s.len())];
+    match memchr::memmem::find(rest, b"$$") {
+        None => Some(false),
+        Some(p) if p + 2 == rest.len() => Some(true),
+        Some(_) => None,
+    }
+}
+
+/// Whether the trimmed line `s` (from its first non-space byte) ends a
+/// math block: it ends with `$$`.
+fn math_block_closes(s: &[u8]) -> bool {
+    s.ends_with(b"$$")
 }
 
 impl Default for BlockParser {
@@ -331,14 +376,17 @@ impl BlockParser {
             first_new: 1,
             tb_kill: 0,
             backup: usize::MAX,
-            tables: false,
+            opts: BlockOptions {
+                table_min_dashes: 1,
+                ..BlockOptions::default()
+            },
         }
     }
 
-    /// A parser at the document start; `tables` turns GFM tables on.
-    pub(crate) fn with_tables(tables: bool) -> Self {
+    /// A parser at the document start with block switches `opts`.
+    pub(crate) fn with_options(opts: BlockOptions) -> Self {
         BlockParser {
-            tables,
+            opts,
             ..Self::new()
         }
     }
@@ -347,14 +395,14 @@ impl BlockParser {
     /// paragraph with a long pending candidate
     /// ([`BlockParser::needs_pending_text`]), the caller must supply it with
     /// [`BlockParser::set_pending_text`].
-    pub(crate) fn from_checkpoint(interner: &Interner, id: StateId, tables: bool) -> Self {
+    pub(crate) fn from_checkpoint(interner: &Interner, id: StateId, opts: BlockOptions) -> Self {
         let (stack, ids) = interner.resolve(id);
         let clean = stack.len();
         let mut p = BlockParser {
             stack,
             ids,
             clean,
-            tables,
+            opts,
             ..Self::new()
         };
         for (i, e) in p.stack.iter().enumerate().skip(1) {
@@ -741,7 +789,7 @@ impl BlockParser {
                 }
             };
             // The cell count a delimiter row on the next line must match.
-            let new_cells = if !self.tables || cells == TABLE_VISITED {
+            let new_cells = if !self.opts.tables || cells == TABLE_VISITED {
                 cells
             } else {
                 table::cell_count(line) as u16
@@ -979,6 +1027,29 @@ impl BlockParser {
                     self.pre_tok(&mut cur, TokenKind::CodeIndent);
                     true
                 }
+                Kind::MathBlock { offset } => {
+                    let fns = cur.fns.min(cur.content_end);
+                    let end = trim_end(b, fns, cur.content_end.max(fns));
+                    if math_block_closes(&b[fns..end]) {
+                        // The closing line: content before the `$$`, then
+                        // the marker; the block ends with this line.
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                        self.tok(&mut cur, sink, TokenKind::Content, end - 2);
+                        self.tok(&mut cur, sink, TokenKind::Marker, end);
+                        let ce = cur.content_end.max(cur.tp);
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
+                        self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                        self.close_top(sink);
+                        return;
+                    }
+                    let mut k = offset;
+                    while k > 0 && cur.peek(cur.offset).is_some_and(scan::is_space_or_tab) {
+                        cur.advance(1, true);
+                        k -= 1;
+                    }
+                    self.pre_tok(&mut cur, TokenKind::CodeIndent);
+                    true
+                }
                 Kind::IndentedCode => {
                     if cur.indent >= CODE_INDENT {
                         cur.advance(CODE_INDENT, true);
@@ -1043,6 +1114,7 @@ impl BlockParser {
                 ck,
                 Kind::FencedCode { .. }
                     | Kind::IndentedCode
+                    | Kind::MathBlock { .. }
                     | Kind::Html { .. }
                     | Kind::FrontMatter { .. }
             ) {
@@ -1057,7 +1129,10 @@ impl BlockParser {
             // Room for a list, its item and a leaf.
             let can_nest = self.stack.len() + 3 <= MAX_NESTING;
             let mut started = false;
-            if !indented && let Some(c) = c.filter(|&c| scan::maybe_special(c)) {
+            let math = self.opts.math_blocks;
+            if !indented
+                && let Some(c) = c.filter(|&c| scan::maybe_special(c) || (math && c == b'$'))
+            {
                 if c == b'>' && can_nest {
                     self.close_unmatched_for(Kind::BlockQuote, sink);
                     cur.advance(fns + 1 - cur.offset, false);
@@ -1091,6 +1166,19 @@ impl BlockParser {
                     self.tok(&mut cur, sink, TokenKind::Marker, fns + n);
                     cur.advance(fns + n - cur.offset, false);
                     started = true;
+                } else if c == b'$' {
+                    let end = cur.content_end.max(fns);
+                    if math_block_open(&b[fns..end]).is_some() {
+                        let kind = Kind::MathBlock {
+                            offset: len32(cur.indent),
+                        };
+                        self.close_unmatched_for(kind, sink);
+                        container = self.add_child(kind, BlockKind::MathBlock, sink);
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                        self.tok(&mut cur, sink, TokenKind::Marker, fns + 2);
+                        cur.advance(fns + 2 - cur.offset, false);
+                        started = true;
+                    }
                 } else if let Some(ty) = scan::html_block_start(s).or_else(|| {
                     // Type 7 cannot interrupt a paragraph, including one that
                     // this line would continue lazily.
@@ -1210,7 +1298,7 @@ impl BlockParser {
                 started = true;
             }
             if !started
-                && self.tables
+                && self.opts.tables
                 && !indented
                 && ck_para
                 && let Kind::Paragraph { refs, cells } = self.stack[container].kind
@@ -1219,7 +1307,7 @@ impl BlockParser {
                 // A delimiter row under the paragraph (`container`, the top
                 // of the stack: every block matched).
                 let end = cur.content_end.max(fns);
-                let columns = table::delimiter_columns(&b[fns..end]);
+                let columns = table::delimiter_columns(&b[fns..end], self.opts.table_min_dashes);
                 if columns > 0 {
                     if columns == usize::from(cells) && self.table_header(container, sink) {
                         self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
@@ -1268,6 +1356,7 @@ impl BlockParser {
                 | Kind::Heading
                 | Kind::ThematicBreak
                 | Kind::FencedCode { .. }
+                | Kind::MathBlock { .. }
                 | Kind::FrontMatter { .. } => false,
                 Kind::Item { .. } => e.has_child || ci < self.first_new,
                 _ => true,
@@ -1304,9 +1393,29 @@ impl BlockParser {
                 self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
                 self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
             }
-            Kind::FencedCode { .. } | Kind::IndentedCode | Kind::FrontMatter { .. } => {
-                self.literal_line(&mut cur, sink)
+            Kind::MathBlock { .. } if ci >= self.first_new => {
+                // Opening line: the rest is content, and the closing `$$`
+                // when the block is one line.
+                let end = trim_end(b, cur.tp, cur.content_end.max(cur.tp));
+                let one_line = end >= cur.tp + 2 && b[end - 2..end] == *b"$$";
+                let content_end = if one_line { end - 2 } else { end };
+                let start = skip_ws(b, cur.tp, content_end);
+                self.tok(&mut cur, sink, TokenKind::Whitespace, start);
+                self.tok(&mut cur, sink, TokenKind::Content, content_end);
+                if one_line {
+                    self.tok(&mut cur, sink, TokenKind::Marker, end);
+                }
+                let ce = cur.content_end.max(cur.tp);
+                self.tok(&mut cur, sink, TokenKind::Whitespace, ce);
+                self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                if one_line {
+                    self.close_top(sink);
+                }
             }
+            Kind::FencedCode { .. }
+            | Kind::IndentedCode
+            | Kind::MathBlock { .. }
+            | Kind::FrontMatter { .. } => self.literal_line(&mut cur, sink),
             Kind::Html { ty } => {
                 self.literal_line(&mut cur, sink);
                 if ty <= 5 && scan::html_block_end(ty, &b[cur.fns.min(b.len())..]) {

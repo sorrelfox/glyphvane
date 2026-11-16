@@ -320,7 +320,7 @@ impl State {
         let block = g.text.as_ref()?;
         let piece = block.borrow().item_at(position)?;
         let doc = self.doc.as_ref()?;
-        let content = doc.tree.node_of(g.ix)?.inline()?;
+        let content = doc.tree.item_inline(g.ix)?;
         let link = content.spans.get(piece)?.link?;
         let info = content.links.get(link as usize)?;
         Some(LinkHit {

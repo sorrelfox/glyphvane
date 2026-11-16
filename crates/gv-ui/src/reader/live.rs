@@ -87,6 +87,18 @@ impl Live {
         self.shown = None;
         self.task = None;
     }
+
+    /// The editor text the shown document was built from.
+    pub fn shown_stamp(&self) -> Option<TextStamp> {
+        self.shown
+    }
+
+    /// The profile changed: the next hand-off builds from scratch, and a
+    /// build still running is dropped.
+    pub fn restart(&mut self) {
+        self.shown = None;
+        self.task = None;
+    }
 }
 
 /// What a build made: the document and, for an incremental update, the
@@ -108,7 +120,8 @@ impl Reader {
         reader.options = RenderOptions {
             styles: StyleTable::split(),
             ..RenderOptions::commonmark()
-        };
+        }
+        .with_profile(&reader.profile);
         reader
     }
 
@@ -154,7 +167,8 @@ impl Reader {
             self.target = target;
         }
         self.path = Some(path.clone());
-        let resolver = Resolver::statuses(&path, self.index.as_ref());
+        let profile = self.profile.id;
+        let resolver = Resolver::statuses(&path, self.index.as_ref(), profile);
         self.statuses_from = index_key(self.index.as_ref());
         let options = self.options.clone();
         self.live.task = Some(cx.spawn(async move |this, cx| {
@@ -167,7 +181,7 @@ impl Reader {
                             (doc, Some(report))
                         }
                         None => (
-                            load::build_tree(&path, tree, text, &resolver, options),
+                            load::build_tree(&path, tree, text, &resolver, options, profile),
                             None,
                         ),
                     };

@@ -21,6 +21,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -91,8 +92,18 @@ impl Workspace {
             changed = true;
             let compiled = detected.compiled.clone();
             tab.profile = Some(detected);
+            // The Source view first: it restarts its hand-off to the Split
+            // view's preview, which then builds with the new profile.
             if let Some(editor) = tab.editor.clone() {
                 editor.update(cx, |e, cx| e.set_compiled_profile(&compiled, cx));
+            }
+            let readers = tab
+                .reader
+                .clone()
+                .into_iter()
+                .chain(tab.split.as_ref().map(|s| s.read(cx).reader().clone()));
+            for reader in readers.collect::<Vec<_>>() {
+                reader.update(cx, |r, cx| r.set_profile(Arc::clone(&compiled), cx));
             }
         }
         if changed {

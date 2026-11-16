@@ -80,7 +80,7 @@ fn document_with_front_matter() -> impl Strategy<Value = String> {
 
 /// The options of the `extended` profile: YAML and TOML front matter.
 fn front_matter_on() -> ParseOptions {
-    ParseOptions::for_profile("extended").expect("built-in profile")
+    ParseOptions::builtin(gv_syntax::ProfileId::Extended)
 }
 
 /// A random Markdown document: blocks from a small grammar.

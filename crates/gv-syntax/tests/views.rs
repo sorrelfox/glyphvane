@@ -25,7 +25,7 @@ use support::edits::{Mode, apply, check_edit};
 use support::views::{filtered_walk, record_walk_range};
 
 fn extended() -> ParseOptions {
-    ParseOptions::for_profile("extended").expect("built-in profile")
+    ParseOptions::builtin(gv_syntax::ProfileId::Extended)
 }
 
 /// Leaves of a full walk: (kind, the content of their lines).
@@ -112,7 +112,7 @@ fn front_matter_is_off_in_commonmark() {
 #[test]
 fn front_matter_variants() {
     let ext = extended();
-    let gfm = ParseOptions::for_profile("gfm-file").expect("built-in profile");
+    let gfm = ParseOptions::builtin(gv_syntax::ProfileId::GfmFile);
     let first = |text: &str, opts| leaves(&parsed(text, opts), text).first().cloned();
     // Closing with `...`, CRLF line endings, trailing spaces and tabs.
     assert_eq!(
@@ -167,9 +167,7 @@ fn front_matter_variants() {
     );
     assert_eq!(
         FrontMatterOptions::YAML,
-        ParseOptions::for_profile("obsidian")
-            .expect("built-in profile")
-            .front_matter
+        ParseOptions::builtin(gv_syntax::ProfileId::Obsidian).front_matter
     );
 }
 

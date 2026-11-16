@@ -382,6 +382,20 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
                 self.cr();
             }
             LeafKind::Table => self.table(leaf),
+            LeafKind::MathBlock => {
+                // comrak's math markup (cmark-gfm has no math).
+                self.cr();
+                let mut tex = Vec::new();
+                for (i, l) in leaf.lines.iter().enumerate() {
+                    if i > 0 {
+                        tex.push(b'\n');
+                    }
+                    self.text.copy_range(l.content.clone(), &mut tex);
+                }
+                self.out.push_str("<p><span data-math-style=\"display\">");
+                escape_html(&mut self.out, &String::from_utf8_lossy(&tex));
+                self.out.push_str("</span></p>\n");
+            }
             // Front matter is metadata; this emitter renders nothing for it.
             LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => {}
         }

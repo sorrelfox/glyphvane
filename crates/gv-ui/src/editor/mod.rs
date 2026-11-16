@@ -454,9 +454,9 @@ impl EditorView {
             status: EditorStatus::Loading,
             doc: None,
             options,
-            commands: MarkdownCommands::for_profile(crate::reader::PROFILE.as_str()),
+            commands: MarkdownCommands::for_profile(gv_profile::ProfileId::CommonMark.as_str()),
             availabilities: Availabilities::default(),
-            paste_profile: paste_profile(crate::reader::PROFILE.as_str()),
+            paste_profile: paste_profile(gv_profile::ProfileId::CommonMark.as_str()),
             read_only: false,
             stats: stats::Stats::default(),
             scroll_y: 0.0,
@@ -468,7 +468,7 @@ impl EditorView {
             bounds: None,
             widest: 0.0,
             show_whitespace: false,
-            links: LinkStatuses::new(None, None),
+            links: LinkStatuses::new(None, None, gv_profile::ProfileId::CommonMark),
             fonts: Fonts::new(&families),
             advances: None,
             press: Press::None,
@@ -486,26 +486,23 @@ impl EditorView {
         }
     }
 
-    /// The parse options of the Reading view's profile.
-    pub fn profile_options() -> ParseOptions {
-        ParseOptions::for_profile(crate::reader::PROFILE.as_str()).unwrap_or_default()
-    }
-
     /// Sets the flavor profile (`commonmark`, `gfm-file`, …): the
     /// Markdown commands follow it at once, the parser from the next
     /// document loaded on.
     pub fn set_profile(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
-        self.options = ParseOptions::for_profile(id).unwrap_or(self.options);
+        self.options =
+            gv_profile::ProfileId::from_id(id).map_or(self.options, ParseOptions::builtin);
         self.availabilities.reset();
         cx.notify();
     }
 
     /// Sets the compiled profile of the tab's document: the Markdown
-    /// commands and smart paste follow it at once; a loaded document is
-    /// parsed again when the parse options differ (and no edit is still
-    /// waiting to be parsed).
+    /// commands, smart paste and link statuses follow it at once; a loaded
+    /// document is parsed again when the parse options differ (and no edit
+    /// is still waiting to be parsed). A Reading view that follows the
+    /// view gets the whole tree again at the next hand-off.
     pub fn set_compiled_profile(
         &mut self,
         profile: &gv_profile::CompiledProfile,
@@ -515,7 +512,10 @@ impl EditorView {
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
         self.availabilities.reset();
-        let options = crate::profile::parse_options(profile);
+        if self.links.profile() != profile.id {
+            self.links.set_profile(profile.id);
+        }
+        let options = ParseOptions::from_profile(profile);
         if options != self.options {
             self.options = options;
             if let Some(doc) = self.doc.as_mut()
@@ -524,6 +524,9 @@ impl EditorView {
             {
                 self.schedule_foldable(cx);
             }
+        }
+        if let Some(doc) = self.doc.as_mut() {
+            doc.syntax.restart_handoff();
         }
         cx.notify();
     }
@@ -559,7 +562,7 @@ impl EditorView {
     pub fn open(&mut self, path: PathBuf, index: Option<PathIndex>, cx: &mut Context<'_, Self>) {
         // The journal and the watcher know a file by its absolute path.
         let path = std::path::absolute(&path).unwrap_or(path);
-        self.links = LinkStatuses::new(Some(&path), index.as_ref());
+        self.links = LinkStatuses::new(Some(&path), index.as_ref(), self.links.profile());
         self.path = Some(path.clone());
         self.untitled = None;
         self.status = EditorStatus::Loading;
@@ -590,7 +593,7 @@ impl EditorView {
 
     /// Opens untitled document `n`: empty, or the text its journal holds.
     pub fn open_untitled(&mut self, n: u64, cx: &mut Context<'_, Self>) {
-        self.links = LinkStatuses::new(None, None);
+        self.links = LinkStatuses::new(None, None, self.links.profile());
         self.path = None;
         self.untitled = Some(n);
         self.status = EditorStatus::Loading;

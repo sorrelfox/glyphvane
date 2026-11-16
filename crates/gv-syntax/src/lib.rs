@@ -59,9 +59,10 @@ pub mod table;
 pub mod tree;
 
 pub use block::MAX_NESTING;
+pub use gv_profile::{CompiledProfile, ProfileId};
 pub use html::{GfmHtmlOptions, to_commonmark_html, to_gfm_html};
 pub use incremental::{Budget, Change, Changes, Reparse, ReparseTask};
-pub use options::{FrontMatterOptions, ParseOptions};
+pub use options::{DollarMath, FrontMatterOptions, ParseOptions};
 pub use tree::event::{BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};
 pub use tree::index::BlockIndex;
 pub use tree::walk::{

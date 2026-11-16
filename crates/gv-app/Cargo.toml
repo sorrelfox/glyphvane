@@ -18,6 +18,7 @@ arboard = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
+gv-profile = { workspace = true }
 gv-settings = { workspace = true }
 gv-syntax = { workspace = true }
 gv-text = { workspace = true }

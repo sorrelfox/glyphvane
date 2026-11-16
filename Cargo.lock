@@ -3158,6 +3158,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-pre",
+ "gv-profile",
  "gv-settings",
  "gv-syntax",
  "gv-text",
@@ -3288,7 +3289,9 @@ name = "gv-render-tree"
 version = "0.0.0"
 dependencies = [
  "gv-inline",
+ "gv-math",
  "gv-model",
+ "gv-profile",
  "gv-syntax",
  "gv-text",
  "proptest",
@@ -3327,6 +3330,7 @@ dependencies = [
  "criterion",
  "gpui-pre-sum-tree",
  "gungraun",
+ "gv-profile",
  "gv-text",
  "memchr",
  "proptest",

@@ -24,9 +24,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use gv_text::TextSource;
 use sum_tree::{Bias, SumTree};
 
-use crate::block::BlockParser;
 use crate::block::front_matter;
 use crate::block::state::{Interner, Kind, RefMode, StateId};
+use crate::block::{BlockOptions, BlockParser};
 use crate::inline::api::{InlineInput, InlineTree, RefDef, RefLookup, parse_inlines_with};
 use crate::options::ParseOptions;
 use chunk::{Chunk, ChunkBuilder, ChunkData, Lines};
@@ -274,7 +274,7 @@ impl SyntaxTree {
     /// result keep the options.
     pub fn parse_with<S: TextSource + ?Sized>(text: &S, options: ParseOptions) -> SyntaxTree {
         let mut interner = Interner::new();
-        let mut p = BlockParser::with_tables(options.tables);
+        let mut p = BlockParser::with_options(BlockOptions::of(options));
         let mut cb = ChunkBuilder::new(1, 0);
         let mut scratch = Vec::new();
         let n = text.len();
@@ -591,7 +591,7 @@ impl SyntaxTree {
                             .iter()
                             .any(|c| matches!(c, b'-' | b'+' | b'*' | b'.' | b')')),
                         TokenKind::Marker => {
-                            s.iter().all(|c| b"#=-*_`~+. \t|:\x0b\x0c".contains(c))
+                            s.iter().all(|c| b"#=-*_`~+. \t|:$\x0b\x0c".contains(c))
                         }
                         TokenKind::InfoString | TokenKind::Content => {
                             !s.contains(&b'\n') && !s.contains(&b'\r')

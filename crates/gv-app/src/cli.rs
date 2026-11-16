@@ -82,7 +82,8 @@ pub struct RenderArgs {
     #[arg(short, long, value_name = "OUT")]
     pub output: Option<PathBuf>,
 
-    /// The flavor profile. Only `commonmark` is available so far.
+    /// The flavor profile: `commonmark`, `gfm-file`, `gfm-comment`,
+    /// `obsidian` or `extended`.
     #[arg(long, value_name = "P", default_value = "commonmark")]
     pub profile: String,
 

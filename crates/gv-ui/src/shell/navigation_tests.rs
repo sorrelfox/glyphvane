@@ -570,7 +570,7 @@ fn the_status_bar_shows_the_place_words_and_profile(cx: &mut TestAppContext) {
     assert_eq!(crumbs, [folder.as_str(), "note.md", "Hello world"]);
     assert_eq!(facts, ["10 words · 1 min read"]);
     assert_eq!(
-        status_bar::profile_name(crate::reader::PROFILE),
+        status_bar::profile_name(gv_profile::ProfileId::CommonMark),
         "CommonMark"
     );
 

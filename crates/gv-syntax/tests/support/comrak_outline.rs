@@ -208,6 +208,9 @@ pub fn gv_outline<S: TextSource + ?Sized>(
                     )
                 }
                 LeafKind::Table => format!("table @{}-{}", leaf.start_line + 1, leaf.end_line + 1),
+                LeafKind::MathBlock => {
+                    format!("math_block @{}-{}", leaf.start_line + 1, leaf.end_line + 1)
+                }
                 LeafKind::ThematicBreak => format!("thematic_break @{}", leaf.open_line + 1),
                 LeafKind::FencedCode | LeafKind::IndentedCode => {
                     let fenced = leaf.kind == LeafKind::FencedCode;

@@ -11,13 +11,16 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use gv_syntax::inline::{InlineInput, RefLookup, parse_inlines, unescape_string};
+use gv_syntax::inline::{
+    InlineInput, InlineOptions, RefLookup, parse_inlines_with, parse_table_cell, unescape_string,
+};
 use gv_syntax::{BlockId, Container, ContainerKind, Leaf, LeafKind, LeafLine, RefMap, Visitor};
 use gv_text::TextSource;
 
 use crate::inline::{self, InlineCx, width_units};
 use crate::node::{
     BlockNode, CodeBlock, CodeLine, Context, Frame, FrameKind, ListMarker, Lookups, NodeKind,
+    TableBlock, TableRow,
 };
 use crate::status::Sources;
 use crate::style::TextRole;
@@ -29,8 +32,10 @@ pub const MAX_FRAMES: usize = 32;
 
 /// The previous tree's nodes that an update may take over.
 pub(crate) struct Reuse<'a> {
-    /// Old nodes of the rebuilt region by block id, with their index.
-    pub by_id: HashMap<BlockId, (usize, &'a BlockNode)>,
+    /// Old nodes of the rebuilt region by block id and whether they are a
+    /// table (a table and the paragraph before it share their text block's
+    /// id), with their index.
+    pub by_id: HashMap<(BlockId, bool), (usize, &'a BlockNode)>,
     /// The reparsed bytes in the new text.
     pub window: Range<usize>,
     /// New length minus old length.
@@ -57,6 +62,8 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     pub text: &'a S,
     pub refs: Arc<RefMap>,
     pub opts: &'a RenderOptions,
+    /// The inline switches of the syntax tree's profile.
+    pub inline_opts: InlineOptions,
     pub sources: Sources<'a>,
     pub reuse: Option<Reuse<'a>>,
     frames: Vec<Frame>,
@@ -76,6 +83,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         text: &'a S,
         refs: Arc<RefMap>,
         opts: &'a RenderOptions,
+        inline_opts: InlineOptions,
         sources: Sources<'a>,
         reuse: Option<Reuse<'a>>,
     ) -> Self {
@@ -83,6 +91,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             text,
             refs,
             opts,
+            inline_opts,
             sources,
             reuse,
             frames: Vec::new(),
@@ -124,7 +133,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         } else {
             return None;
         };
-        let (index, old) = *r.by_id.get(&leaf.id)?;
+        let (index, old) = *r.by_id.get(&(leaf.id, leaf.kind == LeafKind::Table))?;
         let old_range = add(&range, -shift);
         if old.block != old_range {
             return None;
@@ -150,6 +159,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 block: range.clone(),
                 top: range,
                 lookups: old.lookups.clone(),
+                table: old.table,
             },
             index,
         ))
@@ -172,6 +182,14 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 let (content, lookups) = self.inline(leaf, first_content, TextRole::Body);
                 (NodeKind::Paragraph(content), first_content, lookups)
             }
+            LeafKind::Table => {
+                let (table, lookups) = self.table(leaf, first_content);
+                (NodeKind::Table(table), first_content, lookups)
+            }
+            LeafKind::MathBlock => {
+                let code = Arc::new(self.code_block(leaf, range.start, false, false));
+                (NodeKind::Math(code), range.start, None)
+            }
             LeafKind::Heading { level, setext } => {
                 let start = if setext { first_content } else { range.start };
                 let (content, lookups) = self.inline(leaf, start, TextRole::heading(level));
@@ -187,11 +205,6 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 )
             }
             LeafKind::ThematicBreak => (NodeKind::ThematicBreak, range.start, None),
-            // GFM tables have no rendered form yet: their source lines.
-            LeafKind::Table => {
-                let code = Arc::new(self.code_block(leaf, range.start, false, false));
-                (NodeKind::Code(code), range.start, None)
-            }
             LeafKind::FencedCode | LeafKind::IndentedCode => {
                 let fenced = leaf.kind == LeafKind::FencedCode;
                 let code = Arc::new(self.code_block(leaf, range.start, fenced, !fenced));
@@ -218,15 +231,103 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             }
         };
         self.built += 1;
+        // A paragraph and a table split from one text block end with their
+        // own last line, so their sources do not overlap.
+        let end = match leaf.kind {
+            LeafKind::Paragraph | LeafKind::Table => leaf
+                .lines
+                .last()
+                .map_or(range.end, |l| l.line_ending.end.max(l.content.end))
+                .min(range.end),
+            _ => range.end,
+        };
         Some(BlockNode {
             id: leaf.id,
             kind,
-            source: start..range.end.max(start),
+            source: start..end.max(start),
             context: self.context(),
             block: range.clone(),
             top: range,
             lookups,
+            table: leaf.kind == LeafKind::Table,
         })
+    }
+
+    /// Parses the cells of a table and builds its rows (header, then
+    /// body; the delimiter row is syntax).
+    fn table(&mut self, leaf: &Leaf<'_>, base: usize) -> (Arc<TableBlock>, Option<Lookups>) {
+        let delim = leaf.lines.get(1).map_or(0..0, |l| l.content.clone());
+        self.scratch.clear();
+        self.text.copy_range(delim, &mut self.scratch);
+        let aligns = gv_syntax::table::delimiter_row(&self.scratch).unwrap_or_default();
+        let columns = aligns.len();
+        let cx = InlineCx {
+            styles: &self.opts.styles,
+            metrics: &self.opts.metrics,
+            sources: self.sources,
+            block: leaf.id,
+        };
+        let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));
+        let mut labels: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let n = leaf.lines.len();
+        for (i, line) in leaf.lines.iter().enumerate() {
+            if i == 1 {
+                continue;
+            }
+            let header = i == 0;
+            self.scratch.clear();
+            self.text
+                .copy_range(line.content.clone(), &mut self.scratch);
+            let cells: Vec<_> = gv_syntax::table::row_cells(&self.scratch)
+                .unwrap_or_default()
+                .into_iter()
+                .take(columns)
+                .map(|r| {
+                    let abs = line.content.start + r.start..line.content.start + r.end;
+                    let tree = (!abs.is_empty()).then(|| {
+                        parse_table_cell(self.text, abs.clone(), &*self.refs, self.inline_opts)
+                    });
+                    if let Some(t) = &tree {
+                        for l in t.label_lookups() {
+                            if seen.insert(l.to_owned()) {
+                                labels.push((l.into(), self.refs.lookup(l).cloned()));
+                            }
+                        }
+                    }
+                    (abs, tree)
+                })
+                .collect();
+            let role = if header {
+                TextRole::TableHeader
+            } else {
+                TextRole::TableCell
+            };
+            let content = inline::build_row(&cells, columns, line.content.end, base, role, &cx);
+            // Rows tile the table: the header row also covers the
+            // delimiter row; each row ends where the next one starts.
+            let start = if header { base } else { line_start(line) };
+            let end = match leaf.lines.get(if header { 2 } else { i + 1 }) {
+                Some(next) if i + 1 < n => line_start(next),
+                _ => leaf
+                    .lines
+                    .last()
+                    .map_or(line.content.end, |l| l.line_ending.end.max(l.content.end)),
+            };
+            rows.push(TableRow {
+                header,
+                content: Arc::new(content),
+                source: start.saturating_sub(base)..end.max(start).saturating_sub(base),
+            });
+        }
+        let lookups = (!labels.is_empty()).then(|| Lookups::from(labels));
+        (
+            Arc::new(TableBlock {
+                aligns: aligns.into_boxed_slice(),
+                rows: rows.into_boxed_slice(),
+            }),
+            lookups,
+        )
     }
 
     /// Parses and builds the inline content of a paragraph or heading.
@@ -243,12 +344,13 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 .filter(|l| l.has_content)
                 .map(|l| l.content.clone()),
         );
-        let tree = parse_inlines(
+        let tree = parse_inlines_with(
             self.text,
             InlineInput {
                 segments: &self.segments,
             },
             &*self.refs,
+            self.inline_opts,
         );
         let cx = InlineCx {
             styles: &self.opts.styles,
@@ -344,6 +446,12 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
 }
 
 const SPACE: [char; 6] = [' ', '\t', '\n', '\r', '\u{b}', '\u{c}'];
+
+/// Where a table row's source starts: its content (container prefixes and
+/// indentation before it belong to the row above).
+fn line_start(l: &LeafLine) -> usize {
+    l.content.start
+}
 
 fn add(r: &Range<usize>, d: isize) -> Range<usize> {
     let f = |x: usize| x.saturating_add_signed(d);
@@ -448,6 +556,7 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
                     block: c.range.clone(),
                     top: c.range.clone(),
                     lookups: None,
+                    table: false,
                 },
                 None,
             );

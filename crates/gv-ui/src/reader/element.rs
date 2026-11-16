@@ -498,6 +498,83 @@ impl Element for ReaderElement {
                     color: color(Token::BorderDefault),
                     radius: px(0.0),
                 }),
+                // A table row: the table's frame (1 px `border.default`,
+                // radius 6), the header on `surface.sunken`, a line above
+                // each body row. The table is as wide as its columns, at
+                // most the column; wider tables scroll sideways as a whole.
+                ItemKind::TableRow { row, .. } => {
+                    let (first, last) = chunk_ends(&item.kind);
+                    let bw = m.table_border;
+                    let table_w = cache
+                        .table(item.id.block)
+                        .map(|t| t.width(m.table_padding_x) + 2.0 * bw);
+                    let frame_w = table_w.map_or(content_w, |w| w.min(content_w));
+                    let (r, zero) = (px(radius::BLOCK), px(0.0));
+                    let fill = if *row == 0 {
+                        color(Token::SurfaceSunken)
+                    } else {
+                        color(Token::BorderDefault).opacity(0.0)
+                    };
+                    out.under.push(Op::Frame {
+                        bounds: bounds_of(left, content_top, frame_w, bottom - content_top),
+                        borders: Edges {
+                            top: if first { px(bw) } else { zero },
+                            right: px(bw),
+                            bottom: if last { px(bw) } else { zero },
+                            left: px(bw),
+                        },
+                        corners: Corners {
+                            top_left: if first { r } else { zero },
+                            top_right: if first { r } else { zero },
+                            bottom_right: if last { r } else { zero },
+                            bottom_left: if last { r } else { zero },
+                        },
+                        fill,
+                        border: color(Token::BorderDefault),
+                    });
+                    if !first {
+                        out.under.push(Op::Rect {
+                            bounds: bounds_of(left + bw, content_top, frame_w - 2.0 * bw, bw),
+                            color: color(Token::BorderDefault),
+                            radius: px(0.0),
+                        });
+                    }
+                    if let Some(block) = &block {
+                        let layout_width = text
+                            .borrow_mut()
+                            .layout(&mut block.borrow_mut(), NO_WRAP, &ts)
+                            .width();
+                        let inner = (frame_w - 2.0 * bw).max(1.0);
+                        let wide = table_w.map_or(layout_width, |w| w - 2.0 * bw);
+                        let overflow = (wide - inner).max(0.0);
+                        let scroll = hscroll
+                            .get(&item.id.block)
+                            .copied()
+                            .unwrap_or(0.0)
+                            .clamp(0.0, overflow);
+                        let clip_top = content_top + bw;
+                        let clip_bottom = if last { bottom - bw } else { bottom };
+                        let clip = bounds_of(left + bw, clip_top, inner, clip_bottom - clip_top);
+                        let origin = point(px(left + bw - scroll), px(top + text_top(item, &m)));
+                        out.children.push(host.child(
+                            block,
+                            local_selection.clone(),
+                            highlights.clone(),
+                            Place {
+                                origin,
+                                width: NO_WRAP,
+                                mask: Some(clip),
+                            },
+                            window,
+                            cx,
+                        ));
+                        geom.code = Some(CodeGeom {
+                            block: item.id.block,
+                            clip,
+                            overflow,
+                        });
+                    }
+                }
                 kind if is_code(kind) => {
                     let (first, last) = chunk_ends(kind);
                     let r = px(radius::BLOCK);
@@ -744,7 +821,7 @@ impl Element for ReaderElement {
                 continue;
             };
             let badges = {
-                let content = tree.node_of(g.ix).and_then(|n| n.inline().cloned());
+                let content = tree.item_inline(g.ix).cloned();
                 content.map_or_else(Vec::new, |c| {
                     c.links
                         .iter()
@@ -765,7 +842,7 @@ impl Element for ReaderElement {
             let (Some(layout), Some(origin)) = (b.layout(), b.bounds().map(|r| r.origin)) else {
                 continue;
             };
-            let spans = tree.node_of(g.ix).and_then(|n| n.inline().cloned());
+            let spans = tree.item_inline(g.ix).cloned();
             let Some(spans) = spans else {
                 continue;
             };

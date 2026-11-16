@@ -402,7 +402,7 @@ fn current_line_gutter_and_column(cx: &mut TestAppContext) {
 fn highlighting_roles_in_the_view(cx: &mut TestAppContext) {
     let text =
         "---\ntitle: Notes\n---\n# Heading\n\nSome **strong**, `code` and [a link](other.md).\n";
-    let parse = ParseOptions::for_profile("gfm-file").expect("profile");
+    let parse = ParseOptions::builtin(gv_profile::ProfileId::GfmFile);
     let (view, mut vcx) = editor_with(cx, text, parse);
     let style = |vcx: &mut VisualTestContext, line: usize, needle: &str| {
         let col = text.lines().nth(line).unwrap().find(needle).unwrap();
