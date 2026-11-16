@@ -13,7 +13,9 @@
 //!   commands that change what a line is (heading, paragraph, task, quote,
 //!   link), CommonMark reads the following lines anew (a list even across
 //!   blank lines), so only the blocks before the last blank line before the
-//!   edit are checked;
+//!   edit are checked; so too for Enter that leaves an empty item right
+//!   above a blank line while the item went on after it (an item may start
+//!   with at most one blank line, so the rest of the old item is read anew);
 //! - a CRLF document stays CRLF;
 //! - the editor's text is the command's own result (checked inside the
 //!   crate on every commit in debug builds).
@@ -273,6 +275,36 @@ fn before_item_text(text: &str, offset: usize) -> bool {
     offset - start <= i
 }
 
+/// Whether Enter at `offset` leaves an empty item right above a blank line
+/// while the innermost old item at `offset` goes on after that blank line:
+/// the caret is at the end of its line's text, the next line is blank (but
+/// for quote markers), and the item ends after it. An item may begin with at
+/// most one blank line, so the empty item ends there and CommonMark reads
+/// the rest of the old item anew (an indented paragraph may become code, a
+/// paragraph may take in the lines after the item lazily).
+fn empty_item_before_blank_line(text: &str, blocks: &[BlockSpan], offset: usize) -> bool {
+    let blank = |line: &str| line.chars().all(|c| c == '>' || c.is_whitespace());
+    let line_end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |i| offset + i + 1);
+    if !text[offset..line_end].trim().is_empty() {
+        return false;
+    }
+    let next_end = text[line_end..]
+        .find('\n')
+        .map_or(text.len(), |i| line_end + i + 1);
+    if next_end == line_end || !blank(&text[line_end..next_end]) {
+        return false;
+    }
+    blocks
+        .iter()
+        .filter(|block| {
+            block.kind == BlockKind::Item && block.range.start <= offset && offset < block.range.end
+        })
+        .max_by_key(|block| block.depth)
+        .is_some_and(|item| item.range.end > next_end)
+}
+
 /// Whether the line at `offset` is blank (but for quote markers) and the
 /// next line is not.
 fn fills_blank_line(text: &str, offset: usize) -> bool {
@@ -396,6 +428,12 @@ fn run_case(
     ) && specs
         .iter()
         .any(|spec| before_item_text(text, spec.tail.min(spec.head)));
+    // Enter at the end of an item's text above a blank line inside the item
+    // leaves an empty item that ends there: the rest is read anew.
+    let ends_item = command == MarkdownCommand::Newline
+        && specs
+            .iter()
+            .any(|spec| empty_item_before_blank_line(text, &old_blocks, spec.tail.max(spec.head)));
     let plain = matches!(
         command,
         MarkdownCommand::Newline
@@ -435,6 +473,7 @@ fn run_case(
         | MarkdownCommand::ToggleTask
         | MarkdownCommand::InsertLink => Some(true),
         MarkdownCommand::Indent | MarkdownCommand::Outdent => Some(!in_items),
+        MarkdownCommand::Newline => Some(ends_item),
         _ => Some(false),
     };
     if let Some(separated) =
@@ -488,5 +527,21 @@ fn every_caret_of_nested_documents() {
                 }
             }
         }
+    }
+}
+
+/// Enter at the end of an item whose text a blank line and more of the item
+/// follow: the new empty item ends at the blank line, so the rest of the
+/// old item is read anew (here an indented code block, then a paragraph that
+/// takes in the following `8.` line).
+#[test]
+fn enter_before_a_blank_line_inside_an_item() {
+    let text = ">\n-\tw\n\n    m\n==z== x\n8. eight\n- a\n10. k";
+    let newline = MarkdownCommand::ALL
+        .iter()
+        .position(|&command| command == MarkdownCommand::Newline)
+        .unwrap();
+    if let Err(e) = run_case(text, &[(5, 104)], newline, Flavor::CommonMark) {
+        panic!("{e}");
     }
 }
