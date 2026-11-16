@@ -4,20 +4,20 @@
 //! The status bar: where the document is at the left (folder, file, the
 //! heading being read), facts about it at the right: in Preview words and
 //! reading time; in Edit and Split the caret's line and column, words, the
-//! encoding and the line endings ([`EditorFacts`]); the profile.
+//! encoding and the line endings ([`EditorFacts`]); the profile chip
+//! ([`super::profile_chip`]).
 
 use gpui::{
-    Corners, Div, FontWeight, ParentElement as _, Pixels, SharedString, Styled as _, div, px,
+    AnyElement, Corners, Div, ParentElement as _, Pixels, SharedString, Styled as _, div, px,
 };
-use gv_vault::ProfileId;
+use gv_profile::ProfileId;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::{DocFacts, Tab, ViewMode};
 use crate::editor::EditorFacts;
 use crate::icons::Icon;
-use crate::metrics::spacing::{profile_chip, status_bar as spacing};
-use crate::metrics::{icon, radius, size, text};
-use crate::reader::PROFILE;
+use crate::metrics::spacing::status_bar as spacing;
+use crate::metrics::{icon, size, text};
 use crate::theme::Theme;
 
 /// Reading speed for "M min read", in words per minute.
@@ -27,6 +27,7 @@ pub(super) fn status_bar(
     tab: &Tab,
     doc: Option<&DocFacts>,
     editor: Option<&EditorFacts>,
+    profile_chip: AnyElement,
     theme: &Theme,
     radii: Corners<Pixels>,
 ) -> Div {
@@ -64,7 +65,7 @@ pub(super) fn status_bar(
                 .items_center()
                 .gap(px(spacing::GAP))
                 .children(facts(tab, doc, editor))
-                .child(profile(theme)),
+                .child(profile_chip),
         )
 }
 
@@ -149,25 +150,6 @@ fn breadcrumb(items: Vec<SharedString>, theme: &Theme) -> Div {
             };
             chevron.into_iter().chain([label])
         }))
-}
-
-/// The profile chip. It is always visible.
-fn profile(theme: &Theme) -> Div {
-    div()
-        .h(px(size::PROFILE_CHIP))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(profile_chip::GAP))
-        .pl(px(profile_chip::PAD_LEFT))
-        .pr(px(profile_chip::PAD_RIGHT))
-        .rounded(px(radius::CHIP))
-        .bg(theme.accent.tint)
-        .text_color(theme.text.primary)
-        .font_weight(FontWeight(text::weight::ACTIVE))
-        .child(Icon::Profile.sized(icon::SMALL))
-        .child(profile_name(PROFILE))
-        .child(Icon::Select.sized(icon::TINY))
 }
 
 /// A profile as the interface names it.

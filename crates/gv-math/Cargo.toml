@@ -9,6 +9,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ratex-katex-fonts.workspace = true
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-types.workspace = true
+skrifa.workspace = true
+
+[dev-dependencies]
+tiny-skia.workspace = true
 
 [lints]
 workspace = true

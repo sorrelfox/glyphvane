@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Parser switches that change the block structure.
+//! Parser switches of a flavor profile.
 //!
-//! [`ParseOptions`] is the part of a flavor profile that the block pass
-//! reads. It is deliberately small: every field is a switch some built-in
-//! profile sets differently, and the default is CommonMark exactly. A
-//! tree remembers the options it was parsed with ([`SyntaxTree::options`]),
-//! and incremental reparses keep them.
+//! [`ParseOptions`] is the part of a flavor profile that the parser
+//! reads: block switches (front matter, tables) and inline switches
+//! (strikethrough, extended autolinks, see [`InlineOptions`]). It is
+//! deliberately small: every field is a switch some built-in profile sets
+//! differently, and the default is CommonMark exactly. A tree remembers the
+//! options it was parsed with ([`SyntaxTree::options`]), and incremental
+//! reparses keep them.
 //!
-//! | Profile id | Front matter |
-//! |---|---|
-//! | `commonmark` | none (`---` at the top is a thematic break) |
-//! | `gfm-file`, `gfm-comment` | YAML |
-//! | `obsidian` | YAML (JSON objects use the same `---` delimiters) |
-//! | `extended` | YAML and TOML |
+//! | Profile id | Front matter | GFM tables, strikethrough, extended autolinks |
+//! |---|---|---|
+//! | `commonmark` | none (`---` at the top is a thematic break) | no |
+//! | `gfm-file`, `gfm-comment` | YAML | yes |
+//! | `obsidian` | YAML (JSON objects use the same `---` delimiters) | not yet |
+//! | `extended` | YAML and TOML | not yet |
+//!
+//! [`InlineOptions`]: crate::inline::InlineOptions
 //!
 //! [`SyntaxTree::options`]: crate::SyntaxTree::options
 
@@ -52,35 +56,82 @@ impl FrontMatterOptions {
     }
 }
 
-/// Switches of the block pass (see the [module documentation](self)).
+/// Parser switches (see the [module documentation](self)).
 ///
 /// The default parses CommonMark 0.31.2 exactly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ParseOptions {
     /// Front matter at the start of the document.
     pub front_matter: FrontMatterOptions,
+    /// GFM tables (the `table` extension of cmark-gfm): a delimiter row
+    /// under a paragraph's last line turns that line into a table header
+    /// ([`LeafKind::Table`](crate::LeafKind::Table)).
+    pub tables: bool,
+    /// GFM strikethrough with two tildes: `~~x~~` (the `strikethrough`
+    /// extension).
+    pub strikethrough: bool,
+    /// With [`strikethrough`](Self::strikethrough), a single tilde strikes
+    /// through too (`~x~`), as in GFM; without, a lone `~` is text (the
+    /// Obsidian rule, cmark-gfm's `STRIKETHROUGH_DOUBLE_TILDE`).
+    pub strikethrough_single: bool,
+    /// GFM extended autolinks: `www.`, `http://`, `https://`, `ftp://` and
+    /// bare email addresses (the `autolink` extension).
+    pub autolinks: bool,
 }
 
 impl ParseOptions {
     /// CommonMark exactly (the default).
     pub const COMMONMARK: ParseOptions = ParseOptions {
         front_matter: FrontMatterOptions::NONE,
+        tables: false,
+        strikethrough: false,
+        strikethrough_single: false,
+        autolinks: false,
     };
+
+    /// The GFM extensions of the GFM spec (tables, strikethrough, extended
+    /// autolinks), without front matter: what cmark-gfm parses with
+    /// `-e table -e strikethrough -e autolink`.
+    pub const GFM: ParseOptions = ParseOptions {
+        front_matter: FrontMatterOptions::NONE,
+        tables: true,
+        strikethrough: true,
+        strikethrough_single: true,
+        autolinks: true,
+    };
+
+    /// The inline part of the options.
+    pub fn inline(self) -> crate::inline::InlineOptions {
+        crate::inline::InlineOptions {
+            strikethrough: self.strikethrough,
+            strikethrough_single: self.strikethrough_single,
+            autolinks: self.autolinks,
+        }
+    }
 
     /// The options of a built-in profile, by profile id (`commonmark`,
     /// `gfm-file`, `gfm-comment`, `obsidian`, `extended`); `None` for an
     /// unknown id.
     pub fn for_profile(id: &str) -> Option<ParseOptions> {
-        let front_matter = match id {
-            "commonmark" => FrontMatterOptions::NONE,
-            "gfm-file" | "gfm-comment" | "obsidian" => FrontMatterOptions::YAML,
-            "extended" => FrontMatterOptions {
-                yaml: true,
-                toml: true,
+        Some(match id {
+            "commonmark" => ParseOptions::COMMONMARK,
+            "gfm-file" | "gfm-comment" => ParseOptions {
+                front_matter: FrontMatterOptions::YAML,
+                ..ParseOptions::GFM
+            },
+            "obsidian" => ParseOptions {
+                front_matter: FrontMatterOptions::YAML,
+                ..ParseOptions::COMMONMARK
+            },
+            "extended" => ParseOptions {
+                front_matter: FrontMatterOptions {
+                    yaml: true,
+                    toml: true,
+                },
+                ..ParseOptions::COMMONMARK
             },
             _ => return None,
-        };
-        Some(ParseOptions { front_matter })
+        })
     }
 }
 
@@ -99,6 +150,9 @@ mod tests {
         assert!(ext.front_matter.yaml && ext.front_matter.toml);
         let gfm = ParseOptions::for_profile("gfm-file").expect("known");
         assert_eq!(gfm.front_matter, FrontMatterOptions::YAML);
+        assert!(gfm.tables && gfm.strikethrough && gfm.autolinks);
+        let cm = ParseOptions::COMMONMARK;
+        assert!(!cm.tables && !cm.strikethrough && !cm.autolinks);
         assert_eq!(ParseOptions::for_profile("nope"), None);
     }
 }

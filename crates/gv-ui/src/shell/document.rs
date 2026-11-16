@@ -223,8 +223,14 @@ impl Workspace {
         if let Some(editor) = &tab.editor {
             return Some(editor.clone());
         }
+        let profile = self.tab_profile(index, cx);
+        let tab = &self.tabs[index];
         if let (None, Some(n)) = (&tab.path, tab.untitled) {
-            let editor = cx.new(|cx| EditorView::new(EditorView::profile_options(), cx));
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::new(profile.parse_options(), cx);
+                editor.set_compiled_profile(&profile.compiled, cx);
+                editor
+            });
             self.adopt_editor(&editor, cx);
             editor.update(cx, |e, cx| e.open_untitled(n, cx));
             self.tabs[index].editor = Some(editor.clone());
@@ -242,7 +248,8 @@ impl Workspace {
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let read_only = !self.can_edit(index, cx);
         let editor = cx.new(|cx| {
-            let mut editor = EditorView::new(EditorView::profile_options(), cx);
+            let mut editor = EditorView::new(profile.parse_options(), cx);
+            editor.set_compiled_profile(&profile.compiled, cx);
             editor.set_read_only(read_only, cx);
             editor
         });

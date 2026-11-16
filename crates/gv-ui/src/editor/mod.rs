@@ -502,6 +502,32 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Sets the compiled profile of the tab's document: the Markdown
+    /// commands and smart paste follow it at once; a loaded document is
+    /// parsed again when the parse options differ (and no edit is still
+    /// waiting to be parsed).
+    pub fn set_compiled_profile(
+        &mut self,
+        profile: &gv_profile::CompiledProfile,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let id = profile.id.as_str();
+        self.commands = MarkdownCommands::for_profile(id);
+        self.paste_profile = paste_profile(id);
+        self.availabilities.reset();
+        let options = crate::profile::parse_options(profile);
+        if options != self.options {
+            self.options = options;
+            if let Some(doc) = self.doc.as_mut()
+                && doc.queue.borrow().is_empty()
+                && doc.syntax.reparse_all(options)
+            {
+                self.schedule_foldable(cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// The Markdown commands of the view's profile.
     pub fn markdown_commands(&self) -> MarkdownCommands {
         self.commands

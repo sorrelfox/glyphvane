@@ -258,7 +258,7 @@ proptest! {
     ) {
         let head = ["---\ntitle: x\n---\n", "---\n", ""][fm];
         let text = format!("{head}{text}");
-        let parse = ParseOptions { front_matter: FrontMatterOptions::YAML };
+        let parse = ParseOptions { front_matter: FrontMatterOptions::YAML, ..ParseOptions::default() };
         let mut d = common::build_with(&text, parse, RenderOptions::default(), sources());
         for e in edits {
             let range = e.range(&d.text);

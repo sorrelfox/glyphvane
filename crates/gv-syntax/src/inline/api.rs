@@ -82,20 +82,111 @@ pub struct InlineTree {
     pub(super) lookups: Vec<(u32, u32)>,
 }
 
-/// Parses the inline content of a leaf block.
+/// The inline switches of a flavor profile. The default is CommonMark
+/// exactly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct InlineOptions {
+    /// GFM strikethrough: a run of two `~` is a delimiter; an opener and a
+    /// closer of the same length make an
+    /// [`InlineKind::Strikethrough`](super::InlineKind::Strikethrough).
+    pub strikethrough: bool,
+    /// With `strikethrough`, a run of one `~` is a delimiter too (GFM).
+    pub strikethrough_single: bool,
+    /// GFM extended autolinks (`www.…`, `http://…`, `https://…`, `ftp://…`
+    /// and bare email addresses), as
+    /// [`InlineKind::Autolink`](super::InlineKind::Autolink) nodes without
+    /// angle brackets.
+    pub autolinks: bool,
+}
+
+impl InlineOptions {
+    /// CommonMark: no extensions.
+    pub const COMMONMARK: InlineOptions = InlineOptions {
+        strikethrough: false,
+        strikethrough_single: false,
+        autolinks: false,
+    };
+
+    /// The GFM extensions.
+    pub const GFM: InlineOptions = InlineOptions {
+        strikethrough: true,
+        strikethrough_single: true,
+        autolinks: true,
+    };
+}
+
+/// Parses the inline content of a leaf block with the CommonMark rules.
 pub fn parse_inlines<S: gv_text::TextSource + ?Sized>(
     src: &S,
     input: InlineInput<'_>,
     refs: &dyn RefLookup,
 ) -> InlineTree {
+    parse_inlines_with(src, input, refs, InlineOptions::COMMONMARK)
+}
+
+/// Parses the inline content of a leaf block with the given switches.
+pub fn parse_inlines_with<S: gv_text::TextSource + ?Sized>(
+    src: &S,
+    input: InlineInput<'_>,
+    refs: &dyn RefLookup,
+    options: InlineOptions,
+) -> InlineTree {
     let (text, segs) = tree::gather(src, input.segments);
-    parse::parse(text, segs, refs)
+    parse::parse(text, segs, refs, options)
+}
+
+/// Parses one GFM table cell: `cell` is the cell's trimmed document range
+/// (see [`crate::table::row_cells`]). Every backslash directly before a
+/// `|` is removed first, also inside code spans, as cmark-gfm does. The
+/// removed backslashes are not part of the tree's text; a token around one
+/// covers it in its document range.
+pub fn parse_table_cell<S: gv_text::TextSource + ?Sized>(
+    src: &S,
+    cell: Range<usize>,
+    refs: &dyn RefLookup,
+    options: InlineOptions,
+) -> InlineTree {
+    let mut bytes = Vec::new();
+    src.copy_range(cell.clone(), &mut bytes);
+    let pieces = crate::table::cell_pieces(cell, &bytes);
+    let (text, segs) = tree::gather_joined(src, &pieces);
+    parse::parse(text, segs, refs, options)
 }
 
 /// Renders an inline tree as CommonMark HTML (cmark's output, byte for
 /// byte).
 pub fn render_inlines_html(tree: &InlineTree, out: &mut String) {
-    html::render(tree, out);
+    html::render(tree, out, html::RenderOptions::COMMONMARK);
+}
+
+/// Inline HTML rendering switches of the GFM-exact emitter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct InlineHtmlOptions {
+    /// cmark-gfm's renderer: a strong emphasis directly inside another
+    /// strong emphasis writes no tags of its own.
+    pub gfm: bool,
+    /// The GFM tagfilter: `<` of raw HTML that opens one of the disallowed
+    /// tags (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`,
+    /// `noframes`, `script`, `plaintext`) is written as `&lt;`.
+    pub tagfilter: bool,
+}
+
+/// Appends raw HTML (an HTML block's text) with the GFM tagfilter applied
+/// (see [`InlineHtmlOptions::tagfilter`]).
+pub fn push_tagfiltered(out: &mut String, raw: &str) {
+    html::push_filtered(out, raw);
+}
+
+/// Renders an inline tree as HTML with the given switches.
+pub fn render_inlines_html_with(tree: &InlineTree, out: &mut String, options: InlineHtmlOptions) {
+    html::render(
+        tree,
+        out,
+        html::RenderOptions {
+            gfm: options.gfm,
+            tagfilter: options.tagfilter,
+        },
+    );
 }
 
 /// CommonMark label normalization: Unicode full case folding, leading and

@@ -7,7 +7,7 @@ and sanitizer flags cargo-fuzz needs never touch the main build.
 | Target | Checks |
 |---|---|
 | `parse_full` | Arbitrary bytes (decoded lossily as UTF-8) parse and render without panicking |
-| `incremental_equals_full` | A document plus an edit script: reparsing incrementally gives the same CST as a full parse of the edited text |
+| `incremental_equals_full` | A document plus an edit script: reparsing incrementally gives the same CST as a full parse of the edited text, with the CommonMark options and with the GFM extensions |
 | `roundtrip_lossless` | The concatenated CST token texts equal the input |
 
 The targets call the string-level entry points in `gv_syntax::harness`. Until

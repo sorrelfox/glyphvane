@@ -190,6 +190,9 @@ impl Workspace {
             NoticeAction::Close => {
                 self.close_tab(self.active, window, cx);
             }
+            NoticeAction::SwitchProfile => {
+                self.toggle_profile_menu(cx);
+            }
             NoticeAction::OpenCopy(path) => {
                 let path = path.clone();
                 self.tabs[self.active].notice = None;
@@ -216,14 +219,17 @@ impl Workspace {
                     editor.update(cx, |e, cx| e.dismiss_notice(cx));
                 }
             }
-            NoticeSource::Tab => self.tabs[self.active].notice = None,
+            NoticeSource::Tab => {
+                let notice = self.tabs[self.active].notice.take();
+                self.tab_notice_dismissed(notice.as_ref(), cx);
+            }
         }
         cx.notify();
     }
 }
 
 /// A tooltip (SPEC § Popovers): inverted colours, 22 high.
-struct Tooltip(SharedString);
+pub(super) struct Tooltip(pub(super) SharedString);
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {

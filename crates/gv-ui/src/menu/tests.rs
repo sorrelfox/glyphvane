@@ -635,6 +635,15 @@ fn the_format_menu_follows_the_profile(cx: &mut TestAppContext) {
     assert!(f.is_open(), "disabled in Preview");
     f.keys("escape");
 
+    // The file's profile is set to CommonMark (detection would choose
+    // Extended for a loose folder).
+    f.workspace.update(&mut f.vcx, |ws, cx| {
+        ws.pick_profile(
+            crate::profile::Scope::File,
+            Some(gv_profile::ProfileId::CommonMark),
+            cx,
+        );
+    });
     f.keys("secondary-e");
     assert_eq!(f.mode(), ViewMode::Edit);
     let editor = f

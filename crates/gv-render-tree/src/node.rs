@@ -143,10 +143,10 @@ impl BlockNode {
         }
     }
 
-    /// The lines of a code block, HTML block or front matter.
+    /// The lines of a code block, HTML block, math block or front matter.
     pub fn lines(&self) -> Option<&Arc<CodeBlock>> {
         match &self.kind {
-            NodeKind::Code(c) | NodeKind::Html { code: c, .. } => Some(c),
+            NodeKind::Code(c) | NodeKind::Html { code: c, .. } | NodeKind::Math(c) => Some(c),
             NodeKind::Properties { lines, .. } => Some(lines),
             _ => None,
         }
@@ -169,6 +169,10 @@ pub enum NodeKind {
     },
     /// A fenced or indented code block.
     Code(Arc<CodeBlock>),
+    /// Display math from a ` ```math ` fence (profiles with math): the
+    /// fence's lines are the TeX source, joined in [`CodeBlock::text`].
+    /// Copy and find see the source.
+    Math(Arc<CodeBlock>),
     /// A thematic break.
     ThematicBreak,
     /// An HTML block. Raw HTML is rendered natively in a later milestone;
@@ -199,6 +203,7 @@ impl NodeKind {
             Self::Paragraph(_) => "paragraph",
             Self::Heading { .. } => "heading",
             Self::Code(_) => "code",
+            Self::Math(_) => "math",
             Self::ThematicBreak => "thematic-break",
             Self::Html { .. } => "html",
             Self::Properties { .. } => "properties",

@@ -13,7 +13,7 @@
 //! | [`render_gfm_html`] | `cargo xtask spec --suite gfm` |
 //! | [`parse_full`] | pathological suite, `parse_full` fuzz target |
 //! | [`cst_text`] | `roundtrip_lossless` fuzz target |
-//! | [`cst_dump`], [`cst_dump_after_edits`] | `incremental_equals_full` fuzz target, `render --format cst` |
+//! | [`cst_dump`], [`cst_dump_after_edits`] (and their `_with` forms) | `incremental_equals_full` fuzz target, `render --format cst` |
 //!
 //! [`normalize_html`] is the spec-style HTML normalizer that conformance
 //! and differential comparisons use.
@@ -21,9 +21,10 @@
 use std::ops::Range;
 use std::time::Instant;
 
-use crate::html::to_commonmark_html;
+use crate::html::{GfmHtmlOptions, to_commonmark_html, to_gfm_html};
 use crate::incremental::{Budget, Change, Reparse};
 use crate::inline::api::{InlineInput, parse_inlines};
+use crate::options::ParseOptions;
 use crate::tree::SyntaxTree;
 use crate::tree::walk;
 
@@ -78,24 +79,39 @@ pub fn render_commonmark_html(src: &str) -> String {
     to_commonmark_html(&SyntaxTree::parse(src), src)
 }
 
-/// Renders `src` with the GFM profile through the GFM-exact HTML emitter.
+/// Renders `src` like cmark-gfm through the GFM-exact HTML emitter.
 ///
 /// `extensions` names the cmark-gfm extensions to enable (see
-/// [`GFM_EXTENSIONS`]); the GFM spec lists them per example. Unknown names are
-/// ignored.
-///
-/// Until the GFM profile exists (M4), this renders with the CommonMark
-/// profile and ignores `extensions`.
+/// [`GFM_EXTENSIONS`]), as the GFM spec lists them per example and
+/// cmark-gfm's spec runner passes them: `table`, `strikethrough`,
+/// `autolink` and `tagfilter`. `tasklist` and `footnotes` are not
+/// implemented yet, and unknown names are ignored. Front matter is off, as
+/// in cmark-gfm.
 pub fn render_gfm_html(src: &str, extensions: &[&str]) -> String {
-    let _ = extensions;
-    render_commonmark_html(src)
+    let has = |name: &str| extensions.contains(&name);
+    let options = ParseOptions {
+        tables: has("table"),
+        strikethrough: has("strikethrough"),
+        strikethrough_single: has("strikethrough"),
+        autolinks: has("autolink"),
+        ..ParseOptions::COMMONMARK
+    };
+    let html = GfmHtmlOptions {
+        tagfilter: has("tagfilter"),
+    };
+    to_gfm_html(&SyntaxTree::parse_with(src, options), src, html)
 }
 
 /// The deterministic S-expression dump of the CST of `src` (the `cst` format
 /// of `glyphvane render`, documented in [`crate::cst_dump`]). Two parses are
 /// structurally equal iff their dumps are equal.
 pub fn cst_dump(src: &str) -> String {
-    crate::cst_dump::cst_dump(&SyntaxTree::parse(src), src)
+    cst_dump_with(src, ParseOptions::COMMONMARK)
+}
+
+/// [`cst_dump`] with the given parser options.
+pub fn cst_dump_with(src: &str, options: ParseOptions) -> String {
+    crate::cst_dump::cst_dump(&SyntaxTree::parse_with(src, options), src)
 }
 
 /// The concatenated text of every CST token of `src`, in order. The CST is
@@ -142,8 +158,14 @@ pub fn apply_edits(src: &str, edits: &[TextEdit]) -> String {
 /// Panics on invalid edits, like [`apply_edits`], and if an interim tree is
 /// invalid.
 pub fn cst_dump_after_edits(src: &str, edits: &[TextEdit]) -> String {
+    cst_dump_after_edits_with(src, edits, ParseOptions::COMMONMARK)
+}
+
+/// [`cst_dump_after_edits`] with the given parser options; compare with
+/// [`cst_dump_with`].
+pub fn cst_dump_after_edits_with(src: &str, edits: &[TextEdit], options: ParseOptions) -> String {
     let mut text = src.to_owned();
-    let mut tree = SyntaxTree::parse(text.as_str());
+    let mut tree = SyntaxTree::parse_with(text.as_str(), options);
     for edit in edits {
         let change = Change {
             start: edit.range.start,
@@ -197,5 +219,15 @@ mod tests {
             cst_dump_after_edits(src, &edits),
             cst_dump(&apply_edits(src, &edits))
         );
+        let table = "| a |\n| - |\n| b |\n";
+        let edits = [TextEdit {
+            range: 8..9,
+            insert: ":".to_owned(),
+        }];
+        assert_eq!(
+            cst_dump_after_edits_with(table, &edits, ParseOptions::GFM),
+            cst_dump_with(&apply_edits(table, &edits), ParseOptions::GFM)
+        );
+        assert!(cst_dump_with(table, ParseOptions::GFM).contains("(table-header)"));
     }
 }

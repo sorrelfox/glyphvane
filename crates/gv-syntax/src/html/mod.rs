@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The CommonMark-exact HTML emitter.
+//! The CommonMark-exact and GFM-exact HTML emitters.
 //!
 //! Block structure follows cmark's `html.c` byte for byte (with raw HTML
 //! passed through, as `cmark --unsafe` does): XHTML-style void elements,
 //! `& < > "` escaped, `class="language-X"` from the first word of a code
 //! block's info string, `<p>` omitted in tight lists. Inline content is
-//! rendered by the inline module.
+//! rendered by the inline module, with the inline switches of the tree's
+//! [`ParseOptions`](crate::ParseOptions).
+//!
+//! [`to_gfm_html`] is cmark-gfm's output instead: tables
+//! (`extensions/table.c`), `<del>` for strikethrough, no tags for a strong
+//! emphasis directly inside another, and optionally the tagfilter.
 //!
 //! Code and HTML block literals keep the document's line endings (the
 //! block pass never rewrites text); U+0000 is replaced by U+FFFD.
@@ -16,12 +21,47 @@ use std::sync::Arc;
 
 use gv_text::TextSource;
 
-use crate::inline::api::{InlineInput, parse_inlines, render_inlines_html, unescape_string};
+use crate::inline::api::{
+    InlineHtmlOptions, InlineInput, InlineOptions, parse_inlines_with, parse_table_cell,
+    push_tagfiltered, render_inlines_html_with, unescape_string,
+};
+use crate::table::{self, Alignment};
 use crate::tree::walk::{self, Container, ContainerKind, Leaf, LeafKind, Visitor};
 use crate::tree::{RefMap, SyntaxTree};
 
+/// Switches of [`to_gfm_html`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct GfmHtmlOptions {
+    /// The tagfilter extension: in raw HTML (blocks and inline), the `<` of
+    /// `title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`,
+    /// `noframes`, `script` and `plaintext` tags becomes `&lt;`.
+    pub tagfilter: bool,
+}
+
 /// Renders `tree` (parsed from `text`) as CommonMark HTML.
 pub fn to_commonmark_html<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
+    render(tree, text, InlineHtmlOptions::default())
+}
+
+/// Renders `tree` (parsed from `text`) as cmark-gfm does: with the inline
+/// switches of the tree's options, GFM tables, and cmark-gfm's renderer
+/// quirks (see the [module documentation](self)).
+pub fn to_gfm_html<S: TextSource + ?Sized>(
+    tree: &SyntaxTree,
+    text: &S,
+    options: GfmHtmlOptions,
+) -> String {
+    render(
+        tree,
+        text,
+        InlineHtmlOptions {
+            gfm: true,
+            tagfilter: options.tagfilter,
+        },
+    )
+}
+
+fn render<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S, html: InlineHtmlOptions) -> String {
     let mut r = Renderer {
         out: String::with_capacity(tree.len() + tree.len() / 4),
         text,
@@ -29,6 +69,9 @@ pub fn to_commonmark_html<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -
         stack: Vec::new(),
         buf: Vec::new(),
         segments: Vec::new(),
+        inline: tree.options().inline(),
+        html,
+        padded: 0,
     };
     walk::walk(tree, &mut r);
     r.out
@@ -41,7 +84,16 @@ struct Renderer<'s, S: TextSource + ?Sized> {
     stack: Vec<ContainerKind>,
     buf: Vec<u8>,
     segments: Vec<std::ops::Range<usize>>,
+    inline: InlineOptions,
+    html: InlineHtmlOptions,
+    /// Empty cells written so far to pad short table rows.
+    padded: usize,
 }
+
+/// At most this many empty cells pad short table rows in one document
+/// (cmark-gfm's guard against output blow-up, `MAX_AUTOCOMPLETED_CELLS`);
+/// rows after that are written as they are.
+const MAX_PADDED_CELLS: usize = 500_000;
 
 /// Appends `s` with `& < > "` escaped and U+0000 replaced.
 pub(crate) fn escape_html(out: &mut String, s: &str) {
@@ -79,14 +131,101 @@ impl<S: TextSource + ?Sized> Renderer<'_, S> {
                 .filter(|l| l.has_content)
                 .map(|l| l.content.clone()),
         );
-        let tree = parse_inlines(
+        let tree = parse_inlines_with(
             self.text,
             InlineInput {
                 segments: &self.segments,
             },
             &*self.refs,
+            self.inline,
         );
-        render_inlines_html(&tree, &mut self.out);
+        render_inlines_html_with(&tree, &mut self.out, self.html);
+    }
+
+    /// The cells of a table line (document ranges); `None` if it is not a
+    /// row.
+    fn row(&mut self, content: &std::ops::Range<usize>) -> Option<Vec<std::ops::Range<usize>>> {
+        self.buf.clear();
+        self.text.copy_range(content.clone(), &mut self.buf);
+        let cells = table::row_cells(&self.buf)?;
+        Some(
+            cells
+                .into_iter()
+                .map(|r| content.start + r.start..content.start + r.end)
+                .collect(),
+        )
+    }
+
+    /// A GFM table, as cmark-gfm's table extension writes it.
+    fn table(&mut self, leaf: &Leaf<'_>) {
+        let (Some(header), Some(delim)) = (leaf.lines.first(), leaf.lines.get(1)) else {
+            return;
+        };
+        self.buf.clear();
+        self.text.copy_range(delim.content.clone(), &mut self.buf);
+        let aligns = table::delimiter_row(&self.buf).unwrap_or_default();
+        let columns = aligns.len();
+        self.cr();
+        self.out.push_str("<table>");
+        let header_cells = self.row(&header.content).unwrap_or_default();
+        self.cr();
+        self.out.push_str("<thead>");
+        self.table_row(&header_cells, &aligns, "th");
+        self.cr();
+        self.out.push_str("</thead>");
+        let body = &leaf.lines[2..];
+        for line in body {
+            let mut cells = self.row(&line.content).unwrap_or_default();
+            cells.truncate(columns);
+            self.cr();
+            if std::ptr::eq(line, &body[0]) {
+                self.out.push_str("<tbody>");
+                self.cr();
+            }
+            self.table_row(&cells, &aligns, "td");
+        }
+        if !body.is_empty() {
+            self.cr();
+            self.out.push_str("</tbody>");
+            self.cr();
+        }
+        self.cr();
+        self.out.push_str("</table>");
+        self.cr();
+    }
+
+    /// One `<tr>`: `cells` padded with empty cells to the column count
+    /// (within [`MAX_PADDED_CELLS`]).
+    fn table_row(&mut self, cells: &[std::ops::Range<usize>], aligns: &[Alignment], tag: &str) {
+        self.cr();
+        self.out.push_str("<tr>");
+        let missing = aligns.len().saturating_sub(cells.len());
+        let n = if self.padded + missing <= MAX_PADDED_CELLS {
+            self.padded += missing;
+            aligns.len()
+        } else {
+            cells.len().min(aligns.len())
+        };
+        for (i, align) in aligns.iter().take(n).enumerate() {
+            self.cr();
+            self.out.push('<');
+            self.out.push_str(tag);
+            if let Some(a) = align.html() {
+                self.out.push_str(" align=\"");
+                self.out.push_str(a);
+                self.out.push('"');
+            }
+            self.out.push('>');
+            if let Some(cell) = cells.get(i) {
+                let tree = parse_table_cell(self.text, cell.clone(), &*self.refs, self.inline);
+                render_inlines_html_with(&tree, &mut self.out, self.html);
+            }
+            self.out.push_str("</");
+            self.out.push_str(tag);
+            self.out.push('>');
+        }
+        self.cr();
+        self.out.push_str("</tr>");
     }
 
     /// The literal text of a code or HTML block.
@@ -234,10 +373,15 @@ impl<S: TextSource + ?Sized> Visitor for Renderer<'_, S> {
             LeafKind::Html { .. } => {
                 self.cr();
                 self.literal(leaf);
-                let lit = String::from_utf8_lossy(&self.buf).replace('\0', "\u{fffd}");
-                self.out.push_str(&lit);
+                let lit = String::from_utf8_lossy(&self.buf).into_owned();
+                if self.html.tagfilter {
+                    push_tagfiltered(&mut self.out, &lit);
+                } else {
+                    self.out.push_str(&lit.replace('\0', "\u{fffd}"));
+                }
                 self.cr();
             }
+            LeafKind::Table => self.table(leaf),
             // Front matter is metadata; this emitter renders nothing for it.
             LeafKind::LinkRefDef | LeafKind::FrontMatter { .. } => {}
         }

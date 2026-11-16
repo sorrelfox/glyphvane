@@ -34,6 +34,10 @@ pub enum Topic {
     Recovered,
     SyncConflict,
     NotText,
+    /// "Explain detection" from the profile chip.
+    ProfileExplained,
+    /// The document looks like another dialect (FR-PROF-05).
+    DialectHint,
 }
 
 /// What an infobar button does.
@@ -59,6 +63,8 @@ pub enum NoticeAction {
     Close,
     /// Open a sync-conflict copy in a new tab.
     OpenCopy(PathBuf),
+    /// Open the profile chip's menu.
+    SwitchProfile,
 }
 
 /// A button of an infobar.
@@ -207,6 +213,45 @@ impl Notice {
             detail.push('.');
         }
         Self::save_failed(detail)
+    }
+
+    /// The designed hint infobar: the document looks like another dialect
+    /// (FR-PROF-05). `message` is "This looks like X. Switch profile? …":
+    /// its first sentence is the title.
+    pub fn dialect_hint(message: &str) -> Self {
+        let (title, detail) = match message.split_once(". ") {
+            Some((title, rest)) => (format!("{title}."), Some(rest.to_owned())),
+            None => (message.to_owned(), None),
+        };
+        Self {
+            topic: Topic::DialectHint,
+            kind: NoticeKind::Information,
+            title: title.into(),
+            detail: detail.map(Into::into),
+            buttons: vec![NoticeButton::new(
+                NoticeAction::SwitchProfile,
+                "Switch profile",
+            )],
+        }
+    }
+
+    /// "Explain detection" from the profile chip's menu (not designed: an
+    /// information infobar). `lines` come from the detection: the profile
+    /// first, then the reason and notes.
+    pub fn profile_explained(lines: &[String]) -> Self {
+        let mut lines = lines.iter();
+        let title = lines.next().map_or_else(String::new, |l| format!("{l}."));
+        let rest: Vec<&str> = lines.map(String::as_str).collect();
+        Self {
+            topic: Topic::ProfileExplained,
+            kind: NoticeKind::Information,
+            title: title.into(),
+            detail: (!rest.is_empty()).then(|| rest.join(" ").into()),
+            buttons: vec![NoticeButton::new(
+                NoticeAction::SwitchProfile,
+                "Switch profile",
+            )],
+        }
     }
 
     /// The file was deleted or moved away on disk (not designed).

@@ -27,7 +27,7 @@ use sum_tree::{Bias, SumTree};
 use crate::block::BlockParser;
 use crate::block::front_matter;
 use crate::block::state::{Interner, Kind, RefMode, StateId};
-use crate::inline::api::{InlineInput, InlineTree, RefDef, RefLookup, parse_inlines};
+use crate::inline::api::{InlineInput, InlineTree, RefDef, RefLookup, parse_inlines_with};
 use crate::options::ParseOptions;
 use chunk::{Chunk, ChunkBuilder, ChunkData, Lines};
 use event::{BlockId, BlockKind, Ev, Event, TokenKind};
@@ -274,7 +274,7 @@ impl SyntaxTree {
     /// result keep the options.
     pub fn parse_with<S: TextSource + ?Sized>(text: &S, options: ParseOptions) -> SyntaxTree {
         let mut interner = Interner::new();
-        let mut p = BlockParser::new();
+        let mut p = BlockParser::with_tables(options.tables);
         let mut cb = ChunkBuilder::new(1, 0);
         let mut scratch = Vec::new();
         let n = text.len();
@@ -457,8 +457,10 @@ impl SyntaxTree {
         map
     }
 
-    /// The inline tree of a paragraph or heading, parsed on first use and
-    /// cached for this revision by BlockId.
+    /// The inline tree of a paragraph or heading (with the inline switches
+    /// of the tree's options), parsed on first use and cached for this
+    /// revision by BlockId. Not for table leaves: their cells are parsed
+    /// one by one ([`crate::inline::parse_table_cell`]).
     pub fn inlines<S: TextSource + ?Sized>(
         &self,
         leaf: &walk::Leaf<'_>,
@@ -471,12 +473,13 @@ impl SyntaxTree {
         }
         let refs = self.ref_map(text);
         let segments = leaf.segments();
-        let tree = Arc::new(parse_inlines(
+        let tree = Arc::new(parse_inlines_with(
             text,
             InlineInput {
                 segments: &segments,
             },
             &*refs,
+            self.0.options.inline(),
         ));
         if let Ok(mut cache) = self.0.inlines.lock() {
             cache.insert(leaf.id, Arc::clone(&tree));
@@ -587,7 +590,9 @@ impl SyntaxTree {
                         TokenKind::ListMarker => s
                             .iter()
                             .any(|c| matches!(c, b'-' | b'+' | b'*' | b'.' | b')')),
-                        TokenKind::Marker => s.iter().all(|c| b"#=-*_`~+. \t".contains(c)),
+                        TokenKind::Marker => {
+                            s.iter().all(|c| b"#=-*_`~+. \t|:\x0b\x0c".contains(c))
+                        }
                         TokenKind::InfoString | TokenKind::Content => {
                             !s.contains(&b'\n') && !s.contains(&b'\r')
                         }
@@ -712,11 +717,13 @@ fn comparable_state(
     if let Some(top) = entries.last_mut()
         && let Kind::Paragraph {
             refs: RefMode::Pending(t),
+            cells,
         } = top.kind
     {
         text = Some(interner.text(t).to_vec());
         top.kind = Kind::Paragraph {
             refs: RefMode::Pending(0),
+            cells,
         };
     }
     (entries, text)

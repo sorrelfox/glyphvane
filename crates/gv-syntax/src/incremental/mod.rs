@@ -354,7 +354,7 @@ impl SyntaxTree {
         let state = base
             .line(&restart)
             .map_or(crate::block::state::ROOT, |l| l.state);
-        let mut parser = BlockParser::from_checkpoint(&base.interner, state);
+        let mut parser = BlockParser::from_checkpoint(&base.interner, state, base.options.tables);
         if parser.needs_pending_text() {
             parser.set_pending_text(pending_text_before(base, &restart, text));
         }
@@ -442,7 +442,8 @@ fn convergeable(interner: &Interner, state: StateId) -> bool {
     !matches!(
         interner.top(state).kind,
         Kind::Paragraph {
-            refs: RefMode::Long
+            refs: RefMode::Long,
+            ..
         }
     )
 }
@@ -463,7 +464,7 @@ impl ReparseTask {
     fn restart_at_zero(&mut self) {
         let base = &self.base.0;
         self.restart = base.cursor_at_line(0);
-        self.parser = BlockParser::new();
+        self.parser = BlockParser::with_tables(base.options.tables);
         self.lines.clear();
         self.sink.events.clear();
         self.sink.ids.clear();
@@ -1018,6 +1019,6 @@ fn phantom_kind(k: Kind) -> BlockKind {
         Kind::Heading => BlockKind::AtxHeading { level: 1 },
         Kind::ThematicBreak => BlockKind::ThematicBreak,
         Kind::FrontMatter { kind } => BlockKind::FrontMatter { kind },
-        Kind::Paragraph { .. } | Kind::Document => BlockKind::Text,
+        Kind::Paragraph { .. } | Kind::Table | Kind::Document => BlockKind::Text,
     }
 }

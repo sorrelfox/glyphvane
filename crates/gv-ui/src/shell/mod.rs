@@ -14,6 +14,9 @@ mod infobar;
 mod navigation_tests;
 mod outline_panel;
 mod panels;
+mod profile_chip;
+#[cfg(test)]
+mod profile_chip_tests;
 mod saving;
 pub mod session;
 mod status_bar;
@@ -310,6 +313,8 @@ pub struct Tab {
     /// The tab was opened for an edit (`--wait`): viewer mode does not
     /// apply to it.
     edit_requested: bool,
+    /// The document's profile, detected for `path` when first needed.
+    profile: Option<crate::profile::TabProfile>,
 }
 
 impl Tab {
@@ -332,6 +337,7 @@ impl Tab {
             history: History::default(),
             on_close: None,
             edit_requested: false,
+            profile: None,
         }
     }
 
@@ -403,6 +409,12 @@ impl Tab {
 
     pub fn mode(&self) -> ViewMode {
         self.mode
+    }
+
+    /// The document's profile, once detected (the status bar detects the
+    /// active tab's when it is drawn).
+    pub fn profile(&self) -> Option<&crate::profile::TabProfile> {
+        self.profile.as_ref()
     }
 }
 
@@ -518,8 +530,12 @@ pub struct Workspace {
     _bounds: Subscription,
     /// Calls the close hooks of the tabs that are open when the window goes.
     _release: Subscription,
-    /// Viewer mode follows the settings.
+    /// Viewer mode and the profiles follow the settings.
     _settings: Subscription,
+    /// The status bar's profile chip menu.
+    profile_menu: profile_chip::ProfileMenu,
+    /// The profiles follow the overrides picked in any window.
+    _profiles: Subscription,
 }
 
 impl fmt::Debug for Workspace {
@@ -610,7 +626,13 @@ impl Workspace {
                 let_go(hook, path, editor, cx);
             }
         });
-        let settings = cx.observe_global::<AppSettings>(|ws, cx| ws.apply_viewer_mode(cx));
+        let settings = cx.observe_global::<AppSettings>(|ws, cx| {
+            ws.apply_viewer_mode(cx);
+            ws.refresh_profiles(cx);
+        });
+        let profiles = cx.observe_global::<crate::profile::ProfileOverrides>(|ws, cx| {
+            ws.refresh_profiles(cx);
+        });
         let mut this = Self {
             focus,
             chrome,
@@ -641,6 +663,8 @@ impl Workspace {
             _bounds: bounds,
             _release: release,
             _settings: settings,
+            profile_menu: profile_chip::ProfileMenu::default(),
+            _profiles: profiles,
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -1060,6 +1084,7 @@ impl Workspace {
         match (loaded, model) {
             (Some(path), Some(model)) => {
                 session::note_recent_file(cx, &path);
+                let source_path = path.clone();
                 watch.doc = Some(DocFacts {
                     path,
                     model,
@@ -1068,11 +1093,21 @@ impl Workspace {
                 });
                 watch._count = text.map(|text| {
                     cx.spawn(async move |this, cx| {
-                        let words = cx
-                            .background_spawn(async move { status_bar::count_words(&text) })
+                        let (words, signals) = cx
+                            .background_spawn(async move {
+                                // Dialect signs are in the source, not in
+                                // the rendered text.
+                                let signals = std::fs::read_to_string(&source_path)
+                                    .map(|source| gv_profile::hints::scan(&source))
+                                    .unwrap_or_default();
+                                (status_bar::count_words(&text), signals)
+                            })
                             .await;
-                        this.update(cx, |this, cx| this.words_counted(id, words, cx))
-                            .ok();
+                        this.update(cx, |this, cx| {
+                            this.words_counted(id, words, cx);
+                            this.dialect_signals(id, &signals, cx);
+                        })
+                        .ok();
                     })
                 });
             }
@@ -1638,6 +1673,8 @@ impl Render for Workspace {
         let theme = Appearance::theme(cx);
         let radii = window_corner_radii(window, cx);
         let editor_facts = self.editor_facts(cx);
+        let profile_chip = self.render_profile_chip(theme, cx);
+        let profile_menu = self.render_profile_menu(window, theme, cx);
 
         // The window root (GPUI Component's `Root`) draws the frame of a
         // client-decorated window: shadow, border, rounded corners and resize
@@ -1741,9 +1778,11 @@ impl Render for Workspace {
                 self.active_tab(),
                 self.active_doc(),
                 editor_facts.as_ref(),
+                profile_chip,
                 theme,
                 radii,
             ))
+            .children(profile_menu)
             .children(self.heading_probe(cx))
             .children(self.anchor_probe())
     }

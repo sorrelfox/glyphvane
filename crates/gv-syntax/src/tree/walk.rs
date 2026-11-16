@@ -7,7 +7,8 @@
 //! order, with the decisions recorded as markers resolved:
 //!
 //! - a text block becomes its link reference definitions, then a paragraph
-//!   or a setext heading (or nothing, if it held only definitions);
+//!   or a setext heading (or nothing, if it held only definitions), or,
+//!   with GFM tables, a paragraph and then a table;
 //! - a list is tight iff it directly contains no `Loosen` marker (found by
 //!   a first pass over the stream, so the flag is known on entering the
 //!   list).
@@ -102,6 +103,11 @@ pub enum LeafKind {
         /// Its syntax.
         kind: FrontMatterKind,
     },
+    /// A GFM table. Its lines are the header row, the delimiter row (whose
+    /// `content` is the row without surrounding whitespace, with `marker`
+    /// set and `has_content` not) and the body rows; see [`crate::table`]
+    /// for splitting them into cells.
+    Table,
 }
 
 /// One line of a leaf block.
@@ -241,6 +247,9 @@ struct Frame {
     lines: Vec<LeafLine>,
     defs: Vec<u32>,
     setext: Option<(u8, usize)>,
+    /// The line of a `TableHeader` marker and the range of its delimiter
+    /// row.
+    table: Option<(usize, Range<usize>)>,
     info: Option<Range<usize>>,
 }
 
@@ -411,6 +420,7 @@ impl Replay<'_> {
                         lines,
                         defs: Vec::new(),
                         setext: None,
+                        table: None,
                         info: None,
                     });
                 }
@@ -465,7 +475,14 @@ impl Replay<'_> {
                         ll.line_ending = r;
                     }
                     TokenKind::InfoString => f.info = Some(r),
-                    TokenKind::Marker => ll.marker = true,
+                    TokenKind::Marker => {
+                        ll.marker = true;
+                        if let Some((line, delim)) = &mut f.table
+                            && *line == l.index
+                        {
+                            *delim = r;
+                        }
+                    }
                     _ => {
                         if !ll.has_content {
                             ll.content = r.end..r.end;
@@ -476,6 +493,7 @@ impl Replay<'_> {
                 match e.to_event(BlockId(0)) {
                     Event::RefDef { lines } => f.defs.push(lines),
                     Event::Setext { level } => f.setext = Some((level, l.index)),
+                    Event::TableHeader => f.table = Some((l.index, off..off)),
                     _ => {}
                 }
             }
@@ -642,6 +660,44 @@ fn emit_leaf(
                     range: range.clone(),
                 });
                 i += n;
+            }
+            if let Some((dline, delim)) = &f.table {
+                // Content lines before the delimiter row: the last is the
+                // header, the others (after the definitions) a paragraph.
+                let pre = scratch.partition_point(|l| l.line < *dline);
+                let header = pre.saturating_sub(1).max(i);
+                let para = &scratch[i..header];
+                if !para.is_empty() {
+                    v.leaf(&Leaf {
+                        id: f.id,
+                        kind: LeafKind::Paragraph,
+                        lines: para,
+                        info: None,
+                        open_line: f.line,
+                        start_line: line_of(para, f.line),
+                        end_line: last_of(para, f.line),
+                        range: range.clone(),
+                    });
+                }
+                let mut lines: Vec<LeafLine> = scratch[header..pre].to_vec();
+                for l in f.lines.iter().filter(|l| l.line >= *dline) {
+                    let mut l = l.clone();
+                    if l.line == *dline {
+                        l.content = delim.clone();
+                    }
+                    lines.push(l);
+                }
+                v.leaf(&Leaf {
+                    id: f.id,
+                    kind: LeafKind::Table,
+                    lines: &lines,
+                    info: None,
+                    open_line: f.line,
+                    start_line: line_of(&lines, *dline),
+                    end_line: last_of(&lines, *dline),
+                    range,
+                });
+                return f.lines;
             }
             let rest = &scratch[i..];
             if let Some((level, uline)) = f.setext {

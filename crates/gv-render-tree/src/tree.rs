@@ -69,6 +69,8 @@ pub struct RenderOptions {
     pub metrics: Metrics,
     /// Lines per code chunk (50; see the virtual list spike).
     pub chunk_lines: usize,
+    /// ` ```math ` fences are display math (GFM, Extended), not code.
+    pub math_fences: bool,
 }
 
 impl RenderOptions {
@@ -81,6 +83,16 @@ impl RenderOptions {
             styles: StyleTable::preview(),
             metrics: Metrics::default(),
             chunk_lines: 50,
+            math_fences: false,
+        }
+    }
+
+    /// The options of profile `id` (`commonmark`, `gfm-file`, …): the
+    /// CommonMark options with the profile's math syntax.
+    pub fn for_profile(id: &str) -> Self {
+        Self {
+            math_fences: matches!(id, "gfm-file" | "gfm-comment" | "extended"),
+            ..Self::commonmark()
         }
     }
 

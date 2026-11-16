@@ -423,7 +423,7 @@ fn popover_shadow(theme: &Theme) -> Vec<BoxShadow> {
 
 /// A menu's panel: the popover look, 228 wide, padding 4. A submenu grows
 /// past 228 when a label and its shortcut need more room (not designed).
-fn panel(theme: &Theme) -> Div {
+pub(crate) fn panel(theme: &Theme) -> Div {
     div()
         .min_w(px(MENU_WIDTH))
         .p(px(spacing::PAD))
@@ -443,7 +443,7 @@ fn panel(theme: &Theme) -> Div {
 }
 
 /// A row: 24 high, padding `0 8`, radius 5; `accent.tint` when highlighted.
-fn row(theme: &Theme, highlighted: bool) -> Div {
+pub(crate) fn row(theme: &Theme, highlighted: bool) -> Div {
     div()
         .h(px(MENU_ROW))
         .flex_none()
@@ -460,7 +460,7 @@ fn label(title: &'static str) -> Div {
 }
 
 /// A separator: 1 px `border.default`, margin `4 8`.
-fn separator(theme: &Theme) -> Div {
+pub(crate) fn separator(theme: &Theme) -> Div {
     div()
         .h(px(HAIRLINE))
         .flex_none()

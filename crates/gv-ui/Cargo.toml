@@ -14,7 +14,9 @@ gpui = { workspace = true }
 gv-editor = { workspace = true }
 gv-html = { workspace = true }
 gv-inline = { workspace = true }
+gv-math = { workspace = true }
 gv-model = { workspace = true }
+gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
 gv-settings = { workspace = true }
 gv-syntax = { workspace = true }

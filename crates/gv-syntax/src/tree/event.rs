@@ -235,6 +235,11 @@ pub enum Event {
     },
     /// The innermost enclosing list is loose.
     Loosen,
+    /// The enclosing text block is a GFM table from here on: this line is
+    /// its delimiter row, the content line before it its header row, and
+    /// every later line a body row. Content lines before the header are a
+    /// paragraph (after the link reference definitions).
+    TableHeader,
 }
 
 const T_OPEN: u8 = 0;
@@ -243,6 +248,7 @@ const T_TOK: u8 = 2;
 const T_REFDEF: u8 = 3;
 const T_SETEXT: u8 = 4;
 const T_LOOSEN: u8 = 5;
+const T_TABLE: u8 = 6;
 
 const K_QUOTE: u8 = 0;
 const K_BULLET: u8 = 1;
@@ -329,6 +335,17 @@ impl Ev {
             a: 0,
             b: 0,
             n: lines,
+        }
+    }
+
+    /// A `TableHeader` marker.
+    #[inline]
+    pub(crate) fn table_header() -> Ev {
+        Ev {
+            tag: T_TABLE,
+            a: 0,
+            b: 0,
+            n: 0,
         }
     }
 
@@ -435,6 +452,7 @@ impl Ev {
             T_REFDEF => Event::RefDef { lines: self.n },
             T_SETEXT => Event::Setext { level: self.a },
             T_LOOSEN => Event::Loosen,
+            T_TABLE => Event::TableHeader,
             _ => Event::Token(Token {
                 kind: TokenKind::ALL[usize::from(self.a)],
                 virtual_spaces: self.b as u8,
@@ -502,6 +520,7 @@ mod tests {
             let t = Ev::tok(k, 3, 77).token().expect("token");
             assert_eq!((t.kind, t.virtual_spaces, t.len), (k, 3, 77));
         }
+        assert_eq!(Ev::table_header().to_event(BlockId(0)), Event::TableHeader);
         for up in 0..3 {
             assert_eq!(Ev::loosen(up).loosen_up(), Some(u32::from(up)));
             assert_eq!(Ev::loosen(up).to_event(BlockId(0)), Event::Loosen);

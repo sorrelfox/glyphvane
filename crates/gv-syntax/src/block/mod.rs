@@ -41,8 +41,9 @@ pub(crate) mod scan;
 pub(crate) mod state;
 
 use crate::inline::api::parse_ref_def;
+use crate::table;
 use crate::tree::event::{BlockKind, Ev, FrontMatterKind, Sink, TokenKind};
-use state::{Closed, Entry, Interner, Kind, ROOT, RefMode, StateId};
+use state::{Closed, Entry, Interner, Kind, ROOT, RefMode, StateId, TABLE_VISITED};
 
 /// Maximum number of simultaneously open blocks, the document included.
 /// Deeper block quote and list markers are paragraph text.
@@ -303,6 +304,8 @@ pub(crate) struct BlockParser {
     /// blocks between it and the last matched one *before* the unmatched
     /// ones; `usize::MAX` otherwise.
     backup: usize,
+    /// GFM tables are on.
+    tables: bool,
 }
 
 impl Default for BlockParser {
@@ -328,6 +331,15 @@ impl BlockParser {
             first_new: 1,
             tb_kill: 0,
             backup: usize::MAX,
+            tables: false,
+        }
+    }
+
+    /// A parser at the document start; `tables` turns GFM tables on.
+    pub(crate) fn with_tables(tables: bool) -> Self {
+        BlockParser {
+            tables,
+            ..Self::new()
         }
     }
 
@@ -335,13 +347,14 @@ impl BlockParser {
     /// paragraph with a long pending candidate
     /// ([`BlockParser::needs_pending_text`]), the caller must supply it with
     /// [`BlockParser::set_pending_text`].
-    pub(crate) fn from_checkpoint(interner: &Interner, id: StateId) -> Self {
+    pub(crate) fn from_checkpoint(interner: &Interner, id: StateId, tables: bool) -> Self {
         let (stack, ids) = interner.resolve(id);
         let clean = stack.len();
         let mut p = BlockParser {
             stack,
             ids,
             clean,
+            tables,
             ..Self::new()
         };
         for (i, e) in p.stack.iter().enumerate().skip(1) {
@@ -353,9 +366,11 @@ impl BlockParser {
             }
         }
         if let Some(Entry {
-            kind: Kind::Paragraph {
-                refs: RefMode::Pending(t),
-            },
+            kind:
+                Kind::Paragraph {
+                    refs: RefMode::Pending(t),
+                    ..
+                },
             ..
         }) = p.stack.last()
         {
@@ -370,7 +385,8 @@ impl BlockParser {
         matches!(
             self.stack.last().map(|e| e.kind),
             Some(Kind::Paragraph {
-                refs: RefMode::Long
+                refs: RefMode::Long,
+                ..
             })
         )
     }
@@ -490,7 +506,7 @@ impl BlockParser {
     /// or meets a setext underline). Returns whether paragraph text
     /// remains.
     fn settle_paragraph(&mut self, idx: usize, sink: &mut Sink) -> bool {
-        let Kind::Paragraph { refs } = self.stack[idx].kind else {
+        let Kind::Paragraph { refs, cells } = self.stack[idx].kind else {
             return true;
         };
         match refs {
@@ -510,6 +526,7 @@ impl BlockParser {
                     } else {
                         RefMode::Defs
                     },
+                    cells,
                 };
                 self.touch(idx);
                 if has_text {
@@ -695,7 +712,7 @@ impl BlockParser {
     ) {
         let start = cur.tp;
         let end = cur.content_end.max(start);
-        if let Kind::Paragraph { refs } = self.stack[idx].kind {
+        if let Kind::Paragraph { refs, cells } = self.stack[idx].kind {
             let line = &cur.b[start..end];
             let new = match refs {
                 _ if first => refs,
@@ -723,10 +740,19 @@ impl BlockParser {
                     RefMode::Long
                 }
             };
-            if new != refs {
-                self.stack[idx].kind = Kind::Paragraph { refs: new };
+            // The cell count a delimiter row on the next line must match.
+            let new_cells = if !self.tables || cells == TABLE_VISITED {
+                cells
+            } else {
+                table::cell_count(line) as u16
+            };
+            if new != refs || new_cells != cells {
+                self.stack[idx].kind = Kind::Paragraph {
+                    refs: new,
+                    cells: new_cells,
+                };
                 self.touch(idx);
-                if new == RefMode::Text {
+                if new == RefMode::Text && refs != RefMode::Text {
                     self.resolve_deferred(idx, sink);
                 }
             }
@@ -787,6 +813,40 @@ impl BlockParser {
         self.flush(sink);
         sink.push(Ev::setext(level));
         self.stack[idx].kind = Kind::Heading;
+        self.touch(idx);
+        true
+    }
+
+    /// A delimiter row under the open paragraph at `idx` (the top of the
+    /// stack) whose column count matches its last line: that line becomes
+    /// the header of a table. The definitions pending before the header
+    /// line are decided. Returns false (nothing changes) when the paragraph
+    /// holds only decided definitions.
+    fn table_header(&mut self, idx: usize, sink: &mut Sink) -> bool {
+        let Kind::Paragraph { refs, .. } = self.stack[idx].kind else {
+            return false;
+        };
+        match refs {
+            RefMode::Text => {}
+            RefMode::Defs => return false,
+            RefMode::Pending(_) | RefMode::Long => {
+                // `pending` holds the lines since the last decided
+                // definition, each followed by `\n`; the last one is the
+                // header.
+                let body = self.pending.len().saturating_sub(1);
+                let cut = memchr::memrchr(b'\n', &self.pending[..body]).map_or(0, |i| i + 1);
+                let mut defs = std::mem::take(&mut self.defs);
+                extract_defs(&self.pending[..cut], &mut defs);
+                self.defs = defs;
+                self.flush(sink);
+                self.emit_defs(sink);
+                self.pending.clear();
+                self.resolve_deferred(idx, sink);
+            }
+        }
+        self.flush(sink);
+        sink.push(Ev::table_header());
+        self.stack[idx].kind = Kind::Table;
         self.touch(idx);
         true
     }
@@ -953,6 +1013,9 @@ impl BlockParser {
                 }
                 Kind::Html { ty } => !(ty >= 6 && cur.blank),
                 Kind::Paragraph { .. } => !cur.blank,
+                Kind::Table => {
+                    !cur.blank && table::cell_count(&b[cur.fns..cur.content_end.max(cur.fns)]) > 0
+                }
                 Kind::Heading => false,
                 Kind::ThematicBreak | Kind::Document | Kind::List { .. } => true,
             };
@@ -1146,6 +1209,32 @@ impl BlockParser {
                 self.tok(&mut cur, sink, TokenKind::CodeIndent, e);
                 started = true;
             }
+            if !started
+                && self.tables
+                && !indented
+                && ck_para
+                && let Kind::Paragraph { refs, cells } = self.stack[container].kind
+                && cells != TABLE_VISITED
+            {
+                // A delimiter row under the paragraph (`container`, the top
+                // of the stack: every block matched).
+                let end = cur.content_end.max(fns);
+                let columns = table::delimiter_columns(&b[fns..end]);
+                if columns > 0 {
+                    if columns == usize::from(cells) && self.table_header(container, sink) {
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                        self.tok(&mut cur, sink, TokenKind::Marker, trim_end(b, fns, end));
+                        self.tok(&mut cur, sink, TokenKind::Whitespace, end);
+                        self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
+                        return;
+                    }
+                    self.stack[container].kind = Kind::Paragraph {
+                        refs,
+                        cells: TABLE_VISITED,
+                    };
+                    self.touch(container);
+                }
+            }
             if !started || self.stack[container].kind.accepts_lines() {
                 break;
             }
@@ -1235,12 +1324,23 @@ impl BlockParser {
                     let fns = cur.fns;
                     self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
                     self.para_line(&mut cur, sink, ci, false, interner);
+                } else if let Kind::Table = kind {
+                    // A table row.
+                    let fns = cur.fns;
+                    self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
+                    let end = cur.content_end.max(cur.tp);
+                    self.tok(&mut cur, sink, TokenKind::Content, end);
+                    self.tok(&mut cur, sink, TokenKind::LineEnding, b.len());
                 } else {
                     let fns = cur.fns;
                     let refs = self.start_candidate(&b[fns..cur.content_end.max(fns)], interner);
                     let defer = refs != RefMode::Text;
-                    let idx =
-                        self.add_child_ex(Kind::Paragraph { refs }, BlockKind::Text, sink, defer);
+                    let idx = self.add_child_ex(
+                        Kind::Paragraph { refs, cells: 0 },
+                        BlockKind::Text,
+                        sink,
+                        defer,
+                    );
                     self.tok(&mut cur, sink, TokenKind::Whitespace, fns);
                     self.para_line(&mut cur, sink, idx, true, interner);
                 }

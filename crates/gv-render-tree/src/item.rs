@@ -71,6 +71,12 @@ pub enum ItemKind {
         chunks: u32,
         lines: Range<u32>,
     },
+    /// A display math block, one item; `lines` are all the block's source
+    /// lines (shown as code-like text with the error when the formula does
+    /// not render).
+    Math {
+        lines: Range<u32>,
+    },
     ThematicBreak,
     /// A list item without content: its marker.
     EmptyItem,
@@ -94,7 +100,8 @@ impl ItemKind {
         match self {
             Self::Code { lines, .. }
             | Self::Html { lines, .. }
-            | Self::Properties { lines, .. } => Some(lines.clone()),
+            | Self::Properties { lines, .. }
+            | Self::Math { lines } => Some(lines.clone()),
             _ => None,
         }
     }
@@ -116,6 +123,7 @@ impl ItemKind {
             Self::Code { .. } => "code",
             Self::Html { .. } => "html",
             Self::Properties { .. } => "properties",
+            Self::Math { .. } => "math",
             Self::ThematicBreak => "thematic-break",
             Self::EmptyItem => "empty-item",
             Self::EmptyQuote => "empty-quote",
@@ -269,6 +277,16 @@ impl Flatten<'_> {
                 let kind = ItemKind::Heading { level: *level };
                 out.push(mk(0, kind, node.source.clone(), e));
             }
+            NodeKind::Math(code) => {
+                // Until the reader lays the formula out: a line of display
+                // math (about twice a body line) per source line.
+                let lh = self.styles.role(TextRole::Body).line_height;
+                let n = code.lines.len().max(1);
+                #[allow(clippy::cast_precision_loss)]
+                let e = Estimate::fixed(lh * 2.0 * n.min(20) as f32);
+                let lines = 0..to_u32(code.lines.len());
+                out.push(mk(0, ItemKind::Math { lines }, node.source.clone(), e));
+            }
             NodeKind::ThematicBreak => {
                 out.push(mk(
                     0,
@@ -412,6 +430,7 @@ fn own_spacing(item: &Item, m: &Metrics) -> Spacing {
         ItemKind::Heading { level } => m.heading(*level),
         ItemKind::Code { .. } | ItemKind::Html { .. } => m.code,
         ItemKind::Properties { .. } => m.properties,
+        ItemKind::Math { .. } => m.paragraph,
         ItemKind::ThematicBreak => m.rule,
         ItemKind::EmptyItem | ItemKind::EmptyQuote => Spacing::default(),
     };

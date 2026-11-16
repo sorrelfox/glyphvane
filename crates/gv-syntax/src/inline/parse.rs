@@ -22,13 +22,14 @@
 
 use std::cell::RefCell;
 
-use super::api::{InlineTree, RefLookup};
+use super::api::{InlineOptions, InlineTree, RefLookup};
 use super::scan;
 use super::tree::{self, ANode, InlineKind as K, LinkData, LinkKind, NIL, Segs, Str};
 use super::unicode;
 
-/// Bytes that end a text run.
-static SPECIAL: [bool; 256] = {
+/// Bytes that end a text run: CommonMark's, plus `~` with strikethrough
+/// and `:` and `w` with extended autolinks.
+const fn special(tilde: bool, autolink: bool) -> [bool; 256] {
     let mut t = [false; 256];
     let specials = b"\n\r`\\&<*_[]!";
     let mut i = 0;
@@ -36,8 +37,16 @@ static SPECIAL: [bool; 256] = {
         t[specials[i] as usize] = true;
         i += 1;
     }
+    t[b'~' as usize] = tilde;
+    t[b':' as usize] = autolink;
+    t[b'w' as usize] = autolink;
     t
-};
+}
+
+static SPECIAL: [bool; 256] = special(false, false);
+static SPECIAL_TILDE: [bool; 256] = special(true, false);
+static SPECIAL_AUTOLINK: [bool; 256] = special(false, true);
+static SPECIAL_GFM: [bool; 256] = special(true, true);
 
 /// An entry of the delimiter stack (a doubly linked list over a vector, in
 /// push order: a larger index is later in the text).
@@ -104,15 +113,26 @@ thread_local! {
 }
 
 /// Parses gathered text into a finished tree.
-pub(super) fn parse(text: String, segs: Segs, refs: &dyn RefLookup) -> InlineTree {
+pub(super) fn parse(
+    text: String,
+    segs: Segs,
+    refs: &dyn RefLookup,
+    opts: InlineOptions,
+) -> InlineTree {
     SCRATCH.with(|cell| match cell.try_borrow_mut() {
-        Ok(mut scratch) => parse_with(&mut scratch, text, segs, refs),
+        Ok(mut scratch) => parse_with(&mut scratch, text, segs, refs, opts),
         // A lookup that parses inlines itself: use fresh vectors.
-        Err(_) => parse_with(&mut Scratch::default(), text, segs, refs),
+        Err(_) => parse_with(&mut Scratch::default(), text, segs, refs, opts),
     })
 }
 
-fn parse_with(scratch: &mut Scratch, text: String, segs: Segs, refs: &dyn RefLookup) -> InlineTree {
+fn parse_with(
+    scratch: &mut Scratch,
+    text: String,
+    segs: Segs,
+    refs: &dyn RefLookup,
+    opts: InlineOptions,
+) -> InlineTree {
     let mut nodes = std::mem::take(&mut scratch.nodes);
     let mut delims = std::mem::take(&mut scratch.delims);
     let mut brackets = std::mem::take(&mut scratch.brackets);
@@ -135,11 +155,18 @@ fn parse_with(scratch: &mut Scratch, text: String, segs: Segs, refs: &dyn RefLoo
         refs,
         backticks: None,
         html_skip: 0,
+        opts,
+        special: match (opts.strikethrough, opts.autolinks) {
+            (false, false) => &SPECIAL,
+            (true, false) => &SPECIAL_TILDE,
+            (false, true) => &SPECIAL_AUTOLINK,
+            (true, true) => &SPECIAL_GFM,
+        },
     };
     p.run();
     let flat = tree::flatten(
         &p.nodes,
-        segs.as_slice(),
+        segs.lines(),
         text.len() as u32,
         &mut scratch.stack,
     );
@@ -190,6 +217,9 @@ struct Parser<'a> {
     /// sorted: built on first use, so closers are found in O(log n).
     backticks: Option<Vec<(u32, u32)>>,
     html_skip: u8,
+    opts: InlineOptions,
+    /// The bytes that end a text run.
+    special: &'static [bool; 256],
 }
 
 impl Parser<'_> {
@@ -218,6 +248,9 @@ impl Parser<'_> {
                 b'&' => self.entity(),
                 b'<' => self.pointy(),
                 c @ (b'*' | b'_') => self.delimiter_run(c),
+                b'~' if self.opts.strikethrough => self.delimiter_run(b'~'),
+                b'w' if self.opts.autolinks => self.www_autolink(),
+                b':' if self.opts.autolinks => self.url_autolink(),
                 b'[' => {
                     let p = self.pos;
                     let n = self.add_provisional(p, p + 1);
@@ -235,6 +268,9 @@ impl Parser<'_> {
             }
         }
         self.process_emphasis(0);
+        if self.opts.autolinks {
+            self.email_autolinks();
+        }
         if end < len {
             self.add(K::Whitespace, end, len, 0);
         }
@@ -314,7 +350,7 @@ impl Parser<'_> {
     /// Literal text: skipped (it needs no node).
     fn text(&mut self) {
         let mut j = self.pos + 1;
-        while j < self.end && !SPECIAL[self.b[j] as usize] {
+        while j < self.end && !self.special[self.b[j] as usize] {
             j += 1;
         }
         self.pos = j;
@@ -463,6 +499,7 @@ impl Parser<'_> {
                 text: (a, z),
                 dest_raw: Some((a, z)),
                 label_raw: None,
+                ext: false,
             });
             self.add_wrapped(
                 K::Autolink,
@@ -483,6 +520,249 @@ impl Parser<'_> {
             return;
         }
         self.pos = p + 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // GFM extended autolinks (cmark-gfm's `autolink` extension)
+
+    /// `w`: a `www.` autolink, or literal text.
+    fn www_autolink(&mut self) {
+        let p = self.pos;
+        let b = self.b;
+        let ok = self.brackets.is_empty()
+            && (p == 0
+                || is_cmark_space(b[p - 1])
+                || matches!(b[p - 1], b'*' | b'_' | b'~' | b'('))
+            && b[p..self.end].starts_with(b"www.");
+        let len = if ok {
+            check_domain(self.t, p, self.end, false).and_then(|d| {
+                let end = link_extent(b, p + d, self.end);
+                let n = autolink_delim(&b[p..end]);
+                (n > 0).then_some(n)
+            })
+        } else {
+            None
+        };
+        let Some(len) = len else {
+            self.pos = p + 1;
+            return;
+        };
+        let start = self.arena.len() as u32;
+        self.arena.push_str("http://");
+        self.arena.push_str(&self.t[p..p + len]);
+        let dest = Str::Arena(start, self.arena.len() as u32);
+        self.add_ext_autolink(p, p + len, LinkKind::UriAutolink, dest);
+        self.pos = p + len;
+    }
+
+    /// `:`: an `http://`, `https://` or `ftp://` autolink whose scheme was
+    /// just scanned as text, or literal text.
+    fn url_autolink(&mut self) {
+        let p = self.pos;
+        let b = self.b;
+        let end = self.end;
+        let last = self.nodes[0].last;
+        let floor = if last == NIL {
+            0
+        } else {
+            self.nodes[last as usize].end as usize
+        };
+        let mut found = None;
+        if self.brackets.is_empty() && end - p >= 4 && b[p + 1] == b'/' && b[p + 2] == b'/' {
+            let mut rewind = 0;
+            while p - rewind > floor && b[p - rewind - 1].is_ascii_alphabetic() {
+                rewind += 1;
+            }
+            let scheme = &b[p - rewind..p];
+            let safe = (scheme.eq_ignore_ascii_case(b"http")
+                || scheme.eq_ignore_ascii_case(b"https")
+                || scheme.eq_ignore_ascii_case(b"ftp"))
+                && p + 3 < end
+                && is_valid_hostchar(self.t, p + 3);
+            if safe && let Some(d) = check_domain(self.t, p + 3, end, true) {
+                let e = link_extent(b, p + 3 + d, end);
+                let n = autolink_delim(&b[p..e]);
+                if n > 0 {
+                    found = Some((p - rewind, p + n));
+                }
+            }
+        }
+        let Some((a, z)) = found else {
+            self.pos = p + 1;
+            return;
+        };
+        let dest = Str::Text(a as u32, z as u32);
+        self.add_ext_autolink(a, z, LinkKind::UriAutolink, dest);
+        self.pos = z;
+    }
+
+    /// Appends an extended autolink over `a..z` (the text as written).
+    fn add_ext_autolink(&mut self, a: usize, z: usize, kind: LinkKind, dest: Str) {
+        let n = self.new_extended_autolink(a, z, kind, dest);
+        self.append(0, n);
+    }
+
+    /// A detached extended autolink node over `a..z` with its text token.
+    fn new_extended_autolink(&mut self, a: usize, z: usize, kind: LinkKind, dest: Str) -> u32 {
+        let index = self.links.len() as u32;
+        self.links.push(LinkData {
+            kind,
+            dest,
+            title: None,
+            label: None,
+            text: (a as u32, z as u32),
+            dest_raw: Some((a as u32, z as u32)),
+            label_raw: None,
+            ext: true,
+        });
+        let n = self.new_node(K::Autolink, a, z, index);
+        let t = self.new_node(K::AutolinkText, a, z, 0);
+        self.append(n, t);
+        n
+    }
+
+    /// Bare email addresses (and `mailto:`/`xmpp:` addresses) in the text
+    /// of the root's children and, recursively, of its emphasis,
+    /// strikethrough and image descendants; links are skipped. Runs after
+    /// emphasis processing, like cmark-gfm's post-processor. A run of text
+    /// is the text between nodes plus unmatched delimiters and brackets
+    /// (cmark-gfm's consolidated text nodes, except that escapes and
+    /// entities end a run here).
+    fn email_autolinks(&mut self) {
+        let mut todo = vec![0u32];
+        while let Some(parent) = todo.pop() {
+            let pn = self.nodes[parent as usize];
+            let (inner_start, inner_end) = if parent == 0 {
+                (0, self.b.len())
+            } else {
+                (pn.start as usize, pn.end as usize)
+            };
+            let mut run_start = inner_start;
+            let mut child = pn.first;
+            loop {
+                let run_end = if child == NIL {
+                    inner_end
+                } else {
+                    let c = self.nodes[child as usize];
+                    if c.kind == K::Text {
+                        child = c.next;
+                        continue;
+                    }
+                    c.start as usize
+                };
+                if run_end > run_start
+                    && memchr::memchr(b'@', &self.b[run_start..run_end]).is_some()
+                {
+                    self.emails_in_run(parent, run_start, run_end);
+                }
+                if child == NIL {
+                    break;
+                }
+                let c = self.nodes[child as usize];
+                if matches!(
+                    c.kind,
+                    K::Emphasis | K::Strong | K::Strikethrough | K::Image
+                ) {
+                    todo.push(child);
+                }
+                run_start = c.end as usize;
+                child = c.next;
+            }
+        }
+    }
+
+    /// Links the email addresses in the text run `a..z` of `parent`.
+    fn emails_in_run(&mut self, parent: u32, a: usize, z: usize) {
+        let mut from = a;
+        while let Some(at) = memchr::memchr(b'@', &self.b[from..z]).map(|i| from + i) {
+            match email_at(self.b, from, at, z) {
+                Some((s, e, mailto)) => {
+                    let (kind, dest) = if mailto {
+                        (LinkKind::EmailAutolink, Str::Text(s as u32, e as u32))
+                    } else {
+                        (LinkKind::UriAutolink, Str::Text(s as u32, e as u32))
+                    };
+                    let link = self.new_extended_autolink(s, e, kind, dest);
+                    self.splice_text(parent, link, s, e);
+                    from = e;
+                }
+                None => from = at + 1,
+            }
+        }
+    }
+
+    /// Puts `link` (covering `s..e`, all text) among the children of
+    /// `parent`: the unmatched delimiter or bracket nodes it covers are
+    /// removed or cut.
+    fn splice_text(&mut self, parent: u32, link: u32, s: usize, e: usize) {
+        let (s32, e32) = (s as u32, e as u32);
+        // The first child that ends after `s`.
+        let mut c = self.nodes[parent as usize].first;
+        while c != NIL && self.nodes[c as usize].end <= s32 {
+            c = self.nodes[c as usize].next;
+        }
+        // Cut or drop the text nodes that overlap `s..e`.
+        while c != NIL && self.nodes[c as usize].start < e32 {
+            let n = self.nodes[c as usize];
+            debug_assert_eq!(n.kind, K::Text);
+            let next = n.next;
+            if n.start < s32 && n.end > e32 {
+                // Spans the link: keep the head, add the tail.
+                let tail = self.new_node(K::Text, e, n.end as usize, 0);
+                self.node(c).end = s32;
+                self.insert_after(parent, c, tail);
+                c = tail;
+                break;
+            } else if n.start < s32 {
+                self.node(c).end = s32;
+            } else if n.end > e32 {
+                self.node(c).start = e32;
+                break;
+            } else {
+                self.unlink(parent, c);
+            }
+            c = next;
+        }
+        // `c` is the first child after the link (or NIL).
+        if c == NIL {
+            self.append(parent, link);
+        } else {
+            let prev = self.nodes[c as usize].prev;
+            if prev == NIL {
+                self.node(parent).first = link;
+            } else {
+                self.node(prev).next = link;
+            }
+            self.node(link).prev = prev;
+            self.node(link).next = c;
+            self.node(c).prev = link;
+        }
+    }
+
+    fn insert_after(&mut self, parent: u32, after: u32, n: u32) {
+        let next = self.nodes[after as usize].next;
+        self.node(n).prev = after;
+        self.node(n).next = next;
+        self.node(after).next = n;
+        if next == NIL {
+            self.node(parent).last = n;
+        } else {
+            self.node(next).prev = n;
+        }
+    }
+
+    fn unlink(&mut self, parent: u32, n: u32) {
+        let ANode { prev, next, .. } = self.nodes[n as usize];
+        if prev == NIL {
+            self.node(parent).first = next;
+        } else {
+            self.node(prev).next = next;
+        }
+        if next == NIL {
+            self.node(parent).last = prev;
+        } else {
+            self.node(next).prev = prev;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -516,14 +796,16 @@ impl Parser<'_> {
         );
         let left = !ws_after && (!p_after || ws_before || p_before);
         let right = !ws_before && (!p_before || ws_after || p_after);
-        let (can_open, can_close) = if ch == b'*' {
-            (left, right)
-        } else {
+        let (can_open, can_close) = if ch == b'_' {
             (left && (!right || p_before), right && (!left || p_after))
+        } else {
+            (left, right)
         };
         let node = self.add_provisional(start, end);
         self.pos = end;
-        if can_open || can_close {
+        // Strikethrough: runs of two tildes, or of one where allowed.
+        let tilde_ok = |n: usize| n == 2 || (n == 1 && self.opts.strikethrough_single);
+        if (can_open || can_close) && (ch != b'~' || tilde_ok(end - start)) {
             let index = self.delims.len() as u32;
             self.delims.push(Delim {
                 node,
@@ -560,7 +842,7 @@ impl Parser<'_> {
             return;
         }
         // openers_bottom[character][closer length % 3][closer can open]
-        let mut openers_bottom = [[[lower; 2]; 3]; 2];
+        let mut openers_bottom = [[[lower; 2]; 3]; 3];
         let mut closer = self.last_delim;
         let mut first = NIL;
         while closer != NIL && closer >= lower {
@@ -574,8 +856,12 @@ impl Parser<'_> {
                 closer = c.next;
                 continue;
             }
-            let slot = &mut openers_bottom[usize::from(c.ch == b'_')][(c.len % 3) as usize]
-                [usize::from(c.can_open)];
+            let ch_index = match c.ch {
+                b'*' => 0,
+                b'_' => 1,
+                _ => 2,
+            };
+            let slot = &mut openers_bottom[ch_index][(c.len % 3) as usize][usize::from(c.can_open)];
             let bottom = *slot;
             let mut opener = c.prev;
             let mut found = false;
@@ -614,7 +900,26 @@ impl Parser<'_> {
         let (on, cn) = (o.node, c.node);
         let o_len = self.nodes[on as usize].end - self.nodes[on as usize].start;
         let c_len = self.nodes[cn as usize].end - self.nodes[cn as usize].start;
-        let used = if o_len >= 2 && c_len >= 2 { 2 } else { 1 };
+        if o.ch == b'~' && o_len != c_len {
+            // cmark-gfm: tildes of different lengths make no strikethrough;
+            // the closer, the opener and every delimiter between them are
+            // dropped.
+            let mut d = closer;
+            while d != opener && d != NIL {
+                let prev = self.delims[d as usize].prev;
+                self.remove_delim(d);
+                d = prev;
+            }
+            self.remove_delim(opener);
+            return c.next;
+        }
+        let used = if o.ch == b'~' {
+            o_len
+        } else if o_len >= 2 && c_len >= 2 {
+            2
+        } else {
+            1
+        };
         let mut d = c.prev;
         while d != opener && d != NIL {
             let prev = self.delims[d as usize].prev;
@@ -627,7 +932,13 @@ impl Parser<'_> {
         self.node(cn).start = c_start + used;
         let open = self.new_node(K::Marker, (o_end - used) as usize, o_end as usize, 0);
         let close = self.new_node(K::Marker, c_start as usize, (c_start + used) as usize, 0);
-        let kind = if used == 2 { K::Strong } else { K::Emphasis };
+        let kind = if o.ch == b'~' {
+            K::Strikethrough
+        } else if used == 2 {
+            K::Strong
+        } else {
+            K::Emphasis
+        };
         let e = self.new_node(kind, (o_end - used) as usize, (c_start + used) as usize, 0);
         let first = self.nodes[on as usize].next;
         let last = self.nodes[cn as usize].prev;
@@ -732,6 +1043,7 @@ impl Parser<'_> {
             text: (0, 0),
             dest_raw: (de > ds).then_some((ds as u32, de as u32)),
             label_raw: None,
+            ext: false,
         };
         Some((
             data,
@@ -776,6 +1088,7 @@ impl Parser<'_> {
             text: (0, 0),
             dest_raw: None,
             label_raw: Some((raw.0 as u32, raw.1 as u32)),
+            ext: false,
         };
         let second = if kind == LinkKind::Shortcut {
             None
@@ -898,6 +1211,177 @@ impl Parser<'_> {
             self.append(parent, n);
         }
     }
+}
+
+/// cmark's `isspace`: space, tab, LF, VT, FF, CR.
+#[inline]
+fn is_cmark_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
+}
+
+/// cmark-gfm's `is_valid_hostchar` for the character at byte `i` of `t`:
+/// not whitespace and not punctuation. A position inside a multi-byte
+/// character is not valid (cmark-gfm decodes from each byte).
+fn is_valid_hostchar(t: &str, i: usize) -> bool {
+    match t.get(i..).and_then(|r| r.chars().next()) {
+        Some(c) => !unicode::is_whitespace(c) && !unicode::is_punctuation(c),
+        None => false,
+    }
+}
+
+/// cmark-gfm's `check_domain` over `t[start..end]`: the length of the
+/// domain-like prefix (scanned from its second byte, as cmark-gfm does),
+/// or `None` when an underscore sits in one of its last two labels (unless
+/// it has more than ten dots) or, unless `allow_short`, it has no dot.
+fn check_domain(t: &str, start: usize, end: usize, allow_short: bool) -> Option<usize> {
+    let b = &t.as_bytes()[start..end];
+    let size = b.len();
+    let (mut np, mut uscore1, mut uscore2) = (0usize, 0usize, 0usize);
+    let mut i = 1;
+    while i + 1 < size {
+        if b[i] == b'\\' && i + 2 < size {
+            i += 1;
+        }
+        if b[i] == b'_' {
+            uscore2 += 1;
+        } else if b[i] == b'.' {
+            uscore1 = uscore2;
+            uscore2 = 0;
+            np += 1;
+        } else if !is_valid_hostchar(t, start + i) && b[i] != b'-' {
+            break;
+        }
+        i += 1;
+    }
+    if (uscore1 > 0 || uscore2 > 0) && np <= 10 {
+        return None;
+    }
+    if allow_short || np > 0 {
+        Some(i.max(1).min(size))
+    } else {
+        None
+    }
+}
+
+/// Extends a link from `i` to the next whitespace or `<`.
+fn link_extent(b: &[u8], mut i: usize, end: usize) -> usize {
+    while i < end && !is_cmark_space(b[i]) && b[i] != b'<' {
+        i += 1;
+    }
+    i
+}
+
+/// cmark-gfm's `autolink_delim`: the length of `link` once trailing
+/// punctuation, unbalanced closing parentheses and a trailing entity-like
+/// `&name;` are cut, and everything from a `<` on.
+fn autolink_delim(link: &[u8]) -> usize {
+    let mut end = link.len();
+    let (mut opening, mut closing) = (0usize, 0usize);
+    for (i, &c) in link.iter().enumerate() {
+        match c {
+            b'<' => {
+                end = i;
+                break;
+            }
+            b'(' => opening += 1,
+            b')' => closing += 1,
+            _ => {}
+        }
+    }
+    while end > 0 {
+        match link[end - 1] {
+            b')' => {
+                if closing <= opening {
+                    return end;
+                }
+                closing -= 1;
+                end -= 1;
+            }
+            b'?' | b'!' | b'.' | b',' | b':' | b'*' | b'_' | b'~' | b'\'' | b'"' => end -= 1,
+            b';' => {
+                let mut k = end.saturating_sub(2);
+                while k > 0 && link[k].is_ascii_alphabetic() {
+                    k -= 1;
+                }
+                if end >= 2 && k < end - 2 && link[k] == b'&' {
+                    end = k;
+                } else {
+                    end -= 1;
+                }
+            }
+            _ => return end,
+        }
+    }
+    end
+}
+
+/// Whether `b[..i]` ends with `protocol` (which ends with `:`) preceded by
+/// the start of the text (`floor`) or a non-alphanumeric byte.
+fn validate_protocol(b: &[u8], floor: usize, i: usize, protocol: &[u8]) -> bool {
+    i >= floor + protocol.len()
+        && &b[i - protocol.len()..i] == protocol
+        && (i - protocol.len() == floor || !b[i - protocol.len() - 1].is_ascii_alphanumeric())
+}
+
+/// cmark-gfm's email autolink at the `@` at `at`, in text that starts at
+/// `floor` and ends at `end`: the link's range and whether it gets
+/// `mailto:` (`false` when it is written with `mailto:` or `xmpp:`).
+fn email_at(b: &[u8], floor: usize, at: usize, end: usize) -> Option<(usize, usize, bool)> {
+    let mut auto_mailto = true;
+    let mut is_xmpp = false;
+    let mut s = at;
+    while s > floor {
+        let c = b[s - 1];
+        if c.is_ascii_alphanumeric() || matches!(c, b'.' | b'+' | b'-' | b'_') {
+            s -= 1;
+            continue;
+        }
+        if c == b':' {
+            if validate_protocol(b, floor, s, b"mailto:") {
+                auto_mailto = false;
+                s -= 1;
+                continue;
+            }
+            if validate_protocol(b, floor, s, b"xmpp:") {
+                auto_mailto = false;
+                is_xmpp = true;
+                s -= 1;
+                continue;
+            }
+        }
+        break;
+    }
+    if s == at {
+        return None;
+    }
+    let size = end - at;
+    let mut np = 0;
+    let mut n = 0;
+    while n < size {
+        let c = b[at + n];
+        if c.is_ascii_alphanumeric() {
+        } else if c == b'@' {
+            // cmark-gfm counts the `@`s and fails on more than one; stopping
+            // at the second keeps a run of `@`s linear.
+            if n > 0 {
+                return None;
+            }
+        } else if c == b'.' && n + 1 < size && b[at + n + 1].is_ascii_alphanumeric() {
+            np += 1;
+        } else if c == b'/' && is_xmpp {
+        } else if c != b'-' && c != b'_' {
+            break;
+        }
+        n += 1;
+    }
+    if n < 2 || np == 0 || (!b[at + n - 1].is_ascii_alphabetic() && b[at + n - 1] != b'.') {
+        return None;
+    }
+    let n = autolink_delim(&b[at..at + n]);
+    if n == 0 {
+        return None;
+    }
+    Some((s, at + n, auto_mailto))
 }
 
 /// U+0000 classifies as U+FFFD, which CommonMark parsers see in its place.

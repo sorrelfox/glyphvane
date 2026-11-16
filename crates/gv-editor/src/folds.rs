@@ -193,7 +193,10 @@ impl Visitor for Collector<'_> {
             LeafKind::IndentedCode => FoldKind::IndentedCode,
             LeafKind::Html { .. } => FoldKind::Html,
             LeafKind::FrontMatter { .. } => FoldKind::FrontMatter,
-            LeafKind::Paragraph | LeafKind::ThematicBreak | LeafKind::LinkRefDef => return,
+            LeafKind::Paragraph
+            | LeafKind::ThematicBreak
+            | LeafKind::LinkRefDef
+            | LeafKind::Table => return,
         };
         self.push_block(kind, leaf.start_line, leaf.range.end);
     }

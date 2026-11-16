@@ -38,6 +38,7 @@ gv-ui = { path = "crates/gv-ui" }
 gv-helper = { path = "crates/gv-helper" }
 gv-settings = { path = "crates/gv-settings" }
 gv-inline = { path = "crates/gv-inline" }
+gv-profile = { path = "crates/gv-profile" }
 # Zed's rope, vendored unmodified (ADR-015; third_party/zed/PROVENANCE.md).
 rope = { path = "third_party/zed/rope" }
 
@@ -156,6 +157,21 @@ nucleo-matcher = "0.3.1"
 # HTML (gv-html): the HTML5 parser, building into gv-html's own tree sink
 # (MIT OR Apache-2.0). The WHATWG URL parser above resolves pasted links.
 html5ever = "0.40.1"
+# Math (gv-math): RaTeX, LaTeX parsing and layout to a display list
+# (MIT; its mhchem part derives from KaTeX's Apache-2.0 mhchem, credited in
+# the notices), the KaTeX fonts it bundles (OFL-1.1) and the font reader
+# that draws their glyph outlines (skrifa, the version GPUI's text stack
+# already pulls in; MIT OR Apache-2.0). RaTeX has one maintainer and releases often: exact pins, bump
+# together after the math golden tests pass. Never add `ratex-font-loader`
+# or `ratex-unicode-font` (they scan system fonts and log to stderr).
+ratex-katex-fonts = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-parser = "=0.1.15"
+ratex-types = "=0.1.15"
+skrifa = "0.44.0"
+# Math golden tests: CPU rasterizer (the version GPUI already pulls in;
+# BSD-3-Clause).
+tiny-skia = "0.11.4"
 # App (gv-app): the clipboard's HTML flavor for smart paste, which GPUI's
 # clipboard does not carry (MIT OR Apache-2.0). Without the default
 # `image-data` feature: no image decoder. gv-app adds Wayland data-control.

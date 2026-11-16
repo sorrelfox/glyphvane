@@ -211,6 +211,9 @@ fn dump_node(node: &BlockNode, out: &mut String) {
         NodeKind::Properties { kind, lines } => {
             let _ = writeln!(out, "  front matter {kind:?} lines={}", lines.lines.len());
         }
+        NodeKind::Math(code) => {
+            let _ = writeln!(out, "  math lines={}", code.lines.len());
+        }
         NodeKind::ThematicBreak | NodeKind::EmptyItem | NodeKind::EmptyQuote => {}
     }
 }

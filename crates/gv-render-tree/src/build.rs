@@ -187,10 +187,22 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 )
             }
             LeafKind::ThematicBreak => (NodeKind::ThematicBreak, range.start, None),
+            // GFM tables have no rendered form yet: their source lines.
+            LeafKind::Table => {
+                let code = Arc::new(self.code_block(leaf, range.start, false, false));
+                (NodeKind::Code(code), range.start, None)
+            }
             LeafKind::FencedCode | LeafKind::IndentedCode => {
                 let fenced = leaf.kind == LeafKind::FencedCode;
-                let code = self.code_block(leaf, range.start, fenced, !fenced);
-                (NodeKind::Code(Arc::new(code)), range.start, None)
+                let code = Arc::new(self.code_block(leaf, range.start, fenced, !fenced));
+                let math =
+                    fenced && self.opts.math_fences && code.language.as_deref() == Some("math");
+                let kind = if math {
+                    NodeKind::Math(code)
+                } else {
+                    NodeKind::Code(code)
+                };
+                (kind, range.start, None)
             }
             LeafKind::Html { kind } => {
                 let code = Arc::new(self.code_block(leaf, range.start, false, false));

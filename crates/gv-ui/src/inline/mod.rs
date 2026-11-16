@@ -46,6 +46,7 @@
 
 mod element;
 mod fonts;
+mod math;
 mod palette;
 
 #[cfg(test)]
@@ -154,6 +155,14 @@ pub enum BoxContent {
     /// Nothing: the box only takes space (for example the gap before a
     /// link status marker).
     Blank,
+    /// A typeset formula, `em` px per em, the surrounding text colour in
+    /// `color`; characters outside the math fonts use `text_font`.
+    Math {
+        layout: Arc<gv_math::MathLayout>,
+        em: f32,
+        color: ColorRole,
+        text_font: gpui::Font,
+    },
 }
 
 impl std::fmt::Debug for BoxContent {
@@ -166,6 +175,11 @@ impl std::fmt::Debug for BoxContent {
                 .field("color", color)
                 .finish(),
             Self::Blank => f.write_str("Blank"),
+            Self::Math { em, color, .. } => f
+                .debug_struct("Math")
+                .field("em", em)
+                .field("color", color)
+                .finish_non_exhaustive(),
         }
     }
 }

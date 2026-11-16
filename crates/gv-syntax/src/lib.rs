@@ -13,7 +13,7 @@
 //!   ([`tree::event`]): `Open`/`Close` pairs and tokens that cover every
 //!   byte exactly once, plus markers for decisions CommonMark makes
 //!   retroactively (setext underlines, link reference definitions, list
-//!   looseness). Events are append-only per line.
+//!   looseness, GFM table headers). Events are append-only per line.
 //! - **Line checkpoints.** Each line records the parser state at its start
 //!   (an interned `u32`). Lines are stored in small chunks in a persistent
 //!   sum tree with byte and line summaries; nothing stores absolute
@@ -30,9 +30,11 @@
 //!   markers resolved, [`walk_range`] the same for the blocks of a byte
 //!   range without walking the document, [`SyntaxTree::block_index`] a
 //!   cached index of the raw blocks; [`to_commonmark_html`] is the
-//!   CommonMark-exact HTML emitter; [`cst_dump`] the S-expression dump.
-//! - **Options.** [`ParseOptions`] holds the profile switches the block
-//!   pass reads (front matter); the default is CommonMark exactly.
+//!   CommonMark-exact HTML emitter and [`to_gfm_html`] the cmark-gfm-exact
+//!   one; [`cst_dump`] the S-expression dump.
+//! - **Options.** [`ParseOptions`] holds the profile switches the parser
+//!   reads (front matter, GFM tables, strikethrough and extended
+//!   autolinks); the default is CommonMark exactly.
 //! - **Changes.** A reparse reports the replaced window ([`Changes`]);
 //!   reports of consecutive reparses compose ([`Changes::compose`]).
 //!
@@ -53,10 +55,11 @@ pub mod html;
 pub mod incremental;
 pub mod inline;
 pub mod options;
+pub mod table;
 pub mod tree;
 
 pub use block::MAX_NESTING;
-pub use html::to_commonmark_html;
+pub use html::{GfmHtmlOptions, to_commonmark_html, to_gfm_html};
 pub use incremental::{Budget, Change, Changes, Reparse, ReparseTask};
 pub use options::{FrontMatterOptions, ParseOptions};
 pub use tree::event::{BlockId, BlockKind, Event, FrontMatterKind, Token, TokenKind};

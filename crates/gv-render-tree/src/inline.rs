@@ -174,6 +174,11 @@ impl Builder<'_, '_> {
                     });
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
+                // No strikethrough style yet: its text renders plain.
+                InlineKind::Strikethrough => {
+                    let saved = state;
+                    stack.push((node.children(), Some(Exit::Restore(saved))));
+                }
                 InlineKind::Link if state.alt.is_none() => {
                     let saved = state;
                     let link = self.link(&node);

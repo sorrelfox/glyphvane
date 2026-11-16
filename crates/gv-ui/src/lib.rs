@@ -15,6 +15,7 @@ pub mod latency;
 pub mod menu;
 pub mod metrics;
 pub mod palette;
+pub mod profile;
 pub mod reader;
 pub mod settings;
 pub mod shell;

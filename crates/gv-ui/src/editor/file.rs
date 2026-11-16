@@ -1127,7 +1127,8 @@ impl EditorView {
             NoticeAction::Close => cx.emit(DocEvent::CloseRequested),
             // Compare is not designed yet (its button is disabled); opening
             // a sync-conflict copy is the window's.
-            NoticeAction::Compare | NoticeAction::OpenCopy(_) => {}
+            // Switching the profile is the window's.
+            NoticeAction::Compare | NoticeAction::OpenCopy(_) | NoticeAction::SwitchProfile => {}
         }
     }
 

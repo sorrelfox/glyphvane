@@ -8,7 +8,8 @@
 //! chunked text source with 1-31-byte chunks, reparses paused after every
 //! slice and resumed (with the interim tree validated), multi-edit
 //! transactions through `gv_text::Buffer`, front matter enabled (documents
-//! that start with front matter or something close to it).
+//! that start with front matter or something close to it), the GFM
+//! extensions enabled (documents with table fragments).
 //!
 //! Also randomized here, on the same documents and edits: range walks
 //! equal the full walk restricted to the range (on fresh, reparsed and
@@ -149,11 +150,31 @@ const FRONT_MATTER: &[&str] = &[
     "--\n",
 ];
 
+/// GFM table rows, delimiter rows and near misses, and inline extensions.
+const TABLES: &[&str] = &[
+    "| a | b |\n",
+    "| - | - |\n",
+    "|---|:-:|\n",
+    "a | b\n",
+    "--|--\n",
+    "| x |\n",
+    "-:\n",
+    "|\n",
+    "||\n",
+    "| a \\| b |\n",
+    "- | -\n",
+    ":-:\n",
+    "| a | b |\n|---|---|\n| c | d |\n",
+    "> | a |\n> | - |\n",
+    "[t]: /u\n| h |\n| - |\n",
+    "~~strike~~ www.x.com a@b.co\n",
+];
+
 /// Strings typed or pasted by edits.
 const TYPED: &[&str] = &[
     "x", " ", "\n", "\r", "\r\n", "\t", ">", "-", "*", "+", "#", "`", "```", "~~~", "1.", "2)",
     "[", "]", ":", "=", "<", "<div>", "    ", "> ", "- ", "\u{e9}", "\n\n", "]: /u", "-->", "\"",
-    "---", "\n---\n", "...", "+++\n",
+    "---", "\n---\n", "...", "+++\n", "|", "| - |",
 ];
 
 fn fragment() -> impl Strategy<Value = String> {
@@ -167,9 +188,24 @@ fn document(max: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(fragment(), 0..max).prop_map(|v| v.concat())
 }
 
+/// A document for GFM tests: the usual fragments and table fragments.
+fn gfm_document(max: usize) -> impl Strategy<Value = String> {
+    let piece = prop_oneof![
+        2 => fragment(),
+        1 => select(TABLES).prop_map(String::from),
+    ];
+    prop::collection::vec(piece, 0..max).prop_map(|v| v.concat())
+}
+
 /// A document for front matter tests.
 fn fm_document(max: usize) -> impl Strategy<Value = String> {
     (select(FRONT_MATTER), document(max)).prop_map(|(start, rest)| format!("{start}{rest}"))
+}
+
+/// The options of the `gfm-file` profile (YAML front matter, tables,
+/// strikethrough, extended autolinks).
+fn gfm() -> ParseOptions {
+    ParseOptions::for_profile("gfm-file").expect("built-in profile")
 }
 
 /// The options of the `extended` profile (YAML and TOML front matter).
@@ -316,6 +352,26 @@ proptest! {
     #[test]
     fn front_matter_trace(doc in fm_document(30), ops in prop::collection::vec(op(), 50..120), seed in 0usize..1000) {
         run_trace_with(&doc, &ops, seed, extended())?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: env_u32("GV_PROP_SINGLE", 2000), ..ProptestConfig::default() })]
+
+    /// One random edit on a random document, GFM extensions enabled.
+    #[test]
+    fn gfm_single_edit(doc in gfm_document(40), op in op(), seed in 0usize..1000) {
+        run_trace_with(&doc, &[op], seed, gfm())?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: env_u32("GV_PROP_TRACES", 100), ..ProptestConfig::default() })]
+
+    /// Traces of consecutive edits with the GFM extensions enabled.
+    #[test]
+    fn gfm_trace(doc in gfm_document(60), ops in prop::collection::vec(op(), 100..200), seed in 0usize..1000) {
+        run_trace_with(&doc, &ops, seed, gfm())?;
     }
 }
 
@@ -507,12 +563,12 @@ proptest! {
     /// interim trees of paused reparses.
     #[test]
     fn range_walks(
-        doc in fm_document(40),
+        doc in (select(FRONT_MATTER), gfm_document(40)).prop_map(|(a, b)| format!("{a}{b}")),
         ops in prop::collection::vec(op(), 0..4),
         picks in prop::collection::vec((any::<Index>(), prop_oneof![Just(0usize), Just(1), 2usize..40, 40usize..400]), 1..8),
-        fm in any::<bool>(),
+        profile in 0usize..3,
     ) {
-        let options = if fm { extended() } else { ParseOptions::default() };
+        let options = [ParseOptions::default(), extended(), gfm()][profile];
         let mut text = doc;
         let mut tree = SyntaxTree::parse_with(text.as_str(), options);
         check_range_walks(&tree, &text, &picks)?;

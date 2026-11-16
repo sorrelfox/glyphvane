@@ -196,6 +196,7 @@ fn feature_snapshots() {
     let fm = "---\ntitle: A\ntags: [x, y]\n---\nBody\n";
     let parse = ParseOptions {
         front_matter: FrontMatterOptions::YAML,
+        ..ParseOptions::default()
     };
     for display in [FrontMatterDisplay::Properties, FrontMatterDisplay::Hidden] {
         let opts = RenderOptions {

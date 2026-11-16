@@ -1,0 +1,12 @@
+fraction       w=4.049 h=1.371 d=0.930 fills=11 strokes=0 texts=0
+sum_display    w=11.230 h=1.731 d=1.358 fills=22 strokes=0 texts=0
+sum_inline     w=3.152 h=0.814 d=0.300 fills=7 strokes=0 texts=0
+integral       w=7.948 h=1.477 d=0.911 fills=15 strokes=0 texts=0
+matrix         w=3.521 h=1.450 d=0.950 fills=6 strokes=0 texts=0
+cases          w=8.840 h=1.750 d=1.250 fills=15 strokes=0 texts=0
+delimiters     w=4.117 h=1.750 d=1.250 fills=8 strokes=0 texts=0
+accents        w=7.924 h=0.883 d=0.194 fills=14 strokes=0 texts=0
+colors         w=4.447 h=0.731 d=0.300 fills=6 strokes=0 texts=0
+mhchem         w=8.836 h=0.683 d=0.150 fills=11 strokes=0 texts=0
+text_cyrillic  w=3.098 h=0.431 d=0.194 fills=2 strokes=0 texts=3
+dashed_array   w=1.529 h=1.450 d=0.950 fills=3 strokes=0 texts=0

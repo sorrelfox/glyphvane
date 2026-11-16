@@ -28,6 +28,9 @@ pub(crate) type StateId = u32;
 /// The empty stack (only the document is open).
 pub(crate) const ROOT: StateId = 0;
 
+/// [`Kind::Paragraph`] `cells` after a delimiter row that did not match.
+pub(crate) const TABLE_VISITED: u16 = u16::MAX;
+
 /// Reference-definition status of an open paragraph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RefMode {
@@ -71,9 +74,18 @@ pub(crate) enum Kind {
     Html {
         ty: u8,
     },
+    /// `cells`: with GFM tables, the number of cells of the paragraph's
+    /// last line read as a table row (0 if it is not one), the count a
+    /// delimiter row on the next line must match; [`TABLE_VISITED`] once a
+    /// delimiter row failed to match (cmark-gfm then never tries again in
+    /// this paragraph). Always 0 without tables.
     Paragraph {
         refs: RefMode,
+        cells: u16,
     },
+    /// A GFM table (a text block whose delimiter row matched). It continues
+    /// on every line that is a table row, unless another block starts.
+    Table,
     /// ATX or setext heading. Like cmark, it stays open until the next line
     /// closes it.
     Heading,

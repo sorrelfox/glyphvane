@@ -31,19 +31,22 @@
 //! - `cmark:` cases are cmark's `test/pathological_tests.py` (0.31), with
 //!   the same 2n sizes and output checks;
 //! - `block:` cases stress the block pass (deep containers, long lines,
-//!   unclosed fences and comments, long lists, reference definitions).
+//!   unclosed fences and comments, long lists, reference definitions);
+//! - `gfm:` cases run through the GFM renderer with every extension on
+//!   (long and wide tables, delimiter-like lines, tilde runs, autolink
+//!   triggers); the comrak engine skips them.
 //!
-//! TODO(profiles): the profile-specific extras of the test plan (10k `[[` on
-//! one line, an unclosed `%%` at the top, 10k footnotes, a 100k-row table,
-//! 1 MB front matter, 10k `$` signs, embed fan-out) need the Obsidian and GFM
-//! renderers; add them as `profile:` cases when those exist.
+//! TODO(profiles): the other profile-specific extras of the test plan (10k
+//! `[[` on one line, an unclosed `%%` at the top, 10k footnotes, 1 MB front
+//! matter, 10k `$` signs, embed fan-out) need the Obsidian renderer; add
+//! them as `profile:` cases when it exists.
 
 mod support;
 
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use gv_syntax::harness::{IS_PLACEHOLDER, render_commonmark_html};
+use gv_syntax::harness::{IS_PLACEHOLDER, render_commonmark_html, render_gfm_html};
 
 type Make = fn(usize) -> String;
 type Check = fn(&str, usize) -> bool;
@@ -479,6 +482,92 @@ fn cases() -> Vec<Case> {
     ]
 }
 
+/// GFM shapes, rendered with every extension (see [`render_gfm`]).
+fn gfm_cases() -> Vec<Case> {
+    vec![
+        case(
+            "gfm: many table rows",
+            50_000,
+            |k| format!("| a | b |\n| - | - |\n{}", "| x | y |\n".repeat(k)),
+            Some(|o, k| o.matches("<td>x</td>").count() == k),
+        ),
+        case(
+            "gfm: wide header, one-cell rows",
+            2_000,
+            |k| {
+                format!(
+                    "{}\n{}\n{}",
+                    "|a".repeat(k),
+                    "|-".repeat(k),
+                    "x\n".repeat(k)
+                )
+            },
+            None,
+        ),
+        case(
+            "gfm: delimiter-like lines in one paragraph",
+            50_000,
+            |k| format!("a | b\n{}", "--- |\nc | d\n".repeat(k)),
+            None,
+        ),
+        case(
+            "gfm: paragraph lines that are rows",
+            50_000,
+            |k| "| a | b | c |\n".repeat(k),
+            None,
+        ),
+        case(
+            "gfm: unclosed single tildes",
+            16_250,
+            |k| "~a ".repeat(k),
+            Some(|o, k| o.contains(&format!("{}~a", "~a ".repeat(k - 1)))),
+        ),
+        case(
+            "gfm: nested strikethrough and emphasis",
+            16_250,
+            |k| format!("{}b{}", "~~a *a ".repeat(k), " a* a~~".repeat(k)),
+            None,
+        ),
+        case(
+            "gfm: www after underscores",
+            50_000,
+            |k| "_www.a_".repeat(k),
+            None,
+        ),
+        case(
+            "gfm: www triggers that fail",
+            50_000,
+            |k| "(www.a_b.c ".repeat(k),
+            None,
+        ),
+        case(
+            "gfm: scheme triggers",
+            50_000,
+            |k| "http:/ http://a_b.c_d ".repeat(k),
+            None,
+        ),
+        case("gfm: a run of @", 200_000, |k| "@".repeat(k), None),
+        case("gfm: @ between letters", 100_000, |k| "a@".repeat(k), None),
+        case(
+            "gfm: emails in nested emphasis",
+            16_250,
+            |k| format!("{}a@b.c{}", "*x ".repeat(k), " x*".repeat(k)),
+            None,
+        ),
+        case(
+            "gfm: long email local parts",
+            100,
+            |k| format!("{}@b", "a.".repeat(10_000)).repeat(k),
+            None,
+        ),
+    ]
+}
+
+/// Renders with the GFM renderer and every extension on.
+fn render_gfm(src: &str) -> String {
+    render_gfm_html(src, &["table", "strikethrough", "autolink", "tagfilter"])
+}
+
 fn fixed_cases() -> Vec<Fixed> {
     vec![
         Fixed {
@@ -516,7 +605,7 @@ fn time(render: fn(&str) -> String, input: &str, runs: usize) -> (f64, String) {
 }
 
 /// Runs every case through `render`; panics listing the failures.
-fn run_suite(engine: &str, render: fn(&str) -> String) {
+fn run_suite(engine: &str, render: fn(&str) -> String, cases: Vec<Case>, fixed: Vec<Fixed>) {
     let filter = std::env::var("GV_PATHOLOGICAL_FILTER").unwrap_or_default();
     let is_comrak = engine == "comrak";
     // comrak sits at 2.0-2.7 on several shapes (it is not tuned for this
@@ -534,7 +623,7 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
     println!("\nPathological inputs, engine {engine}, max normalized ratio {max_ratio}\n");
     println!("| Case | bytes n | ms | bytes 2n | ms | ratio | output |");
     println!("|---|---:|---:|---:|---:|---:|---|");
-    for c in cases().iter().filter(|c| c.name.contains(filter.as_str())) {
+    for c in cases.iter().filter(|c| c.name.contains(filter.as_str())) {
         // Grow the input until the 2n run is long enough to time reliably
         // (fast engines finish cmark's sizes in well under a millisecond).
         let mut n = c.n;
@@ -615,10 +704,7 @@ fn run_suite(engine: &str, render: fn(&str) -> String) {
             tb * 1e3,
         );
     }
-    for f in fixed_cases()
-        .iter()
-        .filter(|f| f.name.contains(filter.as_str()))
-    {
+    for f in fixed.iter().filter(|f| f.name.contains(filter.as_str())) {
         let out = render(f.input);
         let ok = (f.check)(&out);
         if !ok {
@@ -641,20 +727,26 @@ fn pathological_gv_syntax() {
         println!("pathological_gv_syntax: skipped, gv-syntax's renderer is a placeholder");
         return;
     }
-    run_suite("gv-syntax", render_commonmark_html);
+    run_suite("gv-syntax", render_commonmark_html, cases(), fixed_cases());
+    run_suite("gv-syntax (GFM)", render_gfm, gfm_cases(), Vec::new());
 }
 
 #[test]
 #[ignore = "timing suite; run with `cargo xtask pathological --engine comrak` (release build)"]
 fn pathological_comrak() {
-    run_suite("comrak", support::comrak_commonmark_html);
+    run_suite(
+        "comrak",
+        support::comrak_commonmark_html,
+        cases(),
+        fixed_cases(),
+    );
 }
 
 /// Every generator runs at a small size, and the output matchers accept
 /// what they should (cheap; runs on every `cargo test`).
 #[test]
 fn generators_and_matchers() {
-    for c in cases() {
+    for c in cases().into_iter().chain(gfm_cases()) {
         let small = (c.make)((c.n / 1000).max(3));
         assert!(!small.is_empty(), "{}", c.name);
     }

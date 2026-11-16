@@ -210,6 +210,21 @@ impl Syntax {
         None
     }
 
+    /// Replaces the tree with a full parse of the current text (another
+    /// profile's options). Returns `false`, changing nothing, while a
+    /// reparse is running.
+    pub fn reparse_all(&mut self, options: gv_syntax::ParseOptions) -> bool {
+        if self.running {
+            return false;
+        }
+        self.tree = SyntaxTree::parse_with(&self.text, options);
+        self.shown = (self.tree.clone(), self.text.clone());
+        self.generation += 1;
+        // The next hand-off starts over, as for a new document.
+        self.handed = None;
+        true
+    }
+
     /// A background reparse finished with the tree of `text`.
     pub fn finished(&mut self, tree: SyntaxTree, text: TextSnapshot, changes: &Changes) {
         self.note(changes);

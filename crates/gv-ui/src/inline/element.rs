@@ -462,6 +462,23 @@ impl Painter<'_> {
                 );
             }
             Some(BoxContent::Blank) => {}
+            Some(BoxContent::Math {
+                layout,
+                em,
+                color,
+                text_font,
+            }) => {
+                let current = self.palette.role(*color);
+                super::math::paint_math(
+                    self.window,
+                    self.cx,
+                    layout,
+                    bounds.origin,
+                    *em,
+                    current,
+                    text_font,
+                );
+            }
             None => match b.kind {
                 BoxKind::Checkbox { checked } => self.paint_checkbox(bounds, checked),
                 BoxKind::Math | BoxKind::Image | BoxKind::Other => self.paint_placeholder(bounds),

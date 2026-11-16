@@ -10,6 +10,11 @@
 //!   soft wrap it is laid out at [`NO_WRAP`] and scrolls sideways.
 //! - Front matter lines become a paragraph in the properties style, keys in
 //!   `text.secondary`.
+//! - A display math block becomes a centred paragraph of one math box,
+//!   typeset by the shared [`math_engine`] with the document's macros
+//!   (MathJax scope: definitions flow to later formulas). A formula that
+//!   does not render shows the error in `status.error` above its source in
+//!   the code style.
 //! - Thematic breaks, empty list items and empty quotes have fixed heights.
 //!
 //! Paragraph source offsets are relative to the node's start, as in the
@@ -21,11 +26,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use gpui::WindowTextSystem;
 use gpui::assets::IconName;
-use gv_inline::{Affinity, Bias, Paragraph, ParagraphBuilder};
+use gv_inline::{Affinity, Align, Bias, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
+use gv_math::{MacroLimits, MacroPass, MacroSet, MathEngine};
 use gv_render_tree::{
     BlockNode, BoxRef, CodeBlock, ColorToken, InlineContent, Item, ItemId, ItemKind, LinkSuffix,
     Metrics, NodeKind, RenderTree, StatusIcon, StyleTable, TextRole, Variant, link_decor,
@@ -201,10 +207,21 @@ pub(crate) fn code_paragraph(
     styles: &StyleTable,
 ) -> Paragraph {
     let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Code));
-    let style = styles.run_style(TextRole::Code, Variant::PLAIN);
     if let Some(first) = code.lines.get(lines.start) {
         b.source_anchor(first.source.start);
     }
+    push_code_lines(&mut b, code, lines, styles);
+    b.build()
+}
+
+/// Appends code lines `lines` of `code`, separated by hard breaks.
+fn push_code_lines(
+    b: &mut ParagraphBuilder,
+    code: &CodeBlock,
+    lines: Range<usize>,
+    styles: &StyleTable,
+) {
+    let style = styles.run_style(TextRole::Code, Variant::PLAIN);
     let first_line = lines.start;
     for i in lines {
         let Some(line) = code.lines.get(i) else {
@@ -216,14 +233,13 @@ pub(crate) fn code_paragraph(
             b.hard_break(prev.source.end..line.start.max(prev.source.end));
         }
         push_code_line(
-            &mut b,
+            b,
             code.line(i),
             usize::from(line.indent),
             line.source.clone(),
             style,
         );
     }
-    b.build()
 }
 
 /// The paragraph of front matter lines: `key:` in `text.secondary`, the
@@ -261,6 +277,84 @@ fn properties_paragraph(code: &CodeBlock, lines: Range<usize>, styles: &StyleTab
         }
     }
     b.build()
+}
+
+/// Display math is this much larger than the body text (KaTeX's 1.21).
+const MATH_SCALE: f32 = 1.21;
+
+/// The process-wide math engine: its layout cache is shared by every view
+/// (layouts are in em and theme-independent).
+pub(crate) fn math_engine() -> &'static MathEngine {
+    static ENGINE: OnceLock<MathEngine> = OnceLock::new();
+    ENGINE.get_or_init(MathEngine::default)
+}
+
+/// The macros in force for math node `node`: those defined by the math
+/// nodes before it, in document order.
+fn math_macros(tree: &RenderTree, node: &BlockNode) -> MacroSet {
+    let mut pass = MacroPass::new(MacroLimits::default());
+    for n in tree.nodes() {
+        if let NodeKind::Math(code) = &n.kind {
+            let set = pass.next(&code.text);
+            if n.id == node.id {
+                return set;
+            }
+        }
+    }
+    MacroSet::empty()
+}
+
+/// The block of a display math item: one centred math box, or the error
+/// above the source.
+fn math_block(tree: &RenderTree, node: &BlockNode, code: &CodeBlock) -> InlineBlock {
+    let styles = &tree.options().styles;
+    let macros = math_macros(tree, node);
+    let source = match (code.lines.first(), code.lines.last()) {
+        (Some(a), Some(b)) => a.source.start..b.source.end.max(a.source.start),
+        _ => 0..0,
+    };
+    match math_engine().render(&code.text, true, &macros) {
+        Ok(layout) => {
+            let em = styles.role(TextRole::Body).size * MATH_SCALE;
+            let style = styles
+                .paragraph_style(TextRole::Body)
+                .with_align(Align::Center);
+            let mut b = ParagraphBuilder::new(style);
+            b.inline_box(
+                InlineBox::new(
+                    BoxKind::Math,
+                    layout.width * em,
+                    layout.height * em,
+                    layout.depth * em,
+                ),
+                source,
+            );
+            let mut block = InlineBlock::new(Arc::new(b.build()));
+            block.set_box_content(
+                0,
+                BoxContent::Math {
+                    layout,
+                    em,
+                    color: ColorToken::TextPrimary.role(),
+                    text_font: gpui::font(crate::metrics::font::SYSTEM_FALLBACK),
+                },
+            );
+            block
+        }
+        Err(e) => {
+            let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Code));
+            let style = styles
+                .run_style(TextRole::Code, Variant::PLAIN)
+                .with_color(ColorToken::StatusError.role());
+            b.source_anchor(source.start);
+            b.text(&e.to_string(), style, source.start..source.start);
+            if !code.lines.is_empty() {
+                b.hard_break(source.start..source.start);
+                push_code_lines(&mut b, code, 0..code.lines.len(), styles);
+            }
+            InlineBlock::new(Arc::new(b.build()))
+        }
+    }
 }
 
 /// The text block of an item, if it has text.
@@ -328,8 +422,11 @@ impl ItemCache {
             return c.block.clone();
         }
         let node = tree.node_of(ix)?;
-        let block =
-            make_block(item, node, &tree.options().styles).map(|b| Rc::new(RefCell::new(b)));
+        let block = match &node.kind {
+            NodeKind::Math(code) => Some(math_block(tree, node, code)),
+            _ => make_block(item, node, &tree.options().styles),
+        }
+        .map(|b| Rc::new(RefCell::new(b)));
         if block.is_some() {
             self.built += 1;
         }
@@ -505,6 +602,61 @@ mod tests {
             gv_render_tree::RenderOptions::commonmark(),
             gv_render_tree::Sources::default(),
         )
+    }
+
+    fn math_tree(md: &str) -> RenderTree {
+        let syntax = gv_syntax::parse(md);
+        let model = gv_model::DocModel::build(&syntax, md);
+        RenderTree::build(
+            &syntax,
+            &model,
+            md,
+            gv_render_tree::RenderOptions::for_profile("gfm-file"),
+            gv_render_tree::Sources::default(),
+        )
+    }
+
+    fn math_items(t: &RenderTree) -> Vec<Rc<RefCell<InlineBlock>>> {
+        let mut cache = ItemCache::default();
+        (0..t.items().len())
+            .filter(|&ix| matches!(t.items()[ix].kind, ItemKind::Math { .. }))
+            .map(|ix| cache.block(t, ix).expect("a math block"))
+            .collect()
+    }
+
+    #[test]
+    fn math_fences_become_one_centred_math_box() {
+        let md =
+            "```math\n\\newcommand{\\RR}{\\mathbb{R}}\\RR\n```\n\n```math\nx \\in \\RR^n\n```\n";
+        let t = math_tree(md);
+        let blocks = math_items(&t);
+        assert_eq!(blocks.len(), 2);
+        let body = t.options().styles.role(TextRole::Body).size;
+        for block in &blocks {
+            let block = block.borrow();
+            let p = block.paragraph();
+            assert_eq!(p.style().align, Align::Center);
+            let b = p.items()[0].inline_box().expect("a math box");
+            assert_eq!(b.kind, BoxKind::Math);
+            // At least the width of one display-size glyph.
+            assert!(b.width > body * 0.5 && b.ascent > 0.0, "{b:?}");
+            let Some(BoxContent::Math { layout, em, .. }) = block.box_content(0) else {
+                panic!("math content")
+            };
+            assert!((layout.width * em - b.width).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn a_formula_that_fails_shows_the_error_above_its_source() {
+        let md = "```math\n\\frac{1}{2\n```\n";
+        let t = math_tree(md);
+        let blocks = math_items(&t);
+        let block = blocks[0].borrow();
+        assert!(block.box_content(0).is_none());
+        let text = block.paragraph().text().to_owned();
+        assert!(text.ends_with("\n\\frac{1}{2"), "{text:?}");
+        assert!(text.len() > "\\frac{1}{2".len() + 10, "{text:?}");
     }
 
     fn code_item(t: &RenderTree) -> usize {

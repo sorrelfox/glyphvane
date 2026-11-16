@@ -10,13 +10,31 @@ use super::api::InlineTree;
 use super::scan;
 use super::tree::{InlineKind as K, LinkKind, Node, TextProjection};
 
+/// Switches of [`render`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RenderOptions {
+    /// cmark-gfm's renderer: no tags for a strong emphasis whose parent is
+    /// a strong emphasis.
+    pub(super) gfm: bool,
+    /// The GFM tagfilter on raw HTML.
+    pub(super) tagfilter: bool,
+}
+
+impl RenderOptions {
+    pub(super) const COMMONMARK: RenderOptions = RenderOptions {
+        gfm: false,
+        tagfilter: false,
+    };
+}
+
 /// Renders `tree` as HTML into `out`.
-pub(super) fn render(tree: &InlineTree, out: &mut String) {
+pub(super) fn render(tree: &InlineTree, out: &mut String, opts: RenderOptions) {
     let nodes = &tree.nodes;
-    let mut closers: Vec<(u32, &'static str)> = Vec::new();
+    // Open elements: where they end, their closing tag, their kind.
+    let mut closers: Vec<(u32, &'static str, K)> = Vec::new();
     let mut i = 0usize;
     while i < nodes.len() {
-        while let Some(&(end, tag)) = closers.last() {
+        while let Some(&(end, tag, _)) = closers.last() {
             if end as usize > i {
                 break;
             }
@@ -33,11 +51,19 @@ pub(super) fn render(tree: &InlineTree, out: &mut String) {
             K::HardBreak => out.push_str("<br />\n"),
             K::Emphasis => {
                 out.push_str("<em>");
-                closers.push((n.next, "</em>"));
+                closers.push((n.next, "</em>", K::Emphasis));
             }
             K::Strong => {
-                out.push_str("<strong>");
-                closers.push((n.next, "</strong>"));
+                if opts.gfm && closers.last().is_some_and(|c| c.2 == K::Strong) {
+                    closers.push((n.next, "", K::Strong));
+                } else {
+                    out.push_str("<strong>");
+                    closers.push((n.next, "</strong>", K::Strong));
+                }
+            }
+            K::Strikethrough => {
+                out.push_str("<del>");
+                closers.push((n.next, "</del>", K::Strikethrough));
             }
             K::CodeSpan => {
                 out.push_str("<code>");
@@ -56,7 +82,7 @@ pub(super) fn render(tree: &InlineTree, out: &mut String) {
                         out.push('"');
                     }
                     out.push('>');
-                    closers.push((n.next, "</a>"));
+                    closers.push((n.next, "</a>", K::Link));
                 }
             }
             K::Image => {
@@ -77,20 +103,24 @@ pub(super) fn render(tree: &InlineTree, out: &mut String) {
             }
             K::Autolink => {
                 if let Some(l) = tree.links.get(n.data as usize) {
-                    let address = tree.str(l.dest);
                     out.push_str("<a href=\"");
                     if l.kind == LinkKind::EmailAutolink {
                         out.push_str("mailto:");
                     }
-                    escape_href(out, address);
+                    escape_href(out, tree.str(l.dest));
                     out.push_str("\">");
-                    escape_html(out, address);
+                    escape_html(out, tree.autolink_text(l));
                     out.push_str("</a>");
                 }
                 next = n.next as usize;
             }
             K::RawHtml => {
-                push_raw(out, tree.slice(n.start, n.end));
+                let raw = tree.slice(n.start, n.end);
+                if opts.tagfilter {
+                    push_filtered(out, raw);
+                } else {
+                    push_raw(out, raw);
+                }
                 next = n.next as usize;
             }
             K::Whitespace
@@ -104,9 +134,57 @@ pub(super) fn render(tree: &InlineTree, out: &mut String) {
         }
         i = next;
     }
-    while let Some((_, tag)) = closers.pop() {
+    while let Some((_, tag, _)) = closers.pop() {
         out.push_str(tag);
     }
+}
+
+/// The tags the GFM tagfilter disallows.
+const DISALLOWED_TAGS: [&[u8]; 9] = [
+    b"title",
+    b"textarea",
+    b"style",
+    b"xmp",
+    b"iframe",
+    b"noembed",
+    b"noframes",
+    b"script",
+    b"plaintext",
+];
+
+/// cmark-gfm's `is_tag` of the tagfilter: whether `s` (from a `<` to the
+/// end of the raw HTML) opens or closes a disallowed tag.
+fn is_disallowed_tag(s: &[u8]) -> bool {
+    if s.len() < 3 || s[0] != b'<' {
+        return false;
+    }
+    let start = if s[1] == b'/' { 2 } else { 1 };
+    DISALLOWED_TAGS.iter().any(|name| {
+        let end = start + name.len();
+        if end >= s.len() || !s[start..end].eq_ignore_ascii_case(name) {
+            return false;
+        }
+        match s[end] {
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C | b'>' => true,
+            b'/' => s.get(end + 1) == Some(&b'>'),
+            _ => false,
+        }
+    })
+}
+
+/// Appends raw HTML with the GFM tagfilter applied: the `<` of every
+/// disallowed tag becomes `&lt;`. U+0000 is replaced.
+pub(crate) fn push_filtered(out: &mut String, s: &str) {
+    let b = s.as_bytes();
+    let mut copied = 0;
+    for i in memchr::memchr_iter(b'<', b) {
+        if is_disallowed_tag(&b[i..]) {
+            push_raw(out, &s[copied..i]);
+            out.push_str("&lt;");
+            copied = i + 1;
+        }
+    }
+    push_raw(out, &s[copied..]);
 }
 
 /// Appends the plain text of the nodes `from..to` (cmark's rendering of an
@@ -150,12 +228,13 @@ pub(super) fn plain_text(
             }
             K::Autolink => {
                 if let Some(l) = tree.links.get(n.data as usize) {
-                    push(out, tree.str(l.dest));
+                    push(out, tree.autolink_text(l));
                 }
                 next = n.next as usize;
             }
             K::Emphasis
             | K::Strong
+            | K::Strikethrough
             | K::Link
             | K::Image
             | K::Whitespace
@@ -196,7 +275,7 @@ pub(super) fn project(
             }
             K::Autolink => {
                 if let Some(l) = tree.links.get(n.data as usize) {
-                    push_raw(out, tree.str(l.dest));
+                    push_raw(out, tree.autolink_text(l));
                 }
                 next = n.next as usize;
             }
@@ -206,6 +285,7 @@ pub(super) fn project(
             // nothing.
             K::Emphasis
             | K::Strong
+            | K::Strikethrough
             | K::Link
             | K::Image
             | K::Whitespace
@@ -274,7 +354,7 @@ pub(super) fn escape_html(out: &mut String, s: &str) {
 }
 
 /// Appends `s` unescaped, with U+0000 replaced.
-fn push_raw(out: &mut String, s: &str) {
+pub(crate) fn push_raw(out: &mut String, s: &str) {
     let mut parts = s.split('\0');
     if let Some(first) = parts.next() {
         out.push_str(first);
@@ -368,6 +448,22 @@ mod tests {
         assert_eq!(h("%zz"), "%25zz");
         assert_eq!(h("/[x]\\"), "/%5Bx%5D%5C");
         assert_eq!(h("\0"), "%EF%BF%BD");
+    }
+
+    #[test]
+    fn tagfilter() {
+        let f = |s: &str| {
+            let mut out = String::new();
+            push_filtered(&mut out, s);
+            out
+        };
+        assert_eq!(f("<title>"), "&lt;title>");
+        assert_eq!(f("</SCRIPT >"), "&lt;/SCRIPT >");
+        assert_eq!(f("<xmp/>"), "&lt;xmp/>");
+        assert_eq!(f("<xmp/"), "<xmp/");
+        assert_eq!(f("<titles>"), "<titles>");
+        assert_eq!(f("<style"), "<style");
+        assert_eq!(f("a <em> <iframe\n>"), "a <em> &lt;iframe\n>");
     }
 
     #[test]

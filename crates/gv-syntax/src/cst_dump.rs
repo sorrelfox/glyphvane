@@ -29,8 +29,9 @@
 //! - **Blocks** are written as `(kind attributes start..end` with these
 //!   kinds and attributes: `block-quote`; `bullet-list "-" tight|loose`;
 //!   `ordered-list START "." tight|loose`; `item`; `text` followed by what
-//!   the text block resolves to (`paragraph`, `heading N`, or `empty` when
-//!   it holds only link reference definitions); `atx-heading N`;
+//!   the text block resolves to (`paragraph`, `heading N`, `table`,
+//!   `paragraph table`, or `empty` when it holds only link reference
+//!   definitions); `atx-heading N`;
 //!   `thematic-break`; `fenced-code`; `indented-code`; `html N` (the start
 //!   condition); `front-matter yaml|toml`.
 //! - **Tokens** are `(kind start..end "bytes")`, with `+N` before the bytes
@@ -39,7 +40,8 @@
 //!   `list-marker`, `code-indent`, `marker`, `info`, `content`,
 //!   `line-ending`. Bytes are written as a Rust string literal (`{:?}`).
 //! - **Markers** are `(refdef N)` (the next N content lines of the text
-//!   block are one link reference definition), `(setext N)` and `(loosen)`.
+//!   block are one link reference definition), `(setext N)`, `(loosen)` and
+//!   `(table-header)`.
 //! - **Inlines**: the paragraph or heading of a text block, and an ATX
 //!   heading, end with `(inlines` and the inline module's dump of their
 //!   content, one S-expression per line.
@@ -85,6 +87,14 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
             match leaf.kind {
                 LeafKind::Paragraph => r.text = Some(String::from("paragraph")),
                 LeafKind::Heading { level, .. } => r.text = Some(format!("heading {level}")),
+                LeafKind::Table => {
+                    r.text = Some(if r.text.as_deref() == Some("paragraph") {
+                        String::from("paragraph table")
+                    } else {
+                        String::from("table")
+                    });
+                    return;
+                }
                 LeafKind::LinkRefDef => {
                     if r.text.is_none() {
                         r.text = Some(String::from("empty"));
@@ -187,6 +197,9 @@ pub fn cst_dump<S: TextSource + ?Sized>(tree: &SyntaxTree, text: &S) -> String {
             }
             Event::Loosen => {
                 let _ = writeln!(out, "{indent}(loosen)");
+            }
+            Event::TableHeader => {
+                let _ = writeln!(out, "{indent}(table-header)");
             }
         }
     }

@@ -36,13 +36,18 @@ pub enum InlineKind {
     Emphasis,
     /// `**x**` or `__x__`: a marker, the content, a marker.
     Strong,
+    /// `~x~` or `~~x~~` (GFM strikethrough): a marker, the content, a
+    /// marker.
+    Strikethrough,
     /// A link: `[` marker, the link text, `]` marker, then the destination,
     /// title or label syntax.
     Link,
     /// An image: `![` marker, the description, `]` marker, then the
     /// destination, title or label syntax.
     Image,
-    /// `<scheme:…>` or `<address@example.com>`: marker, text, marker.
+    /// `<scheme:…>` or `<address@example.com>`: marker, text, marker. A GFM
+    /// extended autolink (`www.example.com`, `https://…`, a bare email
+    /// address) has only the text.
     Autolink,
     /// Raw inline HTML: one or more [`HtmlText`](Self::HtmlText) tokens.
     RawHtml,
@@ -92,6 +97,7 @@ impl InlineKind {
             Self::CodeSpan => "CodeSpan",
             Self::Emphasis => "Emphasis",
             Self::Strong => "Strong",
+            Self::Strikethrough => "Strikethrough",
             Self::Link => "Link",
             Self::Image => "Image",
             Self::Autolink => "Autolink",
@@ -221,6 +227,9 @@ pub(super) struct LinkData {
     /// Gathered range of the label as written (reference links: the text of
     /// the second bracket pair, or the link text).
     pub(super) label_raw: Option<(u32, u32)>,
+    /// A GFM extended autolink: its text is `text` as written (the
+    /// destination may differ, as `http://` + `www.…`).
+    pub(super) ext: bool,
 }
 
 /// One segment: where its bytes start in the gathered text and in the
@@ -233,11 +242,14 @@ pub(super) struct Seg {
 }
 
 /// The segment map: one segment inline (most leaves are one line), or
-/// several on the heap.
+/// several on the heap. `Joined` segments are pieces of one run of text
+/// (a table cell around the backslashes removed before its pipes): tokens
+/// may span them.
 #[derive(Clone, Debug)]
 pub(super) enum Segs {
     One(Seg),
     Many(Vec<Seg>),
+    Joined(Vec<Seg>),
 }
 
 impl Default for Segs {
@@ -250,7 +262,16 @@ impl Segs {
     pub(super) fn as_slice(&self) -> &[Seg] {
         match self {
             Self::One(seg) => std::slice::from_ref(seg),
-            Self::Many(segs) => segs,
+            Self::Many(segs) | Self::Joined(segs) => segs,
+        }
+    }
+
+    /// The segments that tokens must not cross (all but the first start a
+    /// new line).
+    pub(super) fn lines(&self) -> &[Seg] {
+        match self {
+            Self::Joined(segs) => segs.get(..1).unwrap_or(&[]),
+            _ => self.as_slice(),
         }
     }
 }
@@ -300,6 +321,38 @@ pub(super) fn gather<S: TextSource + ?Sized>(src: &S, segments: &[Range<usize>])
     let segs = match one {
         Some(seg) => Segs::One(seg),
         None => Segs::Many(segs),
+    };
+    (into_string(buf), segs)
+}
+
+/// Copies the pieces into one buffer with nothing between them (the text
+/// of a table cell without the backslashes before its pipes) and builds the
+/// segment map.
+pub(super) fn gather_joined<S: TextSource + ?Sized>(
+    src: &S,
+    pieces: &[Range<usize>],
+) -> (String, Segs) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut segs = Vec::with_capacity(pieces.len());
+    let src_len = src.len();
+    for r in pieces {
+        let start = r.start.min(src_len);
+        let end = r.end.clamp(start, src_len);
+        if buf.len() + (end - start) > MAX_GATHERED {
+            break;
+        }
+        let g = buf.len();
+        src.copy_range(start..end, &mut buf);
+        segs.push(Seg {
+            g: g as u32,
+            src: start,
+            src_len: (buf.len() - g) as u32,
+        });
+    }
+    let segs = if segs.len() == 1 {
+        Segs::One(segs[0])
+    } else {
+        Segs::Joined(segs)
     };
     (into_string(buf), segs)
 }
@@ -559,6 +612,17 @@ impl InlineTree {
         match s {
             Str::Text(a, b) => self.slice(a, b),
             Str::Arena(a, b) => self.arena.get(a as usize..b as usize).unwrap_or(""),
+        }
+    }
+
+    /// The text an autolink shows: the address of a `<…>` autolink
+    /// (entity references decoded), the text as written of an extended
+    /// autolink.
+    pub(super) fn autolink_text(&self, l: &LinkData) -> &str {
+        if l.ext {
+            self.slice(l.text.0, l.text.1)
+        } else {
+            self.str(l.dest)
         }
     }
 

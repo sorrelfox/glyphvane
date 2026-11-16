@@ -462,6 +462,9 @@ impl Visitor for Leaves<'_, '_> {
                 self.table(leaf);
                 self.callout(leaf);
             }
+            // A GFM table: its lines are the header, the delimiter row and
+            // the body rows, as `table` expects.
+            LeafKind::Table => self.table(leaf),
             LeafKind::FencedCode => {
                 self.painter.code(leaf.range.clone());
                 let info = leaf
@@ -532,7 +535,7 @@ impl Leaves<'_, '_> {
                 };
                 node.children().for_each(|c| self.inline(c, ctx));
             }
-            InlineKind::CodeSpan => {
+            InlineKind::CodeSpan | InlineKind::Strikethrough => {
                 node.children().for_each(|c| self.inline(c, ctx));
             }
             // Raw HTML, or a comment (which may run over several lines).

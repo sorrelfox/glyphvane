@@ -28,8 +28,8 @@ use gv_settings::keymap::Platform;
 use crate::keymap::action_for;
 use model::{Entry, Role, SystemEntry};
 pub use model::{Item, Menu, MenuState};
-pub(crate) use popover::open_in_last_window;
 pub use popover::{DEBUG_APP_MENU_ENV, MenuButton, MenuPopover};
+pub(crate) use popover::{open_in_last_window, panel, row, separator};
 
 gpui::actions!(
     app_menu,

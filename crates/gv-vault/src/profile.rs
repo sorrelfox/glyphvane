@@ -7,7 +7,6 @@
 //! data in [`ProfileParams`]; the resolver has no per-profile branches
 //! beyond what these fields say.
 
-use std::fmt;
 use std::sync::Arc;
 
 /// How a profile names headings in fragments (the document model's enum).
@@ -18,40 +17,8 @@ use crate::path::VaultPath;
 use crate::repo::RepoContext;
 use crate::resolve::tiebreak::TieBreak;
 
-/// The 1.0 profiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProfileId {
-    /// CommonMark 0.31.2, no extensions.
-    CommonMark,
-    /// GitHub, file rendering (repository files).
-    GfmFile,
-    /// GitHub, comment rendering.
-    GfmComment,
-    /// Obsidian.
-    Obsidian,
-    /// The Extended superset (the default for loose folders).
-    Extended,
-}
-
-impl ProfileId {
-    /// The profile id string (`gfm-file`, …).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CommonMark => "commonmark",
-            Self::GfmFile => "gfm-file",
-            Self::GfmComment => "gfm-comment",
-            Self::Obsidian => "obsidian",
-            Self::Extended => "extended",
-        }
-    }
-}
-
-impl fmt::Display for ProfileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+/// The 1.0 profiles (the profile crate's names).
+pub use gv_profile::ProfileId;
 
 /// Where a bare path is looked up, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

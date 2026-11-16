@@ -10,6 +10,7 @@
 
 pub mod standalone;
 
+use gv_syntax::ParseOptions;
 use gv_syntax::harness::{self, TextEdit};
 
 /// Separates the document from the edit script in
@@ -40,12 +41,16 @@ pub fn roundtrip_lossless(data: &[u8]) {
 /// parse of the edited text.
 pub fn incremental_equals_full(data: &[u8]) {
     let (doc, edits) = decode_edits(data);
-    let incremental = harness::cst_dump_after_edits(&doc, &edits);
-    let full = harness::cst_dump(&harness::apply_edits(&doc, &edits));
-    assert!(
-        incremental == full,
-        "incremental != full\ndoc: {doc:?}\nedits: {edits:?}\nincremental:\n{incremental}\nfull:\n{full}"
-    );
+    let edited = harness::apply_edits(&doc, &edits);
+    // CommonMark, then the GFM extensions (tables change the block pass).
+    for options in [ParseOptions::COMMONMARK, ParseOptions::GFM] {
+        let incremental = harness::cst_dump_after_edits_with(&doc, &edits, options);
+        let full = harness::cst_dump_with(&edited, options);
+        assert!(
+            incremental == full,
+            "incremental != full ({options:?})\ndoc: {doc:?}\nedits: {edits:?}\nincremental:\n{incremental}\nfull:\n{full}"
+        );
+    }
 }
 
 /// Decodes `doc 0xFF (pos_lo pos_hi delete insert_len insert…)*`.

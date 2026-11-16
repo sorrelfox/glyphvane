@@ -197,6 +197,7 @@ fn front_matter() {
     let text = "---\ntitle: x\ntags: [a]\n---\n# Heading\nbody\n";
     let yaml = ParseOptions {
         front_matter: FrontMatterOptions::YAML,
+        ..ParseOptions::default()
     };
     assert_eq!(
         regions(text, yaml),
