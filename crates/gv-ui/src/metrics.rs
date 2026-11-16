@@ -115,8 +115,10 @@ pub mod size {
         pub const FOLD_CHIP_INSET_X: f32 = 2.0;
     }
 
-    /// Split view (SPEC § Split, screens `split.*`): two panes of equal
-    /// width with a `HAIRLINE` between them.
+    /// Split view (SPEC § Split, screens `split.*`): two panes, of equal
+    /// width until the divider is dragged, with a `HAIRLINE` between them.
+    /// The divider can be grabbed `DIVIDER_GRAB` either side of the line;
+    /// neither pane gets narrower than `MIN_PANE`.
     ///
     /// - The editor pane starts at its left edge: a 46 px gutter holds the
     ///   line numbers, right-aligned in its first 28, and the fold chevron
@@ -139,6 +141,10 @@ pub mod size {
         pub const PREVIEW_PAD_TOP: f32 = 20.0;
         pub const CARET_BAND_PAD_X: f32 = 6.0;
         pub const CARET_BAND_PAD_Y: f32 = 2.0;
+        /// The narrowest a pane gets when the divider is dragged.
+        pub const MIN_PANE: f32 = 240.0;
+        /// How far the divider's grab area reaches on each side of the line.
+        pub const DIVIDER_GRAB: f32 = 3.0;
     }
 
     pub mod settings_row {

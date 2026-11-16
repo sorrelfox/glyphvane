@@ -12,8 +12,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, ScrollDelta, ScrollEvent,
-    TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point, px, size,
+    AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta, ScrollEvent, TestAppContext,
+    VisualTestContext, WindowBounds, WindowOptions, point, px, size,
 };
 use gv_render_tree::StyleTable;
 
@@ -163,6 +164,71 @@ impl Fixture {
         draw(&mut self.vcx);
     }
 
+    /// The editor pane's width and the preview pane's left edge.
+    fn panes(&mut self) -> (f32, f32) {
+        let editor = self.editor();
+        let columns = editor
+            .update_in(&mut self.vcx, |e, window, _| e.columns(None, window))
+            .expect("laid out");
+        let preview = self.preview();
+        let (bounds, _) = preview.read_with(&self.vcx, |r, _| r.frame_geometry());
+        (
+            f32::from(columns.bounds.size.width),
+            f32::from(bounds.left()),
+        )
+    }
+
+    fn press(&mut self, x: f32, clicks: usize) {
+        self.vcx.simulate_event(MouseDownEvent {
+            position: point(px(x), px(HEIGHT / 2.0)),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: clicks,
+            first_mouse: false,
+        });
+        self.vcx.simulate_event(MouseUpEvent {
+            position: point(px(x), px(HEIGHT / 2.0)),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: clicks,
+        });
+        settle(&mut self.vcx);
+    }
+
+    /// Drags from `from` to `to` (window x), drawing between the moves.
+    fn drag(&mut self, from: f32, to: f32) {
+        let y = px(HEIGHT / 2.0);
+        self.vcx.simulate_event(MouseMoveEvent {
+            position: point(px(from), y),
+            modifiers: Modifiers::default(),
+            pressed_button: None,
+        });
+        self.vcx.simulate_event(MouseDownEvent {
+            position: point(px(from), y),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        draw(&mut self.vcx);
+        for step in 1..=4 {
+            let x = from + (to - from) * step as f32 / 4.0;
+            self.vcx.simulate_event(MouseMoveEvent {
+                position: point(px(x), y),
+                modifiers: Modifiers::default(),
+                pressed_button: Some(MouseButton::Left),
+            });
+            draw(&mut self.vcx);
+        }
+        self.vcx.simulate_event(MouseUpEvent {
+            position: point(px(to), y),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        settle(&mut self.vcx);
+    }
+
     fn preview_text(&mut self) -> String {
         let preview = self.preview();
         preview
@@ -234,6 +300,90 @@ fn split_shows_both_panes_with_a_divider(cx: &mut TestAppContext) {
         reader.read_with(&f.vcx, |r, _| r.styles()),
         Some(StyleTable::preview())
     );
+}
+
+#[gpui::test]
+fn dragging_the_divider_resizes_the_panes(cx: &mut TestAppContext) {
+    let mut f = Fixture::new(cx, &long_doc(300));
+    f.mode(ViewMode::Split);
+    let split = f.split();
+    let (left, line) = f.panes();
+    let caret = f.editor().read_with(&f.vcx, |e, _| e.caret());
+
+    // Grabbed 2 px right of the line and moved 240 px left: the line moves
+    // by as much, and the press did not reach the panes.
+    f.drag(line + 2.0, line + 2.0 - 240.0);
+    assert!(!split.read_with(&f.vcx, |s, _| s.is_dragging_divider()));
+    let (left2, line2) = f.panes();
+    assert!((left2 - (left - 240.0)).abs() <= 1.0, "{left} -> {left2}");
+    assert_eq!(line2 - left2, HAIRLINE);
+    assert_eq!(f.editor().read_with(&f.vcx, |e, _| e.caret()), caret);
+    let ratio = split.read_with(&f.vcx, |s, _| s.ratio());
+    assert!((ratio - left2 / WIDTH).abs() < 0.002, "{ratio}");
+
+    // The editor rewraps at its new width.
+    let editor = f.editor();
+    let columns = editor
+        .update_in(&mut f.vcx, |e, window, _| e.columns(None, window))
+        .expect("laid out");
+    let wrap = editor.read_with(&f.vcx, |e, _| e.editor().and_then(|e| e.wrap_width()));
+    assert_eq!(wrap, Some(columns.text_w));
+
+    // Scroll sync still holds in the resized panes.
+    for _ in 0..6 {
+        f.wheel(100.0, -250.0);
+    }
+    settle(&mut f.vcx);
+    let (e, p) = f.tops();
+    assert!(e > 20.0, "the editor scrolled: {e}");
+    assert!((e - p).abs() < 0.01, "{e} vs {p}");
+
+    // Away from the line a press is the panes' own.
+    let ratio = split.read_with(&f.vcx, |s, _| s.ratio());
+    f.drag(line2 + 40.0, line2 + 200.0);
+    assert_eq!(split.read_with(&f.vcx, |s, _| s.ratio()), ratio);
+}
+
+#[gpui::test]
+fn the_divider_keeps_both_panes_usable(cx: &mut TestAppContext) {
+    let mut f = Fixture::new(cx, "# Title\n\nText.\n");
+    f.mode(ViewMode::Split);
+    let (_, line) = f.panes();
+
+    // Far left and far right: each pane keeps its minimum width.
+    f.drag(line, 10.0);
+    let (left, _) = f.panes();
+    assert_eq!(left, split::MIN_PANE);
+    let (_, line) = f.panes();
+    f.drag(line, WIDTH - 5.0);
+    let (left, line) = f.panes();
+    assert_eq!(WIDTH - line, split::MIN_PANE);
+    assert_eq!(line - left, HAIRLINE);
+}
+
+#[gpui::test]
+fn double_clicking_the_divider_centres_it(cx: &mut TestAppContext) {
+    let mut f = Fixture::new(cx, "# Title\n\nText.\n");
+    f.mode(ViewMode::Split);
+    let split = f.split();
+    let (_, line) = f.panes();
+    f.drag(line, 400.0);
+    let (_, line) = f.panes();
+    assert!((line - 401.0).abs() <= 1.0, "{line}");
+
+    f.press(line, 1);
+    f.press(line, 2);
+    assert_eq!(split.read_with(&f.vcx, |s, _| s.ratio()), 0.5);
+    let (left, line) = f.panes();
+    assert!((left - WIDTH / 2.0).abs() <= 1.0, "{left}");
+    assert_eq!(line - left, HAIRLINE);
+
+    // The split is the tab's: it outlasts a trip to Source and back.
+    f.drag(line, 500.0);
+    let ratio = split.read_with(&f.vcx, |s, _| s.ratio());
+    f.mode(ViewMode::Edit);
+    f.mode(ViewMode::Split);
+    assert_eq!(f.split().read_with(&f.vcx, |s, _| s.ratio()), ratio);
 }
 
 #[gpui::test]

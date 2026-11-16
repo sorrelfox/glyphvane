@@ -5,6 +5,14 @@
 //! Reading view of the same text on the right, in panes of equal width
 //! with a 1 px `border.default` line between them.
 //!
+//! # The divider
+//!
+//! Dragging the line (or a few pixels either side of it) moves it; neither
+//! pane gets narrower than [`split::MIN_PANE`]. A double-click puts it back
+//! in the middle. The split is a share of the view's width, so it holds
+//! when the window is resized; it is the tab's, and lasts while the tab is
+//! open (the session does not store it yet).
+//!
 //! # The preview follows the editor
 //!
 //! The editor is the tab's own [`EditorView`], drawn from the pane's left
@@ -40,7 +48,7 @@
 //!
 //! # Not built
 //!
-//! - The divider cannot be dragged; the panes stay equal.
+//! - The divider cannot be moved from the keyboard.
 
 mod sync;
 #[cfg(test)]
@@ -51,9 +59,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, AppContext as _, Context, DispatchPhase, Entity, Focusable as _,
-    InteractiveElement as _, IntoElement, MouseDownEvent, ParentElement as _, Render, ScrollEvent,
-    Styled as _, Window, canvas, div, px,
+    AnyElement, AppContext as _, Context, CursorStyle, DispatchPhase, Entity, Focusable as _,
+    HitboxBehavior, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, ScrollEvent, Styled as _, Window,
+    bounds, canvas, div, point, px, relative, size,
 };
 use gv_text::Revision;
 use gv_vault::PathIndex;
@@ -61,6 +70,7 @@ use gv_vault::PathIndex;
 use crate::appearance::Appearance;
 use crate::editor::{EditorLayout, EditorView};
 use crate::metrics::HAIRLINE;
+use crate::metrics::size::split;
 use crate::reader::{LoadStatus, Reader, ScrollTarget, SyncRequest};
 use sync::Preview;
 
@@ -91,6 +101,37 @@ pub struct SplitView {
     caret: Option<(usize, Revision)>,
     /// The caret moved: the preview is to show its block.
     reveal: bool,
+    /// The editor pane's share of the view's width, as last set.
+    ratio: f32,
+    /// While the divider is dragged: the pointer's distance right of the
+    /// line when it was grabbed.
+    drag: Option<f32>,
+    /// The view's left edge and width, and the line's left edge, as last
+    /// laid out.
+    frame: Rc<Cell<Frame>>,
+}
+
+/// Where the view and its divider were last laid out (window pixels).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Frame {
+    left: f32,
+    width: f32,
+    line: f32,
+}
+
+/// `ratio` kept so neither pane of a view `width` wide (divider included)
+/// is narrower than [`split::MIN_PANE`]; a view too narrow for two such
+/// panes is split in the middle.
+fn clamp_ratio(ratio: f32, width: f32) -> f32 {
+    if width <= 0.0 {
+        return ratio.clamp(0.0, 1.0);
+    }
+    if width < 2.0 * split::MIN_PANE + HAIRLINE {
+        return 0.5;
+    }
+    let low = split::MIN_PANE / width;
+    let high = 1.0 - (split::MIN_PANE + HAIRLINE) / width;
+    ratio.clamp(low, high)
 }
 
 impl std::fmt::Debug for SplitView {
@@ -126,7 +167,60 @@ impl SplitView {
             synced: None,
             caret: None,
             reveal: false,
+            ratio: 0.5,
+            drag: None,
+            frame: Rc::default(),
         }
+    }
+
+    /// The editor pane's share of the view's width, as last set (before
+    /// clamping to the view's current width).
+    pub fn ratio(&self) -> f32 {
+        self.ratio
+    }
+
+    /// The editor pane's share of the view's width as drawn: the set ratio
+    /// kept clear of the minimum pane widths.
+    pub fn shown_ratio(&self) -> f32 {
+        clamp_ratio(self.ratio, self.frame.get().width)
+    }
+
+    /// Puts the divider at `ratio` of the view's width, kept clear of the
+    /// minimum pane widths.
+    pub fn set_ratio(&mut self, ratio: f32, cx: &mut Context<'_, Self>) {
+        let ratio = clamp_ratio(ratio, self.frame.get().width);
+        if ratio != self.ratio {
+            self.ratio = ratio;
+            cx.notify();
+        }
+    }
+
+    /// Whether the divider is being dragged.
+    pub fn is_dragging_divider(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The pointer went down on the divider at window x `x`.
+    fn grab_divider(&mut self, x: f32, clicks: usize, cx: &mut Context<'_, Self>) {
+        if clicks >= 2 {
+            self.drag = None;
+            self.set_ratio(0.5, cx);
+            return;
+        }
+        self.drag = Some(x - self.frame.get().line);
+        cx.notify();
+    }
+
+    /// The pointer moved to window x `x` with the divider grabbed.
+    fn drag_divider(&mut self, x: f32, cx: &mut Context<'_, Self>) {
+        let Some(grab) = self.drag else {
+            return;
+        };
+        let frame = self.frame.get();
+        if frame.width <= 0.0 {
+            return;
+        }
+        self.set_ratio((x - grab - frame.left) / frame.width, cx);
     }
 
     pub fn editor(&self) -> &Entity<EditorView> {
@@ -285,9 +379,13 @@ impl SplitView {
 /// A pane: `content`, with handlers that make `side` lead when the wheel
 /// turns or a button goes down over it (seen before the pane's own
 /// handlers, which stop them).
-fn pane(content: AnyElement, side: Side, leader: Rc<Cell<Side>>) -> impl IntoElement {
+fn pane(
+    content: AnyElement,
+    side: Side,
+    leader: Rc<Cell<Side>>,
+    frame: Rc<Cell<Frame>>,
+) -> gpui::Div {
     div()
-        .flex_1()
         .min_w_0()
         .h_full()
         .relative()
@@ -295,7 +393,14 @@ fn pane(content: AnyElement, side: Side, leader: Rc<Cell<Side>>) -> impl IntoEle
         .child(content)
         .child(
             canvas(
-                |_, _, _| {},
+                move |bounds, _, _| {
+                    // The editor pane's right edge is the divider's.
+                    if side == Side::Editor {
+                        let mut f = frame.get();
+                        f.line = f32::from(bounds.right());
+                        frame.set(f);
+                    }
+                },
                 move |bounds, (), window, _| {
                     let wheel = leader.clone();
                     window.on_mouse_event(move |e: &ScrollEvent, phase, _, _| {
@@ -325,6 +430,11 @@ impl Render for SplitView {
         let reader_focus = self.reader.read(cx).focus_handle(cx);
         let keys = self.leader.clone();
         let this = cx.weak_entity();
+        let ratio = self.shown_ratio();
+        let dragging = self.drag.is_some();
+        let measure = self.frame.clone();
+        let handle_frame = self.frame.clone();
+        let handle_view = cx.weak_entity();
         div()
             .id("split")
             .key_context(KEY_CONTEXT)
@@ -337,11 +447,32 @@ impl Render for SplitView {
                     keys.set(Side::Preview);
                 }
             })
-            .child(pane(
-                self.editor.clone().into_any_element(),
-                Side::Editor,
-                self.leader.clone(),
-            ))
+            // The view's frame, before the panes are laid out.
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let mut f = measure.get();
+                        f.left = f32::from(bounds.left());
+                        f.width = f32::from(bounds.size.width);
+                        measure.set(f);
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(
+                pane(
+                    self.editor.clone().into_any_element(),
+                    Side::Editor,
+                    self.leader.clone(),
+                    self.frame.clone(),
+                )
+                .flex_none()
+                .w(relative(ratio)),
+            )
             .child(
                 div()
                     .w(px(HAIRLINE))
@@ -349,11 +480,17 @@ impl Render for SplitView {
                     .flex_none()
                     .bg(theme.border.default),
             )
-            .child(pane(
-                self.reader.clone().into_any_element(),
-                Side::Preview,
-                self.leader.clone(),
-            ))
+            .child(
+                pane(
+                    self.reader.clone().into_any_element(),
+                    Side::Preview,
+                    self.leader.clone(),
+                    self.frame.clone(),
+                )
+                .flex_1(),
+            )
+            // Over the panes: the divider's grab area.
+            .child(divider_handle(handle_view, handle_frame, dragging))
             // After the panes are laid out: sync them.
             .child(
                 canvas(
@@ -368,4 +505,74 @@ impl Render for SplitView {
                 .size_0(),
             )
     }
+}
+
+/// The divider's grab area, over both panes: [`split::DIVIDER_GRAB`] either
+/// side of the line. A press there grabs the divider (a double press puts
+/// it back in the middle) before the panes see it; while it is held the
+/// pointer moves it wherever it goes.
+fn divider_handle(
+    view: gpui::WeakEntity<SplitView>,
+    frame: Rc<Cell<Frame>>,
+    dragging: bool,
+) -> impl IntoElement {
+    canvas(
+        move |area, window, _| {
+            let f = frame.get();
+            let grab = bounds(
+                point(px(f.line - split::DIVIDER_GRAB), area.top()),
+                size(px(2.0 * split::DIVIDER_GRAB + HAIRLINE), area.size.height),
+            );
+            window.insert_hitbox(grab, HitboxBehavior::BlockMouse)
+        },
+        move |_, hitbox, window, _| {
+            if dragging {
+                window.set_window_cursor_style(CursorStyle::ResizeLeftRight);
+            } else {
+                window.set_cursor_style(CursorStyle::ResizeLeftRight, &hitbox);
+            }
+            let press = view.clone();
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture
+                    || e.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let x = f32::from(e.position.x);
+                press
+                    .update(cx, |s, cx| s.grab_divider(x, e.click_count, cx))
+                    .ok();
+                cx.stop_propagation();
+            });
+            if dragging {
+                let moved = view.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let x = f32::from(e.position.x);
+                    moved.update(cx, |s, cx| s.drag_divider(x, cx)).ok();
+                    cx.stop_propagation();
+                });
+                let released = view.clone();
+                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture || e.button != MouseButton::Left {
+                        return;
+                    }
+                    released
+                        .update(cx, |s, cx| {
+                            s.drag = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    cx.stop_propagation();
+                });
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
