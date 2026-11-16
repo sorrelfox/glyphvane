@@ -54,16 +54,22 @@ pub struct CommandSettings {
     pub numbering: Numbering,
     /// The link syntax of "Insert link".
     pub link_style: LinkStyle,
+    /// Whether typed brackets, quotes and delimiters pair, wrap the
+    /// selection and are typed over
+    /// ([`MarkdownCommands::type_text`](super::MarkdownCommands::type_text)).
+    pub smart_pairs: bool,
 }
 
 impl Default for CommandSettings {
-    /// A tab, asterisks, sequential numbering, Markdown links.
+    /// A tab, asterisks, sequential numbering, Markdown links, smart
+    /// pairs on.
     fn default() -> Self {
         Self {
             indent: IndentUnit::Tab,
             emphasis: EmphasisStyle::Asterisk,
             numbering: Numbering::Sequential,
             link_style: LinkStyle::Markdown,
+            smart_pairs: true,
         }
     }
 }

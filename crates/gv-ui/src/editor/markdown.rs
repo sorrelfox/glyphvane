@@ -24,13 +24,22 @@
 //!   Enter and Shift+Enter commit the composition as it is (the platform's
 //!   input method normally takes them first); the other commands do
 //!   nothing.
+//! - **Backspace and typing.** Backspace runs
+//!   [`MarkdownCommands::backspace`] first (task box, list marker, item
+//!   indentation, `> `) and deletes as usual where it does not apply; one
+//!   typed character goes through [`MarkdownCommands::type_text`] (smart
+//!   pairs) before plain insertion. Neither applies while composing.
 //! - **Insert link** reads the clipboard: an absolute URL there becomes the
 //!   link's destination.
 //! - **Viewer mode** ([`EditorView::set_read_only`]): no command has a
 //!   handler.
 
+use std::ops::Range;
+
 use gpui::{Action, Context, Div, InteractiveElement as _, Stateful, Window};
-use gv_editor::{Availability, Editor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef};
+use gv_editor::{
+    Availability, DeleteUnit, Editor, MarkdownCommand, MarkdownCommands, Outcome, SyntaxRef,
+};
 use gv_text::Revision;
 
 use super::{Doc, EditorView};
@@ -182,6 +191,71 @@ impl EditorView {
         match outcome {
             None | Some(Outcome::NotInFlavor) => cx.propagate(),
             Some(Outcome::Edited | Outcome::Unchanged) => self.changed(window, cx),
+        }
+    }
+}
+
+impl EditorView {
+    /// Backspace: removes a task box, list marker, item indentation or
+    /// `> ` right before the carets ([`MarkdownCommands::backspace`], one
+    /// undo step), else deletes as usual. The Markdown rule needs the
+    /// current tree; while a long reparse runs it deletes as usual.
+    pub(super) fn backspace(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.read_only {
+            return;
+        }
+        if self
+            .doc
+            .as_ref()
+            .is_some_and(|doc| !doc.editor.is_composing())
+        {
+            self.pump_syntax(cx);
+        }
+        let commands = self.commands;
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let handled = match current_syntax(doc) {
+            Some(syntax) => {
+                let (tree, text) = (syntax.tree.clone(), syntax.text.clone());
+                commands
+                    .backspace(&mut doc.editor, Some(SyntaxRef::new(&tree, &text)))
+                    .is_some()
+            }
+            None => false,
+        };
+        if !handled {
+            doc.editor.delete_backward(DeleteUnit::Grapheme);
+        }
+        self.changed(window, cx);
+    }
+
+    /// Typed text with smart pairs ([`MarkdownCommands::type_text`]): only
+    /// for one character typed at the selections (no range other than the
+    /// primary selection, no composition). Returns whether it was handled;
+    /// if not, the caller inserts the text as usual.
+    pub(super) fn type_smart(&mut self, range: Option<&Range<usize>>, text: &str) -> bool {
+        let commands = self.commands;
+        let Some(doc) = self.doc.as_mut() else {
+            return false;
+        };
+        if doc.editor.is_composing() || text.chars().nth(1).is_some() {
+            return false;
+        }
+        if range.is_some_and(|range| *range != doc.editor.selected_text_range_utf16().range) {
+            return false;
+        }
+        match current_syntax(doc) {
+            Some(syntax) => {
+                let (tree, snapshot) = (syntax.tree.clone(), syntax.text.clone());
+                commands.type_text(
+                    &mut doc.editor,
+                    Some(SyntaxRef::new(&tree, &snapshot)),
+                    text,
+                )
+            }
+            // A long reparse is running: no tree for the context.
+            None => commands.type_text(&mut doc.editor, None, text),
         }
     }
 }

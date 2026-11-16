@@ -303,7 +303,12 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(doc) = self.doc.as_mut().filter(|_| !self.read_only) {
+        if self.read_only {
+            return;
+        }
+        if self.type_smart(range.as_ref(), text) {
+            self.input_changed(cx);
+        } else if let Some(doc) = self.doc.as_mut() {
             doc.editor.replace_text_in_range_utf16(range, text);
             self.input_changed(cx);
         }

@@ -571,6 +571,10 @@ pub struct Editor {
     clock: Box<dyn Clock>,
     display: DisplayLayers,
     composition: Option<Composition>,
+    /// Closing characters inserted by smart pairs, with the character:
+    /// typing it there moves over it, and Backspace between it and its
+    /// opener deletes both. Forgotten when the selections are moved.
+    auto_closers: Vec<(Anchor, char)>,
     observers: Vec<(ObserverId, Observer)>,
     next_observer: u64,
     /// Sorted by header.
@@ -623,6 +627,7 @@ impl Editor {
             clock,
             display,
             composition: None,
+            auto_closers: Vec::new(),
             observers: Vec::new(),
             next_observer: 0,
             foldable: Vec::new(),
@@ -899,6 +904,9 @@ impl Editor {
         } else {
             self.step_unfolded = unfolded;
         }
+        for (anchor, _) in &mut self.auto_closers {
+            *anchor = anchor.transform(&summary);
+        }
         if let Some(composition) = &mut self.composition {
             for (start, end) in &mut composition.ranges {
                 *start = start.transform(&summary);
@@ -1028,7 +1036,18 @@ impl Editor {
                 }
                 let head = selection.head();
                 let start = match unit {
-                    DeleteUnit::Grapheme => prev_grapheme_boundary(text, head),
+                    DeleteUnit::Grapheme => {
+                        // Between an opener and the closer smart pairs
+                        // inserted for it: both go.
+                        let closer = self.auto_closer_at(head);
+                        if let Some(closer) = closer
+                            && head > 0
+                            && char_before(text, head) == opener_of(closer)
+                        {
+                            return head - 1..head + closer.len_utf8();
+                        }
+                        prev_grapheme_boundary(text, head)
+                    }
                     DeleteUnit::Word => prev_word_start(text, head),
                     DeleteUnit::Line => {
                         let start = line_start(text, head);
@@ -1113,12 +1132,90 @@ impl Editor {
         matches!(result, Ok((Some(_), ())))
     }
 
+    // ----- smart pairs -----------------------------------------------------------
+
+    /// The closer smart pairs inserted at `offset`, if it is still there.
+    pub(crate) fn auto_closer_at(&self, offset: usize) -> Option<char> {
+        let text = self.buffer.text();
+        self.auto_closers
+            .iter()
+            .find(|(anchor, closer)| {
+                anchor.offset == offset && char_after(text, offset) == Some(*closer)
+            })
+            .map(|&(_, closer)| closer)
+    }
+
+    /// Applies typed text with one [`TypedEdit`] per selection (in
+    /// selection order) as one typing transaction, sets the selections the
+    /// edits ask for and remembers the closers they insert. Returns
+    /// whether the text or the selections changed.
+    pub(crate) fn type_edits(&mut self, edits: Vec<TypedEdit>) -> bool {
+        if edits.len() != self.selections.len() {
+            return false;
+        }
+        self.end_composition();
+        let primary = self.selections.primary_index();
+        let mut order: Vec<usize> = (0..edits.len()).collect();
+        order.sort_by_key(|&i| (edits[i].range.start, edits[i].range.end));
+        let mut transaction = Transaction::new();
+        for &i in &order {
+            transaction.push(edits[i].range.clone(), edits[i].text.as_str());
+        }
+        let before = self.selections.specs();
+        let result = self.commit(
+            &transaction,
+            EditCause::Edit(EditKind::Typing),
+            false,
+            |selections, text, summary| {
+                let starts: Vec<usize> = edits
+                    .iter()
+                    .map(|edit| summary.transform_offset(edit.range.start, Bias::Left))
+                    .collect();
+                let specs: Vec<SelectionSpec> = edits
+                    .iter()
+                    .zip(&starts)
+                    .map(|(edit, start)| {
+                        SelectionSpec::new(start + edit.select.start, start + edit.select.end)
+                    })
+                    .collect();
+                selections.set(text, &specs, primary);
+                let mut added = Vec::new();
+                let mut consumed = Vec::new();
+                for (edit, start) in edits.iter().zip(&starts) {
+                    if let Some(at) = edit.closer
+                        && let Some(closer) = edit.text.get(at..).and_then(|t| t.chars().next())
+                    {
+                        added.push((Anchor::after(start + at), closer));
+                    }
+                    if edit.over {
+                        consumed.push(*start);
+                    }
+                }
+                (added, consumed)
+            },
+        );
+        debug_assert!(result.is_ok(), "typed edit rejected: {result:?}");
+        let Ok((summary, (added, consumed))) = result else {
+            return false;
+        };
+        let text = self.buffer.text();
+        self.auto_closers.retain(|(anchor, closer)| {
+            !consumed.contains(&anchor.offset) && char_after(text, anchor.offset) == Some(*closer)
+        });
+        self.auto_closers.extend(added);
+        if summary.is_none() && self.selections.specs() != before {
+            self.selections_changed();
+        }
+        summary.is_some() || self.selections.specs() != before
+    }
+
     // ----- undo ---------------------------------------------------------------
 
     /// Undoes the newest step and restores the selections from before it.
     /// A composition in progress is committed first.
     pub fn undo(&mut self) -> UndoOutcome {
         self.end_composition();
+        self.auto_closers.clear();
         match self.history.begin_undo() {
             UndoPlan::Nothing => UndoOutcome::NothingToUndo,
             UndoPlan::StopAtSavePoint => UndoOutcome::StoppedAtSavePoint,
@@ -1139,6 +1236,7 @@ impl Editor {
     /// Returns whether anything was redone.
     pub fn redo(&mut self) -> bool {
         self.end_composition();
+        self.auto_closers.clear();
         let Some((transaction, selections)) = self.history.begin_redo() else {
             return false;
         };
@@ -1209,6 +1307,7 @@ impl Editor {
     /// undo step, tell observers.
     fn user_selection_change(&mut self) {
         self.history.seal();
+        self.auto_closers.clear();
         self.unfold_at_selections();
         let mut block_changes = BlockChanges::default();
         self.settle_block_selections(&mut block_changes);
@@ -3099,5 +3198,53 @@ mod tests {
             prop_assert_eq!(sync.wrap_width(), deferred.wrap_width());
             prop_assert_eq!(shown(&sync), shown(&deferred));
         }
+    }
+}
+
+/// One selection's part of a typed edit ([`Editor::type_edits`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TypedEdit {
+    /// The range replaced (the selection, or an empty range at the caret).
+    pub range: Range<usize>,
+    /// The text inserted there.
+    pub text: String,
+    /// The selection afterwards (tail..head), relative to the start of the
+    /// inserted text; it may reach past it (moving over a closer).
+    pub select: Range<usize>,
+    /// The byte offset in `text` of a closer inserted automatically.
+    pub closer: Option<usize>,
+    /// Whether the caret moves over a remembered closer at `range.start`.
+    pub over: bool,
+}
+
+/// The character after `offset`, if any.
+pub(crate) fn char_after(text: &TextSnapshot, offset: usize) -> Option<char> {
+    let end = next_grapheme_boundary(text, offset);
+    if end <= offset {
+        return None;
+    }
+    text.text_for_range(offset..end)
+        .ok()
+        .and_then(|s| s.chars().next())
+}
+
+/// The character before `offset`, if any.
+pub(crate) fn char_before(text: &TextSnapshot, offset: usize) -> Option<char> {
+    let start = prev_grapheme_boundary(text, offset);
+    if start >= offset {
+        return None;
+    }
+    text.text_for_range(start..offset)
+        .ok()
+        .and_then(|s| s.chars().next_back())
+}
+
+/// The opener smart pairs close with `closer`.
+pub(crate) fn opener_of(closer: char) -> Option<char> {
+    match closer {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        other => Some(other),
     }
 }

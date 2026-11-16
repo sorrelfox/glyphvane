@@ -1284,6 +1284,46 @@ fn enter_at_several_carets(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn backspace_at_a_list_marker(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "gfm-file", "- [ ] a\n", &[(6, 6)]);
+    vcx.simulate_keystrokes("backspace");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n");
+    vcx.simulate_keystrokes("backspace");
+    assert_eq!(text_of(&view, &mut vcx), "a\n");
+    // Elsewhere a plain delete.
+    vcx.simulate_keystrokes("backspace");
+    assert_eq!(text_of(&view, &mut vcx), "a\n");
+    vcx.simulate_keystrokes("right backspace");
+    assert_eq!(text_of(&view, &mut vcx), "\n");
+    // Each Markdown Backspace is one undo step.
+    vcx.simulate_keystrokes("secondary-z");
+    assert_eq!(text_of(&view, &mut vcx), "a\n");
+    vcx.simulate_keystrokes("secondary-z");
+    assert_eq!(text_of(&view, &mut vcx), "- a\n");
+}
+
+#[gpui::test]
+fn typing_pairs_and_types_over(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_in(cx, "gfm-file", "a \n", &[(2, 2)]);
+    vcx.simulate_input("(");
+    assert_eq!(text_of(&view, &mut vcx), "a ()\n");
+    vcx.simulate_input("b)");
+    assert_eq!(text_of(&view, &mut vcx), "a (b)\n");
+    assert_eq!(selections(&view, &mut vcx), [(5, 5)]);
+    // An empty pair goes with one Backspace.
+    vcx.simulate_input(" [");
+    assert_eq!(text_of(&view, &mut vcx), "a (b) []\n");
+    vcx.simulate_keystrokes("backspace");
+    assert_eq!(text_of(&view, &mut vcx), "a (b) \n");
+    // No pair while composing.
+    view.update_in(&mut vcx, |v, window, cx| {
+        v.replace_and_mark_text_in_range(None, "(", None, window, cx);
+        v.replace_text_in_range(None, "(", window, cx);
+    });
+    assert_eq!(text_of(&view, &mut vcx), "a (b) (\n");
+}
+
+#[gpui::test]
 fn no_command_runs_while_composing(cx: &mut TestAppContext) {
     let (view, mut vcx) = editor_in(cx, "commonmark", "- x\n", &[(3, 3)]);
     view.update_in(&mut vcx, |v, window, cx| {

@@ -29,6 +29,8 @@
 //! | [`InsertLink`](MarkdownCommand::InsertLink) | `[selection]()` with the caret in the destination; a URL given (clipboard) fills it; a selected URL becomes the destination; `[[selection]]` in wikilink style. |
 //! | [`Heading`](MarkdownCommand::Heading), [`Paragraph`](MarkdownCommand::Paragraph) | Sets the lines to an ATX heading of the level, or back to a paragraph (escaping text that would start another block). |
 //! | [`Quote`](MarkdownCommand::Quote) | Adds a `> ` level to the blocks the selections cover, or removes the innermost one when they are directly in a quote. |
+//! | [`MarkdownCommands::backspace`] (Backspace) | A caret right after a task box removes the box; right after a list marker (and its padding) removes the marker, keeping the text, and renumbers the rest of a sequential ordered list; right after the item indentation of a continuation line removes it (outdent); right after a `> ` removes it. Other selections delete as usual. |
+//! | [`MarkdownCommands::type_text`] (typing) | Smart pairs: brackets, quotes and backticks pair at a caret, wrap a selection together with the emphasis delimiters, and a paired closer is typed over. Backspace between a pair deletes both. Never while an input method composes. |
 //!
 //! Continuation and renumbering keep the CommonMark structure exact: column
 //! shifts never change a tab's width (a tab in a moved prefix is rewritten
@@ -48,6 +50,7 @@ mod flavor;
 mod inline;
 mod lines;
 mod list;
+mod pairs;
 mod settings;
 
 use gv_syntax::{LeafKind, SyntaxTree};
@@ -288,6 +291,23 @@ impl MarkdownCommands {
         outcome(doc.commit(editor))
     }
 
+    /// Backspace at every selection, where a caret is right after a list
+    /// marker, a task box or a container prefix (see the module
+    /// documentation): one command step. `None`, changing nothing, if no
+    /// caret is at such a place, an input method composes, or `syntax` is
+    /// not the current parse of a text over [`PARSE_LIMIT`] bytes: the
+    /// caller then deletes as usual.
+    pub fn backspace(&self, editor: &mut Editor, syntax: Option<SyntaxRef<'_>>) -> Option<Outcome> {
+        if editor.is_composing() || !may_parse(editor, syntax) {
+            return None;
+        }
+        let mut doc = Doc::new(editor, syntax, self.flavor);
+        if !list::backspace(&mut doc, &self.settings) {
+            return None;
+        }
+        Some(outcome(doc.commit(editor)))
+    }
+
     /// Insert link, with the URL on the clipboard if there is one (it is
     /// used only if it is an absolute URL).
     pub fn insert_link(
@@ -380,6 +400,18 @@ impl MarkdownCommands {
             Availability::NotHere
         }
     }
+}
+
+/// The largest text that the keystroke-level commands (Backspace at a
+/// marker, smart pairs) parse themselves when they are not given the
+/// current tree; above it they fall back to plain editing.
+pub const PARSE_LIMIT: usize = 1 << 20;
+
+/// Whether `syntax` is the current parse of `editor`'s text, or the text is
+/// small enough to parse.
+fn may_parse(editor: &Editor, syntax: Option<SyntaxRef<'_>>) -> bool {
+    syntax.is_some_and(|syntax| syntax.is_parse_of(editor.text()))
+        || editor.text().len() <= PARSE_LIMIT
 }
 
 fn outcome(changed: bool) -> Outcome {

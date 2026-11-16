@@ -1170,3 +1170,139 @@ pub(crate) fn toggle_task(doc: &mut Doc) {
     }
     doc.apply(edits);
 }
+
+// ----- Backspace ---------------------------------------------------------------
+
+/// What Backspace does at a caret right after container syntax.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Back {
+    /// Delete the task box (and the space after it).
+    TaskBox(Range<usize>),
+    /// Delete the list marker and its padding; the item's text joins what
+    /// is before it, and the following items of a sequential ordered list
+    /// are renumbered.
+    Marker(Range<usize>),
+    /// Delete one container prefix: the item indentation of a continuation
+    /// line (outdent) or a `> `.
+    Prefix(Range<usize>),
+}
+
+/// Whether `range` of the line holds only spaces and tabs.
+fn blank_between(ctx: &LineCtx, range: Range<usize>) -> bool {
+    let line = &ctx.line;
+    line.bytes()[line.rel(range.start)..line.rel(range.end)]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
+}
+
+/// The Backspace rule at caret `at`, if it is right after a list marker,
+/// a task box or a container prefix.
+fn back_rule(doc: &Doc, at: usize) -> Option<Back> {
+    let ctx = ctx_at(doc, at);
+    if at <= ctx.line.start {
+        return None;
+    }
+    // On the marker line of the innermost item: the box, then the marker.
+    if let Some(ii) = list_level(&ctx)
+        && let Some(item) = ctx.chain[ii].item()
+        && item.marker_line == ctx.line.index
+        && marker_level(&ctx) == Some(ii)
+    {
+        if let Some(task) = task_box(doc, item)
+            && at >= task.range.end
+            && blank_between(&ctx, task.range.end..at)
+        {
+            return Some(Back::TaskBox(task.range.start..task.with_space.end.max(at)));
+        }
+        let before_box = task_box(doc, item).is_none_or(|task| at <= task.range.start);
+        if at > item.marker_range.end
+            && before_box
+            && blank_between(&ctx, item.marker_range.end..at)
+        {
+            return Some(Back::Marker(item.marker_range.start..at));
+        }
+        return None;
+    }
+    if ctx.lazy || ctx.in_verbatim() {
+        return None;
+    }
+    // Right after the innermost prefix on the line: remove it.
+    let k = ctx
+        .parts
+        .iter()
+        .rposition(|part| part.as_ref().is_some_and(|range| !range.is_empty()))?;
+    let part = ctx.parts[k].clone()?;
+    if part.end != at {
+        return None;
+    }
+    match &ctx.chain[k].kind {
+        LevelKind::Quote => {
+            let line = &ctx.line;
+            let rel = line.bytes()[line.rel(part.start)..line.rel(part.end)]
+                .iter()
+                .position(|&b| b == b'>')?;
+            Some(Back::Prefix(part.start + rel..part.end))
+        }
+        LevelKind::Item(item) if item.marker_line != ctx.line.index => Some(Back::Prefix(part)),
+        _ => None,
+    }
+}
+
+/// Backspace at every selection: a caret right after a task box removes
+/// the box, right after a list marker removes the marker (keeping the
+/// text), and right after a continuation line's item indentation or a
+/// `> ` removes that prefix. Other selections delete as usual. Returns
+/// false, changing nothing, if no caret is at such a place.
+pub(crate) fn backspace(doc: &mut Doc, settings: &CommandSettings) -> bool {
+    let any = doc
+        .sels
+        .iter()
+        .any(|spec| spec.tail == spec.head && back_rule(doc, spec.head).is_some());
+    if !any {
+        return false;
+    }
+    for i in 0..doc.sels.len() {
+        let spec = doc.sels[i];
+        if spec.tail != spec.head {
+            let range = spec.tail.min(spec.head)..spec.tail.max(spec.head);
+            doc.apply(vec![(range.clone(), String::new())]);
+            doc.sels[i] = SelectionSpec::caret(range.start.min(doc.len()));
+            continue;
+        }
+        let at = spec.head;
+        match back_rule(doc, at) {
+            Some(Back::TaskBox(range) | Back::Prefix(range)) => {
+                doc.apply(vec![(range, String::new())]);
+            }
+            Some(Back::Marker(_)) => remove_marker(doc, settings, i),
+            None => {
+                let start = crate::boundaries::prev_grapheme_boundary(doc.text(), at);
+                doc.apply(vec![(start..at, String::new())]);
+            }
+        }
+    }
+    true
+}
+
+/// Removes the list marker before selection `i`, renumbering the items
+/// after it first (while they are still a list) so that a sequential list
+/// stays sequential without it.
+fn remove_marker(doc: &mut Doc, settings: &CommandSettings, i: usize) {
+    let ctx = ctx_at(doc, doc.sels[i].head);
+    if let Some(ii) = list_level(&ctx)
+        && let Some(list) = ctx.chain.get(ii.wrapping_sub(1))
+        && list.list().is_some_and(|info| info.ordered)
+        && let Some((_, items)) = list_items(doc, &list.range)
+        && detect_style(&items, settings) == Style::Sequential
+        && let Some(here) = items
+            .iter()
+            .position(|(range, _)| *range == ctx.chain[ii].range)
+        && let Some(number) = items[here].1.marker.number()
+    {
+        let numbers = (0..).map(|k: u32| number.saturating_add(k));
+        renumber_items(doc, &items[here + 1..], numbers);
+    }
+    if let Some(Back::Marker(range)) = back_rule(doc, doc.sels[i].head) {
+        doc.apply(vec![(range, String::new())]);
+    }
+}

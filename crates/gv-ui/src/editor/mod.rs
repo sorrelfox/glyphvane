@@ -1363,9 +1363,7 @@ impl Render for EditorView {
             root
         } else {
             root.on_action(cx.listener(|this, _: &Backspace, w, cx| {
-                this.with_editor(w, cx, |e, _| {
-                    e.delete_backward(DeleteUnit::Grapheme);
-                });
+                this.backspace(w, cx);
             }))
             .on_action(cx.listener(|this, _: &Delete, w, cx| {
                 this.with_editor(w, cx, |e, _| {
