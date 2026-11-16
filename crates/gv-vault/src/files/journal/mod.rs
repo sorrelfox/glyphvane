@@ -109,6 +109,10 @@ use super::write::{Backup, sync_dir};
 /// The name of the folder below the data dir that holds the journals.
 pub const JOURNAL_FOLDER: &str = "journal";
 
+/// [`DocumentJournal::record_all`] writes its records in pieces of about
+/// this size, so a long burst does not build one huge buffer.
+const RECORD_BATCH_BYTES: usize = 1024 * 1024;
+
 /// The store id for documents outside any vault.
 pub const NO_VAULT_ID: &str = "no-vault";
 
@@ -732,31 +736,69 @@ impl<C: Clock> DocumentJournal<C> {
     /// Starts the journal on the first record and compacts it when it has
     /// grown.
     pub fn record(&mut self, transaction: &Transaction, after: &TextSnapshot) -> io::Result<()> {
-        if transaction.is_empty() {
-            return Ok(());
-        }
-        let inserted: usize = transaction
-            .replacements()
-            .iter()
-            .map(|r| r.text.len())
-            .sum();
-        if inserted > format::MAX_RUN / 2 {
-            // Too large for one record: the snapshot carries the result.
-            return self.compact(after);
-        }
-        self.ensure_started()?;
-        self.seq += 1;
-        let mut frame = Vec::new();
-        format::edit(
-            &mut frame,
-            self.seq,
-            transaction
+        self.record_all([(transaction, after)])
+    }
+
+    /// Records several applied transactions in order, each with the text
+    /// it produced, as [`DocumentJournal::record`] would one by one, but
+    /// with their records handed to the OS in one write (a burst of edits
+    /// that queued up while the journal was busy). A transaction too large
+    /// for one record, and compaction, are handled as in
+    /// [`DocumentJournal::record`]. On an error, the records before the
+    /// failing write may or may not be in the journal.
+    pub fn record_all<'a, I>(&mut self, edits: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = (&'a Transaction, &'a TextSnapshot)>,
+    {
+        let mut frames = Vec::new();
+        let mut last: Option<&TextSnapshot> = None;
+        for (transaction, after) in edits {
+            if transaction.is_empty() {
+                continue;
+            }
+            let inserted: usize = transaction
                 .replacements()
                 .iter()
-                .map(|r| (r.range.start as u64, r.range.end as u64, r.text.as_str())),
-        );
-        self.append(&frame)?;
-        self.edit_bytes += frame.len() as u64;
+                .map(|r| r.text.len())
+                .sum();
+            if inserted > format::MAX_RUN / 2 {
+                // Too large for one record: the snapshot carries the result
+                // (and everything before it).
+                frames.clear();
+                last = None;
+                self.compact(after)?;
+                continue;
+            }
+            // Writes the prologue when the journal does not exist yet;
+            // `frames` is empty then, since every frame follows a start.
+            self.ensure_started()?;
+            self.seq += 1;
+            format::edit(
+                &mut frames,
+                self.seq,
+                transaction
+                    .replacements()
+                    .iter()
+                    .map(|r| (r.range.start as u64, r.range.end as u64, r.text.as_str())),
+            );
+            last = Some(after);
+            if frames.len() >= RECORD_BATCH_BYTES {
+                self.append_edits(&frames, after)?;
+                frames.clear();
+                last = None;
+            }
+        }
+        match last {
+            Some(after) if !frames.is_empty() => self.append_edits(&frames, after),
+            _ => Ok(()),
+        }
+    }
+
+    /// Appends edit records with one write, then compacts at `after` (the
+    /// text after the last of them) if the records have outgrown the text.
+    fn append_edits(&mut self, frames: &[u8], after: &TextSnapshot) -> io::Result<()> {
+        self.append(frames)?;
+        self.edit_bytes += frames.len() as u64;
         let limit = self.policy.compact_min_bytes.max(2 * after.len() as u64);
         if self.edit_bytes > limit {
             self.compact(after)?;

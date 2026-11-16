@@ -391,3 +391,64 @@ fn stale_temporary_files_are_removed_and_ignored() {
     }
     let _ = TextSnapshot::new("");
 }
+
+#[test]
+fn a_burst_recorded_at_once_rebuilds_like_single_records() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = JournalStore::open(dir.path().join("journal")).expect("store");
+    let path = dir.path().join("note.md");
+    fs::write(&path, "start ünï\n").expect("write");
+    let mut buffer = Buffer::new("start ünï\n");
+    // Small enough that bursts cross compactions.
+    let small = JournalPolicy {
+        compact_min_bytes: 2048,
+        ..policy()
+    };
+    let mut journal = begin(&store, &path, &buffer, small);
+    let mut step = 0;
+    for burst in [1, 7, 0, 64, 300, 2, 900] {
+        let mut edits: Vec<(Transaction, TextSnapshot)> = Vec::new();
+        for _ in 0..burst {
+            let at = buffer.clip_offset((step * 7919) % (buffer.len() + 1), gv_text::Bias::Left);
+            let transaction = if step % 3 == 2 && buffer.len() > at + 3 {
+                let end = buffer.clip_offset(at + 3, gv_text::Bias::Right);
+                Transaction::new().delete(at..end)
+            } else {
+                Transaction::new().insert(at, format!("[{step}β]"))
+            };
+            buffer.apply(&transaction).expect("edit");
+            edits.push((transaction, buffer.snapshot()));
+            // Empty transactions are skipped, as by `record`.
+            edits.push((Transaction::new(), buffer.snapshot()));
+            step += 1;
+        }
+        journal
+            .record_all(edits.iter().map(|(t, s)| (t, s)))
+            .expect("record a burst");
+    }
+    drop(journal);
+    let id = &store.recoverable().expect("list")[0].id;
+    let recovery = store.recover(id).expect("recover");
+    assert_eq!(recovery.text, buffer.to_string());
+    assert_eq!(recovery.tail, JournalTail::Complete);
+    assert_eq!(recovery.base.as_deref(), Some("start ünï\n"));
+}
+
+#[test]
+fn an_empty_burst_starts_no_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = JournalStore::open(dir.path().join("journal")).expect("store");
+    let path = dir.path().join("note.md");
+    fs::write(&path, "x\n").expect("write");
+    let buffer = Buffer::new("x\n");
+    let mut journal = begin(&store, &path, &buffer, policy());
+    let snapshot = buffer.snapshot();
+    let empty = Transaction::new();
+    journal
+        .record_all([(&empty, &snapshot), (&empty, &snapshot)])
+        .expect("record nothing");
+    journal.record_all([]).expect("record nothing");
+    assert!(!journal.is_active());
+    drop(journal);
+    assert!(store.recoverable().expect("list").is_empty());
+}
