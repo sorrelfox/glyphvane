@@ -1,0 +1,11 @@
+classDiagram
+    class Engine {
+        +limits Limits
+        +render(source) Outcome
+    }
+    class Cache {
+        -entries int
+        +get(key) Outcome
+    }
+    Engine *-- Cache : owns
+    Engine <|-- Trusted

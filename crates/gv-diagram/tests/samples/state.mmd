@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Rendering : block visible
+    state Rendering {
+        [*] --> Parse
+        Parse --> Layout
+        Layout --> [*]
+    }
+    Rendering --> Idle : done
+    Rendering --> Card : error
+    Card --> [*]

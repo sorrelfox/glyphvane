@@ -1,6 +1,6 @@
 [package]
 name = "gv-media"
-description = "Image, SVG, audio and PDF decoding and rasterizing."
+description = "Image and SVG probing, decoding, orientation, colour and resizing, with caps and a cache."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+# TIFF (first page). Optional per ADR-019 (+0.33 MB); off until the
+# full-link size budget is settled.
+tiff = ["image/tiff"]
+
 [dependencies]
+fast_image_resize = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }
+miniz_oxide = { workspace = true }
+moxcms = { workspace = true }
+resvg = { workspace = true }
+
+[dev-dependencies]
+crc32fast = { workspace = true }
+ratex-katex-fonts = { workspace = true }
+png = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

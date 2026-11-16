@@ -1,0 +1,10 @@
+flowchart TD
+    Open[Open file] --> Detect{Profile?}
+    Detect -->|GFM| Gfm[GitHub rules]
+    Detect -->|Obsidian| Obs[Vault rules]
+    Gfm --> Render((Render))
+    Obs --> Render
+    subgraph Engines
+        Render -.-> Math[[Math]]
+        Render ==> Diagram[(Diagrams)]
+    end

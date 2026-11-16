@@ -1,0 +1,11 @@
+erDiagram
+    NOTE ||--o{ LINK : contains
+    NOTE {
+        string path PK
+        int size
+    }
+    LINK {
+        string target
+        bool resolved
+    }
+    LINK }o--|| NOTE : points-to

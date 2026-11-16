@@ -1,0 +1,7 @@
+architecture-beta
+    group app(cloud)[App]
+    service ui(server)[UI] in app
+    service db(database)[Index] in app
+    service disk(disk)[Vault] in app
+    ui:R --> L:db
+    db:B --> T:disk

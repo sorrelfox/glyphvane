@@ -1,0 +1,7 @@
+C4Context
+    title Glyphvane context
+    Person(user, "Writer", "Edits notes")
+    System(app, "Glyphvane", "Markdown editor")
+    System_Ext(fs, "File system", "Vault folders")
+    Rel(user, app, "Uses")
+    Rel(app, fs, "Reads and writes")

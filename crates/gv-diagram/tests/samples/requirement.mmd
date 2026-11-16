@@ -1,0 +1,11 @@
+requirementDiagram
+    requirement caps {
+        id: 1
+        text: Every engine has caps
+        risk: high
+        verifymethod: test
+    }
+    element engine {
+        type: crate
+    }
+    engine - satisfies -> caps

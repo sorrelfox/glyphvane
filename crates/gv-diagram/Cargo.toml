@@ -1,6 +1,6 @@
 [package]
 name = "gv-diagram"
-description = "Mermaid to SVG with caches; diagram registry and fallback cards."
+description = "Mermaid to a theme-agnostic display list and SVG, with caches, caps and fallback cards."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+log = { workspace = true }
+merman = { workspace = true }
+serde_json = { workspace = true }
+usvg = { workspace = true }
+
+[dev-dependencies]
+ratex-katex-fonts = { workspace = true }
+tiny-skia = { workspace = true }
 
 [lints]
 workspace = true

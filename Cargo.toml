@@ -194,6 +194,38 @@ giallo = { version = "=0.6.0", default-features = false }
 # The bundle's raw-deflate decoder (the version flate2 already pulls in; MIT
 # OR Zlib OR Apache-2.0).
 miniz_oxide = "0.9.1"
+# Diagrams (gv-diagram): Mermaid through merman, a headless Rust port of
+# Mermaid 12 (MIT OR Apache-2.0), WITHOUT ELK (ADR-017): never enable its
+# default features, `layout-elk` or `complete-svg-elk` (merman-elk-layered is
+# EPL-2.0 only; deny.toml rejects it). `native-fonts` measures labels with
+# the font that paints them. One very active maintainer: exact pin, bump
+# after the gv-diagram golden tests pass.
+merman = { version = "=0.10.0", default-features = false, features = [
+  "all-diagrams",
+  "svg",
+  "layout-cytoscape",
+  "native-fonts",
+] }
+# SVG to vector tree (gv-diagram: merman's SVG to our display list) and the
+# SVG rasterizer (gv-media). The 0.47 line merman's font context already
+# pulls in, so the tree has one usvg next to GPUI's own (MIT OR Apache-2.0).
+# No system-font scanning: callers hand in a font database.
+usvg = { version = "0.47.0", default-features = false, features = ["text"] }
+resvg = { version = "0.47.0", default-features = false, features = ["text", "raster-images"] }
+# Images (gv-media, ADR-019): pure-Rust decoders through `image` (MIT OR
+# Apache-2.0), only the formats the plan lists; no rayon, no AVIF (that goes
+# through the helper), no TIFF unless gv-media's `tiff` feature is on.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+# ICC to sRGB (gv-media): the moxcms version `image` already uses
+# (BSD-3-Clause OR Apache-2.0).
+moxcms = "0.8.1"
+# Downscaling decoded images to display size (gv-media): pure Rust with SIMD
+# paths, alpha-correct (MIT OR Apache-2.0). Only the RGBA8 pixel type is
+# compiled in.
+fast_image_resize = { version = "6.1.0", default-features = false, features = ["std", "only_u8x4"] }
+# gv-media tests: writing APNG test files (the png version `image` already
+# uses; MIT OR Apache-2.0).
+png = "0.18.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -232,15 +264,34 @@ opt-level = 3
 debug = false
 strip = "symbols"
 
-# When the Mermaid engine is added, build its crates for size (about 6 MB
-# smaller for +15 % diagram render time, which runs off the UI thread). Cargo
-# warns about package specs that match nothing, so enable these with the
-# dependency: merman, merman-core, merman-render, merman-model, merman-markup,
-# merman-export, merman-theme-contract, merman-unicode-linebreak,
-# roughr-merman, dugong, dugong-graphlib and manatee. Keep GPUI, text shaping,
-# math and image decoding at opt-level 3.
-# [profile.dist.package.merman-render]
-# opt-level = "s"
+# The Mermaid engine's crates are built for size (about 6 MB smaller for
+# +15 % diagram render time, which runs off the UI thread). Keep GPUI, text
+# shaping, math and image decoding at opt-level 3. Cargo warns about package
+# specs that match nothing: drop an entry when its crate leaves the tree.
+[profile.dist.package.merman]
+opt-level = "s"
+[profile.dist.package.merman-core]
+opt-level = "s"
+[profile.dist.package.merman-render]
+opt-level = "s"
+[profile.dist.package.merman-model]
+opt-level = "s"
+[profile.dist.package.merman-markup]
+opt-level = "s"
+[profile.dist.package.merman-export]
+opt-level = "s"
+[profile.dist.package.merman-theme-contract]
+opt-level = "s"
+[profile.dist.package.merman-unicode-linebreak]
+opt-level = "s"
+[profile.dist.package.roughr-merman]
+opt-level = "s"
+[profile.dist.package.dugong]
+opt-level = "s"
+[profile.dist.package.dugong-graphlib]
+opt-level = "s"
+[profile.dist.package.manatee]
+opt-level = "s"
 
 [profile.dev.package."*"]
 opt-level = 1

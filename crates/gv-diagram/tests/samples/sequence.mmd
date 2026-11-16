@@ -1,0 +1,10 @@
+sequenceDiagram
+    autonumber
+    participant UI
+    participant Worker
+    UI->>+Worker: render(block)
+    Note right of Worker: off the UI thread
+    Worker-->>-UI: display list
+    loop every frame
+        UI->>UI: paint
+    end
