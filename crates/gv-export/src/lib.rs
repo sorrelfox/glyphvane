@@ -37,12 +37,19 @@
 //!
 //! [`rich_copy`] runs the same pipeline over a selection and returns an
 //! HTML fragment and its plain-text alternative, for the clipboard.
+//!
+//! # PDF export
+//!
+//! [`export_typst`] turns the render tree into a generated Typst document
+//! (see [`pdf`]) with its images and formulas as assets; the separate
+//! helper executable compiles it to PDF. Print uses the same PDF.
 
 mod assets;
 mod css;
 mod emit;
 mod escape;
 mod math;
+pub mod pdf;
 mod sanitize;
 
 use std::ops::Range;
@@ -54,6 +61,7 @@ use gv_render_tree::{CopyOptions, RenderTree};
 pub use assets::{Asset, ImageMode, ImageNote, Limits};
 pub use css::{ExportTheme, THEME_TOKENS};
 pub use emit::wikilink_href;
+pub use pdf::{PageOptions, Paper, TypstDocument, export_typst};
 pub use sanitize::{ID_PREFIX, rewrite_link};
 
 /// Draws a Mermaid diagram as a standalone SVG (with its text as paths).

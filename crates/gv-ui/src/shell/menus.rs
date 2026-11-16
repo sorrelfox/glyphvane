@@ -65,7 +65,7 @@ impl Workspace {
     pub(super) fn command_tab(&self, cx: &App) -> usize {
         match context_target(cx) {
             ContextTarget::Tab(index) if index < self.tabs.len() => index,
-            ContextTarget::Tab(_) | ContextTarget::Active => self.active,
+            ContextTarget::Tab(_) | ContextTarget::Active | ContextTarget::Link => self.active,
         }
     }
 
@@ -85,7 +85,7 @@ impl Workspace {
     ) {
         let index = match target {
             ContextTarget::Tab(index) => index,
-            ContextTarget::Active => self.active,
+            ContextTarget::Active | ContextTarget::Link => self.active,
         };
         let state = self.menu_state(index, cx);
         self.menus.popover.update(cx, |popover, cx| {
@@ -161,6 +161,19 @@ impl Workspace {
                 e.bounds_for_range(start, Bounds::default(), window, cx)
             });
             let at = caret.map_or_else(|| window.mouse_position(), |b| point(b.left(), b.bottom()));
+            // With the caret on a link: the link menu.
+            if let Some(link) = editor.read(cx).link_at_caret() {
+                crate::reader::link_info::set_menu_link(Some(link), cx);
+                self.open_menu(
+                    ContextMenu::Link,
+                    Placement::At(at),
+                    ContextTarget::Link,
+                    true,
+                    window,
+                    cx,
+                );
+                return;
+            }
             self.open_menu(
                 ContextMenu::Editor,
                 Placement::At(at),

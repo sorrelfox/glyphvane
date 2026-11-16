@@ -13,7 +13,7 @@
 use std::cell::Cell;
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
@@ -166,6 +166,17 @@ impl FilesPanel {
     /// (`workspace.reveal_in_tree`).
     pub fn reveal(&mut self, cx: &mut Context<'_, Self>) {
         self.reveal_active();
+        cx.notify();
+    }
+
+    /// Selects the vault's file `path` and scrolls to it (`links.reveal_in_tree`).
+    pub fn reveal_path(&mut self, path: &Path, cx: &mut Context<'_, Self>) {
+        if let Some(tree) = &mut self.tree
+            && let Some(id) = tree.id_of_fs_path(path)
+        {
+            tree.reveal(id);
+            self.scroll_to_selection();
+        }
         cx.notify();
     }
 

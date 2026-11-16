@@ -56,6 +56,8 @@ mod find;
 pub(crate) mod follow;
 mod heights;
 mod items;
+pub(crate) mod link_info;
+mod link_tip;
 mod links;
 mod live;
 mod load;
@@ -102,7 +104,7 @@ pub use state::ReaderLayout;
 
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use find::DEBUG_FIND_ENV;
-pub(crate) use links::{Navigation, Resolver, navigation};
+pub(crate) use links::{Navigation, NewNote, Resolver, navigation, resolver_kind};
 
 /// Copy the selection as plain text (`editor.copy`) or as Markdown
 /// (`editor.copy_as_markdown`), and select the whole document
@@ -177,6 +179,9 @@ pub struct LinkRequest {
     pub destination: Arc<str>,
     pub kind: gv_model::LinkKind,
     pub disposition: Disposition,
+    /// The whole construct in the document's text, when known (to rewrite
+    /// the link).
+    pub range: Option<std::ops::Range<usize>>,
 }
 
 /// What the Reading view asks of its window.
@@ -251,6 +256,8 @@ pub struct Reader {
     _refresh: Option<Task<()>>,
     /// Remote images: the fetches, failures and sites waiting.
     remote: remote::RemoteImages,
+    /// The tooltip of the link under the pointer.
+    link_tip: link_tip::LinkTip,
     _settings: Subscription,
 }
 
@@ -295,6 +302,7 @@ impl Reader {
             _load: None,
             _refresh: None,
             remote: remote::RemoteImages::default(),
+            link_tip: link_tip::LinkTip::default(),
             _settings: cx.observe_global::<AppSettings>(|this, cx| {
                 this.sync_typography(cx);
                 this.sync_remote(cx);
@@ -885,8 +893,12 @@ impl Render for Reader {
                     .right(px(find_spacing::INSET_RIGHT))
                     .child(bar)
             });
+        let link_tip = (self.status == LoadStatus::Ready)
+            .then(|| self.link_tooltip(window, cx))
+            .flatten();
         match &self.status {
             LoadStatus::Ready => root
+                .children(link_tip)
                 .child(ReaderElement::new(
                     self.state.clone(),
                     cx.weak_entity(),

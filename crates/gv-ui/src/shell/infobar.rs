@@ -234,6 +234,8 @@ impl Workspace {
             NoticeAction::SwitchProfile => {
                 self.toggle_profile_menu(cx);
             }
+            NoticeAction::ChooseLinkTarget => self.choose_link_target(window, cx),
+            NoticeAction::RewriteLink => self.rewrite_ambiguous_link(window, cx),
             NoticeAction::SaveAndClose => self.close_answered(true, window, cx),
             NoticeAction::DiscardAndClose => self.close_answered(false, window, cx),
             NoticeAction::CompareCopy(path) => self.compare_copy(path.clone(), cx),

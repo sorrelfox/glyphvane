@@ -16,6 +16,9 @@ mod files_panel;
 mod files_panel_tests;
 mod history;
 mod infobar;
+mod link_actions;
+#[cfg(test)]
+mod link_actions_tests;
 mod link_checker;
 #[cfg(test)]
 mod link_checker_tests;
@@ -88,9 +91,7 @@ use crate::keymap::actions::view::ToggleSplit;
 use crate::keymap::actions::{file as file_commands, tabs as tab_commands};
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
-use crate::reader::{
-    Disposition, LinkRequest, LoadStatus, Navigation, Reader, ReaderEvent, ScrollTarget,
-};
+use crate::reader::{LinkRequest, LoadStatus, Reader, ReaderEvent, ScrollTarget};
 use crate::split::SplitView;
 use crate::{
     AppSettings, CloseTab, GoBack, GoForward, ReopenClosedTab, ToggleEditMode, TogglePanel,
@@ -575,6 +576,9 @@ pub struct Workspace {
     index_asked: bool,
     /// The profiles follow the overrides picked in any window.
     _profiles: Subscription,
+    /// The link popover (create, candidates, trace) and the last ambiguous
+    /// link followed.
+    link_ux: link_actions::LinkUx,
 }
 
 impl fmt::Debug for Workspace {
@@ -713,6 +717,7 @@ impl Workspace {
             _recent_events: None,
             index_asked: false,
             _profiles: profiles,
+            link_ux: link_actions::LinkUx::new(cx),
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -1302,50 +1307,18 @@ impl Workspace {
         let Some(file) = self.tabs[index].path.clone() else {
             return;
         };
-        let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
-        let profile = reader.read(cx).profile();
-        let target = crate::reader::navigation(
-            &file,
-            snapshot.as_ref(),
-            profile,
-            request.kind,
-            &request.destination,
-        );
-        tracing::debug!(?target, "follow link");
-        let (path, fragment) = match target {
-            Navigation::External(url) => {
-                crate::platform::launcher(cx).open_url(&url, cx);
-                return;
-            }
-            Navigation::Confirm { url, why } => {
-                self.activate_tab(index, window, cx);
-                self.ask(Notice::confirm_url(&url, &why), cx);
-                return;
-            }
-            Navigation::OpenFile(path) => {
-                self.activate_tab(index, window, cx);
-                self.open_other_file(path, cx);
-                return;
-            }
-            Navigation::Refused(why) => {
-                tracing::info!("link not followed: {why}");
-                return;
-            }
-            Navigation::Here { fragment } => (file.clone(), fragment),
-            Navigation::Open { path, fragment } => (path, fragment),
+        let r = reader.read(cx);
+        let construct = request.range.clone().and_then(|range| r.source_text(range));
+        let link = crate::reader::link_info::LinkAt {
+            file,
+            kind: request.kind,
+            image: false,
+            destination: request.destination,
+            range: request.range,
+            construct,
+            profile: r.profile(),
         };
-        let scroll = fragment.map(ScrollTarget::Fragment);
-        match request.disposition {
-            Disposition::InPlace => self.navigate(index, path, scroll, window, cx),
-            Disposition::NewTab => {
-                let scroll = scroll.or(Some(ScrollTarget::Offset(0)));
-                self.insert_tab(OpenTarget::new(path), scroll, true, window, cx);
-            }
-            Disposition::Background => {
-                let scroll = scroll.or(Some(ScrollTarget::Offset(0)));
-                self.insert_tab(OpenTarget::new(path), scroll, false, window, cx);
-            }
-        }
+        self.follow_link_at(index, link, request.disposition, false, window, cx);
     }
 
     /// Shows `path` in tab `index` (the same tab), remembering where the tab
@@ -1784,6 +1757,7 @@ impl Render for Workspace {
             .map(|root| self.panel_actions(root, cx))
             .map(|root| self.pane_actions(root, cx))
             .map(|root| self.switcher_actions(root, cx))
+            .map(|root| self.link_actions(root, window, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1863,6 +1837,7 @@ impl Render for Workspace {
             ))
             .children(profile_menu)
             .child(self.menus.popover.clone())
+            .children(self.render_link_popover(cx))
             .children(self.heading_probe(cx))
             .children(self.anchor_probe())
     }

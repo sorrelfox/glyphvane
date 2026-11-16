@@ -11,9 +11,44 @@ use crate::escape::{escaped, num};
 
 /// The SVG of `tex`, or the error message.
 pub(crate) fn svg(tex: &str, display: bool, macros: &MacroSet) -> Result<String, String> {
+    svg_box(tex, display, macros).map(|b| b.svg)
+}
+
+/// A formula's SVG and the size of its box, in em.
+#[derive(Debug, Clone)]
+pub(crate) struct SvgBox {
+    pub svg: String,
+    pub height: f32,
+    /// How far the box reaches below the baseline.
+    pub depth: f32,
+}
+
+/// The SVG of `tex` with its box, or the error message.
+pub(crate) fn svg_box(tex: &str, display: bool, macros: &MacroSet) -> Result<SvgBox, String> {
     let layout =
         typeset(tex, display, macros, &Limits::default(), None).map_err(|e| e.to_string())?;
-    Ok(layout_svg(&layout, tex))
+    let (_, _, _, height, depth) = bounds(&layout);
+    Ok(SvgBox {
+        svg: layout_svg(&layout, tex),
+        height,
+        depth,
+    })
+}
+
+/// The ink-inclusive box of `l`: left, top, width, height, and the depth
+/// below the baseline.
+fn bounds(l: &MathLayout) -> (f32, f32, f32, f32, f32) {
+    let (mut x0, mut x1) = (0.0f32, l.width);
+    let (mut y0, mut y1) = (0.0f32, l.total_height());
+    if let Some(ink) = l.ink {
+        x0 = x0.min(ink.min_x);
+        x1 = x1.max(ink.max_x);
+        y0 = y0.min(ink.min_y);
+        y1 = y1.max(ink.max_y);
+    }
+    let (w, h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
+    // The baseline sits at `l.height` from the top of the box.
+    (x0, y0, w, h, y1 - l.height)
 }
 
 fn color(c: MathColor) -> String {
@@ -58,17 +93,7 @@ fn path_data(path: &MathPath, dx: f32, dy: f32, s: f32) -> String {
 }
 
 pub(crate) fn layout_svg(l: &MathLayout, tex: &str) -> String {
-    let (mut x0, mut x1) = (0.0f32, l.width);
-    let (mut y0, mut y1) = (0.0f32, l.total_height());
-    if let Some(ink) = l.ink {
-        x0 = x0.min(ink.min_x);
-        x1 = x1.max(ink.max_x);
-        y0 = y0.min(ink.min_y);
-        y1 = y1.max(ink.max_y);
-    }
-    let (w, h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
-    // The baseline sits at `l.height` from the top of the box.
-    let below = y1 - l.height;
+    let (x0, y0, w, h, below) = bounds(l);
     let mut s = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"gv-math-svg\" role=\"img\" \
          aria-label=\"{}\" viewBox=\"{} {} {} {}\" width=\"{}em\" height=\"{}em\" \

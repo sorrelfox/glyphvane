@@ -92,6 +92,10 @@ pub(crate) struct LinkHit {
     pub link: u32,
     pub destination: Arc<str>,
     pub kind: gv_model::LinkKind,
+    pub image: bool,
+    /// The whole construct in the document's text (`None` inside an
+    /// embed, whose text is another note's).
+    pub range: Option<std::ops::Range<usize>>,
 }
 
 /// A button in a code block's head.
@@ -387,11 +391,22 @@ impl State {
         let content = doc.tree.item_inline(g.ix)?;
         let link = content.spans.get(piece)?.link?;
         let info = content.links.get(link as usize)?;
+        let start = doc.tree.node_of(g.ix).map(|n| n.source.start);
+        let range = start
+            .map(|s| s + info.source.start..s + info.source.end)
+            .filter(|r| {
+                // A link of an embedded note is not in this text.
+                doc.text
+                    .get(r.clone())
+                    .is_some_and(|t| t.starts_with(['[', '!', '<']) || t.contains("://"))
+            });
         Some(LinkHit {
             item: g.ix,
             link,
             destination: info.destination.clone(),
             kind: info.kind,
+            image: false,
+            range,
         })
     }
 

@@ -37,8 +37,15 @@ unsound = "workspace"
 # Yanked crate versions are a warning.
 yanked = "warn"
 # Ignored advisories need a reason and an ADR reference.
+#
+# quick-xml 0.38.4 via typst -> hayagriva -> citationberg 0.7.0 (newest, pins
+# quick-xml 0.38, no fixed release). The affected code parses bibliography
+# (CSL) styles, which generated PDFs never use, and it is linked only into
+# the sandboxed glyphvane-helper. Accepted in ADR-018 (amendment of
+# 2026-11-16); remove when citationberg moves to a fixed quick-xml.
 ignore = [
-    #{ id = "RUSTSEC-0000-0000", reason = "ADR-NNN: why" },
+  { id = "RUSTSEC-2026-0194", reason = "CSL parsing unused; helper-only; no fixed version (ADR-018)" },
+  { id = "RUSTSEC-2026-0195", reason = "CSL parsing unused; helper-only; no fixed version (ADR-018)" },
 ]
 
 # ---------------------------------------------------------------------------

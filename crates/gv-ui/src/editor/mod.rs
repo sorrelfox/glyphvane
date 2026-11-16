@@ -122,6 +122,7 @@ mod go;
 mod highlight;
 mod input;
 mod layout;
+mod links;
 mod markdown;
 mod metrics;
 mod paste;
@@ -439,6 +440,10 @@ pub struct EditorView {
     widest: f32,
     show_whitespace: bool,
     links: LinkStatuses,
+    /// The link a Mod+click or a middle click asked the window to follow.
+    clicked_link: Option<crate::reader::link_info::LinkAt>,
+    /// The link under the pointer, for its tooltip.
+    link_hover: links::LinkHover,
     /// The sizes from the Appearance settings and the zoom ([`metrics`]).
     metrics: EditorMetrics,
     fonts: Fonts,
@@ -509,6 +514,8 @@ impl EditorView {
             widest: 0.0,
             show_whitespace: false,
             links: LinkStatuses::new(None, None, gv_profile::ProfileId::CommonMark),
+            clicked_link: None,
+            link_hover: links::LinkHover::default(),
             metrics,
             fonts,
             advances: None,
@@ -1519,6 +1526,9 @@ impl Render for EditorView {
             }
             EditorStatus::Loading => root,
         };
-        host.child(root).children(popover)
+        let link_tip = (self.status == EditorStatus::Ready)
+            .then(|| self.link_tooltip(window, cx))
+            .flatten();
+        host.child(root).children(popover).children(link_tip)
     }
 }

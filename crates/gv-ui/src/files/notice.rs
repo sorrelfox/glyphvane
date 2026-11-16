@@ -58,6 +58,8 @@ pub enum Topic {
     ReadOnly,
     /// Remote images wait for approval (FR-SET-08).
     RemoteContent,
+    /// A followed link matched several notes (FR-NAV-07).
+    AmbiguousLink,
 }
 
 /// What an infobar button does.
@@ -116,6 +118,11 @@ pub enum NoticeAction {
     RemoteAllowVault,
     /// Remote content: add the waiting sites to the block list.
     RemoteBlock,
+    /// An ambiguous link was followed: pick another of its candidates.
+    ChooseLinkTarget,
+    /// An ambiguous link was followed: rewrite it to the shortest form
+    /// that names the note it opened.
+    RewriteLink,
 }
 
 /// A button of an infobar.
@@ -678,6 +685,33 @@ impl Notice {
             Some(format!(
                 "Rich text could not be put on the clipboard here ({reason})."
             )),
+        )
+    }
+
+    /// The designed infobar after following an ambiguous link (FR-NAV-07):
+    /// "*n* notes match *X*." with Choose… and Rewrite link. `rewrite` is
+    /// why the link cannot be rewritten, if it cannot.
+    pub fn ambiguous_link(count: usize, name: &str, opened: &str, rewrite: Option<String>) -> Self {
+        let mut rewrite_button = NoticeButton::new(NoticeAction::RewriteLink, "Rewrite link");
+        rewrite_button.disabled = rewrite.map(Into::into);
+        Self::titled(
+            Topic::AmbiguousLink,
+            NoticeKind::Warning,
+            format!("{count} notes match “{name}”."),
+            Some(format!("This is “{opened}”.")),
+        )
+        .with(NoticeButton::new(NoticeAction::ChooseLinkTarget, "Choose…"))
+        .with(rewrite_button)
+    }
+
+    /// A link was not followed: no note to create, the index still
+    /// building (not designed).
+    pub fn link_not_followed(title: String, detail: String) -> Self {
+        Self::titled(
+            Topic::NotOpened,
+            NoticeKind::Information,
+            title,
+            Some(detail),
         )
     }
 

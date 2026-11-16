@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! HTML export and rich copy with the app's theme, diagram engine and link
-//! resolver (FR-EXPORT-01, -04, -06), for the window's commands and for
-//! `glyphvane export`.
+//! HTML and PDF export and rich copy with the app's theme, diagram engine
+//! and link resolver (FR-EXPORT-01, -02, -04, -06), for the window's
+//! commands and for `glyphvane export`.
 //!
 //! - Exports are styled with the **light** theme's tokens, whatever theme
 //!   the window shows: a print-friendly page.
@@ -16,6 +16,10 @@
 //!   no HTML flavour. Without one, or when it fails (a Wayland compositor
 //!   without the data-control protocol and no X server), the copy is plain
 //!   text and the window says so.
+//! - PDF export generates a Typst document here and hands it to the
+//!   [`PdfEngine`] the application installs ([`set_pdf_engine`]): the
+//!   separate helper process, which compiles it within a deadline and can
+//!   be cancelled.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -24,10 +28,14 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use gpui::{App, Global};
 use gv_diagram::{Outcome, Palette as DiagramPalette, Trust};
-use gv_export::{DiagramRenderer, Export, ExportOptions, ExportTheme, RichCopy};
+use gv_export::{
+    DiagramRenderer, Export, ExportOptions, ExportTheme, ImageNote, PageOptions, RichCopy,
+    TypstDocument,
+};
 use gv_model::DocModel;
 use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{AllPending, NoImageSizes, RenderOptions, RenderTree, Sources};
@@ -126,6 +134,103 @@ pub fn export_text(
     gv_export::export_html(&tree, &options(path, root, profile.id))
 }
 
+/// The Typst document of `text` (the document at `path`) for a PDF with
+/// pages `page`.
+pub fn pdf_document(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    page: &PageOptions,
+) -> TypstDocument {
+    let tree = document_tree(text, path, profile, index);
+    gv_export::export_typst(&tree, &options(path, root, profile.id), page)
+}
+
+/// Why a PDF was not made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PdfError {
+    /// The user cancelled it.
+    Cancelled,
+    /// The engine failed, with a message for the user.
+    Failed(String),
+}
+
+impl std::fmt::Display for PdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "cancelled"),
+            Self::Failed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Compiles generated Typst documents to PDF (the helper process in the
+/// app). Called off the UI thread.
+pub trait PdfEngine: Send + Sync {
+    /// The PDF of `doc`; stops early with [`PdfError::Cancelled`] once
+    /// `cancel` is set.
+    fn render(
+        &self,
+        doc: &TypstDocument,
+        max_pages: u32,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, PdfError>;
+}
+
+/// A PDF and the images it left out.
+#[derive(Debug, Clone)]
+pub struct Pdf {
+    pub bytes: Vec<u8>,
+    pub notes: Vec<ImageNote>,
+    pub title: String,
+}
+
+/// Exports `text` (the document at `path`) as a PDF through `engine`.
+#[allow(clippy::too_many_arguments)]
+pub fn export_pdf(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    page: &PageOptions,
+    engine: &dyn PdfEngine,
+    cancel: &AtomicBool,
+) -> Result<Pdf, PdfError> {
+    let doc = pdf_document(text, path, root, profile, index, page);
+    let bytes = engine.render(&doc, page.max_pages, cancel)?;
+    Ok(Pdf {
+        bytes,
+        notes: doc.notes,
+        title: doc.title,
+    })
+}
+
+/// The engine [`set_pdf_engine`] installed.
+struct InstalledEngine(Arc<dyn PdfEngine>);
+
+impl Global for InstalledEngine {}
+
+/// Uses `engine` for *Export as PDF…* and *Print…*; without one they say
+/// the PDF engine is not available.
+pub fn set_pdf_engine(cx: &mut App, engine: Option<Arc<dyn PdfEngine>>) {
+    match engine {
+        Some(engine) => cx.set_global(InstalledEngine(engine)),
+        None => {
+            if cx.has_global::<InstalledEngine>() {
+                cx.remove_global::<InstalledEngine>();
+            }
+        }
+    }
+}
+
+/// The installed PDF engine.
+pub(crate) fn pdf_engine(cx: &App) -> Option<Arc<dyn PdfEngine>> {
+    cx.try_global::<InstalledEngine>().map(|e| e.0.clone())
+}
+
 /// The source range `range` of `text` as rich text.
 pub fn rich_copy(
     text: &str,
@@ -141,20 +246,30 @@ pub fn rich_copy(
 
 /// `path` with `.html` when its name has no extension.
 pub fn with_html_extension(path: PathBuf) -> PathBuf {
+    with_extension(path, "html")
+}
+
+/// `path` with `.ext` when its name has no extension.
+pub fn with_extension(path: PathBuf, ext: &str) -> PathBuf {
     if path.extension().is_some_and(|e| !e.is_empty()) {
         path
     } else {
-        path.with_extension("html")
+        path.with_extension(ext)
     }
 }
 
 /// The file name an export of the document at `path` suggests.
 pub fn suggested_name(path: Option<&Path>) -> String {
+    suggested_name_with(path, "html")
+}
+
+/// The file name an export of the document at `path` to `.ext` suggests.
+pub fn suggested_name_with(path: Option<&Path>, ext: &str) -> String {
     let stem = path.and_then(Path::file_stem).map_or_else(
         || "Untitled".to_owned(),
         |s| s.to_string_lossy().into_owned(),
     );
-    format!("{stem}.html")
+    format!("{stem}.{ext}")
 }
 
 /// Writes `export` to `path` (and its assets beside it) so that readers
@@ -174,7 +289,8 @@ pub fn write_export(path: &Path, export: &Export) -> io::Result<()> {
     Ok(())
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Writes `bytes` to `path` whole (see [`write_export`]).
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if fs::metadata(path).is_ok_and(|m| m.is_dir()) {
         return Err(io::Error::new(
             io::ErrorKind::IsADirectory,
@@ -222,6 +338,13 @@ fn create_beside(target: &Path, suffix: &str) -> io::Result<(PathBuf, File)> {
 /// system's temporary folder (so no other user can swap the file), named
 /// after the document.
 pub fn write_temporary(export: &Export, name: &str) -> io::Result<PathBuf> {
+    write_temporary_bytes(export.html.as_bytes(), name)
+}
+
+/// Writes `bytes` as `name` in a new private folder in the system's
+/// temporary folder (a PDF to print from the viewer, an HTML file for the
+/// browser).
+pub fn write_temporary_bytes(bytes: &[u8], name: &str) -> io::Result<PathBuf> {
     let base = std::env::temp_dir();
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -241,7 +364,7 @@ pub fn write_temporary(export: &Export, name: &str) -> io::Result<PathBuf> {
                     .write(true)
                     .create_new(true)
                     .open(&path)?;
-                file.write_all(export.html.as_bytes())?;
+                file.write_all(bytes)?;
                 return Ok(path);
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {

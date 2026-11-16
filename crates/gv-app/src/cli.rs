@@ -74,9 +74,10 @@ pub enum Command {
     /// images inlined, links to other notes pointing to their `.html`),
     /// without opening a window.
     ///
-    /// Exit status: 0 on success, 1 when the input cannot be read or the
+    /// Exit status: 0 on success, 1 when the input cannot be read, the PDF
+    /// cannot be made (no `glyphvane-helper`, an engine error) or the
     /// output cannot be written, 2 for a usage error (an unsupported
-    /// profile, `--pdf` for now).
+    /// profile or paper).
     Export(ExportArgs),
     /// Render a Markdown file to HTML or to a syntax tree dump, without
     /// opening a window.
@@ -203,13 +204,19 @@ pub struct ExportArgs {
     #[arg(long)]
     pub html: bool,
 
-    /// Export to PDF (not available yet).
+    /// Export to PDF (made by `glyphvane-helper`, which must be installed
+    /// next to `glyphvane`).
     #[arg(long)]
     pub pdf: bool,
 
-    /// Where to write: by default the input's name with `.html` beside it
-    /// (standard output for standard input); `-` is standard output. The
-    /// file is replaced atomically.
+    /// The PDF's paper: `a4` (the default), `letter`, `legal`, `a5` or
+    /// `a3`.
+    #[arg(long, value_name = "SIZE")]
+    pub paper: Option<String>,
+
+    /// Where to write: by default the input's name with `.html` or `.pdf`
+    /// beside it (standard output for standard input); `-` is standard
+    /// output. The file is replaced atomically.
     #[arg(short, long, value_name = "OUT")]
     pub output: Option<PathBuf>,
 

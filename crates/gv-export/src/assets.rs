@@ -70,6 +70,8 @@ struct State {
     /// Embedded or copied already, by resolved path: the same image twice
     /// is read once.
     done: Vec<(PathBuf, String)>,
+    /// The type of each of `done` (PDF export).
+    mimes: Vec<&'static str>,
 }
 
 /// The images of one export. Shared with the sanitizer's attribute filter,
@@ -122,46 +124,11 @@ impl Store {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(base) = &self.base else {
-            self.note(&mut state, src, "the document has no folder");
-            return Some(src.to_owned());
-        };
-        let Some(rel) = decode_path(src) else {
-            self.note(&mut state, src, "not a plain relative path");
-            return None;
-        };
-        let path = base.join(&rel);
-        let Ok(path) = std::fs::canonicalize(&path) else {
-            self.note(&mut state, src, "file not found");
-            return Some(src.to_owned());
-        };
-        if let Some(root) = &self.root
-            && !path.starts_with(root)
-        {
-            self.note(&mut state, src, "outside the vault");
-            return None;
-        }
-        if let Some((_, done)) = state.done.iter().find(|(p, _)| *p == path) {
-            return Some(done.clone());
-        }
-        let size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(u64::MAX);
-        if size > self.limits.image_bytes {
-            self.note(&mut state, src, "larger than the image cap");
-            return Some(src.to_owned());
-        }
-        if self.mode == ImageMode::Embed && state.total + size > self.limits.total_bytes {
-            self.note(&mut state, src, "the export's image cap is reached");
-            return Some(src.to_owned());
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            self.note(&mut state, src, "cannot be read");
-            return Some(src.to_owned());
-        };
-        let Some(mime) = sniff(&bytes) else {
-            self.note(&mut state, src, "not a known image format");
-            return Some(src.to_owned());
+        let (path, bytes, mime) = match self.fetch(&mut state, src) {
+            Fetched::Done(done) => return Some(done),
+            Fetched::Keep => return Some(src.to_owned()),
+            Fetched::Drop => return None,
+            Fetched::Read { path, bytes, mime } => (path, bytes, mime),
         };
         let out = match self.mode {
             ImageMode::Embed => {
@@ -194,6 +161,101 @@ impl Store {
         state.done.push((path, out.clone()));
         Some(out)
     }
+
+    /// The bytes and type of the local image `src` for a PDF, within the
+    /// caps; `None` (and a note) when it is not embedded. The same file
+    /// twice gives the same key (its first `src`'s index in `done`).
+    pub(crate) fn bytes(&self, src: &str) -> Option<(usize, Option<Vec<u8>>, &'static str)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self.fetch(&mut state, src) {
+            Fetched::Done(done) => {
+                let key = state.done.iter().position(|(_, d)| *d == done)?;
+                let mime = state.mimes.get(key).copied()?;
+                Some((key, None, mime))
+            }
+            Fetched::Keep | Fetched::Drop => None,
+            Fetched::Read { path, bytes, mime } => {
+                state.total += bytes.len() as u64;
+                let key = state.done.len();
+                state.done.push((path, format!("#{key}")));
+                state.mimes.push(mime);
+                Some((key, Some(bytes), mime))
+            }
+        }
+    }
+
+    /// Reports `src` as not embedded.
+    pub(crate) fn skip(&self, src: &str, reason: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.note(&mut state, src, reason);
+    }
+
+    /// Finds, checks and reads the local image `src`.
+    fn fetch(&self, state: &mut State, src: &str) -> Fetched {
+        let Some(base) = &self.base else {
+            self.note(state, src, "the document has no folder");
+            return Fetched::Keep;
+        };
+        let Some(rel) = decode_path(src) else {
+            self.note(state, src, "not a plain relative path");
+            return Fetched::Drop;
+        };
+        let path = base.join(&rel);
+        let Ok(path) = std::fs::canonicalize(&path) else {
+            self.note(state, src, "file not found");
+            return Fetched::Keep;
+        };
+        if let Some(root) = &self.root
+            && !path.starts_with(root)
+        {
+            self.note(state, src, "outside the vault");
+            return Fetched::Drop;
+        }
+        if let Some((_, done)) = state.done.iter().find(|(p, _)| *p == path) {
+            return Fetched::Done(done.clone());
+        }
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(u64::MAX);
+        if size > self.limits.image_bytes {
+            self.note(state, src, "larger than the image cap");
+            return Fetched::Keep;
+        }
+        if self.mode == ImageMode::Embed && state.total + size > self.limits.total_bytes {
+            self.note(state, src, "the export's image cap is reached");
+            return Fetched::Keep;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            self.note(state, src, "cannot be read");
+            return Fetched::Keep;
+        };
+        let Some(mime) = sniff(&bytes) else {
+            self.note(state, src, "not a known image format");
+            return Fetched::Keep;
+        };
+        Fetched::Read { path, bytes, mime }
+    }
+}
+
+/// What [`Store::fetch`] found.
+enum Fetched {
+    /// Embedded already, as this.
+    Done(String),
+    /// Not embedded; keep the reference (reported).
+    Keep,
+    /// Not embedded and not referenced (reported).
+    Drop,
+    Read {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        mime: &'static str,
+    },
 }
 
 /// A relative reference as a relative path: percent-decoded, without a
@@ -233,7 +295,7 @@ fn decode_path(src: &str) -> Option<PathBuf> {
 }
 
 /// The image type of `bytes`, from their signature.
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff(bytes: &[u8]) -> Option<&'static str> {
     let starts = |sig: &[u8]| bytes.starts_with(sig);
     if starts(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")

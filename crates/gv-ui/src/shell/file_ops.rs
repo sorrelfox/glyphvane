@@ -429,6 +429,10 @@ impl Workspace {
     /// the indexing question keeps the folder unindexed in this window.
     pub(super) fn question_dismissed(&mut self, cx: &mut Context<'_, Self>) {
         let notice = self.tabs[self.active].notice.take();
+        if notice.as_ref().is_some_and(super::export::is_progress) {
+            self.cancel_pdf_job(cx);
+            return;
+        }
         if notice
             .as_ref()
             .is_some_and(|n| n.topic == Topic::CloseUnsaved)
@@ -525,6 +529,12 @@ impl Workspace {
         )
         .on_action(cx.listener(|this, _: &file_commands::ExportHtml, _, cx| {
             this.export_html_command(cx);
+        }))
+        .on_action(cx.listener(|this, _: &file_commands::ExportPdf, _, cx| {
+            this.export_pdf_command(cx);
+        }))
+        .on_action(cx.listener(|this, _: &file_commands::Print, window, cx| {
+            this.print_command(window, cx);
         }))
         .on_action(
             cx.listener(|this, _: &file_commands::OpenInBrowser, _, cx| {

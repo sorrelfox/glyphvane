@@ -1712,14 +1712,42 @@ impl ReaderElement {
             let state = self.state.clone();
             let hitbox = hitbox.clone();
             let focus = self.focus.clone();
+            let reader = self.reader.clone();
             window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble
                     || e.button != MouseButton::Right
                     || !hitbox.is_hovered(window)
-                    || state.borrow().link_at(e.position).is_none()
                 {
                     return;
                 }
+                let Some(link) = state.borrow().link_at(e.position) else {
+                    return;
+                };
+                // The link the menu's commands act on.
+                let at = reader
+                    .upgrade()
+                    .and_then(|r| {
+                        let r = r.read(cx);
+                        Some((r.path()?.to_path_buf(), r.profile()))
+                    })
+                    .map(|(file, profile)| {
+                        let construct = link.range.as_ref().and_then(|r| {
+                            let st = state.borrow();
+                            st.doc
+                                .as_ref()
+                                .and_then(|d| d.text.get(r.clone()).map(Arc::<str>::from))
+                        });
+                        super::link_info::LinkAt {
+                            file,
+                            kind: link.kind,
+                            image: link.image,
+                            destination: link.destination.clone(),
+                            range: link.range.clone(),
+                            construct,
+                            profile,
+                        }
+                    });
+                super::link_info::set_menu_link(at, cx);
                 focus.focus(window, cx);
                 crate::menu::show_context_menu(
                     crate::menu::ContextMenu::Link,
@@ -1799,7 +1827,10 @@ impl ReaderElement {
                         } else {
                             Hover::None
                         };
-                        hover != st.hover
+                        // Kept now, so the view's tooltip follows it.
+                        let changed = hover != st.hover;
+                        st.hover = hover;
+                        changed
                     }
                 };
                 drop(st);
@@ -2056,6 +2087,7 @@ fn request(link: &LinkHit, disposition: Disposition) -> LinkRequest {
         destination: link.destination.clone(),
         kind: link.kind,
         disposition,
+        range: link.range.clone(),
     }
 }
 

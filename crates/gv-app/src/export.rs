@@ -1,25 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! `glyphvane export`: a Markdown file to a standalone HTML file, without
-//! a window, as *Export as HTML…* writes it (light theme, images inlined,
-//! links to other notes pointing to their `.html`).
+//! `glyphvane export`: a Markdown file to a standalone HTML file or a PDF,
+//! without a window, as *Export as HTML…* and *Export as PDF…* write them
+//! (light theme, images inlined, links to other notes pointing to their
+//! `.html` in HTML).
 //!
 //! The profile is the one given, else the one the app would detect for the
 //! file. Links get no vault index here, so only their URL kind is checked.
-//! PDF export comes with the helper process; until then `--pdf` is a usage
-//! error. Problems are reported on standard error as `glyphvane: …` lines.
+//! The PDF is made by `glyphvane-helper` (found next to this executable).
+//! Problems are reported on standard error as `glyphvane: …` lines.
 
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+
+use gv_export::{PageOptions, Paper};
 
 use gv_profile::{CompiledProfile, DetectOptions, Overrides, PlannedProfile, ProfileId};
 use gv_text::DecodeStatus;
 
 use crate::cli::ExportArgs;
+use crate::pdf::HelperEngine;
 
-/// Exit status: the input cannot be read or the output cannot be written.
+/// Exit status: the input cannot be read, the PDF cannot be made or the
+/// output cannot be written.
 const EXIT_IO: u8 = 1;
 /// Exit status: a usage error (a profile or format that is not available).
 const EXIT_USAGE: u8 = 2;
@@ -36,12 +42,19 @@ pub fn run(args: &ExportArgs) -> ExitCode {
 }
 
 fn export(args: &ExportArgs) -> Result<(), (u8, String)> {
-    if args.pdf {
-        return Err((
-            EXIT_USAGE,
-            "PDF export is not available yet; use --html".to_owned(),
-        ));
+    if args.paper.is_some() && !args.pdf {
+        return Err((EXIT_USAGE, "--paper is only for --pdf".to_owned()));
     }
+    let paper = match args.paper.as_deref() {
+        None => Paper::default(),
+        Some(name) => Paper::from_name(name).ok_or_else(|| {
+            let available = Paper::ALL.map(Paper::name).join(", ");
+            (
+                EXIT_USAGE,
+                format!("unknown paper `{name}`; available: {available}"),
+            )
+        })?,
+    };
     let stdin = args.input.as_os_str() == "-";
     let path = (!stdin).then(|| std::path::absolute(&args.input).unwrap_or(args.input.clone()));
     let profile = profile(args.profile.as_deref(), path.as_deref())?;
@@ -59,8 +72,29 @@ fn export(args: &ExportArgs) -> Result<(), (u8, String)> {
         );
     }
     let root = path.as_deref().and_then(Path::parent);
-    let export = gv_ui::export::export_text(&decoded.text, path.as_deref(), root, &profile, None);
-    for note in &export.notes {
+    let (bytes, notes, ext) = if args.pdf {
+        let page = PageOptions {
+            paper,
+            ..PageOptions::default()
+        };
+        let pdf = gv_ui::export::export_pdf(
+            &decoded.text,
+            path.as_deref(),
+            root,
+            &profile,
+            None,
+            &page,
+            &HelperEngine::default(),
+            &AtomicBool::new(false),
+        )
+        .map_err(|e| (EXIT_IO, format!("cannot export {name} to PDF: {e}")))?;
+        (pdf.bytes, pdf.notes, "pdf")
+    } else {
+        let export =
+            gv_ui::export::export_text(&decoded.text, path.as_deref(), root, &profile, None);
+        (export.html.into_bytes(), export.notes, "html")
+    };
+    for note in &notes {
         eprintln!(
             "glyphvane: warning: image {} not embedded: {}",
             note.src, note.reason
@@ -68,15 +102,12 @@ fn export(args: &ExportArgs) -> Result<(), (u8, String)> {
     }
     let output = match (&args.output, &path) {
         (Some(out), _) => out.clone(),
-        (None, Some(path)) => path.with_extension("html"),
+        (None, Some(path)) => path.with_extension(ext),
         (None, None) => PathBuf::from("-"),
     };
     if output.as_os_str() == "-" {
         let mut out = io::stdout().lock();
-        return match out
-            .write_all(export.html.as_bytes())
-            .and_then(|()| out.flush())
-        {
+        return match out.write_all(&bytes).and_then(|()| out.flush()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             Err(e) => Err((EXIT_IO, format!("cannot write to standard output: {e}"))),
@@ -91,7 +122,7 @@ fn export(args: &ExportArgs) -> Result<(), (u8, String)> {
             ),
         ));
     }
-    gv_ui::export::write_export(&output, &export)
+    gv_ui::export::write_atomically(&output, &bytes)
         .map_err(|e| (EXIT_IO, format!("cannot write {}: {e}", output.display())))
 }
 

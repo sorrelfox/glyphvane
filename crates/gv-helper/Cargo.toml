@@ -8,7 +8,39 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The separate helper executable (ADR-020, layout H2). The GUI depends on
+# this crate without the `engine` feature: it gets the protocol and the
+# client, and links no Typst.
+[[bin]]
+name = "glyphvane-helper"
+path = "src/main.rs"
+required-features = ["engine"]
+
+[features]
+default = ["engine"]
+# The engines the helper runs: Typst PDF export.
+engine = ["dep:typst", "dep:typst-pdf", "dep:typst-layout", "dep:fontdb"]
+
 [dependencies]
+postcard = { workspace = true }
+serde = { workspace = true }
+fontdb = { workspace = true, optional = true }
+typst = { workspace = true, optional = true }
+typst-layout = { workspace = true, optional = true }
+typst-pdf = { workspace = true, optional = true }
+
+# The helper's address-space limit.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+fontdb = { workspace = true }
+gv-export = { workspace = true }
+gv-model = { workspace = true }
+gv-profile = { workspace = true }
+gv-render-tree = { workspace = true }
+gv-syntax = { workspace = true }
+lopdf = { workspace = true }
 
 [lints]
 workspace = true

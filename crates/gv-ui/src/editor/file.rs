@@ -93,6 +93,9 @@ pub enum DocEvent {
     /// again, or it was converted): the window decides again whether the
     /// view may be edited (viewer mode).
     EditableChanged,
+    /// Mod+click or a middle click on a link: the window follows the link
+    /// [`EditorView::take_clicked_link`] gives.
+    FollowLink(crate::reader::Disposition),
 }
 
 /// A loaded document, before it gets an editor.
@@ -1395,6 +1398,8 @@ impl EditorView {
             | NoticeAction::RemoteAlwaysAllow
             | NoticeAction::RemoteAllowVault
             | NoticeAction::RemoteBlock => {}
+            // The window's (an ambiguous link followed).
+            NoticeAction::ChooseLinkTarget | NoticeAction::RewriteLink => {}
         }
     }
 

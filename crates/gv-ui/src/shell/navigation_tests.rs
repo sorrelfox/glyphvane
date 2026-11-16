@@ -120,6 +120,7 @@ fn follow(
         destination: Arc::from(destination),
         kind: LinkKind::Inline,
         disposition,
+        range: None,
     };
     reader.update(vcx, |_, cx| cx.emit(ReaderEvent::FollowLink(request)));
     draw(vcx);

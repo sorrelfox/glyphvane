@@ -342,7 +342,7 @@ fn more_actions_opens_below_its_button(cx: &mut TestAppContext) {
     assert_eq!(menu.right(), button.right());
     assert_eq!(menu.top(), button.bottom() + px(spacing::OFFSET_Y));
     assert!(!f.has("context-menu-disabled:file.copy_path"));
-    assert!(f.has("context-menu-disabled:file.export_pdf"));
+    assert!(f.has("context-menu-disabled:file.history"));
     f.click("context-menu-item:file.copy_path");
     let copied = f.vcx.read_from_clipboard().and_then(|c| c.text());
     assert_eq!(copied, Some(path_text(&f.path("a.md"))));
@@ -411,7 +411,7 @@ fn the_editor_menu_runs_table_commands(cx: &mut TestAppContext) {
 }
 
 /// In Preview a right-click on a link opens the link menu; elsewhere it
-/// opens nothing. The link commands have no handlers yet.
+/// opens nothing. The link commands that have no handler yet are dimmed.
 #[gpui::test]
 fn the_link_menu_opens_on_a_link(cx: &mut TestAppContext) {
     let link = "x".repeat(60);
@@ -427,7 +427,9 @@ fn the_link_menu_opens_on_a_link(cx: &mut TestAppContext) {
     }
     assert!(found, "a right-click on the link opens a menu");
     assert_eq!(f.menu(), Some(ContextMenu::Link));
-    assert!(f.has("context-menu-disabled:links.follow"));
+    assert!(f.has("context-menu-item:links.follow"));
+    assert!(!f.has("context-menu-disabled:links.follow"));
+    assert!(f.has("context-menu-disabled:links.open_in_split"));
     f.keys("escape");
     assert!(f.reader_focused());
     // Below the text: no menu.

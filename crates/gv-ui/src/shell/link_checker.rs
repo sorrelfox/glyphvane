@@ -1071,7 +1071,12 @@ impl Workspace {
     }
 
     /// `links.fix` and `links.create_note`: the selected finding's fix.
-    fn fix_command(&mut self, create: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn fix_command(
+        &mut self,
+        create: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(checker) = self.panels.link_checker.clone() else {
             return;
         };
@@ -1095,12 +1100,8 @@ impl Workspace {
         .on_action(cx.listener(|this, _: &commands::CheckVault, window, cx| {
             this.check_links_command(ScopeKind::Vault, window, cx);
         }))
-        .on_action(cx.listener(|this, _: &commands::Fix, window, cx| {
-            this.fix_command(false, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &commands::CreateNote, window, cx| {
-            this.fix_command(true, window, cx);
-        }))
+        // `links.fix` and `links.create_note` are in `link_actions`: they
+        // act on the link under the pointer or the caret first.
     }
 
     fn checker_event(
@@ -1172,7 +1173,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let file = source.to_fs_path(root);
+        self.edit_path(source.to_fs_path(root), span, make, window, cx);
+    }
+
+    /// Replaces `span` of `file`'s buffer with what `make` makes of its
+    /// text (one undoable edit), opening the file in a background tab when
+    /// it is not open. Nothing changes when the text at `span` is not what
+    /// `make` expects.
+    pub(super) fn edit_path(
+        &mut self,
+        file: PathBuf,
+        span: Range<usize>,
+        make: impl FnOnce(&str) -> Option<String> + 'static,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let open = |ws: &Self| {
             ws.tabs
                 .iter()

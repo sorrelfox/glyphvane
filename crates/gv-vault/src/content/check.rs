@@ -383,6 +383,53 @@ impl ContentSnapshot {
             .collect()
     }
 
+    /// The findings of one link of `source` (kind `kind`, destination `raw`
+    /// as the resolver takes it, the construct at `span`), with the fixes
+    /// [`Self::check_links`] would offer: for a link under the pointer or
+    /// the caret, which may not be indexed yet. `construct` is the link's
+    /// text in the note; rewrites that cannot be applied to it are left
+    /// out.
+    #[must_use]
+    pub fn check_link(
+        &self,
+        source: &VaultPath,
+        kind: LinkKind,
+        raw: &str,
+        span: Span,
+        construct: Option<&str>,
+    ) -> Vec<Finding> {
+        let Some(paths) = self.0.paths.as_ref() else {
+            return Vec::new();
+        };
+        let checker = Checker {
+            snapshot: self,
+            paths,
+            params: &self.0.options.params,
+            compare: None,
+            aliases: OnceLock::new(),
+        };
+        let link = IndexedLink {
+            kind,
+            raw: raw.into(),
+            span,
+            line: 0,
+            front_matter: false,
+        };
+        let mut out = Vec::new();
+        checker.link(source, &link, &mut out);
+        if let Some(construct) = construct {
+            for f in &mut out {
+                f.fixes.retain(|fix| match &fix.action {
+                    FixAction::Rewrite { path } => {
+                        rewrite_link(construct, f.link_kind, &f.raw, path).is_some()
+                    }
+                    FixAction::CreateNote { .. } => true,
+                });
+            }
+        }
+        out
+    }
+
     /// Checks the links of the notes in `scope` on the snapshot's worker
     /// threads. `source` reads note text for columns and to drop rewrites
     /// that cannot be applied (`None`: columns are 0). `cancel` stops it.

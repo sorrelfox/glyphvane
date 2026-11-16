@@ -174,7 +174,6 @@ impl Syntax {
     }
 
     /// Whether the shown tree is the complete tree of `text`.
-    #[cfg(test)]
     pub fn is_current(&self, text: &TextSnapshot) -> bool {
         !self.running && self.text.revision() == text.revision() && !self.shown.0.is_interim()
     }

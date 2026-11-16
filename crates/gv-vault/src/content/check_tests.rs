@@ -329,6 +329,51 @@ fn fixes_rewrite_links_and_create_notes() {
     );
 }
 
+/// One link, not indexed yet (under the pointer): the same findings and
+/// fixes as a check of its note, rewrites that do not fit the construct
+/// left out.
+#[test]
+fn one_link_is_checked_with_its_fixes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    obsidian_vault(root);
+    let snap = snapshot(root, ProfileId::Obsidian);
+    let source = vp("Fresh.md");
+    let one = |kind, raw: &str, construct: &str| {
+        snap.check_link(
+            &source,
+            kind,
+            raw,
+            Span::of(10..10 + construct.len()),
+            Some(construct),
+        )
+    };
+    let ambiguous = one(LinkKind::Wikilink, "Meeting", "[[Meeting]]");
+    assert_eq!(ambiguous.len(), 1);
+    assert_eq!(ambiguous[0].kind, FindingKind::Ambiguous);
+    assert_eq!(ambiguous[0].span, Span::of(10..21));
+    let fixes: Vec<_> = ambiguous[0].fixes.iter().map(|f| f.label.clone()).collect();
+    assert_eq!(
+        fixes,
+        ["Use Work/Meeting.md", "Use Archive/2025/Meeting.md"]
+    );
+    let missing = one(LinkKind::Wikilink, "Missing note", "[[Missing note]]");
+    assert_eq!(missing[0].kind, FindingKind::Unresolved);
+    assert_eq!(
+        missing[0].fixes[0].action,
+        FixAction::CreateNote {
+            path: vp("Missing note.md")
+        }
+    );
+    // A construct the rewrite does not fit: no rewrite.
+    let reference = one(LinkKind::Reference, "readme.md", "[r][ref]");
+    assert!(
+        reference.iter().all(|f| f.fixes.is_empty()),
+        "{reference:?}"
+    );
+    assert!(one(LinkKind::Wikilink, "Note", "[[Note]]").is_empty());
+}
+
 #[test]
 fn sync_conflict_copies_are_skipped() {
     let dir = tempfile::tempdir().expect("temp dir");

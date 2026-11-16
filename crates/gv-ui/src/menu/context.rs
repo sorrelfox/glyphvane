@@ -66,6 +66,9 @@ pub enum ContextTarget {
     Active,
     /// Tab `n` of the window.
     Tab(usize),
+    /// The link the link menu was opened on
+    /// ([`crate::reader::link_info::menu_link`]), in the active tab.
+    Link,
 }
 
 /// Replaces the misspelled word with the suggestion given.
@@ -140,11 +143,16 @@ pub fn show_context_menu(
 ) {
     if let Some(popover) = context_menu_of(window, cx) {
         popover.update(cx, |popover, cx| {
+            let target = if kind == ContextMenu::Link {
+                ContextTarget::Link
+            } else {
+                ContextTarget::Active
+            };
             popover.open(
                 kind,
                 Placement::At(position),
                 MenuState::default(),
-                ContextTarget::Active,
+                target,
                 false,
                 window,
                 cx,

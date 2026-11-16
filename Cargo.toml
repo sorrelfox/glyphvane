@@ -38,7 +38,7 @@ gv-export = { path = "crates/gv-export" }
 gv-editor = { path = "crates/gv-editor" }
 gv-spell = { path = "crates/gv-spell" }
 gv-ui = { path = "crates/gv-ui" }
-gv-helper = { path = "crates/gv-helper" }
+gv-helper = { path = "crates/gv-helper", default-features = false }
 gv-settings = { path = "crates/gv-settings" }
 gv-inline = { path = "crates/gv-inline" }
 gv-profile = { path = "crates/gv-profile" }
@@ -239,6 +239,30 @@ png = "0.18.1"
 # All MIT OR Apache-2.0 (ring: Apache-2.0 AND ISC).
 ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Image dimensions (gv-export: the PDF pre-flight), the version usvg already
+# pulls in (MIT).
+imagesize = "0.14.0"
+# PDF export (gv-helper, the `glyphvane-helper` executable only): Typst as
+# a library over generated source (Apache-2.0; typst-pdf writes through
+# krilla, MIT OR Apache-2.0). Without typst-assets' bundled fonts: fonts
+# come from the system through fontdb. 0.x with breaking minors: exact
+# pins, bump the three together after the gv-helper PDF tests pass.
+typst = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-pdf = "=0.15.1"
+# The helper's IPC frames (MIT OR Apache-2.0).
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+# gv-helper tests: reading the exported PDFs back (MIT). Without its default
+# features (chrono, rayon).
+lopdf = { version = "=0.47.0", default-features = false }
+# Print (gv-app, Linux): the xdg-desktop-portal Print interface, through the
+# ashpd line GPUI already uses (MIT), on the async-io runtime GPUI uses.
+ashpd = { version = "0.13.13", default-features = false, features = [
+  "async-io",
+  "print",
+  "raw_handle",
+  "wayland",
+] }
 # Spell check (gv-spell): spellbook, a pure-Rust Hunspell-compatible
 # checker (MPL-2.0; one maintainer, alpha). Exact pin: bump only after the
 # spell-check accuracy harness passes on the new version.

@@ -34,7 +34,7 @@ pub(crate) fn is_markdown(path: &Path) -> bool {
 }
 
 /// The resolver's kind of a render-tree link.
-fn resolver_kind(kind: gv_model::LinkKind, image: bool) -> LinkKind {
+pub(crate) fn resolver_kind(kind: gv_model::LinkKind, image: bool) -> LinkKind {
     if kind == gv_model::LinkKind::Wikilink {
         LinkKind::Wikilink
     } else if kind == gv_model::LinkKind::Embed && !image {
@@ -186,6 +186,25 @@ impl Resolver {
         }
     }
 
+    /// The document's place in the vault.
+    pub fn source(&self) -> &VaultPath {
+        &self.source
+    }
+
+    pub fn params(&self) -> &ProfileParams {
+        &self.params
+    }
+
+    /// The resolver's link for `destination`, from the document.
+    pub fn link_ref(&self, kind: LinkKind, destination: &str) -> LinkRef {
+        LinkRef::new(kind, destination, self.source.clone(), self.profile)
+    }
+
+    /// `path` (a vault path) on the file system.
+    pub fn fs_path(&self, path: &VaultPath) -> PathBuf {
+        path.to_fs_path(self.index.root())
+    }
+
     pub fn resolve(&self, kind: LinkKind, destination: &str) -> Resolution {
         let link = LinkRef::new(kind, destination, self.source.clone(), self.profile);
         match &self.probe {
@@ -311,8 +330,165 @@ pub(crate) enum Navigation {
     /// (open with the default app after confirmation, or, for a program,
     /// only reveal it).
     OpenFile(PathBuf),
+    /// An ambiguous link: open `path` (the best candidate, the one the
+    /// tie-break chose) and say which notes match (`candidates`, best
+    /// first, on the file system).
+    Ambiguous {
+        path: PathBuf,
+        fragment: Option<Fragment>,
+        candidates: Vec<PathBuf>,
+    },
+    /// No target: the note following would create, or `None` when there
+    /// is nothing to create (a non-note file, a path outside the root, a
+    /// name with nothing left after sanitising).
+    Unresolved {
+        name: String,
+        create: Option<NewNote>,
+    },
+    /// The vault index is still building: the target cannot be decided
+    /// yet.
+    Pending,
     /// Nothing happens, for this reason (logged).
     Refused(String),
+}
+
+/// The note an unresolved link creates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewNote {
+    /// Below the link root.
+    pub path: VaultPath,
+    /// On the file system.
+    pub file: PathBuf,
+    /// When the name written in the link is not valid on every platform:
+    /// the path part the link is rewritten to first, so that it resolves
+    /// to the sanitised note.
+    pub rewrite: Option<String>,
+}
+
+/// Where Obsidian puts new notes (`.obsidian/app.json`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewFileLocation {
+    Root,
+    Current,
+    Folder(String),
+}
+
+/// The vault's `newFileLocation` (and `newFileFolderPath`), when its
+/// `.obsidian/app.json` sets one.
+fn new_file_location(root: &Path) -> Option<NewFileLocation> {
+    let text = std::fs::read_to_string(root.join(".obsidian").join("app.json")).ok()?;
+    match json_string(&text, "newFileLocation")?.as_str() {
+        "root" => Some(NewFileLocation::Root),
+        "current" => Some(NewFileLocation::Current),
+        "folder" => Some(NewFileLocation::Folder(
+            json_string(&text, "newFileFolderPath").unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+/// The string value of `"key"` in a flat JSON object (enough for the two
+/// settings above: `\"`, `\\` and `\/` are unescaped, other escapes kept).
+fn json_string(text: &str, key: &str) -> Option<String> {
+    let quoted = format!("\"{key}\"");
+    let at = text.find(&quoted)? + quoted.len();
+    let rest = text[at..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                c @ ('"' | '\\' | '/') => out.push(c),
+                c => {
+                    out.push('\\');
+                    out.push(c);
+                }
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The note an unresolved link of kind `kind` creates (09 § Unresolved):
+/// in the folder written in the link; for a bare name, where the vault's
+/// `newFileLocation` says, otherwise the source's folder. A name that is
+/// not valid on every platform is sanitised as the quick switcher does,
+/// and the link is to be rewritten to it.
+pub(crate) fn new_note(resolver: &Resolver, kind: LinkKind, destination: &str) -> Option<NewNote> {
+    let params = resolver.params();
+    let link = resolver.link_ref(kind, destination);
+    let gv_vault::link::DecodedTarget::Path(written) = gv_vault::link::decode(&link, params).target
+    else {
+        return None;
+    };
+    let bare = written.segments.len() == 1 && !written.absolute && !written.is_dot_relative();
+    let place = |path: VaultPath| -> Option<VaultPath> {
+        if !bare {
+            return Some(path);
+        }
+        let name = path.as_str().rsplit('/').next()?.to_owned();
+        let folder = match new_file_location(resolver.root()) {
+            Some(NewFileLocation::Root) => String::new(),
+            Some(NewFileLocation::Folder(f)) => f.trim_matches('/').to_owned(),
+            Some(NewFileLocation::Current) | None => return Some(path),
+        };
+        if folder.is_empty() {
+            VaultPath::new(&name).ok()
+        } else {
+            VaultPath::new(&format!("{folder}/{name}")).ok()
+        }
+    };
+    let make = |path: VaultPath, rewrite: Option<String>| {
+        let path = place(path)?;
+        Some(NewNote {
+            file: resolver.fs_path(&path),
+            path,
+            rewrite,
+        })
+    };
+    let source = resolver.source().clone();
+    if let Some(path) = gv_vault::content::check::note_path_for_link(&link, params, &source) {
+        return make(path, None);
+    }
+    if written.text.is_empty() || written.trailing_slash {
+        return None;
+    }
+    // A name some platform does not allow: the switcher's sanitising, and
+    // the link rewritten to match.
+    let cleaned = crate::switcher::model::new_note_path(&written.text)?;
+    let wiki = link.kind.is_wiki();
+    let had_extension = written
+        .segments
+        .last()
+        .is_some_and(|s| s.to_lowercase().ends_with(".md"));
+    let mut text = if wiki && !had_extension {
+        cleaned.trim_end_matches(".md").to_owned()
+    } else {
+        cleaned
+    };
+    if !wiki {
+        text = text.replace('%', "%25").replace(' ', "%20");
+    }
+    if text == written.text {
+        return None;
+    }
+    let rest = &destination[link_name_end(wiki, destination)..];
+    let rewritten = resolver.link_ref(kind, &format!("{text}{rest}"));
+    let path = gv_vault::content::check::note_path_for_link(&rewritten, params, &source)?;
+    make(path, Some(text))
+}
+
+/// Where the path part of a destination ends.
+fn link_name_end(wiki: bool, destination: &str) -> usize {
+    let end = if wiki {
+        destination.find(['#', '|'])
+    } else {
+        destination.find(['#', '?'])
+    };
+    end.unwrap_or(destination.len())
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -361,6 +537,23 @@ pub(crate) fn navigation(
             let reason = res.block.map(|b| b.to_string()).unwrap_or_default();
             refused(&format!("blocked: {reason}"))
         }
+        Status::Ambiguous(_) => match (&res.target_path, res.target_kind) {
+            (Some(target), Some(TargetKind::File)) if is_markdown(Path::new(target.as_str())) => {
+                Navigation::Ambiguous {
+                    path: target.to_fs_path(resolver.root()),
+                    fragment: res.fragment,
+                    candidates: res
+                        .candidates
+                        .iter()
+                        .map(|c| c.path.to_fs_path(resolver.root()))
+                        .collect(),
+                }
+            }
+            (Some(target), Some(TargetKind::File)) => {
+                Navigation::OpenFile(target.to_fs_path(resolver.root()))
+            }
+            _ => refused("no target"),
+        },
         status if status.is_resolved() => match (&res.target_path, res.target_kind) {
             (Some(target), Some(TargetKind::File)) => {
                 let path = target.to_fs_path(resolver.root());
@@ -383,8 +576,11 @@ pub(crate) fn navigation(
             }
             _ => refused("no target"),
         },
-        Status::Pending => refused("the vault index is still building"),
-        Status::Unresolved => refused("no such note; creating it comes later"),
+        Status::Pending => Navigation::Pending,
+        Status::Unresolved => Navigation::Unresolved {
+            name: super::link_info::link_name(kind, destination),
+            create: new_note(&resolver, resolver_kind(kind, false), destination),
+        },
         Status::OutsideRoot => refused("outside the vault root; following it comes later"),
         _ => refused("not followed"),
     }
@@ -531,14 +727,74 @@ mod tests {
             Navigation::External("https://example.com/x".into())
         );
         assert!(matches!(go("mailto:a@b.c"), Navigation::External(_)));
-        for refused in ["missing.md", "javascript:x", "sub"] {
-            assert!(matches!(go(refused), Navigation::Refused(_)), "{refused}");
-        }
+        assert!(matches!(go("javascript:x"), Navigation::Refused(_)));
+        assert!(!matches!(go("sub"), Navigation::Open { .. }));
+        // A missing note: without the index it may be anywhere in the
+        // vault, so it is pending (no create offer).
+        assert_eq!(go("missing.md"), Navigation::Pending);
         // Other files and other schemes wait for the user.
         assert!(matches!(go("pic.png"), Navigation::OpenFile(path) if path.ends_with("pic.png")));
         assert!(matches!(go("ssh://host"), Navigation::Confirm { url, why }
                 if url == "ssh://host" && why.contains("“ssh:”")));
         assert!(matches!(go("weird-scheme:x"), Navigation::Confirm { .. }));
+    }
+
+    #[test]
+    fn unresolved_links_create_notes_where_the_plan_says() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join(".obsidian")).expect("marker");
+        std::fs::create_dir_all(dir.path().join("sub")).expect("folder");
+        let file = dir.path().join("sub/a.md");
+        std::fs::write(&file, "x").expect("write");
+        let (index, _) = PathIndex::build(dir.path(), IndexConfig::default()).expect("index");
+        let r = Resolver::for_click(&file, Some(&index), ProfileId::Obsidian);
+        let make = |dest: &str| new_note(&r, LinkKind::Wikilink, dest);
+        // A bare name: next to the source without a setting.
+        assert_eq!(
+            make("New").map(|n| n.path.as_str().to_owned()).as_deref(),
+            Some("sub/New.md")
+        );
+        // A folder written in the link: from the vault root.
+        assert_eq!(
+            make("Notes/New#H")
+                .map(|n| n.path.as_str().to_owned())
+                .as_deref(),
+            Some("Notes/New.md")
+        );
+        // A name some platform does not allow: sanitised, with a rewrite.
+        let odd = make("A: b?|alias").expect("a note");
+        assert_eq!(odd.path.as_str(), "sub/A b.md");
+        assert_eq!(odd.rewrite.as_deref(), Some("A b"));
+        // `newFileLocation`.
+        let app = dir.path().join(".obsidian/app.json");
+        std::fs::write(&app, r#"{"newFileLocation":"root"}"#).expect("write");
+        assert_eq!(
+            make("New").map(|n| n.path.as_str().to_owned()).as_deref(),
+            Some("New.md")
+        );
+        std::fs::write(
+            &app,
+            r#"{"newFileLocation": "folder", "newFileFolderPath": "In\/box"}"#,
+        )
+        .expect("write");
+        assert_eq!(
+            make("New").map(|n| n.path.as_str().to_owned()).as_deref(),
+            Some("In/box/New.md")
+        );
+        // Nothing to create for a URL.
+        assert_eq!(new_note(&r, LinkKind::Inline, "https://e.x/"), None);
+    }
+
+    #[test]
+    fn json_strings_are_read_from_flat_objects() {
+        let text = r#"{ "a": 1, "newFileLocation" : "current", "p": "x\"y" }"#;
+        assert_eq!(
+            json_string(text, "newFileLocation").as_deref(),
+            Some("current")
+        );
+        assert_eq!(json_string(text, "p").as_deref(), Some("x\"y"));
+        assert_eq!(json_string(text, "a"), None);
+        assert_eq!(json_string(text, "missing"), None);
     }
 
     #[test]

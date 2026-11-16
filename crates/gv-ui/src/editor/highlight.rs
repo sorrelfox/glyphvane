@@ -185,6 +185,27 @@ impl LinkStatuses {
         self.generation
     }
 
+    /// The status of a link (cached).
+    pub(crate) fn status_of(
+        &mut self,
+        kind: gv_model::LinkKind,
+        image: bool,
+        destination: &str,
+    ) -> LinkStatus {
+        self.status(kind, image, destination)
+    }
+
+    /// The link resolved again, for its target and candidates.
+    pub(crate) fn resolution(
+        &self,
+        kind: gv_model::LinkKind,
+        image: bool,
+        destination: &str,
+    ) -> Option<gv_vault::Resolution> {
+        let resolver = self.resolver.as_ref()?;
+        Some(resolver.resolve(crate::reader::resolver_kind(kind, image), destination))
+    }
+
     fn status(&mut self, kind: gv_model::LinkKind, image: bool, destination: &str) -> LinkStatus {
         let Some(resolver) = &self.resolver else {
             return LinkStatus::Pending;

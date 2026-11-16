@@ -435,6 +435,18 @@ impl Workspace {
                 })
                 .detach();
             }
+            DocEvent::FollowLink(disposition) => {
+                let editor = editor.clone();
+                let window = self.window_handle;
+                cx.spawn(async move |this, cx| {
+                    let _ = cx.update_window(window, |_, window, cx| {
+                        this.update(cx, |ws, cx| {
+                            ws.follow_clicked_link(&editor, disposition, window, cx);
+                        })
+                    });
+                })
+                .detach();
+            }
             DocEvent::ModifiedChanged | DocEvent::NoticeChanged | DocEvent::Saved => {}
         }
         cx.notify();

@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! *Export as HTML…*, *Open in browser* and *Copy as rich text* in headless
-//! GPUI windows over temporary folders. The save dialog, the launcher and
-//! the rich-text clipboard are fakes that record what they were asked, so
-//! no dialog shows, nothing is launched and the system clipboard is not
-//! touched.
+//! *Export as HTML…*, *Export as PDF…*, *Print…*, *Open in browser* and
+//! *Copy as rich text* in headless GPUI windows over temporary folders.
+//! The save dialog, the launcher, the rich-text clipboard, the PDF engine
+//! and the printer are fakes that record what they were asked, so no
+//! dialog shows, nothing is launched or printed, and the system clipboard
+//! is not touched.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
@@ -23,11 +26,13 @@ use gv_vault::files::journal::JournalStore;
 use super::session::{self, Session, SessionStore};
 use super::{OpenTarget, ViewMode, Workspace};
 use crate::chrome::WindowChrome;
-use crate::export::RichClipboard;
+use crate::export::{PdfEngine, PdfError, RichClipboard};
+use crate::files::notice::NoticeAction;
 use crate::files::save_as::{SaveAnswer, SavePathDialog, SavePrompt};
 use crate::keymap::actions::editor::{CopyAsRichText, SelectAll};
 use crate::keymap::actions::file as file_commands;
 use crate::platform::Launcher;
+use crate::print::{PageSetup, PrintSetup, Printed, Printer};
 use crate::{AppSettings, ThemeChoice, ToggleEditMode};
 
 const NOTE: &str =
@@ -87,6 +92,94 @@ impl RichClipboard for FakeClipboard {
     }
 }
 
+/// A PDF engine that records the documents it got and answers with fixed
+/// bytes, or fails.
+#[derive(Clone, Default)]
+struct FakeEngine {
+    sources: Arc<Mutex<Vec<String>>>,
+    fail: Arc<Mutex<Option<String>>>,
+}
+
+const FAKE_PDF: &[u8] = b"%PDF-1.7 fake";
+
+impl PdfEngine for FakeEngine {
+    fn render(
+        &self,
+        doc: &gv_export::TypstDocument,
+        _: u32,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, PdfError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(PdfError::Cancelled);
+        }
+        self.sources.lock().expect("lock").push(doc.source.clone());
+        match self.fail.lock().expect("lock").clone() {
+            Some(reason) => Err(PdfError::Failed(reason)),
+            None => Ok(FAKE_PDF.to_vec()),
+        }
+    }
+}
+
+/// What the fake printer printed: the title, the PDF and its page.
+type PrintedJob = (String, Vec<u8>, Option<PageSetup>);
+
+/// A printer whose dialog answers `page` (or is cancelled, with `None`),
+/// recording the titles asked and the PDFs printed. Never prints.
+#[derive(Clone)]
+struct FakePrinter {
+    answer: Rc<RefCell<Option<Option<PageSetup>>>>,
+    asked: Rc<RefCell<Vec<String>>>,
+    printed: Rc<RefCell<Vec<PrintedJob>>>,
+}
+
+impl FakePrinter {
+    fn answering(answer: Option<Option<PageSetup>>) -> Self {
+        Self {
+            answer: Rc::new(RefCell::new(answer)),
+            asked: Rc::default(),
+            printed: Rc::default(),
+        }
+    }
+}
+
+impl Printer for FakePrinter {
+    fn prepare(
+        &self,
+        title: &str,
+        _: &gpui::Window,
+        _: &mut App,
+    ) -> LocalBoxFuture<'static, Result<Option<PrintSetup>, String>> {
+        self.asked.borrow_mut().push(title.to_owned());
+        let answer = match *self.answer.borrow() {
+            Some(page) => Ok(Some(PrintSetup {
+                page,
+                state: Box::new(page),
+            })),
+            None => Ok(None),
+        };
+        async move { answer }.boxed_local()
+    }
+
+    fn print(
+        &self,
+        setup: PrintSetup,
+        title: &str,
+        pdf: Vec<u8>,
+        _: &mut App,
+    ) -> LocalBoxFuture<'static, Result<Printed, String>> {
+        let state = setup
+            .state
+            .downcast::<Option<PageSetup>>()
+            .map(|s| *s)
+            .expect("our own state comes back");
+        assert_eq!(state, setup.page);
+        self.printed
+            .borrow_mut()
+            .push((title.to_owned(), pdf, setup.page));
+        async { Ok(Printed::Sent) }.boxed_local()
+    }
+}
+
 struct Fixture {
     dir: tempfile::TempDir,
     workspace: Entity<Workspace>,
@@ -94,6 +187,7 @@ struct Fixture {
     dialog: FakeSaveDialog,
     launched: FakeLauncher,
     clipboard: FakeClipboard,
+    engine: FakeEngine,
 }
 
 fn fixture(cx: &mut TestAppContext) -> Fixture {
@@ -103,6 +197,7 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
     let dialog = FakeSaveDialog::default();
     let launched = FakeLauncher::default();
     let clipboard = FakeClipboard::default();
+    let engine = FakeEngine::default();
     let target = Some(OpenTarget::new(dir.path().join("note.md")));
     let journal = dir.path().join("config/journal");
     let (window, workspace) = cx.update(|cx| {
@@ -112,6 +207,7 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
         crate::files::save_as::set_dialog(cx, dialog.clone());
         crate::platform::set_launcher(cx, launched.clone());
         crate::export::set_rich_clipboard(cx, Some(Rc::new(clipboard.clone())));
+        crate::export::set_pdf_engine(cx, Some(Arc::new(engine.clone())));
         session::install(cx, SessionStore::new(Session::default(), None));
         let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(800.0)));
         let options = WindowOptions {
@@ -132,6 +228,7 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
         dialog,
         launched,
         clipboard,
+        engine,
     }
 }
 
@@ -334,4 +431,130 @@ fn without_a_rich_clipboard_the_copy_is_plain_text(cx: &mut TestAppContext) {
     f.dispatch(CopyAsRichText);
     assert!(f.system_clipboard().is_some_and(|t| t.starts_with("Title")));
     assert_eq!(f.notice().as_deref(), Some("Copied as plain text."));
+}
+
+fn sources(f: &Fixture) -> Vec<String> {
+    f.engine.sources.lock().expect("lock").clone()
+}
+
+#[gpui::test]
+fn export_pdf_asks_where_and_writes_the_pdf(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let target = f.dir.path().join("out");
+    f.dialog.answers.borrow_mut().push_back(Ok(Some(target)));
+    f.dispatch(file_commands::ExportPdf);
+    let asked = f.dialog.asked.borrow().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].suggested_name, "note.pdf");
+    // Made off the UI thread from the generated document; `.pdf` added.
+    let pdf = std::fs::read(f.dir.path().join("out.pdf")).expect("written");
+    assert_eq!(pdf, FAKE_PDF);
+    let sources = sources(&f);
+    assert_eq!(sources.len(), 1);
+    assert!(
+        sources[0].contains("#heading(level: 1)[#\"Title\";]"),
+        "{}",
+        sources[0]
+    );
+    assert!(sources[0].contains("paper: \"a4\""));
+    // The progress infobar is gone.
+    assert_eq!(f.notice(), None);
+}
+
+#[gpui::test]
+fn export_pdf_failures_are_shown(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    *f.engine.fail.lock().expect("lock") = Some("the engine broke".to_owned());
+    let target = f.dir.path().join("out.pdf");
+    f.dialog
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Some(target.clone())));
+    f.dispatch(file_commands::ExportPdf);
+    assert_eq!(f.notice().as_deref(), Some("Not exported."));
+    assert!(!target.exists());
+
+    // Without an engine, nothing is asked.
+    f.vcx
+        .update(|_, cx| crate::export::set_pdf_engine(cx, None));
+    f.dispatch(file_commands::ExportPdf);
+    assert_eq!(f.dialog.asked.borrow().len(), 1);
+    assert_eq!(f.notice().as_deref(), Some("Not exported."));
+}
+
+#[gpui::test]
+fn the_progress_infobar_cancels_the_job(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let cancel = f.workspace.update(&mut f.vcx, |ws, cx| {
+        ws.start_pdf_job("Exporting PDF…", cx).expect("starts")
+    });
+    assert_eq!(f.notice().as_deref(), Some("Exporting PDF…"));
+    // A second job waits for the first.
+    let second = f
+        .workspace
+        .update(&mut f.vcx, |ws, cx| ws.start_pdf_job("Exporting PDF…", cx));
+    assert!(second.is_none());
+    f.workspace.update(&mut f.vcx, |ws, cx| {
+        ws.ask(super::export::progress_for_tests("Exporting PDF…"), cx);
+        assert!(ws.answer(&NoticeAction::Cancel, cx));
+    });
+    assert!(cancel.load(Ordering::Relaxed), "cancelled");
+    assert_eq!(f.notice(), None);
+    f.workspace.update(&mut f.vcx, |ws, cx| ws.end_pdf_job(cx));
+}
+
+#[gpui::test]
+fn print_lays_out_for_the_chosen_paper_and_prints(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let letter = PageSetup {
+        width_mm: 215.9,
+        height_mm: 279.4,
+        landscape: true,
+        margin_mm: Some(12.0),
+    };
+    let printer = FakePrinter::answering(Some(Some(letter)));
+    f.vcx
+        .update(|_, cx| crate::print::set_printer(cx, printer.clone()));
+    f.dispatch(file_commands::Print);
+    assert_eq!(*printer.asked.borrow(), ["note"]);
+    let sources = sources(&f);
+    assert_eq!(sources.len(), 1);
+    assert!(
+        sources[0].contains("width: 215.9mm, height: 279.4mm, flipped: true, margin: 12mm"),
+        "{}",
+        sources[0]
+    );
+    let printed = printer.printed.borrow().clone();
+    assert_eq!(printed.len(), 1, "the PDF reached the printer");
+    assert_eq!(printed[0].0, "note");
+    assert_eq!(printed[0].1, FAKE_PDF);
+    assert_eq!(printed[0].2, Some(letter));
+    assert_eq!(f.notice(), None);
+    assert!(f.launched.0.borrow().is_empty());
+}
+
+#[gpui::test]
+fn a_cancelled_print_dialog_makes_no_pdf(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let printer = FakePrinter::answering(None);
+    f.vcx
+        .update(|_, cx| crate::print::set_printer(cx, printer.clone()));
+    f.dispatch(file_commands::Print);
+    assert_eq!(printer.asked.borrow().len(), 1);
+    assert!(sources(&f).is_empty());
+    assert!(printer.printed.borrow().is_empty());
+    assert_eq!(f.notice(), None);
+}
+
+#[gpui::test]
+fn without_a_print_dialog_the_pdf_opens_in_the_viewer(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    f.dispatch(file_commands::Print);
+    let launched = f.launched.0.borrow().clone();
+    assert_eq!(launched.len(), 1);
+    let pdf = &launched[0];
+    assert_eq!(pdf.file_name().and_then(|n| n.to_str()), Some("note.pdf"));
+    assert_eq!(std::fs::read(pdf).expect("written"), FAKE_PDF);
+    assert_eq!(f.notice().as_deref(), Some("Opened in the PDF viewer."));
+    std::fs::remove_dir_all(pdf.parent().expect("folder")).expect("clean up");
 }

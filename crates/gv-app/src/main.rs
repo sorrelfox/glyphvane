@@ -13,8 +13,11 @@ mod gpu;
 mod instance;
 mod latency;
 mod no_gpu_dialog;
+mod pdf;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod present;
+#[cfg(target_os = "linux")]
+mod print_portal;
 mod render;
 mod safe_mode;
 mod session;
@@ -192,6 +195,12 @@ fn main() -> ExitCode {
             latency::install(cx);
             gv_ui::editor::set_html_clipboard(cx, Some(clipboard::system_reader()));
             gv_ui::export::set_rich_clipboard(cx, Some(clipboard::system_writer()));
+            gv_ui::export::set_pdf_engine(
+                cx,
+                Some(std::sync::Arc::new(pdf::HelperEngine::default())),
+            );
+            #[cfg(target_os = "linux")]
+            gv_ui::print::set_printer(cx, print_portal::PortalPrinter);
             gv_ui::keymap::install(cx, locations.as_ref());
             // The crash journal and file watching; safe mode keeps both:
             // they protect the user's text.

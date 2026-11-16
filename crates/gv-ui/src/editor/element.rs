@@ -884,6 +884,15 @@ impl EditorView {
             self.press_fold(hit, window, cx);
             return;
         }
+        // Mod+Click on a link follows it (a plain click never does).
+        if e.modifiers.secondary(cx)
+            && !e.modifiers.shift
+            && !e.modifiers.alt
+            && e.click_count <= 1
+            && self.click_link(e.position, crate::reader::Disposition::InPlace, window, cx)
+        {
+            return;
+        }
         let Some(offset) = self.offset_at(e.position, window, cx) else {
             return;
         };
@@ -1322,6 +1331,19 @@ impl EditorElement {
                 }
                 let focus = view.read(cx).focus.clone();
                 focus.focus(window, cx);
+                // On a link: the link menu, about that link.
+                let link = view.update(cx, |view, cx| view.menu_link_at(e.position, window, cx));
+                if let Some(link) = link {
+                    crate::reader::link_info::set_menu_link(Some(link), cx);
+                    crate::menu::show_context_menu(
+                        crate::menu::ContextMenu::Link,
+                        e.position,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                }
                 crate::menu::show_context_menu(
                     crate::menu::ContextMenu::Editor,
                     e.position,
@@ -1337,6 +1359,7 @@ impl EditorElement {
         }
         {
             let view = self.view.clone();
+            let hover_hitbox = hitbox.clone();
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
@@ -1344,6 +1367,34 @@ impl EditorElement {
                 let pressed = view.read(cx).press != Press::None;
                 if pressed {
                     view.update(cx, |view, cx| view.mouse_move(e, window, cx));
+                } else if !e.dragging() {
+                    // The link under the pointer, for its tooltip.
+                    let at = hover_hitbox.is_hovered(window).then_some(e.position);
+                    view.update(cx, |view, cx| view.hover_moved(at, window, cx));
+                }
+            });
+        }
+        // A middle click on a link: a background tab.
+        {
+            let view = self.view.clone();
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || e.button != MouseButton::Middle
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let followed = view.update(cx, |view, cx| {
+                    view.click_link(
+                        e.position,
+                        crate::reader::Disposition::Background,
+                        window,
+                        cx,
+                    )
+                });
+                if followed {
+                    cx.stop_propagation();
                 }
             });
         }

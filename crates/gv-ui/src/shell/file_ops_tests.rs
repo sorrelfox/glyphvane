@@ -289,6 +289,7 @@ impl Fixture {
             destination: Arc::from(destination),
             kind: LinkKind::Inline,
             disposition: Disposition::InPlace,
+            range: None,
         };
         reader.update(&mut self.vcx, |_, cx| {
             cx.emit(ReaderEvent::FollowLink(request))

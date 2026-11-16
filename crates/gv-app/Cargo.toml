@@ -18,6 +18,9 @@ arboard = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
+gv-export = { workspace = true }
+# The helper's protocol and client only: Typst stays in glyphvane-helper.
+gv-helper = { workspace = true }
 gv-profile = { workspace = true }
 gv-settings = { workspace = true }
 gv-syntax = { workspace = true }
@@ -49,9 +52,12 @@ wayland-protocols = { workspace = true }
 arboard = { workspace = true, features = ["wayland-data-control"] }
 
 # Colour emoji (Linux): finding the installed emoji font and checking that
-# GPUI's rasterizer can draw it, else the bundled one is added.
+# GPUI's rasterizer can draw it, else the bundled one is added. Print: the
+# desktop portal, and the PDF handed to it as an in-memory file (memfd).
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
 fontdb = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
 skrifa = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

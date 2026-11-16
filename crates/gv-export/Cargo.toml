@@ -18,6 +18,9 @@ gv-render-tree.workspace = true
 gv-syntax.workspace = true
 # The URL classifier and policy shared with the Reading view.
 gv-vault.workspace = true
+# Image dimensions before a PDF embeds them (the version usvg already pulls
+# in; MIT).
+imagesize.workspace = true
 
 [dev-dependencies]
 gv-profile.workspace = true

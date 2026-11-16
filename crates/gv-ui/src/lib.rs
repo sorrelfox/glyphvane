@@ -20,6 +20,7 @@ pub mod menu;
 pub mod metrics;
 pub mod palette;
 pub mod platform;
+pub mod print;
 pub mod profile;
 pub mod reader;
 pub mod settings;
