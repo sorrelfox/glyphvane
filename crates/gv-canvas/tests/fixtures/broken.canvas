@@ -1,0 +1,103 @@
+{
+  "nodes": [
+    {
+      "id": "ok",
+      "type": "text",
+      "text": "fine",
+      "x": 0,
+      "y": 0,
+      "width": 100,
+      "height": 50
+    },
+    {
+      "id": "no-x",
+      "type": "text",
+      "text": "x missing",
+      "y": 0,
+      "width": 100,
+      "height": 50
+    },
+    "not an object",
+    {
+      "id": "neg",
+      "type": "text",
+      "text": "",
+      "x": 0,
+      "y": 0,
+      "width": -5,
+      "height": 50
+    },
+    {
+      "id": "bad-colour",
+      "type": "link",
+      "url": "https://example.org",
+      "x": 200,
+      "y": 0,
+      "width": 100,
+      "height": 50,
+      "color": "9"
+    },
+    {
+      "id": "no-file",
+      "type": "file",
+      "x": 0,
+      "y": 100,
+      "width": 100,
+      "height": 50
+    },
+    {
+      "id": "future",
+      "type": "sticker",
+      "x": 200,
+      "y": 100,
+      "width": 100,
+      "height": 50
+    },
+    {
+      "id": "ok",
+      "type": "text",
+      "x": 400,
+      "y": 0,
+      "width": 100,
+      "height": 50
+    },
+    {
+      "id": "big",
+      "type": "text",
+      "text": "",
+      "x": 1e+300,
+      "y": 0,
+      "width": 10,
+      "height": 10
+    },
+    {
+      "id": "grp",
+      "type": "group",
+      "x": -50,
+      "y": -50,
+      "width": 600,
+      "height": 300,
+      "backgroundStyle": "stretch",
+      "label": 7
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-ok",
+      "fromNode": "ok",
+      "toNode": "bad-colour",
+      "fromSide": "middle",
+      "toEnd": "triangle"
+    },
+    {
+      "id": "e-dangling",
+      "fromNode": "ok",
+      "toNode": "no-file"
+    },
+    {
+      "fromNode": "ok",
+      "toNode": "future"
+    },
+    42
+  ]
+}

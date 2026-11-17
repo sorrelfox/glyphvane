@@ -1,0 +1,116 @@
+{
+	"nodes": [
+		{
+			"id": "g-outer",
+			"type": "group",
+			"x": -400,
+			"y": -300,
+			"width": 1400,
+			"height": 900,
+			"label": "Project",
+			"background": "assets/paper.png",
+			"backgroundStyle": "repeat"
+		},
+		{
+			"id": "t-intro",
+			"type": "text",
+			"text": "# Intro\n\nSee [[Plan]] and **bold** text.",
+			"x": -360,
+			"y": -240,
+			"width": 400,
+			"height": 200,
+			"color": "4"
+		},
+		{
+			"id": "g-inner",
+			"type": "group",
+			"x": 200,
+			"y": -260,
+			"width": 700,
+			"height": 400,
+			"label": "Sources",
+			"color": "#8a2BE2"
+		},
+		{
+			"id": "f-note",
+			"type": "file",
+			"file": "Notes/Plan.md",
+			"subpath": "#Goals#Q4",
+			"x": 240,
+			"y": -220,
+			"width": 300,
+			"height": 180,
+			"styleAttributes": {
+				"border": "dashed"
+			}
+		},
+		{
+			"id": "f-block",
+			"type": "file",
+			"file": "Notes/Log é.md",
+			"subpath": "#^abc123",
+			"x": 580,
+			"y": -220,
+			"width": 280,
+			"height": 180
+		},
+		{
+			"id": "l-site",
+			"type": "link",
+			"url": "https://jsoncanvas.org/",
+			"x": -360,
+			"y": 100,
+			"width": 400,
+			"height": 240,
+			"color": "1"
+		},
+		{
+			"id": "f-img",
+			"type": "file",
+			"file": "assets/diagram.png",
+			"x": 240,
+			"y": 200,
+			"width": 320,
+			"height": 240,
+			"color": "6"
+		}
+	],
+	"edges": [
+		{
+			"id": "e1",
+			"fromNode": "t-intro",
+			"fromSide": "right",
+			"toNode": "f-note",
+			"toSide": "left",
+			"label": "plans",
+			"color": "2"
+		},
+		{
+			"id": "e2",
+			"fromNode": "f-note",
+			"fromSide": "right",
+			"fromEnd": "arrow",
+			"toNode": "f-block",
+			"toSide": "left",
+			"toEnd": "none"
+		},
+		{
+			"id": "e3",
+			"fromNode": "t-intro",
+			"toNode": "l-site",
+			"color": "#00ff00",
+			"styleAttributes": {
+				"path": "dotted"
+			}
+		},
+		{
+			"id": "e4",
+			"fromNode": "l-site",
+			"toNode": "f-img"
+		}
+	],
+	"metadata": {
+		"version": "1.0-1.0",
+		"frontmatter": {}
+	}
+}

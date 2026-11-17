@@ -3633,6 +3633,10 @@ version = "0.0.55"
 [[package]]
 name = "gv-canvas"
 version = "0.0.55"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "gv-diagram"

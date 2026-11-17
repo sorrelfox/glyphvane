@@ -9,6 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+serde = { workspace = true }
+# `preserve_order` keeps object keys in file order, so unknown keys survive a
+# round trip in place.
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 [lints]
 workspace = true
