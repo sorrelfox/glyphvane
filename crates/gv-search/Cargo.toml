@@ -9,6 +9,21 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Case-insensitive literal search (the version `regex` already pulls in;
+# Unlicense OR MIT).
+aho-corasick = "1.1.5"
+# Notes, tags, properties and tasks come from the content index.
+gv-vault.workspace = true
+memchr.workspace = true
+rayon.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+gv-profile.workspace = true
+
+[[bench]]
+name = "scan"
+harness = false
 
 [lints]
 workspace = true

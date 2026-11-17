@@ -3804,6 +3804,14 @@ dependencies = [
 [[package]]
 name = "gv-search"
 version = "0.0.55"
+dependencies = [
+ "aho-corasick",
+ "gv-profile",
+ "gv-vault",
+ "memchr",
+ "rayon",
+ "regex",
+]
 
 [[package]]
 name = "gv-settings"
