@@ -31,6 +31,8 @@
 //!   vault, kept in step with the watcher's path-index snapshots and with
 //!   unsaved buffers, with backlinks, unresolved links, tags and the quick
 //!   switcher's entries as queries.
+//! - [`refactor`]: file operations. Rename and move with link rewriting,
+//!   journaled and undoable; new folders, duplicates and the trash.
 //! - [`watch`]: the vault watcher. Keeps a [`SharedPathIndex`] in step with
 //!   the disk (OS notifications, polling on network file systems, rescans
 //!   when events were lost) and reports external changes to open documents
@@ -51,6 +53,7 @@ pub mod path;
 pub mod platform;
 pub mod probe;
 pub mod profile;
+pub mod refactor;
 pub mod repo;
 pub mod resolve;
 pub mod root;

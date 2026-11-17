@@ -9,6 +9,7 @@ pub mod chrome;
 pub mod compare;
 pub mod editor;
 pub mod export;
+pub mod file_prompt;
 pub mod files;
 pub mod find;
 pub mod goto;
@@ -79,6 +80,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     menu::init(cx);
     palette::init(cx);
     goto::init(cx);
+    file_prompt::init(cx);
     switcher::init(cx);
     settings_window::init(cx);
     keymap::init(cx);

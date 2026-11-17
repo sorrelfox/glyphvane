@@ -52,6 +52,9 @@ mod tests;
 mod title_row;
 mod tree;
 mod vault;
+mod vault_ops;
+#[cfg(test)]
+mod vault_ops_tests;
 
 #[cfg(test)]
 pub(crate) use vault::VaultStatus;
@@ -582,6 +585,8 @@ pub struct Workspace {
     link_ux: link_actions::LinkUx,
     /// The expanded table over the content area, while it is open.
     expanded: Option<expanded_table::Expanded>,
+    /// The last rename or move, for Undo.
+    vault_ops: vault_ops::VaultOps,
 }
 
 impl fmt::Debug for Workspace {
@@ -722,6 +727,7 @@ impl Workspace {
             _profiles: profiles,
             link_ux: link_actions::LinkUx::new(cx),
             expanded: None,
+            vault_ops: vault_ops::VaultOps::default(),
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -1590,6 +1596,8 @@ impl Workspace {
             window,
             |this, _, event: &FilesPanelEvent, window, cx| match event {
                 FilesPanelEvent::Open(path) => this.open_path(path.clone(), window, cx),
+                FilesPanelEvent::SwitchVault => this.show_vault_switcher(window, cx),
+                FilesPanelEvent::Sort => this.show_sort_orders(window, cx),
             },
         ));
         self.files = Some(files);
@@ -1766,6 +1774,7 @@ impl Render for Workspace {
             .map(|root| self.pane_actions(root, cx))
             .map(|root| self.switcher_actions(root, cx))
             .map(|root| self.link_actions(root, window, cx))
+            .map(|root| self.vault_op_actions(root, window, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),

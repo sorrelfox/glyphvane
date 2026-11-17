@@ -78,6 +78,40 @@ impl RowKind {
     }
 }
 
+/// The order of a folder's entries. Folders always come first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SortOrder {
+    /// By name, A to Z (natural order).
+    #[default]
+    NameAscending,
+    /// By name, Z to A.
+    NameDescending,
+    /// Files modified last first; folders by name.
+    ModifiedNewest,
+    /// Files modified first first; folders by name.
+    ModifiedOldest,
+}
+
+impl SortOrder {
+    /// Every order, as the sort menu lists them.
+    pub const ALL: [Self; 4] = [
+        Self::NameAscending,
+        Self::NameDescending,
+        Self::ModifiedNewest,
+        Self::ModifiedOldest,
+    ];
+
+    /// What the sort menu calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NameAscending => "File name (A to Z)",
+            Self::NameDescending => "File name (Z to A)",
+            Self::ModifiedNewest => "Modified time (new to old)",
+            Self::ModifiedOldest => "Modified time (old to new)",
+        }
+    }
+}
+
 /// One visible row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TreeRow {
@@ -100,6 +134,20 @@ pub(crate) struct TreeModel {
     rows: Vec<TreeRow>,
     row_of: HashMap<FileId, usize>,
     sorted: HashMap<FileId, Arc<[FileId]>>,
+    sort: SortOrder,
+    /// Rows shown while filtering: the entries whose name contains the
+    /// filter (ignoring case) and the folders above them, which show open.
+    filter: Option<Filter>,
+}
+
+#[derive(Debug)]
+struct Filter {
+    /// The text, case-folded.
+    key: String,
+    /// The matches and their folders.
+    shown: HashSet<FileId>,
+    /// The folders above a match.
+    open: HashSet<FileId>,
 }
 
 impl TreeModel {
@@ -112,9 +160,60 @@ impl TreeModel {
             rows: Vec::new(),
             row_of: HashMap::new(),
             sorted: HashMap::new(),
+            sort: SortOrder::default(),
+            filter: None,
         };
         this.rebuild();
         this
+    }
+
+    pub fn set_sort(&mut self, sort: SortOrder) {
+        if self.sort != sort {
+            self.sort = sort;
+            self.sorted.clear();
+            self.rebuild();
+        }
+    }
+
+    /// The filter text, if the tree is filtered.
+    pub fn filter(&self) -> Option<&str> {
+        self.filter.as_ref().map(|f| f.key.as_str())
+    }
+
+    /// Shows only the entries whose name contains `text` (ignoring case)
+    /// and the folders above them; an empty text shows everything again.
+    pub fn set_filter(&mut self, text: &str) {
+        let key = gv_vault::keys::fold_key(text.trim());
+        if key.is_empty() {
+            if self.filter.take().is_some() {
+                self.rebuild();
+            }
+            return;
+        }
+        let mut shown = HashSet::new();
+        let mut open = HashSet::new();
+        for entry in self.index.iter() {
+            if entry.id == FileId::ROOT {
+                continue;
+            }
+            let name = entry.path.file_name().unwrap_or_default();
+            if !gv_vault::keys::fold_key(name).contains(&key) {
+                continue;
+            }
+            shown.insert(entry.id);
+            let mut parent = entry.path.parent();
+            while let Some(dir) = parent.filter(|p| !p.is_root()) {
+                if let Some(id) = self.index.id_of(dir.as_str()) {
+                    if !open.insert(id) {
+                        break;
+                    }
+                    shown.insert(id);
+                }
+                parent = dir.parent();
+            }
+        }
+        self.filter = Some(Filter { key, shown, open });
+        self.rebuild();
     }
 
     pub fn index(&self) -> &PathIndex {
@@ -126,6 +225,10 @@ impl TreeModel {
     pub fn set_index(&mut self, index: PathIndex) {
         self.index = index;
         self.sorted.clear();
+        if let Some(filter) = self.filter.take() {
+            // The matches of the new snapshot.
+            self.set_filter(&filter.key);
+        }
         let index = &self.index;
         self.expanded
             .retain(|id| index.get(*id).is_some_and(|e| e.kind.is_dir()));
@@ -281,7 +384,7 @@ impl TreeModel {
             return children.clone();
         }
         let index = &self.index;
-        let mut children: Vec<(bool, &str, FileId)> = index
+        let mut children: Vec<(bool, &str, Option<std::time::SystemTime>, FileId)> = index
             .children(dir)
             .iter()
             .filter_map(|id| {
@@ -289,22 +392,38 @@ impl TreeModel {
                 Some((
                     entry.kind.is_dir(),
                     entry.path.file_name().unwrap_or_default(),
+                    entry.meta.mtime,
                     *id,
                 ))
             })
             .collect();
-        children.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| natural_cmp(a.1, b.1)));
-        let children: Arc<[FileId]> = children.into_iter().map(|(_, _, id)| id).collect();
+        let sort = self.sort;
+        children.sort_by(|a, b| {
+            let by_name = natural_cmp(a.1, b.1);
+            b.0.cmp(&a.0).then_with(|| match sort {
+                SortOrder::NameAscending => by_name,
+                SortOrder::NameDescending => by_name.reverse(),
+                // Folders have no meaningful time: by name.
+                _ if a.0 => by_name,
+                SortOrder::ModifiedNewest => b.2.cmp(&a.2).then(by_name),
+                SortOrder::ModifiedOldest => a.2.cmp(&b.2).then(by_name),
+            })
+        });
+        let children: Arc<[FileId]> = children.into_iter().map(|(_, _, _, id)| id).collect();
         self.sorted.insert(dir, children.clone());
         children
     }
 
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
+        let shown = |id: &FileId, filter: &Option<Filter>| {
+            filter.as_ref().is_none_or(|f| f.shown.contains(id))
+        };
         let mut stack: Vec<(FileId, usize)> = self
             .sorted_children(FileId::ROOT)
             .iter()
             .rev()
+            .filter(|id| shown(id, &self.filter))
             .map(|id| (*id, 0))
             .collect();
         while let Some((id, depth)) = stack.pop() {
@@ -312,7 +431,11 @@ impl TreeModel {
                 continue;
             };
             let kind = RowKind::of(&entry.kind, &entry.path);
-            let expanded = kind == RowKind::Folder && self.expanded.contains(&id);
+            let expanded = kind == RowKind::Folder
+                && match &self.filter {
+                    Some(f) => f.open.contains(&id),
+                    None => self.expanded.contains(&id),
+                };
             rows.push(TreeRow {
                 id,
                 depth,
@@ -322,7 +445,13 @@ impl TreeModel {
             });
             if expanded {
                 let children = self.sorted_children(id);
-                stack.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+                stack.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .filter(|child| shown(child, &self.filter))
+                        .map(|child| (*child, depth + 1)),
+                );
             }
         }
         self.row_of = rows.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
@@ -432,6 +561,62 @@ mod tests {
         assert_eq!(names(&m), ["a", "d.md"]);
         assert!(!m.collapse_or_parent());
         assert!(!m.select_previous());
+    }
+
+    #[test]
+    fn the_sort_order_applies_to_files_not_folders_first() {
+        let mut m = model(&["b.md", "a.md", "c.md", "Z/x.md", "Y/x.md"]);
+        m.set_sort(SortOrder::NameDescending);
+        assert_eq!(names(&m), ["Z", "Y", "c.md", "b.md", "a.md"]);
+        // Modified time: the index has none here, so by name.
+        m.set_sort(SortOrder::ModifiedNewest);
+        assert_eq!(names(&m), ["Y", "Z", "a.md", "b.md", "c.md"]);
+    }
+
+    #[test]
+    fn modified_time_orders_files() {
+        use std::time::{Duration, SystemTime};
+        let base = model(&["a.md", "b.md", "c.md"]);
+        let at = |s: u64| gv_vault::FileMeta {
+            mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s)),
+            ..gv_vault::FileMeta::default()
+        };
+        let next = base
+            .index()
+            .apply(&[
+                gv_vault::Change::Upsert {
+                    path: VaultPath::new("a.md").expect("path"),
+                    kind: EntryKind::File,
+                    meta: at(20),
+                },
+                gv_vault::Change::Upsert {
+                    path: VaultPath::new("b.md").expect("path"),
+                    kind: EntryKind::File,
+                    meta: at(30),
+                },
+                gv_vault::Change::Upsert {
+                    path: VaultPath::new("c.md").expect("path"),
+                    kind: EntryKind::File,
+                    meta: at(10),
+                },
+            ])
+            .expect("apply");
+        let mut m = TreeModel::new(next);
+        m.set_sort(SortOrder::ModifiedNewest);
+        assert_eq!(names(&m), ["b.md", "a.md", "c.md"]);
+        m.set_sort(SortOrder::ModifiedOldest);
+        assert_eq!(names(&m), ["c.md", "a.md", "b.md"]);
+    }
+
+    #[test]
+    fn the_filter_shows_matches_with_their_folders_open() {
+        let mut m = model(&["Notes/Meeting.md", "Notes/other.md", "meet.md", "x/y.md"]);
+        m.set_filter("MEET");
+        assert_eq!(names(&m), ["Notes", "  Meeting.md", "meet.md"]);
+        assert_eq!(m.filter(), Some("meet"));
+        m.set_filter("");
+        assert_eq!(names(&m), ["Notes", "x", "meet.md"]);
+        assert_eq!(m.filter(), None);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, EventEmitter, Global, SharedString, Task};
 use gv_vault::content::{ContentEvent, ContentIndexer, ContentOptions, ContentSnapshot};
 use gv_vault::root::{self, RootDetection, RootMarker, RootReason};
-use gv_vault::{IndexConfig, IndexError, PathIndex, ProfileId, SharedPathIndex};
+use gv_vault::{IndexConfig, IndexError, PathIndex, ProfileId, ProfileParams, SharedPathIndex};
 
 /// Where the path index is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,15 +161,29 @@ impl WindowVault {
         this
     }
 
-    /// Builds the index on a background thread.
+    /// Builds the index on a background thread, after rolling back
+    /// refactors of this vault that a crash interrupted.
     fn build(&mut self, config: IndexConfig, cx: &mut Context<'_, Self>) {
         let index = self.index.clone();
         let path = self.root.clone();
+        let journal = refactor_journal_dir(cx);
         self.status = VaultStatus::Building;
         self._build = Some(cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let result = cx
-                .background_spawn(async move { index.build(&path, config) })
+                .background_spawn(async move {
+                    if let Some(journal) = journal {
+                        for done in gv_vault::refactor::recover(&path, &journal) {
+                            tracing::warn!(
+                                root = %path.display(),
+                                id = done.id,
+                                problems = ?done.problems,
+                                "rolled back an interrupted file operation"
+                            );
+                        }
+                    }
+                    index.build(&path, config)
+                })
                 .await;
             let elapsed = started.elapsed();
             this.update(cx, |vault, cx| vault.finish_build(result, elapsed, cx))
@@ -249,16 +263,30 @@ impl WindowVault {
         cx.notify();
     }
 
-    /// Starts the content index on the built path index, replacing (and
-    /// so cancelling) a previous one.
-    fn start_content(&mut self, cx: &mut Context<'_, Self>) {
-        let profile = match self.reason {
+    /// The profile the vault's links resolve with.
+    pub fn profile(&self) -> ProfileId {
+        match self.reason {
             RootReason::Marker(RootMarker::Obsidian) => ProfileId::Obsidian,
             RootReason::Marker(RootMarker::Git) => ProfileId::GfmFile,
             RootReason::Marker(RootMarker::Glyphvane) | RootReason::FileFolder => {
                 ProfileId::Extended
             }
-        };
+        }
+    }
+
+    /// The link resolution parameters: the content index's, else the
+    /// profile's defaults.
+    pub fn params(&self) -> ProfileParams {
+        self.content().map_or_else(
+            || ProfileParams::for_profile(self.profile()),
+            |c| c.options().params.clone(),
+        )
+    }
+
+    /// Starts the content index on the built path index, replacing (and
+    /// so cancelling) a previous one.
+    fn start_content(&mut self, cx: &mut Context<'_, Self>) {
+        let profile = self.profile();
         let mut options = ContentOptions::for_profile(profile);
         if let Some(locations) = cx
             .try_global::<crate::settings::AppSettings>()
@@ -363,6 +391,14 @@ impl WindowVault {
     pub fn build_time(&self) -> Option<Duration> {
         self.build_time
     }
+}
+
+/// Where refactors (rename and move with their link updates) are
+/// journaled: `refactor/` in the app's data folder, when it is known.
+pub(crate) fn refactor_journal_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<crate::settings::AppSettings>()
+        .and_then(|s| s.locations())
+        .map(|l| l.data_dir().join("refactor"))
 }
 
 /// `n` with thousands separators: 50000 becomes "50,000".

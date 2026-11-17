@@ -59,7 +59,7 @@ const NEW_NOTE_NAME: &str = "Untitled";
 pub(super) fn is_question(topic: Topic) -> bool {
     matches!(
         topic,
-        Topic::Confirm | Topic::NotOpened | Topic::IndexAsk | Topic::CloseUnsaved
+        Topic::Confirm | Topic::NotOpened | Topic::IndexAsk | Topic::CloseUnsaved | Topic::FileOp
     )
 }
 
@@ -428,6 +428,10 @@ impl Workspace {
             }
             NoticeAction::Cancel => {
                 self.question_dismissed(cx);
+            }
+            NoticeAction::UndoFileOp => {
+                close(self);
+                self.undo_file_op(cx);
             }
             _ => return false,
         }

@@ -1000,7 +1000,7 @@ fn fixed_case(link: &LinkRef, target: &VaultPath) -> Option<String> {
 
 /// The part of a raw destination before the fragment, query or display
 /// text.
-fn path_part(kind: LinkKind, raw: &str) -> &str {
+pub(crate) fn path_part(kind: LinkKind, raw: &str) -> &str {
     let end = if kind.is_wiki() {
         raw.find(['#', '|'])
     } else {
@@ -1068,7 +1068,7 @@ fn encode_path(path: &str) -> String {
         .join("/")
 }
 
-fn encode_segment(segment: &str) -> String {
+pub(crate) fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for c in segment.chars() {
         match c {

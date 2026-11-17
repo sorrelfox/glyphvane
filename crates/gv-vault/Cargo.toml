@@ -26,6 +26,8 @@ sha2.workspace = true
 similar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# Delete moves files to the OS trash.
+trash.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
 

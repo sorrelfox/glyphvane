@@ -446,7 +446,17 @@ fn the_file_tree_menu(cx: &mut TestAppContext) {
     assert!(f.has("file-row-1"));
     f.right_click("file-row-1");
     assert_eq!(f.menu(), Some(ContextMenu::FileTree));
-    assert!(f.has("context-menu-disabled:file.rename"));
+    // The file operations run on the selected row.
+    for id in [
+        "file.new_folder",
+        "file.rename",
+        "file.move",
+        "file.duplicate",
+        "file.delete",
+    ] {
+        assert!(f.has(&format!("context-menu-item:{id}")), "{id}");
+        assert!(!f.has(&format!("context-menu-disabled:{id}")), "{id}");
+    }
     let selected = {
         let files = f.workspace.read_with(&f.vcx, |ws, _| ws.files.clone());
         files.and_then(|files| files.read_with(&f.vcx, |p, _| p.selected_name()))

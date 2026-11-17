@@ -9,9 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use super::FileSource;
 use super::record::{IndexedLink, NoteRecord, RecordKind, Span, file_stem};
 use super::state::{Cancelled, LinkTarget, State, parallel_map};
+use super::{ContentOptions, FileSource};
 use crate::index::conflict::{SyncService, detect_sync_conflict};
 use crate::index::{EntryKind, PathIndex};
 use crate::keys::fold_key;
@@ -126,6 +126,13 @@ impl ContentSnapshot {
     #[must_use]
     pub fn root(&self) -> Option<&Path> {
         self.0.paths.as_ref().map(PathIndex::root)
+    }
+
+    /// The settings the index was built with: the profile, link
+    /// resolution parameters and note extensions.
+    #[must_use]
+    pub fn options(&self) -> &ContentOptions {
+        &self.0.options
     }
 
     /// The path index the links were resolved against.

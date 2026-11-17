@@ -60,6 +60,9 @@ pub enum Topic {
     RemoteContent,
     /// A followed link matched several notes (FR-NAV-07).
     AmbiguousLink,
+    /// A file operation of the Files panel was done or refused (rename,
+    /// move, duplicate, trash, new folder).
+    FileOp,
 }
 
 /// What an infobar button does.
@@ -123,6 +126,8 @@ pub enum NoticeAction {
     /// An ambiguous link was followed: rewrite it to the shortest form
     /// that names the note it opened.
     RewriteLink,
+    /// Undo the last rename or move, with its link updates.
+    UndoFileOp,
 }
 
 /// A button of an infobar.
@@ -728,6 +733,28 @@ impl Notice {
         )
     }
 
+    /// A file operation was done (not designed: an information infobar).
+    /// `undo` offers Undo.
+    pub fn file_op_done(title: String, detail: Option<String>, undo: bool) -> Self {
+        let notice = Self::titled(Topic::FileOp, NoticeKind::Information, title, detail);
+        if undo {
+            notice.with(NoticeButton::new(NoticeAction::UndoFileOp, "Undo"))
+        } else {
+            notice
+        }
+    }
+
+    /// A file operation was refused or failed (not designed: an error
+    /// infobar).
+    pub fn file_op_failed(title: &str, reason: &str) -> Self {
+        Self::titled(
+            Topic::FileOp,
+            NoticeKind::Error,
+            title.to_owned(),
+            Some(sentence(reason)),
+        )
+    }
+
     /// Revert could not read the file (not designed).
     pub fn revert_failed(reason: &str) -> Self {
         Self::titled(
@@ -814,6 +841,19 @@ pub(crate) fn shown_folder(folder: &Path) -> String {
     } else {
         format!("{shown}{}", std::path::MAIN_SEPARATOR)
     }
+}
+
+/// `reason` as a sentence: a capital first letter and a full stop.
+fn sentence(reason: &str) -> String {
+    let mut chars = reason.chars();
+    let mut out: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
 }
 
 #[cfg(test)]

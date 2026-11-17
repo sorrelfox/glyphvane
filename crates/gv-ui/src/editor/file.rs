@@ -1392,6 +1392,7 @@ impl EditorView {
             | NoticeAction::IndexFolder(_)
             | NoticeAction::SaveAndClose
             | NoticeAction::DiscardAndClose
+            | NoticeAction::UndoFileOp
             | NoticeAction::Cancel => {}
             // The Reading view's (remote content).
             NoticeAction::RemoteLoadOnce

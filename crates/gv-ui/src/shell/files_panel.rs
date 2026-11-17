@@ -9,6 +9,12 @@
 //! revealed. Rows are drawn lazily, so the size of the vault does not
 //! matter. A right-click on a row selects it and opens the file tree's
 //! context menu.
+//!
+//! The head's buttons: New note, New folder, Sort (a list of orders in
+//! the Go popover; not designed), Collapse all. The title opens the vault
+//! switcher. **Filter** (not designed): Mod+F in the tree shows a field
+//! above the rows; typing keeps the entries whose name contains the text
+//! and the folders above them, Enter goes to the rows, Esc clears it.
 
 use std::cell::Cell;
 use std::f32::consts::FRAC_PI_2;
@@ -16,21 +22,23 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle, Window,
-    canvas, div, px, radians, uniform_list,
+    AnyElement, App, AppContext as _, Bounds, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollStrategy, SharedString,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
+    Window, canvas, div, px, radians, uniform_list,
 };
+use gv_vault::VaultPath;
 
 use super::controls::icon_button;
-use super::tree::{RowKind, TreeModel};
+use super::tree::{RowKind, SortOrder, TreeModel};
 use super::vault::{VaultStatus, WindowVault};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
-use crate::keymap::actions::file::NewNote;
+use crate::keymap::actions::file::{NewFolder, NewNote};
 use crate::metrics::spacing::{list, list_row, panel_head};
 use crate::metrics::{icon, radius, size, text};
 use crate::theme::Theme;
@@ -48,8 +56,17 @@ gpui::actions!(
         ExpandOrChild,
         /// Open the selected file, or open or close the selected folder.
         OpenSelected,
+        /// Show the filter field and put the keyboard in it.
+        Filter,
+        /// Clear the filter and hide its field.
+        ClearFilter,
+        /// Leave the filter field for the rows.
+        FocusRows,
     ]
 );
+
+/// The key context of the filter field.
+const FILTER_CONTEXT: &str = "FileTreeFilter";
 
 /// The key context of the tree.
 pub(super) const KEY_CONTEXT: &str = "FileTree";
@@ -63,6 +80,18 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("left", CollapseOrParent, context),
         KeyBinding::new("right", ExpandOrChild, context),
         KeyBinding::new("enter", OpenSelected, context),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-f"
+            } else {
+                "ctrl-f"
+            },
+            Filter,
+            context,
+        ),
+        KeyBinding::new("escape", ClearFilter, Some("FileTreeFilter > Input")),
+        KeyBinding::new("enter", FocusRows, Some("FileTreeFilter > Input")),
+        KeyBinding::new("down", FocusRows, Some("FileTreeFilter > Input")),
     ]
 }
 
@@ -71,6 +100,10 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 pub(crate) enum FilesPanelEvent {
     /// Open this file as a tab.
     Open(PathBuf),
+    /// The title was clicked: show the vault switcher.
+    SwitchVault,
+    /// The Sort button was clicked: show the sort orders.
+    Sort,
 }
 
 /// The Files panel of a window's sidebar.
@@ -85,6 +118,11 @@ pub(crate) struct FilesPanel {
     /// The selected row as last drawn, in window coordinates, for the
     /// context menu key.
     selected_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The sort order, kept when the tree is made again.
+    sort: SortOrder,
+    /// The filter field, while it shows.
+    filter: Option<Entity<InputState>>,
+    _filter_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
 }
 
@@ -119,6 +157,9 @@ impl FilesPanel {
             active,
             scroll: UniformListScrollHandle::new(),
             selected_bounds: Rc::default(),
+            sort: SortOrder::default(),
+            filter: None,
+            _filter_events: None,
             _vault_changed: None,
         };
         if let Some(vault) = vault {
@@ -154,7 +195,12 @@ impl FilesPanel {
                 Some(tree) if tree.index().generation() == snapshot.generation() => {}
                 Some(tree) => tree.set_index(snapshot),
                 None => {
-                    self.tree = Some(TreeModel::new(snapshot));
+                    let mut tree = TreeModel::new(snapshot);
+                    tree.set_sort(self.sort);
+                    if let Some(filter) = &self.filter {
+                        tree.set_filter(&filter.read(cx).value());
+                    }
+                    self.tree = Some(tree);
                     self.reveal_active();
                 }
             }
@@ -176,6 +222,102 @@ impl FilesPanel {
         {
             tree.reveal(id);
             self.scroll_to_selection();
+        }
+        cx.notify();
+    }
+
+    /// Selects the vault entry `path` and scrolls to it (after a file
+    /// operation). Does nothing until the snapshot has it.
+    pub fn reveal_vault_path(&mut self, path: &VaultPath, cx: &mut Context<'_, Self>) {
+        self.sync(cx);
+        if let Some(tree) = &mut self.tree
+            && let Some(id) = tree.index().id_of(path.as_str())
+        {
+            tree.reveal(id);
+            self.scroll_to_selection();
+        }
+        cx.notify();
+    }
+
+    /// The order of the entries.
+    pub fn sort(&self) -> SortOrder {
+        self.sort
+    }
+
+    pub fn set_sort(&mut self, sort: SortOrder, cx: &mut Context<'_, Self>) {
+        self.sort = sort;
+        if let Some(tree) = &mut self.tree {
+            tree.set_sort(sort);
+            self.scroll_to_selection();
+        }
+        cx.notify();
+    }
+
+    /// Mod+F: shows the filter field and puts the keyboard in it.
+    fn show_filter(&mut self, _: &Filter, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let input = match &self.filter {
+            Some(input) => input.clone(),
+            None => {
+                let input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_placeholder("Filter files", window, cx);
+                    state
+                });
+                self._filter_events = Some(cx.subscribe_in(
+                    &input,
+                    window,
+                    |this, input, event: &InputEvent, _, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let text = input.read(cx).value();
+                            if let Some(tree) = &mut this.tree {
+                                tree.set_filter(&text);
+                            }
+                            cx.notify();
+                        }
+                    },
+                ));
+                self.filter = Some(input.clone());
+                input
+            }
+        };
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Esc in the filter field: everything shows again.
+    fn clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.filter = None;
+        self._filter_events = None;
+        if let Some(tree) = &mut self.tree {
+            tree.set_filter("");
+        }
+        self.scroll_to_selection();
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Enter or Down in the filter field: the rows take the keyboard,
+    /// with the first one selected.
+    fn focus_rows(&mut self, _: &FocusRows, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(tree) = &mut self.tree
+            && tree.selected_row().is_none()
+        {
+            tree.select_next();
+        }
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Filters the rows by `text`, as typing in the filter field does
+    /// (tests).
+    #[cfg(test)]
+    pub fn set_filter_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.show_filter(&Filter, window, cx);
+        if let Some(input) = &self.filter {
+            input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
+        }
+        if let Some(tree) = &mut self.tree {
+            tree.set_filter(text);
         }
         cx.notify();
     }
@@ -316,10 +458,10 @@ impl FilesPanel {
             .pl(px(panel_head::PAD_LEFT))
             .pr(px(panel_head::PAD_RIGHT))
             .child(
-                // TODO(vault-switcher): opens the vault switcher.
                 div()
                     .id("vault-switcher")
                     .debug_selector(|| "vault-switcher".into())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FilesPanelEvent::SwitchVault)))
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -334,12 +476,18 @@ impl FilesPanel {
                             .child(Icon::ChevronDown.sized(icon::CHEVRON)),
                     ),
             )
-            // TODO(file-ops): new folder and sort (FR-VAULT-06).
             .child(action("new-note", Icon::NewNote).on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(NewNote), cx);
             }))
-            .child(action("new-folder", Icon::NewFolder))
-            .child(action("sort-files", Icon::Sort))
+            .child(
+                action("new-folder", Icon::NewFolder).on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(NewFolder), cx);
+                }),
+            )
+            .child(
+                action("sort-files", Icon::Sort)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FilesPanelEvent::Sort))),
+            )
             .child(
                 action("collapse-all", Icon::CollapseAll)
                     .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
@@ -358,7 +506,12 @@ impl FilesPanel {
                 message("Indexing\u{2026}", theme).into_any_element()
             }
             (VaultStatus::Ready, Some(tree)) if tree.rows().is_empty() => {
-                message("No files", theme).into_any_element()
+                let note = if tree.filter().is_some() {
+                    "No matching files"
+                } else {
+                    "No files"
+                };
+                message(note, theme).into_any_element()
             }
             (VaultStatus::Ready, Some(tree)) => div()
                 .flex_1()
@@ -447,6 +600,43 @@ impl FilesPanel {
             .collect()
     }
 
+    /// The selected row's vault path, and whether it is a folder.
+    pub fn selected_entry(&self) -> Option<(VaultPath, bool)> {
+        let tree = self.tree.as_ref()?;
+        let row = tree.rows().get(tree.selected_row()?)?;
+        let entry = tree.index().get(row.id)?;
+        Some((entry.path.clone(), entry.kind.is_dir()))
+    }
+
+    /// The filter field, while it shows.
+    fn render_filter(&self, theme: &Theme) -> Option<Div> {
+        let input = self.filter.as_ref()?;
+        Some(
+            div()
+                .key_context(FILTER_CONTEXT)
+                .debug_selector(|| "file-filter".into())
+                .flex_none()
+                .h(px(size::FIELD))
+                .mx(px(size::LIST_ROW_INSET))
+                .mt(px(list::PAD_Y))
+                .px(px(list_row::PAD_LEFT))
+                .flex()
+                .items_center()
+                .rounded(px(radius::CONTROL))
+                .bg(theme.surface.sunken)
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .aria_label("Filter files")
+                            .appearance(false)
+                            .px_0()
+                            .py_0()
+                            .text_color(theme.text.primary),
+                    ),
+                ),
+        )
+    }
+
     /// The selected row's file or folder.
     pub fn selected_path(&self) -> Option<PathBuf> {
         let tree = self.tree.as_ref()?;
@@ -486,6 +676,9 @@ impl Render for FilesPanel {
             .on_action(cx.listener(Self::collapse_or_parent))
             .on_action(cx.listener(Self::expand_or_child))
             .on_action(cx.listener(Self::open_selected))
+            .on_action(cx.listener(Self::show_filter))
+            .on_action(cx.listener(Self::clear_filter))
+            .on_action(cx.listener(Self::focus_rows))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
@@ -495,6 +688,7 @@ impl Render for FilesPanel {
             .flex()
             .flex_col()
             .child(self.render_head(theme, cx))
+            .children(self.render_filter(theme))
             .child(self.render_body(theme, cx))
     }
 }
