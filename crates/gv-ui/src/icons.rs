@@ -51,6 +51,8 @@ gpui::assets::icon_assets!(
         SpellCheck,
         Table2,
         TextWrap,
+        Volume2,
+        VolumeX,
         X,
         Zap,
     ]
@@ -139,6 +141,12 @@ pub enum Icon {
     NoticeWarning,
     NoticeError,
     Dismiss,
+    /// The audio player's play and pause buttons.
+    Play,
+    Pause,
+    /// The audio player's mute button: sound on, muted.
+    Volume,
+    Muted,
 }
 
 impl Icon {
@@ -216,6 +224,12 @@ impl Icon {
             Self::NoticeWarning => IconName::TriangleAlert,
             Self::NoticeError => IconName::CircleX,
             Self::Dismiss => IconName::X,
+            Self::Play => IconName::Play,
+            Self::Pause => IconName::Pause,
+            // Not in the design's inventory: Lucide's `volume-2` and
+            // `volume-x`.
+            Self::Volume => IconName::Volume2,
+            Self::Muted => IconName::VolumeX,
         }
     }
 }
@@ -351,7 +365,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 58] = [
+    const ALL: [Icon; 62] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -410,6 +424,10 @@ mod tests {
         Icon::NoticeWarning,
         Icon::NoticeError,
         Icon::Dismiss,
+        Icon::Play,
+        Icon::Pause,
+        Icon::Volume,
+        Icon::Muted,
     ];
 
     #[test]

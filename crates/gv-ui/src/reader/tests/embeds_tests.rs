@@ -6,7 +6,8 @@
 //! of itself and of the embedding note), bases hosted and listing the
 //! embedding note, query blocks listing their results, clicks that open
 //! files, the scroll anchor while a block's content lands, and profiles
-//! without live blocks.
+//! without live blocks, and audio embeds with their player (on a silent
+//! output that never opens a device).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,12 @@ impl View {
         let seen = Arc::clone(&followed);
         let (window, reader) = cx.update(|cx| {
             crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+            // Audio players never open a real device here.
+            let (backend, _) = gv_media::audio::NullBackend::new(gv_media::audio::OutputFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            });
+            crate::audio::set_engine(cx, crate::audio::AudioEngine::new(backend));
             let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(600.0)));
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -115,6 +122,27 @@ impl View {
         let shown = st.cache.live.get(live.key).cloned().expect("asked for");
         let gap = doc.tree.items()[g.ix].gap_before;
         (shown, (g.top + gap, g.bottom), g.ix)
+    }
+
+    /// Runs the window until the live block at `prefix` shows what `cond`
+    /// accepts (the decoder runs on its own thread: real time too).
+    fn wait_live(&mut self, prefix: &str, what: &str, cond: impl Fn(&Shown) -> bool) -> Shown {
+        let start = std::time::Instant::now();
+        loop {
+            self.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(50));
+            self.settle();
+            let (shown, _, _) = self.live(prefix);
+            if cond(&shown) {
+                return shown;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "timed out waiting for {what}: {shown:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     fn followed(&self) -> Vec<LinkRequest> {
@@ -437,15 +465,16 @@ fn media_embeds_are_cards_that_open_outside(cx: &mut TestAppContext) {
         &dir.path().join("Doc.md"),
         gv_profile::ProfileId::Obsidian,
     );
-    let card = |shown: &Shown| match shown {
-        Shown::Media(m) => (*m).clone(),
-        other => panic!("not a card: {other:?}"),
+    let card = |shown: &Shown| match shown.card() {
+        Some(m) => (**m).clone(),
+        None => panic!("not a card: {shown:?}"),
     };
     let (shown, (top, bottom), _) = v.live("![[Talk.mp3]]");
     let talk = card(&shown);
     assert_eq!(talk.title, "Talk.mp3");
     assert_eq!(talk.detail, "MP3 audio \u{b7} 3.4 KB");
     assert_eq!(talk.action, "Open externally");
+    assert!(matches!(shown, Shown::Audio(..)), "{shown:?}");
     assert!(bottom - top < LIVE_EMBED_HEIGHT / 2.0, "{top} {bottom}");
     let (shown, _, _) = v.live("![[Paper.pdf");
     let paper = card(&shown);
@@ -461,8 +490,9 @@ fn media_embeds_are_cards_that_open_outside(cx: &mut TestAppContext) {
     };
     assert!(why.contains("not found"), "{why}");
 
-    // A click on a card follows its action; a notice follows nothing.
-    for (y0, y1) in [(top, bottom), (f_top, f_bottom), (g_top, g_bottom)] {
+    // A click on a card (on an audio card's header) follows its action; a
+    // notice follows nothing.
+    for (y0, y1) in [(top, top + 20.0), (f_top, f_bottom), (g_top, g_bottom)] {
         v.vcx
             .simulate_click(point(px(450.0), px((y0 + y1) / 2.0)), Modifiers::none());
         v.settle();
@@ -498,7 +528,7 @@ fn html_audio_resolves_next_to_the_note_and_network_paths_are_blocked(cx: &mut T
         gv_profile::ProfileId::Obsidian,
     );
     let (shown, _, _) = v.live("<audio controls");
-    let Shown::Media(memo) = shown else {
+    let Some(memo) = shown.card().cloned() else {
         panic!("{shown:?}");
     };
     assert_eq!(memo.title, "memo.ogg");
@@ -519,4 +549,120 @@ fn html_audio_resolves_next_to_the_note_and_network_paths_are_blocked(cx: &mut T
         panic!("{shown:?}");
     };
     assert!(why.contains("network share"), "{why}");
+}
+
+/// A 48 kHz stereo 16-bit WAV of `frames` frames of a quiet ramp.
+fn wav(frames: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(frames * 4);
+    for f in 0..frames {
+        let v = i16::try_from(f % 1000).expect("small") + 1;
+        data.extend_from_slice(&v.to_le_bytes());
+        data.extend_from_slice(&(-v).to_le_bytes());
+    }
+    let len = u32::try_from(data.len()).expect("small");
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&48_000u32.to_le_bytes());
+    out.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&data);
+    out
+}
+
+fn player_of(shown: &Shown) -> Entity<crate::audio::AudioPlayerView> {
+    match shown {
+        Shown::Audio(_, p) => p.clone(),
+        other => panic!("no player: {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn audio_embeds_host_a_player_that_loads_on_first_play(cx: &mut TestAppContext) {
+    use crate::audio::PlayerState;
+    let dir = vault(&[("Doc.md", "![[Tone.wav]]\n\nAfter.\n")]);
+    std::fs::write(dir.path().join("Tone.wav"), wav(48_000 * 4)).expect("writes");
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    let (shown, _, _) = v.live("![[Tone.wav]]");
+    let card = shown.card().cloned().expect("card");
+    assert_eq!(card.title, "Tone.wav");
+    assert_eq!(card.action, "Open externally");
+    let player = player_of(&shown);
+    // Nothing is read before the first play.
+    assert!(!player.read_with(&v.vcx, |p, _| p.is_loaded()));
+    assert!(!v.st().borrow().geometry.hosts.is_empty());
+
+    // A click on play (inside the reader) loads and plays.
+    let play = v.vcx.debug_bounds("audio-play").expect("drawn").center();
+    assert!(v.st().borrow().in_host(play));
+    v.vcx.simulate_click(play, Modifiers::none());
+    let state = |v: &View| player.read_with(&v.vcx, |p, _| p.state().clone());
+    let start = std::time::Instant::now();
+    while state(&v) != PlayerState::Playing {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            state(&v)
+        );
+        v.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        v.settle();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(player.read_with(&v.vcx, |p, _| p.is_loaded()));
+    assert!(v.followed().is_empty(), "the click stayed with the player");
+    // The click focused it: Space is its own key in the reader.
+    v.vcx.simulate_keystrokes("space");
+    v.settle();
+    assert_eq!(state(&v), PlayerState::Paused);
+    // The same player stays across a refresh of the live blocks.
+    v.reader.update(&mut v.vcx, |r, cx| {
+        let items = r.state.borrow_mut().cache.live.refresh(|_| true);
+        r.state.borrow_mut().stale.extend(items);
+        cx.notify();
+    });
+    v.settle();
+    let (again, _, _) = v.live("![[Tone.wav]]");
+    assert_eq!(player_of(&again), player);
+}
+
+#[gpui::test]
+fn an_unplayable_audio_file_falls_back_to_the_card(cx: &mut TestAppContext) {
+    let dir = vault(&[
+        ("Doc.md", "![[Broken.mp3]]\n"),
+        ("Broken.mp3", "not audio at all"),
+    ]);
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    let (shown, _, _) = v.live("![[Broken.mp3]]");
+    assert!(matches!(shown, Shown::Audio(..)), "{shown:?}");
+    let play = v.vcx.debug_bounds("audio-play").expect("drawn").center();
+    v.vcx.simulate_click(play, Modifiers::none());
+    let shown = v.wait_live("![[Broken.mp3]]", "the card", |s| {
+        matches!(s, Shown::Media(_))
+    });
+    let card = shown.card().cloned().expect("card");
+    assert_eq!(card.title, "Broken.mp3");
+    assert_eq!(card.action, "Open externally");
+    assert!(
+        card.detail.starts_with("MP3 audio \u{b7} 16 bytes \u{b7} "),
+        "{}",
+        card.detail
+    );
+    assert!(v.st().borrow().geometry.hosts.is_empty());
 }

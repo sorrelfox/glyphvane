@@ -2687,7 +2687,9 @@ fn paint_live(
     // A query's count, or a media card's action, on the right.
     let (count, count_color) = match &shown {
         Some(Shown::Query(q)) => (Some(q.count()), Token::TextTertiary),
-        Some(Shown::Media(m)) => (Some(m.action.to_owned()), Token::AccentDefault),
+        Some(Shown::Media(m) | Shown::Audio(m, _)) => {
+            (Some(m.action.to_owned()), Token::AccentDefault)
+        }
         _ => (None, Token::TextTertiary),
     };
     let count_w = count.as_ref().map_or(0.0, |c| {
@@ -2711,7 +2713,7 @@ fn paint_live(
     });
     let title_x = x + pad + icon_size + CALLOUT_ICON_GAP * s.zoom;
     let title_text = match &shown {
-        Some(Shown::Media(m)) => m.title.clone(),
+        Some(Shown::Media(m) | Shown::Audio(m, _)) => m.title.clone(),
         _ => live_title(live),
     };
     let title = fit_text(&title_text, x + w - pad - count_w - title_x, s.body.size);
@@ -2750,8 +2752,11 @@ fn paint_live(
     };
     if live.kind.is_media() {
         // The whole card follows its action.
-        if matches!(shown, Some(Shown::Media(_))) {
-            control(o, area, None);
+        match &shown {
+            Some(Shown::Media(_)) => control(o, area, None),
+            // The player takes the body; the header opens the file.
+            Some(Shown::Audio(..)) => control(o, bounds_of(x, y, w, head), None),
+            _ => {}
         }
     } else if live.target.is_some() {
         control(o, bounds_of(x, y, w, head), None);
@@ -2813,6 +2818,33 @@ fn paint_live(
                 padding: pad,
             });
             control(o, body, None);
+        }
+        Shown::Audio(_, player) => {
+            // The player, hosted like a base: pointer input over it is its
+            // own, and a click on it focuses it for its keys.
+            let area = bounds_of(
+                x + pad,
+                y + head,
+                (w - 2.0 * pad).max(0.0),
+                super::media_card::PLAYER_HEIGHT,
+            );
+            let mut element = player.into_any_element();
+            element.layout_as_root(
+                size(
+                    AvailableSpace::Definite(area.size.width),
+                    AvailableSpace::Definite(area.size.height),
+                ),
+                window,
+                cx,
+            );
+            window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
+                element.prepaint_at(area.origin, window, cx);
+            });
+            o.out.children.push(Child {
+                element,
+                mask: Some(body),
+            });
+            o.geometry.hosts.push(area);
         }
         Shown::Base(view) => {
             // The Bases view, hosted: pointer input over it is its own.

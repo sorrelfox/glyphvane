@@ -6,9 +6,12 @@
 //! `<audio>`, `<video>` and `<iframe>` HTML blocks, all live blocks of a
 //! media kind ([`LiveKind::is_media`]).
 //!
-//! Nothing is played, rasterized or loaded yet: there is no audio output
-//! in the workspace and the PDF engine is not in the helper process. A
-//! card says what the file or page is and offers to open it outside the
+//! An audio file of the vault gets a player ([`crate::audio`]) under the
+//! card's title line, created when the block is first drawn and kept with
+//! it; the file is read only on the first play or seek, so a note with
+//! many embeds decodes none of them up front. A file the player cannot
+//! play falls back to the card. Nothing else is played, rasterized or
+//! loaded yet: the PDF engine is not in the helper process. A card says what the file or page is and offers to open it outside the
 //! app, through the same link handling as a click on a link (the window
 //! asks before opening a file with its default app, and hands web
 //! addresses to the browser under the external hand-off rules).
@@ -24,13 +27,16 @@
 //! a size: the card says they are blocked.
 //!
 //! Not designed: built with the live block's box, header and line
-//! (flagged). The card's poster, a PDF page preview and an audio player
-//! with play/pause, seek and time come with their engines.
+//! (flagged). The card's poster and a PDF page preview come with their
+//! engines.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{AppContext as _, Context};
+
+use crate::audio::{AudioPlayerEvent, AudioPlayerView};
+use crate::metrics::size::icon_button;
 use gv_render_tree::{LiveBlock, LiveKind};
 use gv_vault::url::UrlClass;
 use gv_vault::{Status, TargetKind};
@@ -38,6 +44,10 @@ use gv_vault::{Status, TargetKind};
 use super::embeds::Shown;
 use super::links::{Resolver, resolver_kind};
 use super::{Disposition, LinkRequest, Reader};
+
+/// The height of an audio card's player row, px (its 24 px buttons, its
+/// 2 px padding above and below and its hairline focus ring).
+pub(crate) const PLAYER_HEIGHT: f32 = icon_button::SQUARE + 6.0;
 
 /// What a media card shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +333,20 @@ impl Reader {
         let revision = self.state.borrow().revision;
         let kind = block.kind;
         let anchor = block.anchor.clone();
+        // A player already shown for the same file stays, and keeps
+        // playing, across a refresh.
+        if kind == LiveKind::Audio {
+            let mut st = self.state.borrow_mut();
+            let same = matches!(
+                st.cache.live.get(key),
+                Some(Shown::Audio(_, player)) if player.read(cx).path() == path
+            );
+            if same {
+                st.cache.live.unchanged(key);
+                return;
+            }
+        }
+        let path_for_player = path.clone();
         cx.spawn(async move |reader, cx| {
             let size = cx.background_spawn(async move { size_of(&path) }).await;
             reader
@@ -331,21 +355,51 @@ impl Reader {
                         reader.state.borrow_mut().cache.live.unchanged(key);
                         return;
                     }
-                    let shown = match size {
-                        Ok(size) => Shown::Media(Arc::new(local_card(
-                            kind,
-                            &name,
-                            Some(size),
-                            anchor.as_deref(),
-                            open,
-                        ))),
-                        Err(why) => Shown::Notice(why.into()),
+                    let card = match size {
+                        Ok(size) => {
+                            Arc::new(local_card(kind, &name, Some(size), anchor.as_deref(), open))
+                        }
+                        Err(why) => {
+                            reader.land(key, Shown::Notice(why.into()), cx);
+                            return;
+                        }
                     };
-                    reader.land(key, shown, cx);
+                    if kind == LiveKind::Audio {
+                        reader.show_player(key, card, path_for_player, cx);
+                    } else {
+                        reader.land(key, Shown::Media(card), cx);
+                    }
                 })
                 .ok();
         })
         .detach();
+    }
+}
+
+impl Reader {
+    /// Shows `card` with a player of `path` (lazy: nothing is read until
+    /// the first play); a file it cannot play goes back to the card.
+    fn show_player(
+        &mut self,
+        key: gv_render_tree::LiveKey,
+        card: Arc<MediaCard>,
+        path: PathBuf,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let player = cx.new(|cx| AudioPlayerView::lazy(path, cx));
+        let fallback = Arc::clone(&card);
+        let events = cx.subscribe(&player, move |reader, _, event: &AudioPlayerEvent, cx| {
+            let AudioPlayerEvent::Failed(error) = event;
+            let mut card = (*fallback).clone();
+            card.detail = format!("{} \u{b7} {}", card.detail, error.message());
+            reader.land(key, Shown::Media(Arc::new(card)), cx);
+        });
+        self.land(key, Shown::Audio(card, player), cx);
+        self.state
+            .borrow_mut()
+            .cache
+            .live
+            .keep(key, Some(events), None);
     }
 }
 

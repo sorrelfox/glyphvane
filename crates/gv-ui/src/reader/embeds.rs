@@ -87,8 +87,23 @@ pub(crate) enum Shown {
     Query(Arc<QueryShown>),
     /// A media card.
     Media(Arc<super::media_card::MediaCard>),
+    /// An audio file of the vault: its card's header over a hosted player.
+    Audio(
+        Arc<super::media_card::MediaCard>,
+        Entity<crate::audio::AudioPlayerView>,
+    ),
     /// It cannot be shown; why.
     Notice(Arc<str>),
+}
+
+impl Shown {
+    /// The media card shown, also over an audio player.
+    pub fn card(&self) -> Option<&Arc<super::media_card::MediaCard>> {
+        match self {
+            Self::Media(m) | Self::Audio(m, _) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for Shown {
@@ -99,6 +114,7 @@ impl std::fmt::Debug for Shown {
             Self::Base(_) => f.write_str("Base(..)"),
             Self::Query(q) => write!(f, "Query({} files)", q.files.len()),
             Self::Media(m) => write!(f, "Media({:?})", m.title),
+            Self::Audio(m, _) => write!(f, "Audio({:?})", m.title),
             Self::Notice(n) => write!(f, "Notice({n:?})"),
         }
     }
@@ -178,6 +194,8 @@ pub(crate) fn box_height(shown: &Shown, reserve: f32, line: f32, zoom: f32) -> f
             head + rows * line + PAD * zoom
         }
         Shown::Notice(_) | Shown::Media(_) => head + line + PAD * zoom,
+        // The player draws at fixed interface sizes.
+        Shown::Audio(..) => head + super::media_card::PLAYER_HEIGHT + PAD * zoom,
     }
 }
 
@@ -265,7 +283,12 @@ impl LiveBlocks {
     }
 
     /// Keeps the base view's event subscription and file text with `key`.
-    fn keep(&mut self, key: LiveKey, events: Option<Subscription>, text: Option<Arc<str>>) {
+    pub(super) fn keep(
+        &mut self,
+        key: LiveKey,
+        events: Option<Subscription>,
+        text: Option<Arc<str>>,
+    ) {
         if let Some(e) = self.entries.get_mut(&key) {
             e._events = events;
             e.text = text;
@@ -693,7 +716,7 @@ pub(crate) fn open_request(
 ) -> Option<LinkRequest> {
     if block.kind.is_media() {
         return match (row, shown) {
-            (None, Some(Shown::Media(card))) => card.request(disposition),
+            (None, Some(shown)) => shown.card()?.request(disposition),
             _ => None,
         };
     }

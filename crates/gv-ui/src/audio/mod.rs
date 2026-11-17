@@ -36,7 +36,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::assets::IconName;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Bounds, Context, DispatchPhase, EventEmitter, FocusHandle, Focusable,
@@ -48,11 +47,37 @@ use gv_media::audio::Player;
 pub use gv_media::audio::{AudioEngine, AudioError, PlayerState};
 
 use crate::appearance::Appearance;
+use crate::icons::Icon;
 use crate::metrics::size::icon_button;
 use crate::metrics::{HAIRLINE, icon, radius, text};
 
 /// The key context of a player.
 pub const KEY_CONTEXT: &str = "AudioPlayer";
+
+gpui::actions!(
+    audio_player,
+    [
+        /// Play or pause the focused player.
+        TogglePlay,
+        /// Go to the start.
+        SeekStart,
+        /// Go to the end.
+        SeekEnd,
+    ]
+);
+
+/// The player's keys that a surrounding view also binds (the Reading
+/// view's Space, Home and End scroll): bound in the player's context so
+/// they are the player's while it has the focus. Left and Right are read
+/// as plain key presses.
+pub fn key_bindings() -> Vec<gpui::KeyBinding> {
+    let context = Some(KEY_CONTEXT);
+    vec![
+        gpui::KeyBinding::new("space", TogglePlay, context),
+        gpui::KeyBinding::new("home", SeekStart, context),
+        gpui::KeyBinding::new("end", SeekEnd, context),
+    ]
+}
 
 /// How far Left and Right seek.
 pub const SEEK_STEP: Duration = Duration::from_secs(5);
@@ -116,6 +141,8 @@ pub struct AudioPlayerView {
     /// The volume before muting.
     unmuted: Option<f32>,
     focus: FocusHandle,
+    /// The file was handed to the player (see [`Self::lazy`]).
+    loaded: bool,
     /// The follow-up task is running.
     ticking: bool,
     ticker: Option<Task<()>>,
@@ -143,9 +170,17 @@ impl Focusable for AudioPlayerView {
 impl AudioPlayerView {
     /// A player for `path`, loading it at once on a background thread.
     pub fn new(path: impl Into<PathBuf>, cx: &mut Context<'_, Self>) -> Self {
+        let mut view = Self::lazy(path, cx);
+        view.ensure_loaded(cx);
+        view
+    }
+
+    /// A player for `path` that reads nothing until the first play or
+    /// seek: a note with many embeds decodes and parks a thread only for
+    /// those that are played.
+    pub fn lazy(path: impl Into<PathBuf>, cx: &mut Context<'_, Self>) -> Self {
         let path = path.into();
         let player = engine(cx).player();
-        player.load(&path);
         let mut view = Self {
             path,
             state: PlayerState::Empty,
@@ -156,11 +191,26 @@ impl AudioPlayerView {
             bar: Rc::new(Cell::new(None)),
             unmuted: None,
             focus: cx.focus_handle(),
+            loaded: false,
             ticking: false,
             ticker: None,
         };
         view.sync(cx);
         view
+    }
+
+    /// Hands the file to the player, once.
+    fn ensure_loaded(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.loaded {
+            self.loaded = true;
+            self.player.load(&self.path);
+            self.sync(cx);
+        }
+    }
+
+    /// Whether the file has been handed to the player.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
     }
 
     pub fn path(&self) -> &Path {
@@ -192,6 +242,7 @@ impl AudioPlayerView {
     }
 
     pub fn toggle(&mut self, cx: &mut Context<'_, Self>) {
+        self.ensure_loaded(cx);
         self.player.toggle();
         self.sync(cx);
     }
@@ -377,7 +428,8 @@ impl Render for AudioPlayerView {
         let focused = self.focus.is_focused(window);
         let playing = self.state.is_playing();
         let failed = matches!(self.state, PlayerState::Error(ref e) if !e.is_output());
-        let ready = !failed && !matches!(self.state, PlayerState::Empty | PlayerState::Loading);
+        let ready = !failed
+            && (!self.loaded || !matches!(self.state, PlayerState::Empty | PlayerState::Loading));
         let can_seek = self.can_seek();
         let fraction = self.shown_fraction();
 
@@ -404,14 +456,7 @@ impl Render for AudioPlayerView {
                         this.toggle(cx);
                     }))
             })
-            .child(
-                gpui::component::Icon::new(if playing {
-                    IconName::Pause
-                } else {
-                    IconName::Play
-                })
-                .size(px(icon::ROW)),
-            );
+            .child((if playing { Icon::Pause } else { Icon::Play }).sized(icon::ROW));
 
         let bar_cell = Rc::clone(&self.bar);
         let weak = cx.entity().downgrade();
@@ -519,12 +564,12 @@ impl Render for AudioPlayerView {
             .active(|s| s.bg(theme.state.press))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)))
             .child(
-                gpui::component::Icon::new(if self.is_muted() {
-                    IconName::VolumeX
+                (if self.is_muted() {
+                    Icon::Muted
                 } else {
-                    IconName::Volume2
+                    Icon::Volume
                 })
-                .size(px(icon::ROW)),
+                .sized(icon::ROW),
             );
 
         let status: Option<(SharedString, gpui::Hsla)> = match &self.state {
@@ -538,6 +583,15 @@ impl Render for AudioPlayerView {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.on_key(e, cx)))
+            .on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.toggle(cx)))
+            .on_action(cx.listener(|this, _: &SeekStart, _, cx| {
+                this.seek_to(Duration::ZERO, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SeekEnd, _, cx| {
+                if let Some(d) = this.duration {
+                    this.seek_to(d, cx);
+                }
+            }))
             .flex()
             .flex_col()
             .w_full()

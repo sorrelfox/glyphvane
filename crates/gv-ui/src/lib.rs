@@ -89,6 +89,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     // The widgets' own keys, then the commands' keys from the keymap.
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
+    cx.bind_keys(audio::key_bindings());
     cx.bind_keys(canvas_view::key_bindings());
     cx.bind_keys(bases_view::key_bindings());
     cx.bind_keys(editor::key_bindings());
