@@ -171,10 +171,11 @@ fn a_click_on_a_tag_asks_for_a_search(cx: &mut TestAppContext) {
     let at = piece_of(&st.borrow(), "#project", InlineRole::Tag);
     vcx.simulate_click(at, Modifiers::none());
     settle(&mut vcx);
-    assert_eq!(
-        st.borrow().tag_search.as_deref(),
-        Some("tag:#project/alpha")
-    );
+    // The window's `search.vault` handler took it: the Search panel
+    // searches for it.
+    assert_eq!(st.borrow().tag_search.as_deref(), None);
+    let query = workspace.read_with(&vcx, |ws, cx| ws.search_query(cx));
+    assert_eq!(query.as_deref(), Some("tag:#project/alpha"));
     // No navigation.
     assert_eq!(file_of(&workspace, &mut vcx), "t.md");
 }

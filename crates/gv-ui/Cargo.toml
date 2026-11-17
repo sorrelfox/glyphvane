@@ -24,6 +24,7 @@ gv-media = { workspace = true, features = ["remote"] }
 gv-model = { workspace = true }
 gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
+gv-search = { workspace = true }
 gv-settings = { workspace = true }
 gv-spell = { workspace = true }
 gv-syntax = { workspace = true }

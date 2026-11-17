@@ -12,6 +12,7 @@ publish = false
 arc-swap.workspace = true
 caseless.workspace = true
 crc32fast.workspace = true
+gv-canvas.workspace = true
 gv-model.workspace = true
 gv-profile.workspace = true
 gv-settings.workspace = true

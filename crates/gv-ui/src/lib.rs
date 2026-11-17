@@ -25,6 +25,7 @@ pub mod platform;
 pub mod print;
 pub mod profile;
 pub mod reader;
+pub mod search_panel;
 pub mod settings;
 pub mod settings_window;
 pub mod shell;
@@ -79,6 +80,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(canvas_view::key_bindings());
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
+    cx.bind_keys(search_panel::key_bindings());
     menu::init(cx);
     palette::init(cx);
     goto::init(cx);

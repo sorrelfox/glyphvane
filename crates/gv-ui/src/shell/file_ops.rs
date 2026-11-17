@@ -108,7 +108,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let path = std::path::absolute(&path).unwrap_or(path);
-        if platform::is_markdown(&path) {
+        if super::canvas_tabs::opens_as_tab(&path) {
             self.open_path(path, window, cx);
         } else {
             self.open_other_file(path, cx);

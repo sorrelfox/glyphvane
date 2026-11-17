@@ -14,7 +14,6 @@ use super::vault::{ContentUpdated, VaultStatus, WindowVault};
 use super::{OpenTarget, Workspace, session};
 use crate::files::notice::Notice;
 use crate::keymap::actions::workspace as workspace_commands;
-use crate::platform;
 use crate::reader::ScrollTarget;
 use crate::switcher::model::{self, Gather, VaultSource};
 use crate::switcher::{self as quick, Choice, ChoiceFn, Sources, SourcesFn, SwitcherRequest};
@@ -66,10 +65,13 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let handle = self.window_handle;
-        self._content_updates = Some(cx.subscribe(vault, move |_, _, _: &ContentUpdated, cx| {
-            // The switcher reads this workspace as it refreshes.
-            cx.defer(move |cx| quick::refresh(handle, cx));
-        }));
+        self._content_updates =
+            Some(cx.subscribe(vault, move |this, _, _: &ContentUpdated, cx| {
+                // The switcher reads this workspace as it refreshes.
+                cx.defer(move |cx| quick::refresh(handle, cx));
+                // So does the Search panel.
+                this.sync_search(cx);
+            }));
     }
 
     /// What the switcher lists now.
@@ -126,7 +128,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if !platform::is_markdown(&file) {
+        if !super::canvas_tabs::opens_as_tab(&file) {
             self.open_other_file(file, cx);
             return;
         }

@@ -63,6 +63,10 @@ impl Workspace {
         if let Some(compare) = tab.editor.as_ref().and_then(|e| e.read(cx).compare_view()) {
             return area.child(compare).into_any_element();
         }
+        // A canvas file shows in its Canvas view, whatever the mode.
+        if let Some(canvas) = self.shown_canvas() {
+            return area.child(canvas.clone()).into_any_element();
+        }
         match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
             (ViewMode::Preview, Some(reader), _, _) => {
                 return area.child(reader.clone()).into_any_element();
@@ -112,6 +116,12 @@ impl Workspace {
             )
             .children(startup::enabled().then(empty_probe))
             .into_any_element()
+    }
+
+    /// The Canvas view on screen: the active tab's, when it shows a canvas.
+    pub(super) fn shown_canvas(&self) -> Option<&Entity<crate::canvas_view::CanvasView>> {
+        let tab = self.active_tab();
+        tab.canvas.as_ref().filter(|_| tab.is_canvas())
     }
 
     /// The Source view on screen: the active tab's, in Edit and Split

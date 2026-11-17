@@ -523,7 +523,8 @@ fn the_sidebar_switcher_switches_panels(cx: &mut TestAppContext) {
         assert_eq!(shown, panel);
         assert!(!f.has("files-panel"));
         assert!(f.has(&format!("sidebar-panel:{id}")));
-        assert!(f.has(&format!("empty-{id}")));
+        // The Search panel is built (WP-24); the others are not yet.
+        assert_eq!(f.has(&format!("empty-{id}")), panel != SidebarPanel::Search);
     }
     f.click("panel-switch:files");
     assert!(f.has("files-panel"));

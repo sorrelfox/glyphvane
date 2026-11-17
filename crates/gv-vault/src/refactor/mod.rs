@@ -31,7 +31,10 @@
 //! # Not rewritten
 //!
 //! Links inside code are never touched (the index does not see them).
-//! Canvas `file` nodes and Bases `link()` literals are not rewritten yet.
+//! Bases `link()` literals are not rewritten yet. Canvas files are: a
+//! file card's `file` and a group's `background` that name a moved entry
+//! get its new path, with only the bytes of that string replaced
+//! (`gv_canvas::patch`).
 //! Notes that are not UTF-8 are listed as skipped.
 
 mod apply;

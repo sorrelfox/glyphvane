@@ -97,7 +97,7 @@ fn moving_a_note_updates_its_own_relative_links() {
         ),
         ("notes/a.md", "[back](n.md)\n"),
         ("notes/pic.png", "png"),
-        ("archive/.keep", ""),
+        ("archive/x.txt", ""),
     ]);
     let root = dir.path();
     rename_and_apply(
@@ -388,4 +388,90 @@ fn deleting_goes_through_the_trash() {
         move_to_trash(root, &[p("gone.md")], &trash),
         Err(RefactorError::Missing(_))
     ));
+}
+
+const BOARD: &str = r#"{
+  "nodes": [
+    {"id": "1", "type": "file", "file": "notes/a.md", "x": 0, "y": 0, "width": 10, "height": 10},
+    {"id": "2", "type": "file", "file": "other.md", "x": 0, "y": 0, "width": 10, "height": 10},
+    {"id": "3", "type": "group", "background": "notes/pic.png", "x": 0, "y": 0, "width": 10, "height": 10}
+  ],
+  "edges": [],
+  "extra": {"kept": true}
+}"#;
+
+#[test]
+fn renaming_a_note_rewrites_canvas_file_cards_in_place() {
+    let dir = vault(&[
+        ("notes/a.md", "# A"),
+        ("other.md", ""),
+        ("notes/pic.png", ""),
+        ("board.canvas", BOARD),
+    ]);
+    let root = dir.path();
+    let plan = plan(root, ProfileId::Obsidian, &[mv("notes/a.md", "notes/b.md")]).expect("plan");
+    let edit = plan
+        .edits
+        .iter()
+        .find(|e| e.path == p("board.canvas"))
+        .expect("canvas edit");
+    assert_eq!(edit.changes.len(), 1);
+    assert_eq!(edit.changes[0].old, "\"notes/a.md\"");
+    assert_eq!(edit.changes[0].new, "\"notes/b.md\"");
+    assert_eq!(edit.changes[0].line, 2);
+    apply(&plan, None).expect("apply");
+    // Only the path string changed: formatting and unknown keys stay.
+    assert_eq!(
+        read(root, "board.canvas"),
+        BOARD.replace("notes/a.md", "notes/b.md")
+    );
+}
+
+#[test]
+fn moving_a_folder_rewrites_every_canvas_path_below_it() {
+    let dir = vault(&[
+        ("notes/a.md", ""),
+        ("notes/pic.png", ""),
+        ("other.md", ""),
+        ("archive/x.txt", ""),
+        ("board.canvas", BOARD),
+    ]);
+    let root = dir.path();
+    let applied = rename_and_apply(root, ProfileId::Obsidian, &[mv("notes", "archive/notes")]);
+    let text = read(root, "board.canvas");
+    assert!(text.contains("\"archive/notes/a.md\""));
+    assert!(text.contains("\"archive/notes/pic.png\""));
+    assert!(text.contains("\"other.md\""));
+    undo(&applied, None).expect("undo");
+    assert_eq!(read(root, "board.canvas"), BOARD);
+}
+
+#[test]
+fn a_moved_canvas_keeps_its_vault_paths_and_a_broken_one_is_reported() {
+    let dir = vault(&[
+        ("notes/a.md", ""),
+        ("f/x.txt", ""),
+        ("board.canvas", BOARD),
+        ("bad.canvas", "{\"nodes\": [ {"),
+    ]);
+    let root = dir.path();
+    let plan = plan(
+        root,
+        ProfileId::Obsidian,
+        &[mv("board.canvas", "f/board.canvas")],
+    )
+    .expect("plan");
+    // Canvas paths are from the vault root, so moving the canvas changes
+    // nothing in it.
+    assert!(plan.edits.iter().all(|e| e.path != p("board.canvas")));
+    let plan = plan_for_rename(root);
+    assert!(
+        plan.skipped
+            .iter()
+            .any(|s| s.source == p("bad.canvas") && s.reason.contains("not a valid canvas"))
+    );
+}
+
+fn plan_for_rename(root: &Path) -> RefactorPlan {
+    plan(root, ProfileId::Obsidian, &[mv("notes/a.md", "notes/c.md")]).expect("plan")
 }

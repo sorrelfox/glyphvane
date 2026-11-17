@@ -858,7 +858,11 @@ impl Workspace {
                     if was_deleted {
                         tab.notice = None;
                     }
-                    if let (Some(reader), Some(file)) = (tab.reader.clone(), tab.path.clone()) {
+                    if tab.canvas.is_some() {
+                        self.reload_canvas(index, cx);
+                    } else if let (Some(reader), Some(file)) =
+                        (tab.reader.clone(), tab.path.clone())
+                    {
                         reader.update(cx, |r, cx| {
                             let at = r.position();
                             r.open(file, at, cx);

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::{FileEdit, LinkChange, Move, RefactorError, RefactorPlan, Skipped};
 use crate::content::check::{encode_segment, path_part, rewrite_link};
-use crate::content::{ContentSnapshot, extract};
+use crate::content::{ContentSnapshot, Span, extract};
 use crate::files::ContentHash;
 use crate::index::{Change, PathIndex};
 use crate::keys::fold_key;
@@ -94,6 +94,20 @@ pub fn plan_moves(
             &mut edits,
             &mut skipped,
         );
+    }
+
+    // Canvas files name vault paths in their file nodes and group
+    // backgrounds: those follow the moves too.
+    for entry in paths.iter() {
+        if entry.kind.is_dir()
+            || !entry
+                .path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
+        {
+            continue;
+        }
+        plan_canvas(root, &moved, &entry.path, &mut edits, &mut skipped);
     }
 
     // A moved file whose name another file already has: bare links may
@@ -265,6 +279,105 @@ fn plan_note(
         after,
         changes,
     });
+}
+
+/// Plans the edits of the canvas file `source`: every `file` (and group
+/// `background`) that names a moved entry is replaced by its new path,
+/// touching only the bytes of that string.
+fn plan_canvas(
+    root: &Path,
+    moved: &BTreeMap<VaultPath, VaultPath>,
+    source: &VaultPath,
+    edits: &mut Vec<FileEdit>,
+    skipped: &mut Vec<Skipped>,
+) {
+    let skip_canvas = |reason: String, skipped: &mut Vec<Skipped>| {
+        skipped.push(Skipped {
+            source: source.clone(),
+            line: 0,
+            link: String::new(),
+            reason,
+        });
+    };
+    let bytes = match std::fs::read(source.to_fs_path(root)) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            skip_canvas(format!("cannot be read: {err}"), skipped);
+            return;
+        }
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        skip_canvas(
+            "is not UTF-8: its file cards were not updated".to_owned(),
+            skipped,
+        );
+        return;
+    };
+    let mut changes = Vec::new();
+    let planned = gv_canvas::patch::plan_path_patches(&text, |r| {
+        // Paths are vault-relative; a leading slash is kept as written.
+        let rooted = r.value.starts_with('/');
+        let path = VaultPath::new(r.value.trim_start_matches('/')).ok()?;
+        let to = moved.get(&path)?;
+        let new = if rooted {
+            format!("/{}", to.as_str())
+        } else {
+            to.as_str().to_owned()
+        };
+        changes.push(LinkChange {
+            span: Span::of(r.range.clone()),
+            line: line_of(&text, r.range.start),
+            old: text.get(r.range.clone()).unwrap_or_default().to_owned(),
+            new: gv_canvas::patch::encode_json_string(&new),
+        });
+        Some(new)
+    });
+    let patches = match planned {
+        Ok(patches) => patches,
+        Err(err) => {
+            if text.trim().is_empty() {
+                return;
+            }
+            skip_canvas(
+                format!("is not a valid canvas ({err}): its file cards were not updated"),
+                skipped,
+            );
+            return;
+        }
+    };
+    if patches.is_empty() {
+        return;
+    }
+    // Only the refs that got a patch (an unchanged value gives none).
+    changes.retain(|c| patches.iter().any(|p| Span::of(p.range.clone()) == c.span));
+    let after = match gv_canvas::patch::apply_patches(&text, &patches) {
+        Ok(after) => after,
+        Err(err) => {
+            skip_canvas(
+                format!("its file cards could not be updated: {err}"),
+                skipped,
+            );
+            return;
+        }
+    };
+    edits.push(FileEdit {
+        path: source.clone(),
+        moved_to: moved.get(source).unwrap_or(source).clone(),
+        before_hash: ContentHash::of(text.as_bytes()),
+        before: text,
+        after,
+        changes,
+    });
+}
+
+/// The 0-based line of byte `offset` in `text`.
+fn line_of(text: &str, offset: usize) -> u32 {
+    let end = offset.min(text.len());
+    let lines = text.as_bytes()[..end]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count();
+    u32::try_from(lines).unwrap_or(u32::MAX)
 }
 
 /// `text` with each change's span replaced (spans in order, not

@@ -739,6 +739,12 @@ impl Reader {
         Some(tree.plain_text(0..tree.len(), opts))
     }
 
+    /// The search a click on a tag asked for (`tag:#name`), taken by the
+    /// vault search's `search.vault` handler.
+    pub fn take_tag_search(&self) -> Option<std::sync::Arc<str>> {
+        self.state.borrow_mut().tag_search.take()
+    }
+
     /// The selection as plain text.
     pub fn selected_text(&self) -> Option<String> {
         let st = self.state.borrow();

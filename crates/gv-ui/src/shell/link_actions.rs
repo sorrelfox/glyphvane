@@ -335,6 +335,10 @@ impl Workspace {
                 self.ask(Notice::confirm_url(&url, &why), cx);
                 return;
             }
+            Navigation::OpenFile(path) if super::canvas_tabs::is_canvas(&path) => {
+                self.open_link_target(index, path, None, disposition, window, cx);
+                return;
+            }
             Navigation::OpenFile(path) => {
                 self.activate_tab(index, window, cx);
                 self.open_other_file(path, cx);
@@ -396,7 +400,7 @@ impl Workspace {
     }
 
     /// Shows a followed link's target; returns the tab it shows in.
-    fn open_link_target(
+    pub(super) fn open_link_target(
         &mut self,
         index: usize,
         path: PathBuf,
@@ -425,7 +429,7 @@ impl Workspace {
         }
     }
 
-    fn link_vault_root(&self, cx: &App) -> Option<PathBuf> {
+    pub(super) fn link_vault_root(&self, cx: &App) -> Option<PathBuf> {
         self.vault.as_ref().map(|v| v.read(cx).root().to_path_buf())
     }
 

@@ -337,6 +337,20 @@ pub mod spacing {
         pub const BUTTON_PAD_X: f32 = 6.0;
     }
 
+    /// The Search panel (SPEC § Sidebar): the field (`size::FIELD` high)
+    /// has margin `0 8` and, like the find field, padding `0 2 0 7` with 4
+    /// before its toggles; the summary line is 26 high, its text lined up
+    /// with the list rows'; a context line is indented 37 from the row's
+    /// edge, one `text::UI_SECTION` line high. Not designed: the 2 between
+    /// context lines and below a note's last one, and the heading path
+    /// tooltip.
+    pub mod search {
+        pub const FIELD_MARGIN_X: f32 = 8.0;
+        pub const SUMMARY_HEIGHT: f32 = 26.0;
+        pub const LINE_INDENT: f32 = 37.0;
+        pub const LINE_GAP: f32 = 2.0;
+    }
+
     /// The find popover: padding 4, rows 4 apart, 2 between the controls
     /// of the find row and 4 between those of the replace row; the find
     /// field has padding `0 2 0 7` and 4 between its text and its toggles,

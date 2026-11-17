@@ -3,6 +3,9 @@
 
 //! The main window: title row, side panels, document area and status bar.
 
+mod canvas_tabs;
+#[cfg(test)]
+mod canvas_tabs_tests;
 mod controls;
 mod document;
 mod expanded_table;
@@ -42,6 +45,9 @@ mod profile_chip;
 mod profile_chip_tests;
 mod recent_panel;
 mod saving;
+mod search;
+#[cfg(test)]
+mod search_tests;
 pub mod session;
 mod status_bar;
 mod switcher;
@@ -329,6 +335,9 @@ pub struct Tab {
     /// The Split view, made with the Source view when the tab first goes
     /// to Split; it goes with the Source view.
     split: Option<Entity<SplitView>>,
+    /// The Canvas view, in place of the Reading view, when the file is a
+    /// canvas ([`canvas_tabs`]).
+    canvas: Option<Entity<crate::canvas_view::CanvasView>>,
     /// The number of an untitled document (`tabs.new`), which has no path.
     untitled: Option<u64>,
     /// The tab's own infobar, for what happens to its file while only the
@@ -360,6 +369,7 @@ impl Tab {
             reader: None,
             editor: None,
             split: None,
+            canvas: None,
             untitled: None,
             notice: None,
             history: History::default(),
@@ -410,6 +420,16 @@ impl Tab {
 
     pub fn split(&self) -> Option<&Entity<SplitView>> {
         self.split.as_ref()
+    }
+
+    /// The Canvas view of a tab that shows a canvas file.
+    pub fn canvas(&self) -> Option<&Entity<crate::canvas_view::CanvasView>> {
+        self.canvas.as_ref()
+    }
+
+    /// Whether the tab shows a canvas file (in the Canvas view).
+    fn is_canvas(&self) -> bool {
+        self.path.as_deref().is_some_and(canvas_tabs::is_canvas)
     }
 
     /// The Split view's preview pane, once the tab has a Split view.
@@ -922,6 +942,10 @@ impl Workspace {
             || tab
                 .split_reader(cx)
                 .is_some_and(|r| r.read(cx).focus_handle(cx).contains_focused(window, cx))
+            || tab
+                .canvas
+                .as_ref()
+                .is_some_and(|c| c.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
     fn focus_reader_if(&self, focused: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -941,6 +965,10 @@ impl Workspace {
     /// Gives the keyboard to the document on screen, or to the window when
     /// it shows none.
     fn focus_document(&self, window: &mut Window, cx: &mut App) {
+        if let Some(canvas) = self.shown_canvas() {
+            canvas.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
         match (self.shown_reader(), self.shown_editor()) {
             (Some(reader), _) => reader.read(cx).focus_handle(cx).focus(window, cx),
             (None, Some(editor)) => editor.read(cx).focus_handle(cx).focus(window, cx),
@@ -958,6 +986,7 @@ impl Workspace {
             .into_iter()
             .chain(self.shown_editor().map(Entity::entity_id))
             .chain(self.shown_split_reader(cx).map(|r| r.entity_id()))
+            .chain(self.shown_canvas().map(Entity::entity_id))
             .collect();
         let readers = self
             .tabs
@@ -965,9 +994,11 @@ impl Workspace {
             .filter_map(|t| t.reader.clone())
             .chain(self.tabs.iter().filter_map(|t| t.split_reader(cx)));
         let editors = self.tabs.iter().filter_map(|t| t.editor.as_ref());
+        let canvases = self.tabs.iter().filter_map(|t| t.canvas.as_ref());
         let hidden_focused = readers
             .map(|r| (r.entity_id(), r.read(cx).focus_handle(cx)))
             .chain(editors.map(|e| (e.entity_id(), e.read(cx).focus_handle(cx))))
+            .chain(canvases.map(|c| (c.entity_id(), c.read(cx).focus_handle(cx))))
             .any(|(id, focus)| !shown.contains(&id) && focus.contains_focused(window, cx));
         if hidden_focused || (!shown.is_empty() && self.focus.is_focused(window)) {
             self.focus_document(window, cx);
@@ -1053,6 +1084,8 @@ impl Workspace {
             let index = index.clone();
             split.update(cx, |s, cx| s.set_index(Some(index), cx));
         }
+        self.sync_canvas_roots(cx);
+        self.sync_search(cx);
         self.sync_links(cx);
     }
 
@@ -1084,6 +1117,12 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) -> Option<Entity<Reader>> {
         let path = self.tabs.get(index)?.path.clone()?;
+        // A canvas file gets a Canvas view instead.
+        if canvas_tabs::is_canvas(&path) {
+            self.ensure_canvas(index, path, window, cx);
+            return None;
+        }
+        self.tabs[index].canvas = None;
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let profile = self.tab_profile(index, cx).compiled;
         let reader = cx.new(|cx| {
@@ -1413,16 +1452,28 @@ impl Workspace {
             self.untrack_if_unused(&left);
         }
         let tab = &mut self.tabs[index];
-        match tab.reader.clone() {
-            Some(reader) if same => {
-                let target = scroll.clone().unwrap_or(ScrollTarget::Offset(0));
-                self.split_scroll_to(index, target.clone(), cx);
-                reader.update(cx, |r, cx| r.scroll_to(target, cx));
+        if canvas_tabs::is_canvas(&path) {
+            // The Reading view of the file left goes; the Canvas view
+            // shows the canvas (or loads it in place of another).
+            if let Some(reader) = tab.reader.take() {
+                self.readers.remove(&reader.entity_id());
             }
-            Some(reader) => reader.update(cx, |r, cx| r.open(path, scroll.clone(), cx)),
-            None => {
-                let reader = self.make_reader(index, scroll.clone(), window, cx);
-                self.tabs[index].reader = reader;
+            self.make_reader(index, None, window, cx);
+        } else {
+            match tab.reader.clone() {
+                Some(reader) if same => {
+                    let target = scroll.clone().unwrap_or(ScrollTarget::Offset(0));
+                    self.split_scroll_to(index, target.clone(), cx);
+                    reader.update(cx, |r, cx| r.scroll_to(target, cx));
+                }
+                Some(reader) => {
+                    self.tabs[index].canvas = None;
+                    reader.update(cx, |r, cx| r.open(path, scroll.clone(), cx));
+                }
+                None => {
+                    let reader = self.make_reader(index, scroll.clone(), window, cx);
+                    self.tabs[index].reader = reader;
+                }
             }
         }
         if index == self.active {
@@ -1627,6 +1678,10 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else {
             return false;
         };
+        // The Canvas view is read-only and has no Source view.
+        if tab.is_canvas() {
+            return false;
+        }
         tab.edit_requested || tab.untitled.is_some() || !AppSettings::viewer_mode(cx)
     }
 
@@ -1773,6 +1828,7 @@ impl Render for Workspace {
             .map(|root| self.panel_actions(root, cx))
             .map(|root| self.pane_actions(root, cx))
             .map(|root| self.switcher_actions(root, cx))
+            .map(|root| self.search_actions(root, cx))
             .map(|root| self.link_actions(root, window, cx))
             .map(|root| self.vault_op_actions(root, window, cx))
             // The mouse's back and forward buttons.
