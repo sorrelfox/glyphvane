@@ -110,6 +110,7 @@ const BUILTIN: &[Row] = &[
     ("workspace.show_backlinks", "Show backlinks", Category::Workspace, None, &[]),
     ("workspace.show_outgoing_links", "Show outgoing links", Category::Workspace, None, &[]),
     ("workspace.show_link_checker", "Show link checker", Category::Workspace, None, &[]),
+    ("workspace.show_base", "Show base in sidebar", Category::Workspace, None, &[]),
     ("window.minimize", "Minimize window", Category::Workspace, None, &[]),
     ("window.zoom", "Zoom window", Category::Workspace, None, &[]),
     ("window.bring_all_to_front", "Bring all windows to front", Category::Workspace, None, &[]),

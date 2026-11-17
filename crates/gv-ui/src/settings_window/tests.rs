@@ -735,3 +735,26 @@ fn arrow_keys_move_along_the_sections(cx: &mut TestAppContext) {
     draw(vcx);
     assert_eq!(focused(vcx).flatten().as_deref(), Some(first.as_str()));
 }
+
+/// The segmented controls are radio groups named by what they choose:
+/// the scope in the head and the light theme of the Appearance section.
+#[gpui::test]
+fn segmented_controls_are_named_radio_groups(cx: &mut TestAppContext) {
+    use crate::a11y::Role;
+    use crate::a11y::testing::with_role;
+
+    let mut f = fixture(cx, GLOBAL_TEXT);
+    let vcx = &mut f.vcx;
+    let groups: Vec<String> = with_role(vcx, Role::RadioGroup)
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(
+        groups.iter().any(|g| g == "Settings apply to"),
+        "{groups:?}"
+    );
+    assert!(
+        groups.iter().any(|g| g == "In light appearance, use"),
+        "{groups:?}"
+    );
+}

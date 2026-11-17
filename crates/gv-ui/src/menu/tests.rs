@@ -203,6 +203,7 @@ fn the_menus_follow_each_platform() {
                 "workspace.show_backlinks",
                 "workspace.show_outgoing_links",
                 "workspace.show_link_checker",
+                "workspace.show_base",
                 "editor.toggle_whitespace",
                 "view.toggle_soft_wrap",
                 "view.fold",

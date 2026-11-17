@@ -219,7 +219,7 @@ impl Workspace {
 
     /// Applies `changes` to the vault's index at once, sooner than the
     /// watcher, so the Files panel shows the result.
-    fn publish_changes(&self, changes: &[Change], cx: &mut Context<'_, Self>) {
+    pub(super) fn publish_changes(&self, changes: &[Change], cx: &mut Context<'_, Self>) {
         let Some(vault) = self.vault.clone() else {
             return;
         };
@@ -230,7 +230,7 @@ impl Workspace {
     }
 
     /// Selects `path` in the Files panel.
-    fn reveal_entry(&self, path: &VaultPath, cx: &mut Context<'_, Self>) {
+    pub(super) fn reveal_entry(&self, path: &VaultPath, cx: &mut Context<'_, Self>) {
         if let Some(files) = &self.files {
             files.update(cx, |f, cx| f.reveal_vault_path(path, cx));
         }
@@ -1057,7 +1057,7 @@ fn broken_links(
 
 /// The index entries of a new file or folder (a duplicate), walked from
 /// disk.
-fn upserts(root: &Path, path: &VaultPath) -> Vec<Change> {
+pub(super) fn upserts(root: &Path, path: &VaultPath) -> Vec<Change> {
     let mut out = Vec::new();
     let mut stack = vec![path.clone()];
     while let Some(path) = stack.pop() {

@@ -496,3 +496,80 @@ fn a_pasted_image_is_saved_and_embedded(cx: &mut TestAppContext) {
     f.undo();
     assert_eq!(f.text(&editor), "Hello\n");
 }
+
+/// Files from the OS dropped on the Files panel are copied into the folder
+/// under the pointer (a file row's folder, the vault folder below the
+/// rows), keeping their names with a number when taken; nothing opens.
+#[gpui::test]
+fn files_from_the_os_dropped_on_the_files_panel_are_copied_in(cx: &mut TestAppContext) {
+    let mut f = Fixture::new(
+        cx,
+        &[("a.md", "Hello\n"), ("Archive/old.md", "")],
+        WIKI,
+        "",
+        "a.md",
+    );
+    let outside = f.dir.path().join("out");
+    std::fs::create_dir_all(&outside).expect("folder");
+    let x = outside.join("x.txt");
+    std::fs::write(&x, "x").expect("write");
+    let old = outside.join("old.md");
+    std::fs::write(&old, "other").expect("write");
+
+    // Onto a folder row: into that folder; a taken name gets a number.
+    let archive = f.row_point("Archive");
+    f.drop_files(&[x.clone(), old.clone()], archive);
+    f.until("the copies", |f| f.root().join("Archive/old 1.md").exists());
+    assert_eq!(f.read("Archive/x.txt"), "x");
+    assert_eq!(f.read("Archive/old.md"), "", "the vault's file is kept");
+    assert_eq!(f.read("Archive/old 1.md"), "other");
+    assert!(x.exists(), "copied, not moved");
+    assert_eq!(f.active_name(), "a.md", "nothing opens");
+
+    // Onto a file row at the top level: into the vault folder.
+    let a = f.row_point("a.md");
+    f.drop_files(std::slice::from_ref(&x), a);
+    f.until("the copy", |f| f.root().join("x.txt").exists());
+    // The copy is in the index and selected.
+    f.until("the row", |f| {
+        let files =
+            f.ws.read_with(&f.vcx, |ws, _| ws.files.clone())
+                .expect("panel");
+        files.read_with(&f.vcx, |p, _| {
+            p.visible_rows().iter().any(|(_, n)| n == "x.txt")
+        })
+    });
+
+    // A folder is not copied: a notice says so.
+    f.drop_files(std::slice::from_ref(&outside), archive);
+    f.draw();
+    assert!(!f.root().join("Archive/out").exists());
+}
+
+#[test]
+fn copies_keep_their_names_and_folders_are_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("vault");
+    std::fs::create_dir_all(root.join("Sub")).expect("folders");
+    std::fs::write(root.join("Sub/a.txt"), "old").expect("write");
+    let src = dir.path().join("a.txt");
+    std::fs::write(&src, "new").expect("write");
+    let folder = gv_vault::VaultPath::new("Sub").expect("path");
+    let copied =
+        super::drag_drop::copy_files_into(&root, &folder, &[src, dir.path().join("vault")]);
+    assert_eq!(
+        copied
+            .copies
+            .iter()
+            .map(gv_vault::VaultPath::as_str)
+            .collect::<Vec<_>>(),
+        ["Sub/a 1.txt"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("Sub/a 1.txt")).expect("read"),
+        "new"
+    );
+    assert_eq!(copied.failed.len(), 1);
+    assert_eq!(copied.failed[0].0, "vault");
+    assert_eq!(copied.changes.len(), 1);
+}

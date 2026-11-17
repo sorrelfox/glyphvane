@@ -172,3 +172,55 @@ fn f6_reaches_every_sidebar_panel_and_the_right_panel(cx: &mut TestAppContext) {
         assert!(reached, "F6 reached the links list");
     }
 }
+
+/// The tab that has the keyboard: its name.
+fn focused_tab(vcx: &mut VisualTestContext) -> Option<String> {
+    crate::a11y::testing::focused(vcx).flatten()
+}
+
+fn tab_names(vcx: &mut VisualTestContext) -> Vec<String> {
+    crate::a11y::testing::with_role(vcx, crate::a11y::Role::Tab)
+        .into_iter()
+        .filter_map(|t| t.label)
+        .collect()
+}
+
+/// Delete on a focused document tab closes it, and the keyboard goes to
+/// the tab that takes its place, or the one before when it was the last.
+#[gpui::test]
+fn delete_closes_the_focused_document_tab(cx: &mut TestAppContext) {
+    let (dir, workspace, mut vcx) = open(cx);
+    for name in ["b.md", "c.md"] {
+        let file = dir.path().join(name);
+        std::fs::write(&file, "# Note\n").expect("write");
+        vcx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.open_tab(OpenTarget::new(&file), window, cx));
+        });
+        draw(&mut vcx);
+    }
+    assert_eq!(tab_names(&mut vcx), ["a.md", "b.md", "c.md"]);
+    for _ in 0..60 {
+        if focused_tab(&mut vcx).as_deref() == Some("c.md") {
+            break;
+        }
+        keys(&mut vcx, "tab");
+    }
+    keys(&mut vcx, "left");
+    assert_eq!(focused_tab(&mut vcx).as_deref(), Some("b.md"));
+
+    // With a modifier nothing closes.
+    keys(&mut vcx, "shift-delete");
+    assert_eq!(tab_names(&mut vcx), ["a.md", "b.md", "c.md"]);
+
+    keys(&mut vcx, "delete");
+    assert_eq!(tab_names(&mut vcx), ["a.md", "c.md"]);
+    assert_eq!(focused_tab(&mut vcx).as_deref(), Some("c.md"));
+
+    // The last tab: the keyboard goes to the one before it.
+    keys(&mut vcx, "delete");
+    assert_eq!(tab_names(&mut vcx), ["a.md"]);
+    assert_eq!(focused_tab(&mut vcx).as_deref(), Some("a.md"));
+    // Closed tabs can be reopened as from the close button.
+    let closed = vcx.update(|_, cx| workspace.read(cx).closed.len());
+    assert_eq!(closed, 2);
+}

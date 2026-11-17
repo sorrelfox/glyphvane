@@ -1440,6 +1440,7 @@ impl Workspace {
             l.set_context(vault, file, visible, can_link, cx)
         });
         self.sync_link_checker(cx);
+        self.sync_base_panel(cx);
     }
 
     fn links_event(

@@ -13,7 +13,8 @@
 //!   ([`crate::conflicts`]) and File history panels are built.
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
-//!   checker ([`super::link_checker`]) joins it once asked for.
+//!   checker ([`super::link_checker`]) joins it once asked for, and so
+//!   does the sidebar base ([`super::base_panel`], `workspace.show_base`).
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -121,6 +122,8 @@ pub(super) enum RightSection {
     Backlinks,
     OutgoingLinks,
     LinkChecker,
+    /// The sidebar base ([`super::base_panel`]).
+    Base,
 }
 
 /// Which panels show.
@@ -130,6 +133,12 @@ pub(super) struct Panels {
     /// The Link checker, once asked for.
     pub link_checker: Option<Entity<LinkChecker>>,
     pub _checker_events: Option<Subscription>,
+    /// The sidebar base, once asked for ([`super::base_panel`]).
+    pub base: Option<Entity<crate::bases_view::BasesPanel>>,
+    pub _base_events: Vec<Subscription>,
+    /// The chosen base file as last read: its vault path, size and mtime
+    /// (a change on disk reads it again).
+    pub base_seen: Option<super::base_panel::BaseSeen>,
     /// The Search panel, once shown ([`super::search`]).
     pub search: Option<Entity<crate::search_panel::SearchPanel>>,
     pub _search_events: Option<Subscription>,
@@ -434,6 +443,9 @@ impl Workspace {
             let checker = self.ensure_link_checker(cx);
             checker.update(cx, |c, cx| c.expand(cx));
         }
+        if section == RightSection::Base {
+            self.ensure_base_panel(window, cx);
+        }
         if section == RightSection::Outline
             && let Some(outline) = &self.outline
         {
@@ -443,7 +455,7 @@ impl Workspace {
             match section {
                 RightSection::Backlinks => links.update(cx, |l, cx| l.expand_backlinks(cx)),
                 RightSection::OutgoingLinks => links.update(cx, |l, cx| l.expand_outgoing(cx)),
-                RightSection::Outline | RightSection::LinkChecker => {}
+                RightSection::Outline | RightSection::LinkChecker | RightSection::Base => {}
             }
         }
         cx.notify();
@@ -474,6 +486,7 @@ impl Workspace {
         let backlinks = right(RightSection::Backlinks);
         let outgoing = right(RightSection::OutgoingLinks);
         let checker = right(RightSection::LinkChecker);
+        let base = right(RightSection::Base);
         let root = self.link_checker_actions(root, cx);
         root.on_action(
             cx.listener(move |this, _: &commands::ShowFiles, window, cx| {
@@ -520,6 +533,11 @@ impl Workspace {
                 checker(this, window, cx);
             }),
         )
+        .on_action(
+            cx.listener(move |this, _: &commands::ShowBase, window, cx| {
+                base(this, window, cx);
+            }),
+        )
     }
 }
 
@@ -548,6 +566,22 @@ pub(super) fn right_panel(
         .when_some(links, |panel, links| panel.child(links))
         .when_some(panels.link_checker.clone(), |panel, checker| {
             panel.child(checker)
+        })
+        // The sidebar base takes the room left (not designed: its place
+        // below the other sections, the line above it).
+        .when_some(panels.base.clone(), |panel, base| {
+            panel.child(
+                div()
+                    .id("right-panel-base")
+                    .debug_selector(|| "right-panel-base".into())
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(theme.border.default)
+                    .child(base),
+            )
         })
 }
 

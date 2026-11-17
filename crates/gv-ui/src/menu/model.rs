@@ -362,6 +362,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             item("workspace.show_backlinks", "Backlinks"),
             item("workspace.show_outgoing_links", "Outgoing links"),
             item("workspace.show_link_checker", "Link checker"),
+            item("workspace.show_base", "Base"),
             SEPARATOR,
             item("editor.toggle_whitespace", "Show whitespace"),
             item("view.toggle_soft_wrap", "Soft wrap"),

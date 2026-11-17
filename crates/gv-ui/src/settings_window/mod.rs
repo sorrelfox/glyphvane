@@ -889,7 +889,13 @@ impl SettingsWindow {
                     .font_weight(FontWeight(text::weight::STRONG))
                     .child(title),
             )
-            .child(controls::segmented(segments, true, theme))
+            .child(controls::radio_group(
+                "settings-scope",
+                "Settings apply to",
+                segments,
+                true,
+                theme,
+            ))
             .into_any_element()
     }
 

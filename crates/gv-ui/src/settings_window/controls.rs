@@ -8,12 +8,12 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, FontWeight, InteractiveElement as _,
-    ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    IntoElement as _, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 
 use super::metrics::{field, row, select, stepper};
-use crate::a11y::{A11yExt as _, Role, Toggled};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role, Toggled};
 use crate::metrics::size::{CONTROL, segment, settings_row, switch};
 use crate::metrics::spacing::mode_switch;
 use crate::metrics::{DISABLED_OPACITY, FOCUS_HALO, HAIRLINE, font, radius, text};
@@ -145,6 +145,23 @@ pub struct Segment {
     pub label: SharedString,
     pub active: bool,
     pub on_click: Option<OnClick>,
+}
+
+/// [`segmented`] as a radio group named `label` (usually the row's label),
+/// so assistive technology hears the choices as one set: "Light, radio
+/// button, 1 of 2" inside "In light appearance, use, radio group".
+pub fn radio_group(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    segments: Vec<Segment>,
+    enabled: bool,
+    theme: &Theme,
+) -> AnyElement {
+    segmented(segments, enabled, theme)
+        .id(id)
+        .a11y_group(Role::RadioGroup, label)
+        .accessible()
+        .into_any_element()
 }
 
 /// A segmented control: a 24 frame with 20 high segments, the active one

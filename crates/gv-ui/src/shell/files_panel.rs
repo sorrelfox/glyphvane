@@ -26,11 +26,11 @@ use std::rc::Rc;
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollStrategy, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
-    Window, canvas, div, px, radians, uniform_list,
+    AnyElement, App, AppContext as _, Bounds, Context, Div, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyBinding,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription,
+    UniformListScrollHandle, Window, canvas, div, px, radians, uniform_list,
 };
 use gv_vault::VaultPath;
 
@@ -110,6 +110,13 @@ pub(crate) enum FilesPanelEvent {
     /// An entry was dragged onto a folder (the vault folder for the
     /// panel below the rows): move it there.
     MoveInto { from: VaultPath, folder: VaultPath },
+    /// Files from the OS were dropped on a folder row, a file row (its
+    /// folder) or the panel below the rows (the vault folder): copy them
+    /// into that folder.
+    CopyInto {
+        paths: Vec<PathBuf>,
+        folder: VaultPath,
+    },
 }
 
 /// The Files panel of a window's sidebar.
@@ -534,6 +541,13 @@ impl FilesPanel {
                         folder: VaultPath::root(),
                     });
                 }))
+                .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(FilesPanelEvent::CopyInto {
+                        paths: paths.paths().to_vec(),
+                        folder: VaultPath::root(),
+                    });
+                }))
                 .child(
                     uniform_list(
                         "file-tree",
@@ -583,6 +597,15 @@ impl FilesPanel {
                     is_dir: e.kind.is_dir(),
                 });
                 let folder = entry.filter(|e| e.kind.is_dir()).map(|e| e.path.clone());
+                // OS files dropped on a row go into its folder: the row's
+                // own for a folder, its parent's for a file.
+                let copy_folder = entry.map(|e| {
+                    if e.kind.is_dir() {
+                        e.path.clone()
+                    } else {
+                        e.path.parent().unwrap_or_default()
+                    }
+                });
                 let status = git
                     .as_deref()
                     .zip(entry)
@@ -619,6 +642,21 @@ impl FilesPanel {
                                     cx.stop_propagation();
                                     cx.emit(FilesPanelEvent::MoveInto {
                                         from: file.vault_path.clone(),
+                                        folder: folder.clone(),
+                                    });
+                                }))
+                        })
+                        .when_some(copy_folder, |frame, folder| {
+                            frame
+                                .when(row.kind == RowKind::Folder, |frame| {
+                                    frame.drag_over::<ExternalPaths>(move |style, _, _, _| {
+                                        style.bg(drop_tint)
+                                    })
+                                })
+                                .on_drop(cx.listener(move |_, paths: &ExternalPaths, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(FilesPanelEvent::CopyInto {
+                                        paths: paths.paths().to_vec(),
                                         folder: folder.clone(),
                                     });
                                 }))

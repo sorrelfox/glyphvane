@@ -244,6 +244,68 @@ fn plan_note(
         ((r.status, r.notes.contains(&Note::CaseDiffers)), target)
     };
     let mut changes: Vec<LinkChange> = Vec::new();
+    // Reference links take their destination from a definition
+    // (`[label]: dest`): the definition is rewritten like an inline link,
+    // and the uses that read it need nothing of their own.
+    let mut defined: BTreeSet<&str> = BTreeSet::new();
+    let defs = ref_defs(&text, params.profile);
+    for def in &defs {
+        let raw = def.def.destination.as_str();
+        let (status, Some(target)) = target_of(pre, LinkKind::Reference, raw, source) else {
+            continue;
+        };
+        if !matches!(status.0, Status::Exact | Status::CaseFold | Status::Loose) {
+            continue;
+        }
+        defined.insert(raw);
+        let new_target = moved.get(&target).unwrap_or(&target);
+        if new_source == source && *new_target == target {
+            continue;
+        }
+        let (post_status, post_target) = target_of(post, LinkKind::Reference, raw, new_source);
+        if post_status == status && post_target.as_ref() == Some(new_target) {
+            continue;
+        }
+        let (Some(construct), Some(dest)) = (
+            text.get(def.range.clone()),
+            text.get(def.destination_range.clone()),
+        ) else {
+            continue;
+        };
+        let skip = |reason: &str| Skipped {
+            source: source.clone(),
+            line: line_of(&text, def.range.start),
+            link: construct.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let written = path_part(LinkKind::Inline, raw);
+        let Some(path) = generate(
+            LinkKind::Inline,
+            written,
+            new_source,
+            new_target,
+            post,
+            params,
+        ) else {
+            skipped.push(skip("no link to the new place could be written"));
+            continue;
+        };
+        // The destination as written: only its path part is replaced.
+        match rewrite_link(dest, LinkKind::Inline, raw, &path) {
+            Some(new_dest) if new_dest != dest => {
+                let at = def.destination_range.start - def.range.start;
+                let end = def.destination_range.end - def.range.start;
+                changes.push(LinkChange {
+                    span: Span::of(def.range.clone()),
+                    line: line_of(&text, def.range.start),
+                    old: construct.to_owned(),
+                    new: format!("{}{new_dest}{}", &construct[..at], &construct[end..]),
+                });
+            }
+            Some(_) => {}
+            None => skipped.push(skip("the definition could not be rewritten as written")),
+        }
+    }
     for link in &data.links {
         let (status, Some(target)) = target_of(pre, link.kind, &link.raw, source) else {
             continue;
@@ -262,6 +324,12 @@ fn plan_note(
         let Some(construct) = text.get(link.span.range()) else {
             continue;
         };
+        // A reference link or image whose definition was planned above.
+        let by_reference = link.kind == LinkKind::Reference
+            || (link.kind == LinkKind::Image && !construct.ends_with(')'));
+        if by_reference && defined.contains(&*link.raw) {
+            continue;
+        }
         let skip = |reason: &str| Skipped {
             source: source.clone(),
             line: link.line,
@@ -302,6 +370,31 @@ fn plan_note(
         after,
         changes,
     });
+}
+
+/// The link reference definitions of `text` with their document ranges.
+fn ref_defs(text: &str, profile: crate::profile::ProfileId) -> Vec<gv_syntax::inline::RefDefSpans> {
+    struct Defs<'t> {
+        text: &'t str,
+        out: Vec<gv_syntax::inline::RefDefSpans>,
+    }
+    impl gv_syntax::Visitor for Defs<'_> {
+        fn leaf(&mut self, leaf: &gv_syntax::Leaf<'_>) {
+            if let Some(def) = leaf.link_ref_def(self.text) {
+                self.out.push(def);
+            }
+        }
+    }
+    if !text.contains("]:") {
+        return Vec::new();
+    }
+    let tree = gv_syntax::parse_with(text, gv_syntax::ParseOptions::builtin(profile));
+    let mut defs = Defs {
+        text,
+        out: Vec::new(),
+    };
+    gv_syntax::walk(&tree, &mut defs);
+    defs.out
 }
 
 /// Plans the edits of the canvas file `source`: every `file` (and group

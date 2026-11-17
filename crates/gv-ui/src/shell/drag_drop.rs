@@ -8,6 +8,11 @@
 //!   (or onto the panel below the rows, for the vault folder) moves there
 //!   like Move to…: the links to it are planned, previewed when they
 //!   change, and the move can be undone ([`Workspace::start_moves`]).
+//! - **Files from the OS → Files panel.** Copied into the folder they
+//!   were dropped on (a file row's folder; the vault folder below the
+//!   rows), each keeping its name with ` 1`, ` 2`, … when taken
+//!   (11 § Attachments); the last copy is selected. Folders are not
+//!   copied (a notice says so).
 //! - **Files panel → Source view.** A link at the drop point in the
 //!   vault's link style; Alt (Option) at the drop embeds it instead.
 //!   Images, media and PDFs are always embedded. Folders are not linked.
@@ -30,7 +35,7 @@
 //! drop-target highlights, and the external-files question (the Go
 //! popover's list).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
@@ -125,6 +130,51 @@ impl Workspace {
             return;
         };
         self.start_moves(vec![Move { from, to }], window, cx);
+    }
+
+    /// Files from the OS were dropped on the Files panel: copied into
+    /// `folder` of the vault off the UI thread, then shown and the last
+    /// one selected. What could not be copied is named in a notice.
+    pub(super) fn copy_dropped(
+        &mut self,
+        paths: Vec<PathBuf>,
+        folder: VaultPath,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(root) = self.vault.as_ref().map(|v| v.read(cx).root().to_path_buf()) else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let handle = self.window_handle;
+        let task = cx.background_spawn(async move { copy_files_into(&root, &folder, &paths) });
+        cx.spawn(async move |this, cx| {
+            let copied = task.await;
+            let _ = cx.update_window(handle, |_, _, cx| {
+                this.update(cx, |ws, cx| {
+                    ws.publish_changes(&copied.changes, cx);
+                    if let Some(last) = copied.copies.last() {
+                        ws.reveal_entry(last, cx);
+                    }
+                    if let Some((name, reason)) = copied.failed.first() {
+                        let title = if copied.failed.len() == 1 {
+                            format!("“{name}” was not copied into the vault.")
+                        } else {
+                            format!(
+                                "{} files were not copied into the vault.",
+                                copied.failed.len()
+                            )
+                        };
+                        ws.ask(
+                            crate::files::notice::Notice::file_op_failed(&title, reason),
+                            cx,
+                        );
+                    }
+                })
+            });
+        })
+        .detach();
     }
 
     /// The Source view on screen and the text offset under the pointer,
@@ -388,4 +438,45 @@ impl Workspace {
             }
         }
     }
+}
+
+/// What [`copy_files_into`] did.
+#[derive(Debug, Default)]
+pub(super) struct CopiedFiles {
+    /// The copies, in drop order.
+    pub copies: Vec<VaultPath>,
+    /// Their index entries.
+    pub changes: Vec<gv_vault::Change>,
+    /// The name and reason of each file not copied.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Copies each of `paths` into `folder` of the vault at `root`, keeping
+/// its name (` 1`, ` 2`, … when taken). Folders are not copied.
+pub(super) fn copy_files_into(root: &Path, folder: &VaultPath, paths: &[PathBuf]) -> CopiedFiles {
+    let dir = folder.to_fs_path(root);
+    let mut out = CopiedFiles::default();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if path.is_dir() {
+            out.failed
+                .push((name, "Folders are not copied into the vault.".to_owned()));
+            continue;
+        }
+        let copy = attachments::copy_into(&dir, path).and_then(|copy| {
+            let relative = copy.strip_prefix(root).map_err(std::io::Error::other)?;
+            VaultPath::from_relative_fs_path(relative).map_err(std::io::Error::other)
+        });
+        match copy {
+            Ok(copy) => {
+                out.changes.extend(super::vault_ops::upserts(root, &copy));
+                out.copies.push(copy);
+            }
+            Err(err) => out.failed.push((name, err.to_string())),
+        }
+    }
+    out
 }

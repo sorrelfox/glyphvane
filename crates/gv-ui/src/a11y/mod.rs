@@ -258,6 +258,13 @@ impl RovingTabs {
             .position(|h| h.contains_focused(window, cx))
     }
 
+    /// Gives tab `index` the keyboard (nothing when it has no handle).
+    pub fn focus(&self, index: usize, window: &mut Window, cx: &mut App) {
+        if let Some(handle) = self.handles.get(index) {
+            handle.focus(window, cx);
+        }
+    }
+
     /// The one tab that is a Tab stop: the focused one, else `selected`,
     /// else the first.
     pub fn stop(&self, window: &Window, cx: &App, selected: Option<usize>) -> usize {

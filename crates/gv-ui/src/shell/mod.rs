@@ -3,6 +3,9 @@
 
 //! The main window: title row, side panels, document area and status bar.
 
+mod base_panel;
+#[cfg(test)]
+mod base_panel_tests;
 mod bases_tabs;
 #[cfg(test)]
 mod bases_tabs_tests;
@@ -1883,6 +1886,9 @@ impl Workspace {
                 FilesPanelEvent::SwitchVault => this.show_vault_switcher(window, cx),
                 FilesPanelEvent::MoveInto { from, folder } => {
                     this.drag_move(from.clone(), folder.clone(), window, cx);
+                }
+                FilesPanelEvent::CopyInto { paths, folder } => {
+                    this.copy_dropped(paths.clone(), folder.clone(), cx);
                 }
                 FilesPanelEvent::Sort => this.show_sort_orders(window, cx),
             },

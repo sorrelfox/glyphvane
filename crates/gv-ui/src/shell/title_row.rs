@@ -7,8 +7,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, BoxShadow, Context, Corners, Div, FontWeight, InteractiveElement as _,
-    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
+    IntoElement as _, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
     transparent_black,
 };
 
@@ -350,6 +350,12 @@ impl Workspace {
                     .a11y_tab(tab.label.name.clone(), active, index, count)
                     .when(unsaved, |el| el.aria_description("Unsaved changes"))
                     .roving_tab(theme, &self.tab_keys, index, index == stop, |_, _, _| {})
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "delete" && !e.keystroke.modifiers.modified() {
+                            cx.stop_propagation();
+                            this.close_tab_from_keys(index, window, cx);
+                        }
+                    }))
                     .h(px(tab::HEIGHT))
                     .min_w_0()
                     .flex()
@@ -389,6 +395,28 @@ impl Workspace {
                     .child(trailing.accessible())
                     .accessible()
             }))
+    }
+}
+
+impl Workspace {
+    /// Delete on a focused tab (or its close button): closes it as its
+    /// close button would, and the keyboard goes to the tab that takes its
+    /// place (the one before it when it was the last). A close that waits
+    /// for an answer about unsaved changes leaves the keyboard alone.
+    pub(super) fn close_tab_from_keys(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let before = self.tabs.len();
+        self.close_tab(index, window, cx);
+        let closed = self.tabs.len() < before || (before == 1 && self.tabs[0].is_placeholder());
+        if closed {
+            let to = index.min(self.tabs.len().saturating_sub(1));
+            self.tab_keys.focus(to, window, cx);
+            cx.notify();
+        }
     }
 }
 

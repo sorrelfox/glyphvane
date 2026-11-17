@@ -108,6 +108,7 @@ command_actions! {
         ShowBacklinks = "workspace.show_backlinks",
         ShowOutgoingLinks = "workspace.show_outgoing_links",
         ShowLinkChecker = "workspace.show_link_checker",
+        ShowBase = "workspace.show_base",
     }
     window {
         Minimize = "window.minimize",

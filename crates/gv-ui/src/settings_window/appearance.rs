@@ -149,7 +149,13 @@ impl SettingsWindow {
                 "In light appearance, use",
                 Some("Applies to System. Dark appearance always uses Dark.".into()),
                 self.error(PREFERRED_LIGHT, cx).map(SharedString::from),
-                vec![controls::segmented(segments, system, theme).into_any_element()],
+                vec![controls::radio_group(
+                    "preferred-light-choices",
+                    "In light appearance, use",
+                    segments,
+                    system,
+                    theme,
+                )],
                 theme,
             )
             .debug_selector(|| format!("settings-row-{PREFERRED_LIGHT}"))

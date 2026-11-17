@@ -77,6 +77,8 @@ impl Workspace {
                 this.sync_tags(cx);
                 // Bases list the vault's files.
                 this.push_bases_content(cx);
+                // So does the sidebar base.
+                this.push_base_panel_content(cx);
                 // Live blocks in the Reading views refresh.
                 this.push_reader_content(cx);
             }));

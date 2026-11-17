@@ -301,13 +301,55 @@ fn links_that_still_resolve_are_left_alone() {
 }
 
 #[test]
-fn a_reference_link_is_reported_not_rewritten() {
-    let dir = vault(&[("Old.md", ""), ("x.md", "[a][r]\n\n[r]: Old.md\n")]);
+fn a_reference_links_definition_is_rewritten() {
+    let dir = vault(&[
+        ("Old.md", ""),
+        (
+            "x.md",
+            "[a][r] and [r] and ![i][r]\n\n[r]: Old.md \"Title\"\n",
+        ),
+    ]);
     let root = dir.path();
     let plan = plan(root, ProfileId::Obsidian, &[mv("Old.md", "New.md")]).expect("plan");
-    assert!(plan.edits.is_empty());
-    assert_eq!(plan.skipped.len(), 1);
-    assert!(plan.skipped[0].reason.contains("reference"));
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+    assert_eq!(plan.edits.len(), 1);
+    assert_eq!(
+        plan.edits[0].after,
+        "[a][r] and [r] and ![i][r]\n\n[r]: New.md \"Title\"\n"
+    );
+    assert_eq!(plan.edits[0].changes.len(), 1);
+    assert_eq!(plan.edits[0].changes[0].old, "[r]: Old.md \"Title\"");
+    assert_eq!(plan.edits[0].changes[0].line, 2);
+}
+
+#[test]
+fn reference_definitions_follow_a_move_in_their_written_style() {
+    let dir = vault(&[
+        ("a/T x.md", ""),
+        ("a/n.md", "[t]\n\n[t]: <T x.md#Part>\n[u]: ./T%20x.md\n"),
+        ("src.md", "> [t]\n>\n> [t]: a/T%20x.md\n"),
+    ]);
+    let root = dir.path();
+    rename_and_apply(root, ProfileId::GfmFile, &[mv("a", "c")]);
+    // The moved note's own definitions are relative to its folder and keep
+    // resolving; the other note's definition (inside a quote) follows.
+    assert_eq!(
+        read(root, "c/n.md"),
+        "[t]\n\n[t]: <T x.md#Part>\n[u]: ./T%20x.md\n"
+    );
+    assert_eq!(read(root, "src.md"), "> [t]\n>\n> [t]: c/T%20x.md\n");
+}
+
+#[test]
+fn a_moved_notes_own_reference_definition_is_rewritten() {
+    let dir = vault(&[
+        ("t.md", ""),
+        ("n.md", "[t]\n\n[t]: t.md\n"),
+        ("d/other.md", ""),
+    ]);
+    let root = dir.path();
+    rename_and_apply(root, ProfileId::GfmFile, &[mv("n.md", "d/n.md")]);
+    assert_eq!(read(root, "d/n.md"), "[t]\n\n[t]: ../t.md\n");
 }
 
 #[test]
