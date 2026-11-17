@@ -16,8 +16,13 @@ tiff = ["image/tiff"]
 # Remote images: the HTTP fetcher and its disk cache. Off for the helper
 # process, which never touches the network.
 remote = ["dep:ureq", "dep:rustls", "dep:url"]
+# Audio playback: decoding (symphonia, libopus) and the output stream
+# (cpal; on Linux it links the system ALSA library). Only the GUI turns it
+# on: the CLI and the helper never play sound.
+audio = ["dep:symphonia", "dep:symphonia-adapter-libopus", "dep:cpal"]
 
 [dependencies]
+cpal = { workspace = true, optional = true }
 fast_image_resize = { workspace = true }
 image = { workspace = true }
 log = { workspace = true }
@@ -25,6 +30,8 @@ miniz_oxide = { workspace = true }
 moxcms = { workspace = true }
 resvg = { workspace = true }
 rustls = { workspace = true, optional = true }
+symphonia = { workspace = true, optional = true }
+symphonia-adapter-libopus = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
@@ -40,3 +47,7 @@ workspace = true
 [[test]]
 name = "remote"
 required-features = ["remote"]
+
+[[test]]
+name = "audio"
+required-features = ["audio"]

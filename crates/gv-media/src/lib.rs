@@ -17,6 +17,9 @@
 //! - Remote images (the `remote` feature): [`remote::RemoteFetcher`]
 //!   downloads into a disk cache with caps; the caller applies the
 //!   remote-content policy.
+//! - Audio (the `audio` feature): [`audio::AudioEngine`] and
+//!   [`audio::Player`] decode with symphonia and libopus and play through
+//!   cpal.
 //! - Results are fitted to the display box with fast_image_resize and
 //!   delivered as straight RGBA8 frames.
 //!
@@ -36,6 +39,8 @@
 //! # Ok::<(), MediaError>(())
 //! ```
 
+#[cfg(feature = "audio")]
+pub mod audio;
 mod color;
 mod engine;
 mod error;

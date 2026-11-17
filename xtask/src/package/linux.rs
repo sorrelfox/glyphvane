@@ -254,6 +254,9 @@ fn depends_from_readelf(text: &str) -> Result<Vec<String>> {
             "libfontconfig.so.1" => "libfontconfig1 (>= 2.13.1)".to_owned(),
             "libfreetype.so.6" => "libfreetype6 (>= 2.11.1)".to_owned(),
             "libz.so.1" => "zlib1g (>= 1:1.2.11)".to_owned(),
+            // The audio player's output (cpal through alsa-sys). The 64-bit
+            // time `libasound2t64` of newer releases provides `libasound2`.
+            "libasound.so.2" => "libasound2 (>= 1.0.16)".to_owned(),
             other => match xcb_extension(other) {
                 Some(pkg) => format!("{pkg} (>= 1.14)"),
                 None => {
@@ -519,6 +522,7 @@ mod tests {
  0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
  0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
  0x0000000000000001 (NEEDED)             Shared library: [libxcb-xkb.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libasound.so.2]
   0x0010:   Name: GLIBC_2.34  Flags: none  Version: 4
   0x0020:   Name: GLIBC_2.39  Flags: none  Version: 5
   0x0030:   Name: GLIBC_2.4  Flags: none  Version: 6
@@ -532,6 +536,7 @@ mod tests {
                 "libgcc-s1 (>= 3.0)",
                 "libc6 (>= 2.39)",
                 "libxcb-xkb1 (>= 1.14)",
+                "libasound2 (>= 1.0.16)",
             ]
         );
         let old_glibc = " 0x1 (NEEDED) Shared library: [libc.so.6]\n  Name: GLIBC_2.17\n";

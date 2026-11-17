@@ -7,6 +7,7 @@ pub mod about;
 pub mod app_state;
 pub mod appearance;
 pub(crate) mod attachments;
+pub mod audio;
 pub(crate) mod autocomplete;
 pub mod bases_view;
 pub mod canvas_view;

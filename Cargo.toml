@@ -235,6 +235,33 @@ fast_image_resize = { version = "6.1.0", default-features = false, features = ["
 # gv-media tests: writing APNG test files (the png version `image` already
 # uses; MIT OR Apache-2.0).
 png = "0.18.1"
+# Audio (gv-media `audio`, ADR-019): symphonia decodes (MPL-2.0), only
+# the codecs and containers FR-RENDER-07 lists, with the ID3 and APE tag
+# readers so tagged MP3s probe; no SIMD feature (it pulls in rustfft). Opus
+# through the libopus adapter (MIT OR Apache-2.0) with bundled libopus
+# (opusic-sys, BSD-3-Clause; needs CMake and a C compiler). Output through
+# cpal (Apache-2.0; on Linux alsa 0.11, MIT OR Apache-2.0, and alsa-sys,
+# MIT, which links the system libasound). rodio is not used: its mixer and
+# resampler are more than one player needs. Licences checked from the
+# sources on 2026-11-17. Exact pins: bump together after the gv-media audio
+# tests pass.
+symphonia = { version = "=0.6.1", default-features = false, features = [
+  "mp3",
+  "aac",
+  "alac",
+  "flac",
+  "vorbis",
+  "pcm",
+  "isomp4",
+  "ogg",
+  "mkv",
+  "wav",
+  "id3v1",
+  "id3v2",
+  "ape",
+] }
+symphonia-adapter-libopus = { version = "=0.3.0", default-features = false, features = ["bundled"] }
+cpal = { version = "=0.18.2", default-features = false }
 # Remote images (gv-media `remote`): a blocking HTTP client over rustls with
 # the `ring` provider, verifying through the OS certificate store
 # (rustls-platform-verifier), so the Mozilla root list (webpki-roots,

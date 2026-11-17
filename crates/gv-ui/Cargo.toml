@@ -29,7 +29,9 @@ gv-highlight = { workspace = true }
 gv-html = { workspace = true }
 gv-inline = { workspace = true }
 gv-math = { workspace = true }
-gv-media = { workspace = true, features = ["remote"] }
+# `audio`: the audio embed's player (symphonia, libopus, cpal; links the
+# system ALSA library on Linux).
+gv-media = { workspace = true, features = ["remote", "audio"] }
 gv-model = { workspace = true }
 gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
