@@ -4,6 +4,7 @@
 //! GPUI views: workspace, panes, editor and reader elements, panels, theming.
 
 pub mod about;
+pub mod app_state;
 pub mod appearance;
 pub(crate) mod attachments;
 pub(crate) mod autocomplete;
@@ -12,6 +13,7 @@ pub mod canvas_view;
 pub mod chrome;
 pub mod compare;
 pub mod conflicts;
+pub mod crash_reports;
 pub mod editor;
 pub mod export;
 pub mod file_prompt;
@@ -20,10 +22,12 @@ pub mod find;
 pub mod goto;
 pub mod icons;
 pub mod inline;
+pub mod integration;
 pub mod keymap;
 pub mod latency;
 pub mod menu;
 pub mod metrics;
+pub mod onboarding;
 pub mod palette;
 pub mod platform;
 pub mod print;
@@ -39,6 +43,7 @@ pub mod switcher;
 pub mod tags_panel;
 pub mod theme;
 pub mod trust;
+pub mod updates;
 pub mod zoom;
 
 use std::path::Path;
@@ -95,6 +100,9 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     file_prompt::init(cx);
     switcher::init(cx);
     settings_window::init(cx);
+    onboarding::init(cx);
+    updates::init(cx);
+    integration::init(cx);
     keymap::init(cx);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {

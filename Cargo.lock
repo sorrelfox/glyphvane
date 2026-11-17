@@ -3919,12 +3919,14 @@ dependencies = [
  "nucleo-matcher",
  "ratex-katex-fonts",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "unicode-segmentation",
+ "ureq",
 ]
 
 [[package]]

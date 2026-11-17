@@ -67,6 +67,11 @@ pub const APP_COMMANDS: &[&str] = &[
     "app.about",
     "app.licenses",
     "app.copy_debug_info",
+    "app.check_for_updates",
+    #[cfg(target_os = "macos")]
+    "app.install_cli",
+    "settings.import",
+    "settings.export",
     "app.open_menu",
     "workspace.command_palette",
     "view.cycle_theme",

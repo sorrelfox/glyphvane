@@ -296,6 +296,12 @@ impl AppSettings {
             .is_some_and(|this| this.settings().general.viewer_mode)
     }
 
+    /// The layer of the settings for all vaults: the global file's, or its
+    /// in-memory stand-in in safe mode and without a file.
+    pub fn global_layer(&self) -> Option<&gv_settings::Layer> {
+        self.stack.layer(LayerKind::Global)
+    }
+
     /// The global settings file, if settings are saved.
     pub fn global_file(&self) -> Option<&SettingsFile> {
         self.global_file.as_ref()

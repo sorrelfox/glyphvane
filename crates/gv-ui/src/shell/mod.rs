@@ -2022,6 +2022,7 @@ impl Render for Workspace {
                                             .h_full()
                                             .flex()
                                             .flex_col()
+                                            .children(crate::updates::notices::render(theme, cx))
                                             .children(self.render_infobar(theme, cx))
                                             .child(self.render_document(theme, cx)),
                                     )

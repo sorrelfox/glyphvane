@@ -43,6 +43,12 @@ gv-vault = { workspace = true }
 image = { workspace = true }
 nucleo-matcher = { workspace = true }
 regex = { workspace = true }
+# The update check (FR-PLAT-07): the same HTTP client, TLS set-up and OS
+# certificate store as remote images (workspace pins; MIT OR Apache-2.0,
+# ring Apache-2.0 AND ISC), and the release JSON (MIT OR Apache-2.0).
+rustls = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
 notify-debouncer-full = { workspace = true }
 # The diagram font when no system sans-serif face is usable (OFL).
 ratex-katex-fonts = { workspace = true }
@@ -54,7 +60,6 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 gpui-pre = { workspace = true, features = ["test-support"] }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

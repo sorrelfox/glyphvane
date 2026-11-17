@@ -43,15 +43,21 @@
 //!   description and key; the sidebar then lists only the sections with
 //!   matches. Esc closes an open list, then clears the search, then closes
 //!   the window.
-//! - Settings import and export (`settings.import`, `settings.export`,
-//!   FR-SET-05) are a Should for M9 and have no handler yet.
+//! - **Export and import** (`settings.export`, `settings.import`,
+//!   FR-SET-05): rows in the About section; an import shows its changes
+//!   for review before anything is saved ([`transfer`]).
 
 mod appearance;
-mod controls;
-mod metrics;
+pub(crate) mod controls;
+pub(crate) mod metrics;
 pub mod model;
 #[cfg(test)]
 mod tests;
+mod transfer;
+#[cfg(test)]
+mod transfer_tests;
+
+pub use transfer::PendingImport;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -109,6 +115,12 @@ pub(crate) fn init(cx: &mut App) {
             tracing::warn!("settings: cannot open the settings window: {err}");
         }
     });
+    cx.on_action(|_: &actions::settings::Export, cx| {
+        with_window(cx, |this, cx| this.export_settings(cx));
+    });
+    cx.on_action(|_: &actions::settings::Import, cx| {
+        with_window(cx, |this, cx| this.import_settings(cx));
+    });
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -122,6 +134,28 @@ pub(crate) fn init(cx: &mut App) {
         .detach();
     })
     .detach();
+}
+
+/// Opens the settings window on its About section and runs `f` on it:
+/// `settings.export` and `settings.import` from the palette.
+fn with_window(
+    cx: &mut App,
+    f: impl FnOnce(&mut SettingsWindow, &mut Context<'_, SettingsWindow>) + 'static,
+) {
+    // Deferred: the command may come from inside the settings window's own
+    // update, which `open` cannot enter again.
+    cx.defer(move |cx| {
+        if let Err(err) = open(cx) {
+            tracing::warn!("settings: cannot open the settings window: {err}");
+            return;
+        }
+        if let Some((_, view)) = settings_window(cx) {
+            view.update(cx, |this, cx| {
+                this.select_section(SectionId::About, cx);
+                f(this, cx);
+            });
+        }
+    });
 }
 
 /// Uses the settings layers of the vault of `workspace`'s active document.
@@ -247,6 +281,10 @@ pub struct SettingsWindow {
     open_select: Option<&'static str>,
     /// The installed font families, for the font selects.
     fonts: Vec<SharedString>,
+    /// An import waiting for Apply or Cancel.
+    import: Option<PendingImport>,
+    /// The last export or import message.
+    transfer_status: Option<String>,
     focus: FocusHandle,
     subscriptions: Vec<Subscription>,
 }
@@ -302,6 +340,8 @@ impl SettingsWindow {
             errors: HashMap::new(),
             open_select: None,
             fonts,
+            import: None,
+            transfer_status: None,
             focus,
             subscriptions: vec![search_events, settings_changed],
         }
@@ -744,7 +784,9 @@ impl SettingsWindow {
     }
 
     fn head(&self, theme: &Theme, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
-        let title: SharedString = if self.query.trim().is_empty() {
+        let title: SharedString = if self.import.is_some() {
+            "Import settings".into()
+        } else if self.query.trim().is_empty() {
             self.section.label().into()
         } else {
             "Search results".into()
@@ -805,6 +847,9 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
+        if self.import.is_some() {
+            return self.import_preview(theme, cx);
+        }
         if !self.query.trim().is_empty() {
             return self.search_results(theme, window, cx);
         }
@@ -1158,6 +1203,7 @@ impl SettingsWindow {
                 "On: changes apply until the app quits and are not saved.".to_owned(),
             ));
         }
+        let transfer = self.transfer_rows(theme, cx);
         vec![
             div()
                 .border_b(px(HAIRLINE))
@@ -1178,6 +1224,7 @@ impl SettingsWindow {
                     )
                 }))
                 .into_any_element(),
+            transfer,
         ]
     }
 

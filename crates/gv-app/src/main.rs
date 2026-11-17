@@ -6,6 +6,7 @@
 mod check_links;
 mod cli;
 mod clipboard;
+mod crash;
 #[cfg(target_os = "linux")]
 mod emoji_font;
 mod export;
@@ -154,6 +155,13 @@ fn main() -> ExitCode {
         app_settings = app_settings.with_safe_mode();
     }
     settings::report(&app_settings);
+    // Local crash reports, written only while the opt-in setting is on.
+    crash::install(
+        locations
+            .as_ref()
+            .map(gv_settings::Locations::crash_reports_dir),
+        app_settings.settings().privacy_and_security.crash_reports,
+    );
     startup::mark("settings loaded");
     // Read before the event loop starts, like the settings.
     let session_store = session::store(locations.as_ref());
@@ -206,6 +214,15 @@ fn main() -> ExitCode {
             // they protect the user's text.
             gv_ui::files::install(cx, locations.as_ref());
             ui_session::install(cx, session_store);
+            // Onboarding, update check and crash-report bookkeeping.
+            gv_ui::app_state::install(cx);
+            cx.observe_global::<AppSettings>(|cx| {
+                crash::set_enabled(gv_ui::crash_reports::enabled(cx));
+            })
+            .detach();
+            // Recent documents for the Dock (macOS) and the jump list
+            // (Windows).
+            gv_ui::integration::recent::install(cx);
             if let Some(path) = watched {
                 settings::watch(path, cx);
             }
@@ -222,6 +239,7 @@ fn main() -> ExitCode {
             .detach();
             startup::mark("UI set up (theme, keymap, journal, session, settings watcher)");
             let waits = request.wait;
+            let plain_launch = !waits && restores_session(&request);
             let opened = if waits {
                 wait::open(request, wait::Waiter::Local, cx)
             } else if restores_session(&request) {
@@ -241,6 +259,14 @@ fn main() -> ExitCode {
                     // closed: they wait for the next start.
                     if !waits {
                         gv_ui::files::recover_unsaved(cx);
+                        // A report from the last run, the update check
+                        // (only with the opt-in), and the first-run
+                        // welcome on a start without files.
+                        gv_ui::crash_reports::announce(cx);
+                        gv_ui::updates::start(cx);
+                        if plain_launch {
+                            gv_ui::onboarding::show_if_first_run(cx);
+                        }
                     }
                 }
                 Err(err) => {

@@ -25,6 +25,9 @@ pub const SETTINGS_FILE: &str = "settings.toml";
 /// The name of the session state file in the data dir.
 const SESSION_FILE: &str = "session.json";
 
+/// The name of the application state file in the data dir.
+const STATE_FILE: &str = "state.json";
+
 /// The folder inside a vault that holds shared settings.
 pub const IN_VAULT_FOLDER: &str = ".glyphvane";
 
@@ -148,6 +151,18 @@ impl Locations {
         self.data.join(SESSION_FILE)
     }
 
+    /// Application state that is not a setting (onboarding, the update
+    /// check, crash reports seen): [`crate::AppState`].
+    pub fn app_state_file(&self) -> PathBuf {
+        self.data.join(STATE_FILE)
+    }
+
+    /// Local crash reports (FR-PLAT-08), next to the logs. Nothing in it is
+    /// ever sent anywhere.
+    pub fn crash_reports_dir(&self) -> PathBuf {
+        self.logs.join("crash-reports")
+    }
+
     /// The per-vault folder in the data dir.
     pub fn vault_data_dir(&self, vault_id: &str) -> Result<PathBuf, InvalidVaultId> {
         check_vault_id(vault_id)?;
@@ -205,6 +220,14 @@ mod tests {
             Ok(PathBuf::from("/tmp/gv-test/data/vaults/a1b2/settings.toml"))
         );
         assert_eq!(loc.log_dir(), Path::new("/tmp/gv-test/logs"));
+        assert_eq!(
+            loc.app_state_file(),
+            Path::new("/tmp/gv-test/data/state.json")
+        );
+        assert_eq!(
+            loc.crash_reports_dir(),
+            Path::new("/tmp/gv-test/logs/crash-reports")
+        );
         assert_eq!(
             loc.session_file(),
             Path::new("/tmp/gv-test/data/session.json")

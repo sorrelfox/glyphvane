@@ -46,6 +46,8 @@ mod paths;
 mod resolve;
 mod schema;
 mod spec;
+mod state;
+mod transfer;
 
 // The value and document types used in this crate's API.
 pub use toml;
@@ -76,4 +78,9 @@ pub use schema::{
 };
 pub use spec::{
     Kind, Merge, Scope, Section, SettingType, Spec, Tighten, ValueError, sections, spec, specs,
+};
+pub use state::{AppState, ReleaseRecord, STATE_VERSION, UpdateState};
+pub use transfer::{
+    EXPORT_FILE_NAME, ImportChange, ImportError, ImportPreview, display_value, export_settings,
+    preview_import,
 };
