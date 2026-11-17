@@ -201,6 +201,7 @@ pub struct Theme {
     pub selection: Selection,
     pub syntax: Syntax,
     pub diagram: DiagramColors,
+    pub canvas: CanvasColors,
     pub shadow: Shadows,
 }
 
@@ -315,6 +316,16 @@ pub struct Syntax {
 #[serde(deny_unknown_fields)]
 pub struct DiagramColors {
     pub category: [Color; 12],
+}
+
+/// Canvas colours: the six preset colours of JSON Canvas (`color` `"1"` to
+/// `"6"`: red, orange, yellow, green, cyan, purple), `canvas.preset.1` to
+/// `.6` (provisional, not designed yet). Cards and groups draw their border
+/// in the colour and a translucent fill of it.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanvasColors {
+    pub preset: [Color; 6],
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

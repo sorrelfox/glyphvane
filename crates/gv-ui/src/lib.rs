@@ -5,6 +5,7 @@
 
 pub mod about;
 pub mod appearance;
+pub mod canvas_view;
 pub mod chrome;
 pub mod compare;
 pub mod editor;
@@ -75,6 +76,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     // The widgets' own keys, then the commands' keys from the keymap.
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
+    cx.bind_keys(canvas_view::key_bindings());
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     menu::init(cx);

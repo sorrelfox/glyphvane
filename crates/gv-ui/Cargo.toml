@@ -12,6 +12,7 @@ publish = false
 fontdb = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
+gv-canvas = { workspace = true }
 gv-diagram = { workspace = true }
 gv-editor = { workspace = true }
 gv-export = { workspace = true }

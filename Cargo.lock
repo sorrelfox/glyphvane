@@ -3884,6 +3884,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-sum-tree",
+ "gv-canvas",
  "gv-diagram",
  "gv-editor",
  "gv-export",

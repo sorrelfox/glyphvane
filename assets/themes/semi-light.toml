@@ -72,6 +72,17 @@ category = [
     "#8FB0E8",
 ]
 
+[canvas]   # provisional, needs design: JSON Canvas preset colours "1" to "6"
+# (red, orange, yellow, green, cyan, purple)
+preset = [
+    "#D93A3F",
+    "#C9711F",
+    "#B59A12",
+    "#2E9A55",
+    "#1C9AA0",
+    "#7C5CC9",
+]
+
 [[shadow.popover]]
 x = 0
 y = 10
