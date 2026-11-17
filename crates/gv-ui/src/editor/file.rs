@@ -630,6 +630,15 @@ impl EditorView {
         }
     }
 
+    /// Shows `notice` in the document's infobar (`None` closes it).
+    pub(super) fn show_doc_notice(&mut self, notice: Option<Notice>, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        doc.state.set_notice(notice);
+        self.notice_changed(cx);
+    }
+
     fn notice_changed(&mut self, cx: &mut Context<'_, Self>) {
         cx.emit(DocEvent::NoticeChanged);
         cx.notify();
@@ -1399,8 +1408,15 @@ impl EditorView {
             | NoticeAction::IndexFolder(_)
             | NoticeAction::SaveAndClose
             | NoticeAction::DiscardAndClose
-            | NoticeAction::UndoFileOp
             | NoticeAction::Cancel => {}
+            // A heading or block-id rename of this document.
+            NoticeAction::UndoFileOp => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.state.set_notice(None);
+                }
+                self.notice_changed(cx);
+                self.undo_anchor_rename(cx);
+            }
             // The Reading view's (remote content).
             NoticeAction::RemoteLoadOnce
             | NoticeAction::RemoteAlwaysAllow

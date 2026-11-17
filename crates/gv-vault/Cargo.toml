@@ -19,6 +19,8 @@ gv-settings.workspace = true
 # The content index parses notes with the views' parser.
 gv-syntax.workspace = true
 gv-text.workspace = true
+# Git awareness: the branch and each file's status (pure Rust).
+gix.workspace = true
 # Version history objects: deflate, pure Rust.
 miniz_oxide.workspace = true
 ignore.workspace = true

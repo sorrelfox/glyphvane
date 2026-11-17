@@ -17,14 +17,14 @@ use super::*;
 
 /// A vault on disk with its content index, registered as the windows'
 /// indexes are.
-struct Vault {
+pub(super) struct Vault {
     _dir: tempfile::TempDir,
-    root: PathBuf,
+    pub(super) root: PathBuf,
     index: PathIndex,
     _indexer: ContentIndexer,
 }
 
-fn vault(files: &[(&str, &str)]) -> Vault {
+pub(super) fn vault(files: &[(&str, &str)]) -> Vault {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::path::absolute(dir.path().join("vault")).expect("absolute");
     for (path, text) in files {
@@ -50,7 +50,7 @@ fn vault(files: &[(&str, &str)]) -> Vault {
 
 /// A Source view of `file` in `vault`, in `profile`, with the caret at the
 /// end of the text.
-fn editor_in(
+pub(super) fn editor_in(
     cx: &mut TestAppContext,
     vault: &Vault,
     file: &str,

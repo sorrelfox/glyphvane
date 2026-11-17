@@ -8,7 +8,9 @@
 //! and everything else stay exactly as they were. [`path_refs`] finds every
 //! vault path a canvas holds (a file node's `file`, a group's `background`)
 //! with its byte range in the source; [`plan_path_patches`] turns a rename
-//! mapping into [`Patch`]es; [`apply_patches`] applies them.
+//! mapping into [`Patch`]es; [`apply_patches`] applies them. [`subpath_refs`]
+//! finds the file nodes' `subpath`s (`#Heading`, `#^block`) for heading and
+//! block-id renames.
 
 use std::fmt;
 use std::ops::Range;
@@ -88,9 +90,33 @@ impl std::error::Error for PatchError {}
 /// top-level `nodes` array is searched. A key that appears twice in one node
 /// yields two refs; both get patched.
 pub fn path_refs(src: &str) -> Result<Vec<PathRef>, ScanError> {
+    scan(src).map(|(refs, _)| refs)
+}
+
+/// The `subpath` of a file node (`#Heading`, `#^block`), with its byte
+/// range: heading and block-id renames rewrite it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubpathRef {
+    /// Position in the `nodes` array.
+    pub node_index: usize,
+    /// The node's `file` (decoded), if it has one.
+    pub file: Option<String>,
+    /// Byte range of the JSON string token, quotes included.
+    pub range: Range<usize>,
+    /// The decoded string value.
+    pub value: String,
+}
+
+/// Finds the `subpath` of every file node, in file order.
+pub fn subpath_refs(src: &str) -> Result<Vec<SubpathRef>, ScanError> {
+    scan(src).map(|(_, subpaths)| subpaths)
+}
+
+fn scan(src: &str) -> Result<(Vec<PathRef>, Vec<SubpathRef>), ScanError> {
     let mut s = Scanner {
         b: src.as_bytes(),
         pos: 0,
+        subpaths: Vec::new(),
     };
     let mut out = Vec::new();
     s.ws();
@@ -101,7 +127,7 @@ pub fn path_refs(src: &str) -> Result<Vec<PathRef>, ScanError> {
     s.expect(b'{')?;
     s.ws();
     if s.eat(b'}') {
-        return Ok(out);
+        return Ok((out, s.subpaths));
     }
     loop {
         s.ws();
@@ -119,7 +145,7 @@ pub fn path_refs(src: &str) -> Result<Vec<PathRef>, ScanError> {
             continue;
         }
         s.expect(b'}')?;
-        return Ok(out);
+        return Ok((out, s.subpaths));
     }
 }
 
@@ -196,6 +222,7 @@ pub fn apply_patches(src: &str, patches: &[Patch]) -> Result<String, PatchError>
 struct Scanner<'a> {
     b: &'a [u8],
     pos: usize,
+    subpaths: Vec<SubpathRef>,
 }
 
 impl Scanner<'_> {
@@ -407,6 +434,7 @@ impl Scanner<'_> {
         self.expect(b'{')?;
         let mut type_name: Option<String> = None;
         let mut found: Vec<PathRef> = Vec::new();
+        let mut subpath: Option<(Range<usize>, String)> = None;
         self.ws();
         if !self.eat(b'}') {
             loop {
@@ -420,7 +448,9 @@ impl Scanner<'_> {
                     "background" => Some(PathKey::Background),
                     _ => None,
                 };
-                if (wanted.is_some() || key == "type") && self.peek() == Some(b'"') {
+                if key == "subpath" && self.peek() == Some(b'"') {
+                    subpath = Some(self.string()?);
+                } else if (wanted.is_some() || key == "type") && self.peek() == Some(b'"') {
                     let (range, value) = self.string()?;
                     match wanted {
                         Some(key) => found.push(PathRef {
@@ -447,6 +477,21 @@ impl Scanner<'_> {
             PathKey::File => type_name.as_deref() == Some("file"),
             PathKey::Background => type_name.as_deref() == Some("group"),
         };
+        if type_name.as_deref() == Some("file")
+            && let Some((range, value)) = subpath
+        {
+            let file = found
+                .iter()
+                .rev()
+                .find(|r| r.key == PathKey::File)
+                .map(|r| r.value.clone());
+            self.subpaths.push(SubpathRef {
+                node_index,
+                file,
+                range,
+                value,
+            });
+        }
         out.extend(found.into_iter().filter(|r| keep(r.key)));
         Ok(())
     }
@@ -466,6 +511,19 @@ mod tests {
         assert_eq!(refs[0].key, PathKey::File);
         assert_eq!(refs[1].node_index, 1);
         assert_eq!(refs[1].key, PathKey::Background);
+    }
+
+    #[test]
+    fn finds_subpaths_of_file_nodes() {
+        let src = "{\"nodes\":[{\"subpath\":\"#A \\u00e9\",\"type\":\"file\",\"file\":\"n.md\"},{\"type\":\"text\",\"subpath\":\"#x\"},{\"type\":\"file\",\"file\":\"m.md\",\"subpath\":\"#^id\"}]}";
+        let subs = subpath_refs(src).expect("scan");
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].value, "#A \u{e9}");
+        assert_eq!(subs[0].file.as_deref(), Some("n.md"));
+        assert_eq!(&src[subs[0].range.clone()], "\"#A \\u00e9\"");
+        assert_eq!(subs[1].node_index, 2);
+        assert_eq!(subs[1].value, "#^id");
+        assert_eq!(path_refs(src).expect("scan").len(), 2);
     }
 
     #[test]

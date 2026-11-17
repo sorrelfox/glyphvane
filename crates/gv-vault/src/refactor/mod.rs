@@ -28,6 +28,13 @@
 //! it works on case-insensitive file systems. Collisions are checked
 //! without regard to case on every OS, so a vault stays portable.
 //!
+//! # Heading and block-id renames
+//!
+//! [`plan_anchor_rename`] plans renaming a heading or a block id and
+//! rewriting every link to it (see the `anchor` module): the note's own
+//! edit for its editor buffer, and a [`RefactorPlan`] without moves for
+//! the other notes and canvases, applied and undone like a file rename.
+//!
 //! # Not rewritten
 //!
 //! Links inside code are never touched (the index does not see them).
@@ -37,6 +44,9 @@
 //! (`gv_canvas::patch`).
 //! Notes that are not UTF-8 are listed as skipped.
 
+mod anchor;
+#[cfg(test)]
+mod anchor_tests;
 mod apply;
 mod ops;
 mod plan;
@@ -45,6 +55,10 @@ mod tests;
 
 use std::path::PathBuf;
 
+pub use anchor::{
+    AnchorPlan, AnchorRename, AnchorTarget, block_marker_range, heading_text_range,
+    plan_anchor_rename, validate_block_id, validate_heading_text,
+};
 pub use apply::{AppliedEdit, AppliedRefactor, Recovered, apply, recover, undo};
 pub use ops::{
     SystemTrash, Trash, clean_name, create_folder, duplicate, duplicate_name, move_to_trash,
@@ -195,6 +209,12 @@ pub enum RefactorError {
     /// The trash failed.
     #[error("cannot move to the trash: {0}")]
     Trash(String),
+    /// A note to edit has unsaved changes in an editor.
+    #[error("“{0}” has unsaved changes: save it first")]
+    Unsaved(VaultPath),
+    /// The heading or block to rename is not there (or cannot be renamed).
+    #[error("{0}")]
+    NoAnchor(String),
 }
 
 impl RefactorError {

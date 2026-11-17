@@ -104,6 +104,9 @@ serde_json = "1.0.145"
 # lock-free snapshot publication.
 arc-swap = "1.9.5"
 caseless = "0.2.2"
+# Vault: Git awareness (branch, file status). Pure Rust; only the status
+# machinery, no network, no parallel threads (MIT OR Apache-2.0).
+gix = { version = "0.90.0", default-features = false, features = ["status", "sha1"] }
 ignore = "0.4.34"
 tempfile = "3.27.0"
 unicode-normalization = "0.1.26"

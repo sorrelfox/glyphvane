@@ -84,7 +84,7 @@ impl EditorView {
     }
 
     /// The document's headings, block ids, tags, footnotes and properties.
-    fn current_note(&mut self) -> Arc<NoteData> {
+    pub(super) fn current_note(&mut self) -> Arc<NoteData> {
         let profile = self.links.profile();
         let Some(doc) = self.doc.as_ref() else {
             return Arc::default();

@@ -128,6 +128,7 @@ mod links;
 mod markdown;
 mod metrics;
 mod paste;
+mod rename;
 mod rows;
 mod spell;
 mod stats;
@@ -466,6 +467,8 @@ pub struct EditorView {
     note_record: autocomplete::CurrentNote,
     /// Where the autocomplete popover was last placed.
     autocomplete_placed: Option<Bounds<Pixels>>,
+    /// Rename heading or block ID: the last rename, for its Undo.
+    rename: rename::RenameState,
     /// A Save As asked for while the document loaded.
     save_as_after_load: Option<file::SaveAsTarget>,
     #[cfg(test)]
@@ -535,6 +538,7 @@ impl EditorView {
             autocomplete: autocomplete_state(gv_profile::ProfileId::CommonMark),
             note_record: autocomplete::CurrentNote::default(),
             autocomplete_placed: None,
+            rename: rename::RenameState::default(),
             save_as_after_load: None,
             #[cfg(test)]
             probe: element::Probe::default(),
@@ -1392,6 +1396,7 @@ impl Render for EditorView {
         let host = div().id("editor-host").relative().size_full();
         let host = self.autocomplete_handlers(host, cx);
         let host = self.find_handlers(host, cx);
+        let host = self.rename_handlers(host, cx);
         let popover = self
             .find_popover()
             .filter(|_| self.status == EditorStatus::Ready);

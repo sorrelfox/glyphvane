@@ -47,6 +47,7 @@ pub mod content;
 pub mod expect;
 pub mod files;
 pub mod fragment;
+pub mod git;
 pub mod index;
 pub mod keys;
 pub mod link;

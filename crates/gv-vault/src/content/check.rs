@@ -1193,9 +1193,21 @@ impl<'a> HeadingKeys<'a> {
         primary: Anchoring,
         exact_only: bool,
     ) -> Option<(usize, bool)> {
+        self.find_how(range, part, primary, exact_only)
+            .map(|(i, _, loose)| (i, loose))
+    }
+
+    /// Like [`Self::find`], with the anchoring that matched.
+    fn find_how(
+        &mut self,
+        range: std::ops::Range<usize>,
+        part: &str,
+        primary: Anchoring,
+        exact_only: bool,
+    ) -> Option<(usize, Anchoring, bool)> {
         let part = nfc_key(part).into_owned();
         if let Some(i) = self.find_by(primary, range.clone(), &part) {
-            return Some((i, false));
+            return Some((i, primary, false));
         }
         if exact_only {
             return None;
@@ -1206,7 +1218,7 @@ impl<'a> HeadingKeys<'a> {
             .collect();
         for &a in &others {
             if let Some(i) = self.find_by(a, range.clone(), &part) {
-                return Some((i, true));
+                return Some((i, a, true));
             }
         }
         let lower = part.to_lowercase();
@@ -1220,7 +1232,7 @@ impl<'a> HeadingKeys<'a> {
                 if let Some(i) = range.clone().find(|&i| {
                     keys[i].1 == lower || lower_stripped.as_deref() == Some(keys[i].1.as_str())
                 }) {
-                    return Some((i, true));
+                    return Some((i, a, true));
                 }
             }
         }
@@ -1275,6 +1287,40 @@ fn match_block(blocks: &[IndexedBlockId], id: &str) -> AnchorMatch {
     } else {
         AnchorMatch::Missing
     }
+}
+
+/// The headings a heading fragment's parts name, in order, each with the
+/// anchoring it matched by (the primary one first, then the fallbacks of
+/// the link checker). `None` when a part names no heading, or for `top`.
+pub(crate) fn heading_chain(
+    headings: &[IndexedHeading],
+    parts: &[String],
+    primary: Anchoring,
+) -> Option<Vec<(usize, Anchoring)>> {
+    let mut keys = HeadingKeys::new(headings);
+    let mut range = 0..headings.len();
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let (i, how, _) = keys.find_how(range.clone(), part, primary, false)?;
+        out.push((i, how));
+        let level = headings[i].level;
+        let end = headings[i + 1..]
+            .iter()
+            .position(|h| h.level <= level)
+            .map_or(headings.len(), |p| i + 1 + p);
+        range = i + 1..end;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The slug of every heading of `headings` under `algorithm`, in order
+/// (duplicates numbered as the algorithm numbers them).
+pub(crate) fn heading_slugs(headings: &[IndexedHeading], algorithm: SlugAlgorithm) -> Vec<String> {
+    let mut keys = HeadingKeys::new(headings);
+    keys.slugs(algorithm)
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect()
 }
 
 // ----- Headless runs ---------------------------------------------------------

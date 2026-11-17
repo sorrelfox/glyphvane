@@ -611,7 +611,7 @@ fn line_of(text: &str, offset: usize) -> u32 {
 
 /// `text` with each change's span replaced (spans in order, not
 /// overlapping).
-fn apply_changes(text: &str, changes: &[LinkChange]) -> String {
+pub(super) fn apply_changes(text: &str, changes: &[LinkChange]) -> String {
     let mut out = String::with_capacity(text.len() + 64);
     let mut at = 0;
     for c in changes {
