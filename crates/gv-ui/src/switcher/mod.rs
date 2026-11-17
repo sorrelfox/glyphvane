@@ -69,6 +69,7 @@ use gpui::{AnyWindowHandle, App, Entity, KeyBinding, Window};
 use gv_vault::content::ContentSnapshot;
 
 pub use view::QuickSwitcher;
+pub(crate) use view::{hint, label_text, popover_shadow};
 
 gpui::actions!(
     quick_switcher,

@@ -457,6 +457,39 @@ pub fn rank(entries: &[Entry], query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, _, i)| i).collect()
 }
 
+/// The positions of `labels` that match `query`, best first, with the
+/// switcher's matching: every word of the query in any order, case and
+/// (unless the query has some) accents ignored; a label equal to the
+/// query comes first; ties keep the labels' order. An empty query lists
+/// every label in order. Editor autocomplete ranks tags, emoji, languages
+/// and the like with it.
+pub fn rank_labels<S: AsRef<str>>(labels: &[S], query: &str) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return (0..labels.len()).collect();
+    }
+    let pattern = pattern(query);
+    let folded = fold_key(query);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, usize)> = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(index, label)| {
+            let label = label.as_ref();
+            let score = pattern.score(Utf32Str::new(label, &mut buf), &mut matcher)?;
+            let exact = if fold_key(label) == folded {
+                EXACT_BONUS
+            } else {
+                0
+            };
+            Some((score + exact, index))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 /// The byte ranges of `text` that `query` (without its mode character)
 /// matches, merged where they touch; empty when it does not match.
 pub fn highlight(text: &str, query: &str) -> Vec<Range<usize>> {

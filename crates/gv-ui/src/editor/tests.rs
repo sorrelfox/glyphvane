@@ -26,6 +26,7 @@ use crate::metrics::size::{document, editor as editor_size};
 use crate::shell::{OpenTarget, ViewMode, Workspace};
 use crate::{AppSettings, ThemeChoice};
 
+mod autocomplete;
 mod code;
 mod find;
 mod fold;

@@ -364,7 +364,7 @@ fn describe(entry: &Entry) -> String {
 }
 
 /// `shadow.popover`, the application's only shadow.
-fn popover_shadow(theme: &Theme) -> Vec<BoxShadow> {
+pub(crate) fn popover_shadow(theme: &Theme) -> Vec<BoxShadow> {
     theme
         .shadow
         .popover
@@ -381,7 +381,12 @@ fn popover_shadow(theme: &Theme) -> Vec<BoxShadow> {
 
 /// `label` with its `matched` letters in weight 700, then `suffix` in
 /// `text.secondary`.
-fn label_text(label: &str, matched: &[Range<usize>], suffix: &str, theme: &Theme) -> StyledText {
+pub(crate) fn label_text(
+    label: &str,
+    matched: &[Range<usize>],
+    suffix: &str,
+    theme: &Theme,
+) -> StyledText {
     let bold = HighlightStyle {
         font_weight: Some(FontWeight(text::weight::BOLD)),
         ..HighlightStyle::default()
@@ -403,7 +408,7 @@ fn label_text(label: &str, matched: &[Range<usize>], suffix: &str, theme: &Theme
 }
 
 /// A key hint: the key in mono `text.primary`, then what it does.
-fn hint(key: &'static str, label: String, theme: &Theme) -> Div {
+pub(crate) fn hint(key: &'static str, label: String, theme: &Theme) -> Div {
     div()
         .flex()
         .gap(px(spacing::HINT_KEY_GAP))

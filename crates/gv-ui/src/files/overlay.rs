@@ -53,6 +53,19 @@ pub(crate) fn register(root: &Path, handle: ContentHandle) {
     hub.sinks.push((root.to_path_buf(), handle));
 }
 
+/// The content index of the vault that holds `path` (the deepest one when
+/// vaults nest), with its root: its current snapshot, once built. Editor
+/// autocomplete reads the vault's notes, headings and tags from it.
+pub(crate) fn content_of(path: &Path) -> Option<(PathBuf, gv_vault::content::ContentSnapshot)> {
+    let mut hub = hub();
+    hub.sinks.retain(|(_, h)| !h.is_stopped());
+    hub.sinks
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .and_then(|(root, handle)| Some((root.clone(), handle.snapshot()?)))
+}
+
 /// The document at `path` has unsaved text `text`.
 pub(crate) fn dirty(path: &Path, text: &TextSnapshot) {
     let mut hub = hub();

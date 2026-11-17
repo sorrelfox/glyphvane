@@ -114,6 +114,7 @@
 //! to Preview, the Reading view is rebuilt from the editor's text
 //! ([`EditorView::take_preview_text`]), saved or not.
 
+mod autocomplete;
 mod element;
 mod file;
 mod find;
@@ -457,6 +458,12 @@ pub struct EditorView {
     handed_off: Option<Revision>,
     /// Find and replace.
     find: find::FindState,
+    /// Autocomplete ([`crate::autocomplete`]).
+    autocomplete: crate::autocomplete::State,
+    /// The document's index record, for autocomplete.
+    note_record: autocomplete::CurrentNote,
+    /// Where the autocomplete popover was last placed.
+    autocomplete_placed: Option<Bounds<Pixels>>,
     /// A Save As asked for while the document loaded.
     save_as_after_load: Option<file::SaveAsTarget>,
     #[cfg(test)]
@@ -523,6 +530,9 @@ impl EditorView {
             scrollbar: None,
             handed_off: None,
             find: find::FindState::default(),
+            autocomplete: autocomplete_state(gv_profile::ProfileId::CommonMark),
+            note_record: autocomplete::CurrentNote::default(),
+            autocomplete_placed: None,
             save_as_after_load: None,
             #[cfg(test)]
             probe: element::Probe::default(),
@@ -541,6 +551,10 @@ impl EditorView {
     pub fn set_profile(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
+        if let Some(profile) = gv_profile::ProfileId::from_id(id) {
+            self.autocomplete
+                .set_switches(&gv_profile::definition(profile).switches);
+        }
         self.options =
             gv_profile::ProfileId::from_id(id).map_or(self.options, ParseOptions::builtin);
         self.availabilities.reset();
@@ -560,6 +574,7 @@ impl EditorView {
         let id = profile.id.as_str();
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
+        self.autocomplete.set_switches(&profile.switches);
         self.availabilities.reset();
         if self.links.profile() != profile.id {
             self.links.set_profile(profile.id);
@@ -613,6 +628,7 @@ impl EditorView {
         // The journal and the watcher know a file by its absolute path.
         let path = std::path::absolute(&path).unwrap_or(path);
         self.links = LinkStatuses::new(Some(&path), index.as_ref(), self.links.profile());
+        self.autocomplete.index = index;
         self.path = Some(path.clone());
         self.untitled = None;
         self.status = EditorStatus::Loading;
@@ -776,6 +792,7 @@ impl EditorView {
         self.stats.reset();
         self.spell.reset();
         self.reset_find();
+        self.autocomplete.clear();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
@@ -802,6 +819,7 @@ impl EditorView {
     /// The window's path index changed: link statuses are asked again.
     pub fn set_index(&mut self, index: Option<PathIndex>, cx: &mut Context<'_, Self>) {
         self.links.reset(self.path.as_deref(), index.as_ref());
+        self.autocomplete.index = index;
         cx.notify();
     }
 
@@ -974,6 +992,7 @@ impl EditorView {
         crate::latency::handled();
         self.spell_after_change();
         self.pump_syntax(cx);
+        self.update_autocomplete();
         self.after_edit(cx);
         self.autoscroll = true;
         cx.notify();
@@ -1262,6 +1281,13 @@ pub(crate) struct Extra {
     scroll: f64,
 }
 
+/// Autocomplete for built-in profile `id`.
+fn autocomplete_state(id: gv_profile::ProfileId) -> crate::autocomplete::State {
+    let mut state = crate::autocomplete::State::default();
+    state.set_switches(&gv_profile::definition(id).switches);
+    state
+}
+
 /// The paste profile of flavor profile `id`.
 fn paste_profile(id: &str) -> gv_html::Profile {
     gv_html::Profile::from_id(id).unwrap_or_default()
@@ -1355,11 +1381,8 @@ impl Render for EditorView {
         // popover, so the commands bound to it also work from the
         // popover's fields; the editor's own handlers are on the element
         // with its focus, which the fields are not inside.
-        let host = div()
-            .id("editor-host")
-            .key_context(KEY_CONTEXT)
-            .relative()
-            .size_full();
+        let host = div().id("editor-host").relative().size_full();
+        let host = self.autocomplete_handlers(host, cx);
         let host = self.find_handlers(host, cx);
         let popover = self
             .find_popover()
@@ -1529,6 +1552,12 @@ impl Render for EditorView {
         let link_tip = (self.status == EditorStatus::Ready)
             .then(|| self.link_tooltip(window, cx))
             .flatten();
-        host.child(root).children(popover).children(link_tip)
+        let completions = (self.status == EditorStatus::Ready)
+            .then(|| self.autocomplete_popover(window, cx))
+            .flatten();
+        host.child(root)
+            .children(popover)
+            .children(link_tip)
+            .children(completions)
     }
 }

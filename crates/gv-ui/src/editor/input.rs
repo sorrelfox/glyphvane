@@ -315,6 +315,9 @@ impl EntityInputHandler for EditorView {
         if self.read_only {
             return;
         }
+        // Text an input method commits is not typing: it opens no
+        // autocomplete.
+        self.autocomplete.typed = self.doc.as_ref().is_some_and(|d| !d.editor.is_composing());
         if self.type_smart(range.as_ref(), text) {
             self.input_changed(cx);
         } else if let Some(doc) = self.doc.as_mut() {

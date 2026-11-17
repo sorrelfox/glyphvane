@@ -13,6 +13,10 @@ publish = false
 # Apache-2.0; 0.4.45 is already in the graph through GPUI, checked
 # 2026-11-17).
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+# gemoji shortcodes for the editor's `:` autocomplete ((MIT OR Apache-2.0)
+# AND Unicode-3.0; its phf 0.13.1 is already in the graph, checked
+# 2026-11-17).
+emojis = "=0.9.1"
 fontdb = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
