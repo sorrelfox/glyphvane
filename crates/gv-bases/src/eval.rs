@@ -420,6 +420,13 @@ impl<'a> Evaluator<'a> {
                     .map(|i| self.eval(i, row, vars))
                     .collect::<Result<_, _>>()?,
             )),
+            Expr::Object(entries) => Ok(Value::Object(
+                entries
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), self.eval(v, row, vars)?)))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
+            )),
             Expr::Ident(name) => self.ident(name, row, vars),
             Expr::Member(target, name) => {
                 if let Some(ns) = self.namespace(target, vars) {

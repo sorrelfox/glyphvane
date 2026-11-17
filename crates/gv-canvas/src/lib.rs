@@ -12,10 +12,13 @@
 //! - [`CanvasView`] is what a renderer draws from: bounds, paint order,
 //!   viewport culling, hit-testing, edge geometry, level of detail and
 //!   navigation.
+//! - [`Minimap`] maps the canvas and the view into a small overview box;
+//!   [`MinimapPolicy`] says when one is worth showing.
 
 mod color;
 mod edge;
 mod geom;
+mod minimap;
 mod model;
 pub mod patch;
 mod view;
@@ -26,6 +29,7 @@ pub use geom::{
     DEFAULT_MAX_ZOOM, DEFAULT_MIN_ZOOM, FitOptions, Point, Rect, Side, Size, Transform,
     fit_to_content,
 };
+pub use minimap::{Minimap, MinimapPolicy};
 pub use model::{
     BackgroundStyle, Canvas, EDGE_KEYS, Edge, End, Issue, IssueItem, IssueKind, MAX_COORDINATE,
     NODE_GENERIC_KEYS, Node, NodeKind, ParseError, Severity, Subpath, node_type_keys,

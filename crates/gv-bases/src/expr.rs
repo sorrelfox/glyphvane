@@ -7,7 +7,8 @@
 //! `+` `-`; `*` `/` `%`; unary `!` `-`; then member access (`a.b`),
 //! indexing (`a[0]`, `a["key"]`) and calls (`f(x)`, `a.m(x)`). Literals:
 //! numbers, strings in single or double quotes (with `\` escapes),
-//! `true`, `false`, `null` and lists (`[1, 2]`).
+//! `true`, `false`, `null`, lists (`[1, 2]`) and objects
+//! (`{"name": "value"}`, keys are strings or names).
 
 use std::fmt;
 use std::sync::Arc;
@@ -74,6 +75,8 @@ pub enum Expr {
     String(Arc<str>),
     /// `[a, b]`
     List(Vec<Expr>),
+    /// `{"key": a, other: b}`
+    Object(Vec<(Arc<str>, Expr)>),
     /// A name: a property, `file`, `note`, `formula`, `this`, or a
     /// variable (`value`, `index`, `acc`, `values`).
     Ident(Arc<str>),
@@ -124,7 +127,7 @@ struct Lexer<'a> {
 
 const OPERATORS: &[&str] = &[
     "==", "!=", "<=", ">=", "&&", "||", "+", "-", "*", "/", "%", "<", ">", "!", "(", ")", "[", "]",
-    ",", ".",
+    ",", ".", "{", "}", ":",
 ];
 
 impl Lexer<'_> {
@@ -286,6 +289,7 @@ fn tree_depth(root: &Expr) -> usize {
                 stack.push((t, d + 1));
                 stack.extend(args.iter().map(|i| (i, d + 1)));
             }
+            Expr::Object(entries) => stack.extend(entries.iter().map(|(_, v)| (v, d + 1))),
         }
     }
     max
@@ -437,6 +441,10 @@ impl Parser<'_> {
             message,
             offset: at,
         };
+        // Checked before the lexer reads on into the pattern.
+        if self.tok == Tok::Op("/") {
+            return Err(fail("regular expressions are not supported".into()));
+        }
         match self.bump()? {
             Tok::Num(n) => Ok(Expr::Number(n)),
             Tok::Str(s) => Ok(Expr::String(s)),
@@ -470,7 +478,27 @@ impl Parser<'_> {
                 }
                 Ok(Expr::List(items))
             }
-            Tok::Op("/") => Err(fail("regular expressions are not supported".into())),
+            Tok::Op("{") => {
+                let mut entries = Vec::new();
+                if !self.eat("}")? {
+                    loop {
+                        let key = match self.bump()? {
+                            Tok::Str(k) | Tok::Ident(k) => k,
+                            other => {
+                                return Err(self
+                                    .error(format!("expected a key, found {}", describe(&other))));
+                            }
+                        };
+                        self.expect(":")?;
+                        entries.push((key, self.expr()?));
+                        if self.eat("}")? {
+                            break;
+                        }
+                        self.expect(",")?;
+                    }
+                }
+                Ok(Expr::Object(entries))
+            }
             other => Err(fail(format!("unexpected {}", describe(&other)))),
         }
     }
@@ -554,6 +582,28 @@ mod tests {
             Expr::List(vec![Expr::Number(1.0), Expr::String("a".into())])
         );
         assert_eq!(p("[]"), Expr::List(vec![]));
+        assert_eq!(
+            p(r#"{"name": "value", n: 1}"#),
+            Expr::Object(vec![
+                ("name".into(), Expr::String("value".into())),
+                ("n".into(), Expr::Number(1.0)),
+            ])
+        );
+        assert_eq!(p("{}"), Expr::Object(vec![]));
+        assert!(parse("{1: 2}").is_err());
+        assert!(parse("{\"a\" 2}").is_err());
+    }
+
+    #[test]
+    fn regular_expressions_are_named() {
+        for src in [
+            r#"/abc/.matches("x")"#,
+            r#""a:b".replace(/:/, "-")"#,
+            r#""a".split(/,/g)"#,
+        ] {
+            let e = parse(src).expect_err(src);
+            assert_eq!(e.message, "regular expressions are not supported", "{src}");
+        }
     }
 
     #[test]

@@ -35,6 +35,7 @@ use gv_media::{CancelFlag, DecodeRequest};
 
 use super::table::group_label;
 use super::{BasesView, Colors};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::metrics::{radius, text};
 use crate::reader::Disposition;
 use crate::reader::remote::{Decision, Policy, RemoteShown};
@@ -284,6 +285,8 @@ impl BasesView {
         let measured = self.width.clone();
         let entity = cx.entity_id();
         div()
+            .id("bases-cards")
+            .a11y_group(Role::List, self.view_label())
             .relative()
             .flex_1()
             .min_h_0()
@@ -311,6 +314,7 @@ impl BasesView {
                 )
                 .size_full(),
             )
+            .accessible()
             .into_any_element()
     }
 
@@ -325,7 +329,16 @@ impl BasesView {
         match line {
             CardLine::Group(g) => {
                 let group = &result.groups[g];
+                let n = group.rows.len();
+                let name = format!(
+                    "Group {}, {n} {}",
+                    group_label(&group.key),
+                    if n == 1 { "file" } else { "files" }
+                );
                 div()
+                    .id(("bases-card-group", ix))
+                    .role(Role::Heading)
+                    .aria_label(name)
                     .debug_selector(move || format!("bases-group:{g}"))
                     .flex()
                     .items_center()
@@ -341,13 +354,15 @@ impl BasesView {
                             .text_color(colors.tertiary)
                             .child(group.rows.len().to_string()),
                     )
+                    .accessible()
                     .into_any_element()
             }
             CardLine::Cards(g, start, end) => {
                 let mut el = div().flex().gap(px(GAP)).px(px(GAP)).pt(px(GAP));
+                let before: usize = result.groups[..g].iter().map(|g| g.rows.len()).sum();
                 for r in start..end {
                     let row = &result.groups[g].rows[r];
-                    el = el.child(self.card(&result, row, (ix, r), &colors, cx));
+                    el = el.child(self.card(&result, row, (ix, r), before + r, &colors, cx));
                 }
                 el.into_any_element()
             }
@@ -359,6 +374,7 @@ impl BasesView {
         result: &ViewResult,
         row: &Row,
         place: (usize, usize),
+        ordinal: usize,
         colors: &Colors,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
@@ -368,11 +384,29 @@ impl BasesView {
         let path = row.path.clone();
         let middle = path.clone();
         let (line, r) = place;
+        let texts: Vec<String> = row.cells.iter().map(super::cells::cell_text).collect();
+        let title = texts
+            .first()
+            .filter(|t| !t.is_empty())
+            .cloned()
+            .unwrap_or_else(|| row.path.rsplit('/').next().unwrap_or(&row.path).to_owned());
+        let description: Vec<String> = result
+            .columns
+            .iter()
+            .zip(&texts)
+            .skip(1)
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(c, t)| format!("{}: {t}", c.label))
+            .collect();
+        let theme = crate::appearance::Appearance::theme(cx);
         let mut card = div()
             .id(gpui::ElementId::Name(
                 format!("bases-card:{line}:{r}").into(),
             ))
             .debug_selector(move || format!("bases-card:{r}"))
+            .a11y_list_item(title, ordinal, result.shown)
+            .aria_description(description.join("; "))
+            .keyboard_control(theme)
             .flex_none()
             .w(px(width))
             .h(px(height))
@@ -464,7 +498,7 @@ impl BasesView {
             };
             body = body.child(line.child(cell));
         }
-        card.child(body).into_any_element()
+        card.child(body).accessible().into_any_element()
     }
 }
 

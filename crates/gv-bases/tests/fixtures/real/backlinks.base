@@ -1,0 +1,13 @@
+filters:
+  and:
+    - file.hasLink(this.file)
+    - file.path != this.file.path
+views:
+  - type: table
+    name: Linked here
+    order:
+      - file.name
+      - file.mtime
+      - formula.this_name
+formulas:
+  this_name: this.file.name

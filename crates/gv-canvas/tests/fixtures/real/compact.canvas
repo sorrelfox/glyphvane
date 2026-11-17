@@ -1,0 +1,12 @@
+{
+	"nodes":[
+		{"id":"5d1e0c3f8a9b2c47","type":"group","x":-320,"y":-480,"width":640,"height":220,"label":"Overview"},
+		{"id":"a07c2e9d1f4b6830","type":"file","file":"Projects/readme.md","x":-300,"y":-220,"width":580,"height":540,"color":"6"},
+		{"id":"c3b8f1a2d5e6970b","type":"file","file":"assets/logo.svg","x":-300,"y":-460,"width":220,"height":80},
+		{"id":"e4d2a6c8b0f13579","type":"text","text":"More:\n\n- [Apps](/docs/apps.md)\n- [Spec](spec/1.0.md)\n- [Site](https://example.org/canvas)","x":20,"y":-460,"width":280,"height":180},
+		{"id":"f19a3b5c7d2e4608","type":"file","file":"spec/1.0.md","x":380,"y":-420,"width":400,"height":400}
+	],
+	"edges":[
+		{"id":"9b8a7c6d5e4f3021","fromNode":"c3b8f1a2d5e6970b","fromSide":"right","toNode":"e4d2a6c8b0f13579","toSide":"left"}
+	]
+}

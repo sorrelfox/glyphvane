@@ -9,18 +9,24 @@
 //! (the summaries of the whole view) stay put above and below it; the
 //! three scroll sideways together when the columns are wider than the
 //! view.
+//!
+//! Assistive technology gets a table: the header row's cells are column
+//! headers, each line a row (numbered from 2, after the header) with a
+//! cell per column named after the cell's text; group headers and
+//! summary lines are rows too. The list layout is a list of items.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, uniform_list,
+    AnyElement, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px, uniform_list,
 };
 use gv_bases::{Column, PropertyId, Summary, Value, ViewResult};
 
-use super::cells::tooltip;
+use super::cells::{cell_text, tooltip};
 use super::{BasesView, Colors};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::metrics::text;
 
 /// The height of every line.
@@ -57,6 +63,50 @@ pub(crate) fn lines(result: &ViewResult) -> Vec<Line> {
         }
     }
     out
+}
+
+/// The position of each line's row among the rows (`None` for group
+/// headers and summaries): the list layout's item numbers.
+pub(crate) fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
+    let mut n = 0;
+    lines
+        .iter()
+        .map(|l| match l {
+            Line::Row(..) => {
+                n += 1;
+                Some(n - 1)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A group header's accessible name.
+fn group_name(result: &ViewResult, g: usize) -> String {
+    let group = &result.groups[g];
+    let n = group.rows.len();
+    format!(
+        "Group {}, {n} {}",
+        group_label(&group.key),
+        if n == 1 { "file" } else { "files" }
+    )
+}
+
+/// A summary line's accessible name: "Summaries: pages Sum 900, …".
+fn summaries_name(columns: &[Column], summaries: &[Option<Summary>]) -> String {
+    let parts: Vec<String> = columns
+        .iter()
+        .zip(summaries)
+        .filter_map(|(c, s)| {
+            let s = s.as_ref()?;
+            let value = match &s.value {
+                Ok(v) => v.display(),
+                Err(e) => format!("Error: {e}"),
+            };
+            Some(format!("{} {} {value}", c.label, s.name))
+        })
+        .collect();
+    format!("Summaries: {}", parts.join(", "))
 }
 
 /// The width of each column.
@@ -96,6 +146,9 @@ impl BasesView {
         let widths = widths(&result.columns);
         let total: f32 = widths.iter().sum::<f32>().max(1.0);
         let mut header = div()
+            .id("bases-header-row")
+            .role(Role::Row)
+            .aria_row_index(1)
             .flex()
             .flex_none()
             .h(px(ROW_HEIGHT))
@@ -111,6 +164,9 @@ impl BasesView {
                 div()
                     .id(("bases-header", i))
                     .debug_selector(move || format!("bases-header:{i}"))
+                    .role(Role::ColumnHeader)
+                    .aria_label(col.label.clone())
+                    .aria_column_index(i + 1)
                     .flex_none()
                     .w(px(*w))
                     .h_full()
@@ -120,7 +176,8 @@ impl BasesView {
                     .border_r_1()
                     .border_color(colors.border)
                     .child(div().min_w_0().truncate().child(col.label.clone()))
-                    .tooltip(tooltip(col.property.to_string().into(), *colors)),
+                    .tooltip(tooltip(col.property.to_string().into(), *colors))
+                    .accessible(),
             );
         }
         let count = self.lines.len();
@@ -137,25 +194,35 @@ impl BasesView {
             .flex_col()
             .h_full()
             .w(px(total))
-            .child(header)
+            .child(header.accessible())
             .child(list);
         if result.summaries.iter().any(Option::is_some) {
             table = table.child(
                 self.summary_line(&result.summaries, &widths, colors)
+                    .id("bases-footer-row")
+                    .role(Role::Row)
+                    .aria_label(summaries_name(&result.columns, &result.summaries))
+                    .aria_row_index(count + 2)
                     .border_t_1()
                     .border_color(colors.border_strong)
                     .bg(colors.header)
-                    .debug_selector(|| "bases-footer".into()),
+                    .debug_selector(|| "bases-footer".into())
+                    .accessible(),
             );
         }
+        let rows = count + 1 + usize::from(result.summaries.iter().any(Option::is_some));
         div()
             .id("bases-table")
+            .a11y_group(Role::Table, self.view_label())
+            .aria_row_count(rows)
+            .aria_column_count(result.columns.len())
             .flex_1()
             .min_h_0()
             .w_full()
             .overflow_x_scroll()
             .restrict_scroll_to_axis()
             .child(table)
+            .accessible()
             .into_any_element()
     }
 
@@ -174,15 +241,36 @@ impl BasesView {
                 continue;
             };
             let el = match line {
-                Line::Group(g) => group_header(&result, g, total, &colors),
+                Line::Group(g) => group_header(&result, g, total, &colors)
+                    .id(("bases-group-row", ix))
+                    .role(Role::Row)
+                    .aria_label(group_name(&result, g))
+                    .aria_row_index(ix + 2)
+                    .accessible()
+                    .into_any_element(),
                 Line::GroupSummary(g) => self
                     .summary_line(&result.groups[g].summaries, &widths, &colors)
+                    .id(("bases-summary-row", ix))
+                    .role(Role::Row)
+                    .aria_label(summaries_name(&result.columns, &result.groups[g].summaries))
+                    .aria_row_index(ix + 2)
                     .bg(colors.chip)
+                    .accessible()
                     .into_any_element(),
                 Line::Row(g, r) => {
                     self.rows_drawn.set(self.rows_drawn.get() + 1);
                     let row = &result.groups[g].rows[r];
+                    let name = row
+                        .cells
+                        .first()
+                        .map(cell_text)
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| row.path.to_string());
                     let mut el = div()
+                        .id(("bases-row", ix))
+                        .role(Role::Row)
+                        .aria_label(name)
+                        .aria_row_index(ix + 2)
                         .flex()
                         .h(px(ROW_HEIGHT))
                         .w(px(total))
@@ -200,6 +288,10 @@ impl BasesView {
                         );
                         el = el.child(
                             div()
+                                .id(ElementId::Name(format!("bases-cell:{ix}:{c}").into()))
+                                .role(Role::Cell)
+                                .aria_label(cell_text(&value))
+                                .aria_column_index(c + 1)
                                 .flex_none()
                                 .w(px(*w))
                                 .h_full()
@@ -207,10 +299,11 @@ impl BasesView {
                                 .flex()
                                 .items_center()
                                 .overflow_hidden()
-                                .child(cell),
+                                .child(cell)
+                                .accessible(),
                         );
                     }
-                    el.into_any_element()
+                    el.accessible().into_any_element()
                 }
             };
             out.push(el);
@@ -274,15 +367,26 @@ impl BasesView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let count = self.lines.len();
-        uniform_list(
-            "bases-list-rows",
-            count,
-            cx.processor(|this, range: Range<usize>, _, cx| this.list_lines(range, cx)),
-        )
-        .track_scroll(&self.list_scroll)
-        .flex_1()
-        .w_full()
-        .into_any_element()
+        div()
+            .id("bases-list")
+            .a11y_group(Role::List, self.view_label())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                uniform_list(
+                    "bases-list-rows",
+                    count,
+                    cx.processor(|this, range: Range<usize>, _, cx| this.list_lines(range, cx)),
+                )
+                .track_scroll(&self.list_scroll)
+                .flex_1()
+                .w_full(),
+            )
+            .accessible()
+            .into_any_element()
     }
 
     /// The list's lines in `range`: the first property, then the others,
@@ -299,12 +403,31 @@ impl BasesView {
                 continue;
             };
             let el = match line {
-                Line::Group(g) => group_header(&result, g, 0.0, &colors),
+                Line::Group(g) => group_header(&result, g, 0.0, &colors)
+                    .id(("bases-list-group", ix))
+                    .role(Role::Heading)
+                    .aria_label(group_name(&result, g))
+                    .accessible()
+                    .into_any_element(),
                 Line::GroupSummary(_) => div().h(px(ROW_HEIGHT)).into_any_element(),
                 Line::Row(g, r) => {
                     self.rows_drawn.set(self.rows_drawn.get() + 1);
                     let row = &result.groups[g].rows[r];
+                    let texts: Vec<String> = row
+                        .cells
+                        .iter()
+                        .map(cell_text)
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    let name = if texts.is_empty() {
+                        row.path.rsplit('/').next().unwrap_or(&row.path).to_owned()
+                    } else {
+                        texts.join(", ")
+                    };
+                    let position = self.row_numbers.get(ix).copied().flatten().unwrap_or(0);
                     let mut el = div()
+                        .id(("bases-list-item", ix))
+                        .a11y_list_item(name, position, result.shown)
                         .flex()
                         .items_center()
                         .gap(px(8.0))
@@ -340,7 +463,7 @@ impl BasesView {
                         );
                         el = el.child(cell);
                     }
-                    el.into_any_element()
+                    el.accessible().into_any_element()
                 }
             };
             out.push(el);
@@ -366,9 +489,9 @@ impl FirstStyle for gpui::Div {
 }
 
 /// A group's header: its key and its number of rows.
-fn group_header(result: &ViewResult, g: usize, width: f32, colors: &Colors) -> AnyElement {
+fn group_header(result: &ViewResult, g: usize, width: f32, colors: &Colors) -> gpui::Div {
     let group = &result.groups[g];
-    let mut el = div()
+    let el = div()
         .debug_selector(move || format!("bases-group:{g}"))
         .flex()
         .items_center()
@@ -398,10 +521,9 @@ fn group_header(result: &ViewResult, g: usize, width: f32, colors: &Colors) -> A
                 .text_color(colors.tertiary)
                 .child(group.rows.len().to_string()),
         );
-    el = if width > 0.0 {
+    if width > 0.0 {
         el.w(px(width))
     } else {
         el.w_full()
-    };
-    el.into_any_element()
+    }
 }

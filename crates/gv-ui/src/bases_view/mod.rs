@@ -21,7 +21,8 @@
 //!   dropped. Until the first result the view says what it waits for;
 //!   later ones replace the shown result when they land.
 //! - `this` is the base file's vault path (FR-BASES-04); an embedded base
-//!   ([`BasesView::embedded`]) gets the embedding note's.
+//!   ([`BasesView::embedded`]) gets the embedding note's, a sidebar base
+//!   ([`BasesView::sidebar`], [`BasesPanel`]) the active file's.
 //! - Dates are read and shown in the system's time zone.
 //!
 //! # Drawing
@@ -50,7 +51,17 @@
 //!
 //! # Keys
 //!
-//! `]` and `[` switch to the next and the previous view.
+//! `]` and `[` switch to the next and the previous view. The view tabs and
+//! the problems chip are Tab stops (Enter or Space presses them).
+//!
+//! # Accessibility
+//!
+//! The views are a tab list; the results count is a polite live status;
+//! the problems chip a button that says whether its panel is open, the
+//! panel a list. The table is a table of rows and cells with column
+//! headers ([`table`]); the cards and the list layouts are lists whose
+//! items are named after the file's first property, a card describing
+//! its other properties.
 //!
 //! # Not designed (built plainly, flagged)
 //!
@@ -59,6 +70,7 @@
 
 mod cards;
 mod cells;
+mod panel;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -81,12 +93,14 @@ use gv_bases::{CompiledBase, EvalContext, Incomplete, IndexData, VaultData, View
 use gv_vault::Fragment;
 use gv_vault::content::ContentSnapshot;
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::metrics::radius;
 use crate::metrics::text;
 use crate::reader::{Disposition, LinkRequest};
 use crate::theme::Theme;
 use cards::Covers;
+pub use panel::BasesPanel;
 use table::Line;
 
 /// The key context of the Bases view.
@@ -228,6 +242,9 @@ pub struct BasesView {
     vault_root: Option<PathBuf>,
     /// The file `this` refers to.
     this: Option<Arc<str>>,
+    /// `this` was given ([`set_this`](Self::set_this)) and does not follow
+    /// the base file.
+    this_given: bool,
     status: BasesStatus,
     compiled: Option<Arc<CompiledBase>>,
     /// The view shown (an index into the base's views).
@@ -246,6 +263,8 @@ pub struct BasesView {
     problems_open: bool,
     /// The table's (and the list's) lines for the shown result.
     lines: Rc<Vec<Line>>,
+    /// Each line's position among the rows (the list's item numbers).
+    row_numbers: Rc<Vec<Option<usize>>>,
     table_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
     cards_list: ListState,
@@ -325,12 +344,44 @@ impl BasesView {
         })
     }
 
+    /// A base shown in a sidebar panel: `this` is `active` (the vault path
+    /// of the file in the main area), changed with
+    /// [`set_this`](Self::set_this) as the active file changes.
+    pub fn sidebar(
+        path: PathBuf,
+        vault_root: Option<PathBuf>,
+        active: Option<Arc<str>>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|cx| {
+            let mut view = Self::new(cx);
+            view.vault_root = vault_root;
+            view.this = active;
+            view.this_given = true;
+            view.load(path, cx);
+            view
+        })
+    }
+
+    /// Sets the file `this` refers to (a sidebar base's active file) and
+    /// evaluates again when it changed. From then on `this` no longer
+    /// follows the base file.
+    pub fn set_this(&mut self, this: Option<Arc<str>>, cx: &mut Context<'_, Self>) {
+        self.this_given = true;
+        if this != self.this {
+            self.this = this;
+            self.evaluate(cx);
+            cx.notify();
+        }
+    }
+
     pub fn new(cx: &mut Context<'_, Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
             source: None,
             vault_root: None,
             this: None,
+            this_given: false,
             status: BasesStatus::Empty,
             compiled: None,
             view: 0,
@@ -345,6 +396,7 @@ impl BasesView {
             mono: crate::inline::FontFamilies::from_app(cx).mono,
             problems_open: false,
             lines: Rc::default(),
+            row_numbers: Rc::default(),
             table_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             cards_list: ListState::new(0, ListAlignment::Top, px(400.0)),
@@ -363,7 +415,7 @@ impl BasesView {
     /// Reads and shows `path` (again, after a change on disk: the view
     /// shown stays when the base still has it).
     pub fn load(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
-        if !matches!(&self.source, Some(Source::File(p)) if *p == path) {
+        if !self.this_given && !matches!(&self.source, Some(Source::File(p)) if *p == path) {
             self.this = Some(vault_path(&path, self.vault_root.as_deref()));
         }
         self.source = Some(Source::File(path.clone()));
@@ -509,6 +561,7 @@ impl BasesView {
         self._eval = None;
         self.evaluations += 1;
         self.lines = Rc::new(table::lines(&result));
+        self.row_numbers = Rc::new(table::row_numbers(&self.lines));
         self.result = Some(Arc::new(result));
         self.card_columns = 0;
         cx.notify();
@@ -530,7 +583,9 @@ impl BasesView {
         }
         self.vault_root = root;
         self.covers.clear();
-        if let Some(Source::File(path)) = &self.source {
+        if let Some(Source::File(path)) = &self.source
+            && !self.this_given
+        {
             self.this = Some(vault_path(path, self.vault_root.as_deref()));
             self.evaluate(cx);
         }
@@ -604,6 +659,17 @@ impl BasesView {
             };
             self.select_view(next, cx);
         }
+    }
+
+    /// The shown view's name (its layout without one).
+    pub(crate) fn view_label(&self) -> String {
+        self.compiled
+            .as_ref()
+            .and_then(|b| b.base().views.get(self.view))
+            .map_or_else(
+                || "Results".to_owned(),
+                |v| v.name.clone().unwrap_or_else(|| kind_label(&v.kind)),
+            )
     }
 
     fn root(&self) -> PathBuf {
@@ -698,7 +764,16 @@ impl BasesView {
             .border_b_1()
             .border_color(colors.border)
             .bg(colors.header);
+        let theme = Appearance::theme(cx);
+        let mut tabs = div()
+            .id("bases-view-tabs")
+            .a11y_group(Role::TabList, "Views")
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .min_w_0();
         if let Some(base) = &self.compiled {
+            let count = base.base().views.len();
             for (i, view) in base.base().views.iter().enumerate() {
                 let label: SharedString = view
                     .name
@@ -707,10 +782,12 @@ impl BasesView {
                     .into();
                 let active = i == self.view;
                 let hover = colors.hover;
-                row = row.child(
+                tabs = tabs.child(
                     div()
                         .id(("bases-view-tab", i))
                         .debug_selector(move || format!("bases-view-tab:{i}"))
+                        .a11y_tab(label.clone(), active, i, count)
+                        .keyboard_control(theme)
                         .h(px(22.0))
                         .px(px(8.0))
                         .flex()
@@ -726,11 +803,12 @@ impl BasesView {
                             d.text_color(colors.secondary).hover(move |s| s.bg(hover))
                         })
                         .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_view(i, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_view(i, cx)))
+                        .accessible(),
                 );
             }
         }
-        row = row.child(div().flex_1());
+        row = row.child(tabs.accessible()).child(div().flex_1());
         if self.evaluating {
             row = row.child(
                 div()
@@ -741,21 +819,35 @@ impl BasesView {
             );
         }
         if let Some(r) = &self.result {
+            let count = count_text(r);
             row = row.child(
                 div()
+                    .id("bases-count")
                     .debug_selector(|| "bases-count".into())
+                    .role(Role::Status)
+                    .aria_label(count.clone())
                     .text_size(px(text::UI_SMALL.size))
                     .text_color(colors.secondary)
-                    .child(count_text(r)),
+                    .child(count)
+                    .accessible()
+                    .live(Live::Polite),
             );
         }
         let problems = self.problems().len();
         if problems > 0 {
             let open = self.problems_open;
+            let label = if problems == 1 {
+                "1 problem".to_owned()
+            } else {
+                format!("{problems} problems")
+            };
             row = row.child(
                 div()
                     .id("bases-problems-chip")
                     .debug_selector(|| "bases-problems-chip".into())
+                    .a11y_button(label.clone())
+                    .aria_expanded(open)
+                    .keyboard_control(theme)
                     .ml(px(8.0))
                     .h(px(20.0))
                     .px(px(8.0))
@@ -769,24 +861,24 @@ impl BasesView {
                     })
                     .text_size(px(text::UI_SMALL.size))
                     .text_color(colors.warning)
-                    .child(if problems == 1 {
-                        "1 problem".to_owned()
-                    } else {
-                        format!("{problems} problems")
-                    })
+                    .child(label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.problems_open = !this.problems_open;
                         cx.notify();
-                    })),
+                    }))
+                    .accessible(),
             );
         }
         row.into_any_element()
     }
 
     fn render_problems(&self, colors: &Colors) -> AnyElement {
+        let problems = self.problems();
+        let count = problems.len();
         let mut panel = div()
             .id("bases-problems")
             .debug_selector(|| "bases-problems".into())
+            .a11y_group(Role::List, "Problems")
             .flex_none()
             .max_h(px(180.0))
             .overflow_y_scroll()
@@ -799,9 +891,11 @@ impl BasesView {
             .flex()
             .flex_col()
             .gap(px(2.0));
-        for (at, what) in self.problems() {
+        for (i, (at, what)) in problems.into_iter().enumerate() {
             panel = panel.child(
                 div()
+                    .id(("bases-problem", i))
+                    .a11y_list_item(format!("{at}: {what}"), i, count)
                     .flex()
                     .gap(px(8.0))
                     .child(
@@ -811,10 +905,11 @@ impl BasesView {
                             .text_color(colors.secondary)
                             .child(at),
                     )
-                    .child(div().text_color(colors.text).child(what)),
+                    .child(div().text_color(colors.text).child(what))
+                    .accessible(),
             );
         }
-        panel.into_any_element()
+        panel.accessible().into_any_element()
     }
 
     fn render_body(&mut self, colors: &Colors, cx: &mut Context<'_, Self>) -> AnyElement {

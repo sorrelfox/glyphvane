@@ -1,0 +1,90 @@
+filters:
+  and:
+    - file.inFolder("Books")
+    - file.ext == "md"
+formulas:
+  pages_left: if(pages, pages - note["pages read"], "")
+  progress: if(pages, ((note["pages read"] / pages) * 100).round(1), 0)
+  finished_on: if(finished, finished.format("YYYY-MM-DD"), "")
+  age: started.relative()
+  author_born: author.asFile().properties.born
+  meta: '{"pages": pages, "kind": "book"}'
+  shelf: file.folder.split("/").slice(1).join(" / ")
+  initials: file.basename.replace(/[aeiou]/g, "")
+  lucky: random()
+properties:
+  file.name:
+    displayName: Title
+  note.author:
+    displayName: Author
+  formula.progress:
+    displayName: Progress %
+x-plugin-state:
+  lastOpened: 2025-03-09
+  pinned: true
+views:
+  - type: table
+    name: Reading
+    filters:
+      and:
+        - status == "reading"
+    order:
+      - file.name
+      - author
+      - pages
+      - formula.pages_left
+      - formula.progress
+      - formula.age
+      - formula.author_born
+      - formula.initials
+      - formula.lucky
+    sort:
+      - property: formula.progress
+        direction: DESC
+    columnSize:
+      file.name: 260
+      note.author: 160
+    rowHeight: medium
+    summaries:
+      pages: Sum
+      formula.progress: Average
+  - type: table
+    name: By status
+    groupBy:
+      property: note.status
+      direction: ASC
+    order:
+      - file.name
+      - status
+      - rating
+    summaries:
+      rating: Average
+  - type: cards
+    name: Shelf
+    order:
+      - file.name
+      - author
+      - formula.shelf
+    image: note.cover
+    imageFit: contain
+    imageAspectRatio: 1.5
+    cardSize: 180
+  - type: list
+    name: Titles
+    order:
+      - file.name
+      - author
+    limit: 2
+  - type: kanban
+    name: Board
+    groupBy:
+      property: note.status
+      direction: ASC
+    groupOrder:
+      - to read
+      - reading
+      - done
+  - type: map
+    name: Where
+    coordinates: note.coordinates
+    markerIcon: book

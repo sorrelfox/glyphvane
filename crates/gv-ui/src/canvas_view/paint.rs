@@ -66,6 +66,9 @@ pub(crate) struct Colors {
     pub warning_tint: Hsla,
     pub error: Hsla,
     pub presets: [Hsla; 6],
+    /// The minimap's box and its border.
+    pub map_background: Hsla,
+    pub map_border: Hsla,
 }
 
 impl Colors {
@@ -85,6 +88,8 @@ impl Colors {
             warning_tint: theme.status.warning_tint.into(),
             error: theme.status.error.into(),
             presets: theme.canvas.preset.map(Into::into),
+            map_background: theme.surface.raised.into(),
+            map_border: theme.border.default.into(),
         }
     }
 

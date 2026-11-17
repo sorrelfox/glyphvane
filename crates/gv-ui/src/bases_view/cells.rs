@@ -293,6 +293,36 @@ impl BasesView {
     }
 }
 
+/// What assistive technology reads for a cell: the text the cell shows
+/// (a check box as "checked" or "not checked", a list's items joined, an
+/// image as "image", `html()` as its text), or the error.
+pub(crate) fn cell_text(value: &CellValue) -> String {
+    match value {
+        Ok(v) => value_text(v),
+        Err(e) => format!("Error: {e}"),
+    }
+}
+
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(true) => "checked".to_owned(),
+        Value::Bool(false) => "not checked".to_owned(),
+        Value::List(items) => items
+            .iter()
+            .map(value_text)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::Link(l) => l.label().to_owned(),
+        Value::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
+        Value::Html(html) => html_text(html),
+        Value::Image(_) => "image".to_owned(),
+        Value::Icon(name) => format!("{name} icon"),
+        _ => v.display(),
+    }
+}
+
 fn plain(text: String, color: gpui::Hsla) -> AnyElement {
     div()
         .min_w_0()

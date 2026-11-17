@@ -3,7 +3,8 @@
 
 //! The Canvas view in headless GPUI windows: loading and drawing a fixture
 //! canvas, culling, pan and zoom, keyboard navigation, opening cards,
-//! problems, reduced motion.
+//! problems, reduced motion, the minimap, `view.zoom_to_fit`, and what
+//! assistive technology is told.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -18,6 +19,7 @@ use gv_vault::FragmentKind;
 
 use super::cards::Preview;
 use super::{CanvasEvent, CanvasStatus, CanvasView};
+use crate::a11y::{Role, testing};
 use crate::reader::Disposition;
 use crate::{AppSettings, ThemeChoice};
 
@@ -278,12 +280,12 @@ fn drag_and_wheel_pan_and_ctrl_wheel_zooms_at_the_pointer(cx: &mut TestAppContex
     let (_dir, view, mut vcx) = shown(cx, "board.canvas");
     at_origin(&view, &mut vcx, 60.0, 80.0);
     let none = Modifiers::none();
-    // Drag on empty space.
-    let from = point(px(900.0), px(600.0));
+    // Drag on empty space (left of the minimap).
+    let from = point(px(600.0), px(600.0));
     vcx.simulate_mouse_down(from, MouseButton::Left, none);
-    vcx.simulate_mouse_move(point(px(950.0), px(630.0)), MouseButton::Left, none);
-    vcx.simulate_mouse_move(point(px(980.0), px(650.0)), MouseButton::Left, none);
-    vcx.simulate_mouse_up(point(px(980.0), px(650.0)), MouseButton::Left, none);
+    vcx.simulate_mouse_move(point(px(650.0), px(630.0)), MouseButton::Left, none);
+    vcx.simulate_mouse_move(point(px(680.0), px(650.0)), MouseButton::Left, none);
+    vcx.simulate_mouse_up(point(px(680.0), px(650.0)), MouseButton::Left, none);
     let t = view.read_with(&vcx, |v, _| v.transform());
     assert_eq!((t.pan.x, t.pan.y, t.zoom), (140.0, 130.0, 1.0));
 
@@ -565,4 +567,226 @@ fn reloading_the_same_file_keeps_the_view(cx: &mut TestAppContext) {
             doc.layout.fit(v.viewport(), &FitOptions::default())
         );
     });
+}
+
+/// The window point of world point (`x`, `y`) on the minimap of the last
+/// frame.
+fn map_point(
+    view: &Entity<CanvasView>,
+    vcx: &mut VisualTestContext,
+    x: f64,
+    y: f64,
+) -> Point<Pixels> {
+    view.read_with(vcx, |v, _| {
+        let map = v.minimap_layout().expect("the minimap is shown");
+        let p = map.map.world_to_screen(gv_canvas::Point::new(x, y));
+        let o = v.minimap.bounds.get().origin;
+        point(o.x + px(p.x as f32), o.y + px(p.y as f32))
+    })
+}
+
+/// The world point at the centre of the view.
+fn view_centre(view: &Entity<CanvasView>, vcx: &mut VisualTestContext) -> gv_canvas::Point {
+    view.read_with(vcx, |v, _| {
+        v.transform().screen_to_world(gv_canvas::Point::new(
+            f64::from(WIDTH) / 2.0,
+            f64::from(HEIGHT) / 2.0,
+        ))
+    })
+}
+
+fn near(a: gv_canvas::Point, b: gv_canvas::Point, tolerance: f64) -> bool {
+    (a.x - b.x).abs() <= tolerance && (a.y - b.y).abs() <= tolerance
+}
+
+#[gpui::test]
+fn the_minimap_shows_when_the_canvas_leaves_the_view(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    // Fitted: the whole canvas is in view, no map.
+    assert!(!view.read_with(&vcx, |v, _| v.minimap_shown()));
+    assert!(vcx.debug_bounds("canvas-minimap").is_none());
+
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    assert!(view.read_with(&vcx, |v, _| v.minimap_shown()));
+    let b = vcx.debug_bounds("canvas-minimap").expect("drawn");
+    assert!(f32::from(b.right()) <= WIDTH && f32::from(b.left()) > WIDTH / 2.0);
+    assert!(f32::from(b.bottom()) <= HEIGHT && f32::from(b.top()) > HEIGHT / 2.0);
+    // The viewport rectangle is on the map, the far cards too.
+    let map = view.read_with(&vcx, |v, _| v.minimap_layout().expect("map"));
+    let far = node(&view, &mut vcx, "far");
+    let far_rect = view.read_with(&vcx, |v, _| {
+        v.doc.as_ref().expect("loaded").layout.node_rect(far)
+    });
+    let on_map = map.rect(&far_rect);
+    let frame = gv_canvas::Rect::new(0.0, 0.0, 200.0, 140.0).inflate(1e-6);
+    assert!(frame.contains_rect(&on_map) && frame.contains_rect(&map.viewport));
+
+    // A click there centres the view on it (reduced motion: at once),
+    // selecting nothing and opening nothing.
+    let seen = events(&view, &mut vcx);
+    let c = far_rect.center();
+    let at = map_point(&view, &mut vcx, c.x, c.y);
+    vcx.simulate_click(at, Modifiers::none());
+    draw(&mut vcx);
+    let tolerance = 2.0 / map.map.zoom;
+    assert!(near(view_centre(&view, &mut vcx), c, tolerance));
+    view.read_with(&vcx, |v, _| {
+        assert!(v.animation.is_none());
+        assert_eq!(v.selected(), None);
+        assert_eq!(v.transform().zoom, 1.0, "the zoom is kept");
+    });
+    assert!(seen.borrow().is_empty());
+
+    // A drag moves the view along.
+    let from = map_point(&view, &mut vcx, 500.0, 200.0);
+    let to = map_point(&view, &mut vcx, 300.0, 100.0);
+    let none = Modifiers::none();
+    vcx.simulate_mouse_down(from, MouseButton::Left, none);
+    let target = view.read_with(&vcx, |v, _| {
+        v.minimap_layout()
+            .expect("map")
+            .to_world(gv_canvas::Point::new(
+                f64::from(f32::from(to.x - v.minimap.bounds.get().origin.x)),
+                f64::from(f32::from(to.y - v.minimap.bounds.get().origin.y)),
+            ))
+    });
+    vcx.simulate_mouse_move(to, MouseButton::Left, none);
+    vcx.simulate_mouse_up(to, MouseButton::Left, none);
+    draw(&mut vcx);
+    assert!(near(view_centre(&view, &mut vcx), target, 1e-6));
+
+    // Fitting brings everything in view: the map goes.
+    vcx.dispatch_action(crate::keymap::actions::view::ZoomToFit);
+    draw(&mut vcx);
+    assert!(!view.read_with(&vcx, |v, _| v.minimap_shown()));
+}
+
+#[gpui::test]
+fn a_minimap_click_animates_unless_motion_is_reduced(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    vcx.update(|_, cx| cx.set_reduce_motion(false));
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    let at = map_point(&view, &mut vcx, 6100.0, 6150.0);
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    view.read_with(&vcx, |v, _| {
+        assert!(v.animation.is_some(), "animated");
+        assert_ne!(v.transform, v.transform());
+    });
+    vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+}
+
+#[gpui::test]
+fn a_canvas_that_fits_has_no_minimap(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "sub.canvas");
+    at_origin(&view, &mut vcx, 0.0, 0.0);
+    assert!(!view.read_with(&vcx, |v, _| v.minimap_shown()));
+    at_origin(&view, &mut vcx, 300.0, 300.0);
+    assert!(!view.read_with(&vcx, |v, _| v.minimap_shown()));
+}
+
+#[gpui::test]
+fn zoom_to_fit_is_a_command(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    vcx.dispatch_action(crate::keymap::actions::view::ZoomToFit);
+    let (t, fit) = view.read_with(&vcx, |v, _| {
+        let doc = v.doc.clone().expect("loaded");
+        (
+            v.transform(),
+            doc.layout.fit(v.viewport(), &FitOptions::default()),
+        )
+    });
+    assert_eq!(t, fit);
+    // Shift+1 runs it too.
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    vcx.simulate_keystrokes("shift-1");
+    assert_eq!(view.read_with(&vcx, |v, _| v.transform()), fit);
+}
+
+#[gpui::test]
+fn cards_are_a_list_in_reading_order(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    // The canvas is a named group that takes the keyboard.
+    let root = testing::named(&mut vcx, "Canvas board");
+    assert_eq!(root.role, Some(Role::Group));
+    assert!(root.focusable);
+    let list = testing::named(&mut vcx, "8 cards, 3 connections");
+    assert_eq!(list.role, Some(Role::List));
+    let items: Vec<testing::Node> = testing::with_role(&mut vcx, Role::ListItem);
+    let names: Vec<&str> = items.iter().filter_map(|n| n.label.as_deref()).collect();
+    assert_eq!(
+        names,
+        [
+            "Text card: Hello",
+            "File card: Note.md#Second",
+            "Link card: https://example.com/page",
+            "File card: img.png",
+            "File card: doc.pdf",
+            "File card: sub.canvas",
+            "Text card: far away",
+            "Text card: odd",
+        ]
+    );
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(item.position, Some((i + 1, 8)));
+        assert_eq!(item.selected, Some(false));
+        assert!(item.clickable, "a click action opens the card");
+    }
+    // Edges and groups are described on the cards.
+    let desc = |name: &str, vcx: &mut VisualTestContext| {
+        testing::named(vcx, name).description.unwrap_or_default()
+    };
+    assert_eq!(
+        desc("Text card: Hello", &mut vcx),
+        "In group Group A. Links to Note.md#Second (refers), img.png"
+    );
+    assert_eq!(
+        desc("File card: Note.md#Second", &mut vcx),
+        "In group Group A. Links to https://example.com/page. Linked from Hello (refers)"
+    );
+    assert!(desc("Text card: odd", &mut vcx).starts_with("Problems: `color`"));
+    assert_eq!(desc("Text card: far away", &mut vcx), "");
+
+    // The selected card is reported as it moves.
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert_eq!(
+        testing::named(&mut vcx, "Text card: Hello").selected,
+        Some(true)
+    );
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert_eq!(
+        testing::named(&mut vcx, "Text card: Hello").selected,
+        Some(false)
+    );
+    assert_eq!(
+        testing::named(&mut vcx, "File card: Note.md#Second").selected,
+        Some(true)
+    );
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.selected()),
+        Some(node(&view, &mut vcx, "f1"))
+    );
+}
+
+#[gpui::test]
+fn problems_zoom_and_minimap_are_named(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    let n = view.read_with(&vcx, |v, _| v.canvas().expect("loaded").issues().len());
+    let chip_name = format!("{n} problems");
+    let chip = testing::named(&mut vcx, &chip_name);
+    assert_eq!(chip.role, Some(Role::Button));
+    assert_eq!(chip.expanded, Some(false));
+    let b = vcx.debug_bounds("canvas-issues").expect("chip");
+    vcx.simulate_click(b.center(), Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(testing::named(&mut vcx, &chip_name).expanded, Some(true));
+    let problems = testing::named(&mut vcx, "Problems");
+    assert_eq!(problems.role, Some(Role::List));
+    let zoom = testing::named(&mut vcx, "Zoom 100%");
+    assert_eq!(zoom.role, Some(Role::Status));
+    assert!(zoom.live.is_some());
+    assert_eq!(testing::named(&mut vcx, "Minimap").role, Some(Role::Image));
 }

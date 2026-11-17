@@ -32,9 +32,18 @@
 //! - Keys ([`key_bindings`]): Tab and Shift+Tab walk the cards in reading
 //!   order, the arrows go to the nearest card that way, Enter opens the
 //!   selected card's file (Mod+Enter in a new tab), Shift+1 or Home fits
-//!   the whole canvas, Shift+arrows pan, Escape clears the selection.
-//!   Moving to a card off screen pans to it, animated unless the system
-//!   asks for reduced motion.
+//!   the whole canvas (the `view.zoom_to_fit` command), Shift+arrows pan,
+//!   Escape clears the selection. Moving to a card off screen pans to it,
+//!   animated unless the system asks for reduced motion.
+//! - The minimap ([`minimap`]) in the bottom right corner, shown when part
+//!   of the canvas is out of view: a click or a drag there moves the view.
+//!
+//! # Accessibility
+//!
+//! The canvas is a named group that takes the keyboard; its cards are an
+//! invisible list in reading order whose selected item follows the
+//! selection ([`a11y`]). The problems chip is a button that says whether
+//! its list is open, the list is a list, and the zoom readout a status.
 //!
 //! # Problems
 //!
@@ -45,9 +54,12 @@
 //! # Not designed (built plainly, flagged)
 //!
 //! The whole surface: card, group and edge styling, the issues chip and
-//! list, the zoom readout, the loading, empty and error states.
+//! list, the zoom readout, the minimap, the loading, empty and error
+//! states.
 
+mod a11y;
 mod cards;
+mod minimap;
 mod paint;
 #[cfg(test)]
 mod tests;
@@ -71,12 +83,14 @@ use gv_canvas::{
 };
 use gv_vault::Fragment;
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::inline::{FontFamilies, InlineParagraph, Palette};
-use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset};
+use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset, ZoomToFit};
 use crate::reader::{Disposition, LinkRequest};
 use cards::{Block, Cards, Parsed, Preview};
+use minimap::MinimapState;
 use paint::{Colors, screen, world};
 
 /// The key context of the Canvas view.
@@ -101,8 +115,6 @@ gpui::actions!(
         OpenCard,
         /// Open the selected card's file in a new tab.
         OpenCardInNewTab,
-        /// Show the whole canvas.
-        FitToContent,
         /// Pan the view.
         PanLeft,
         PanRight,
@@ -133,8 +145,9 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
             OpenCardInNewTab,
             c,
         ),
-        KeyBinding::new("shift-1", FitToContent, c),
-        KeyBinding::new("home", FitToContent, c),
+        // `view.zoom_to_fit` while the canvas has the focus.
+        KeyBinding::new("shift-1", ZoomToFit, c),
+        KeyBinding::new("home", ZoomToFit, c),
         KeyBinding::new("shift-left", PanLeft, c),
         KeyBinding::new("shift-right", PanRight, c),
         KeyBinding::new("shift-up", PanUp, c),
@@ -272,6 +285,7 @@ pub struct CanvasView {
     drag: Option<Drag>,
     animation: Option<Animation>,
     issues_open: bool,
+    minimap: MinimapState,
     cards: Cards,
     /// Items painted straight to the scene in the last frame (groups and
     /// edges), and node elements made in the last render.
@@ -324,6 +338,7 @@ impl CanvasView {
             drag: None,
             animation: None,
             issues_open: false,
+            minimap: MinimapState::default(),
             cards: Cards::new(&families),
             painted: Rc::new(Cell::new(0)),
             nodes_drawn: 0,
@@ -1089,9 +1104,17 @@ impl CanvasView {
             div()
         } else {
             let n = issues.len();
+            let label = if n == 1 {
+                "1 problem".to_owned()
+            } else {
+                format!("{n} problems")
+            };
             let chip = div()
                 .id("canvas-issues")
                 .debug_selector(|| "canvas-issues".into())
+                .a11y_button(label.clone())
+                .aria_expanded(self.issues_open)
+                .keyboard_control(theme)
                 .flex()
                 .items_center()
                 .gap(px(4.0))
@@ -1112,16 +1135,14 @@ impl CanvasView {
                         .text_color(colors.warning)
                         .child(Icon::NoticeWarning.sized(12.0)),
                 )
-                .child(if n == 1 {
-                    "1 problem".to_owned()
-                } else {
-                    format!("{n} problems")
-                });
+                .child(label)
+                .accessible();
             let mut col = div().flex().flex_col().items_start().gap(px(4.0));
             if self.issues_open {
                 let mut list = div()
                     .id("canvas-issue-list")
                     .debug_selector(|| "canvas-issue-list".into())
+                    .a11y_group(Role::List, "Problems")
                     .max_h(px(240.0))
                     .max_w(px(520.0))
                     .overflow_y_scroll()
@@ -1134,26 +1155,39 @@ impl CanvasView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_scroll(|_, _, cx| cx.stop_propagation());
-                for issue in issues {
+                for (i, issue) in issues.iter().enumerate() {
                     let color = match issue.severity {
                         Severity::Error => colors.error,
                         Severity::Warning => colors.label,
                     };
-                    list = list.child(div().text_color(color).child(issue.to_string()));
+                    let text = issue.to_string();
+                    list = list.child(
+                        div()
+                            .id(("canvas-issue", i))
+                            .a11y_list_item(text.clone(), i, n)
+                            .text_color(color)
+                            .child(text)
+                            .accessible(),
+                    );
                 }
-                col = col.child(list);
+                col = col.child(list.accessible());
             }
             col.child(chip)
         };
         let zoom = format!("{:.0}%", self.transform.zoom * 100.0);
         bar = bar.child(left).child(
             div()
+                .id("canvas-zoom")
                 .debug_selector(|| "canvas-zoom".into())
+                .role(Role::Status)
+                .aria_label(format!("Zoom {zoom}"))
                 .px(px(6.0))
                 .rounded(px(crate::metrics::radius::CONTROL))
                 .bg(colors.background)
                 .text_color(theme.text.secondary)
-                .child(zoom),
+                .child(zoom)
+                .accessible()
+                .live(Live::Polite),
         );
         bar.into_any_element()
     }
@@ -1298,7 +1332,7 @@ impl Render for CanvasView {
                     this.open_node(n, Disposition::NewTab, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &FitToContent, _, cx| this.fit(cx)))
+            .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.fit(cx)))
             .on_action(
                 cx.listener(|this, _: &PanLeft, _, cx| this.pan_by(PAN_KEY_FRACTION, 0.0, cx)),
             )
@@ -1398,16 +1432,23 @@ impl Render for CanvasView {
 
         match (&self.status, self.doc.clone()) {
             (CanvasStatus::Ready, Some(doc)) => {
+                root = root.child(self.card_list(&doc, cx));
                 if viewport.width > 0.0 {
                     let visible = self.visible_items();
                     let overlays = self.overlays(&doc, &visible, &palette, &colors, cx);
                     root = root.children(overlays);
+                    if let Some(map) = self.layout_minimap(&doc) {
+                        root = root.child(self.minimap_element(&doc, map, &colors, cx));
+                    }
+                } else {
+                    self.minimap.map = None;
                 }
                 if doc.canvas.nodes().is_empty() {
                     root = root.child(centered_note("This canvas is empty.", &colors));
                 }
             }
             (CanvasStatus::Failed(why), _) => {
+                self.minimap.map = None;
                 root = root.child(centered_note(
                     format!("This canvas cannot be shown: {why}"),
                     &colors,
@@ -1415,7 +1456,13 @@ impl Render for CanvasView {
             }
             _ => {}
         }
-        root.child(self.controls(&colors, cx))
+        let name = self.path.as_deref().and_then(Path::file_stem).map_or_else(
+            || "Canvas".to_owned(),
+            |s| format!("Canvas {}", s.to_string_lossy()),
+        );
+        root.a11y_group(Role::Group, name)
+            .child(self.controls(&colors, cx))
+            .accessible()
     }
 }
 

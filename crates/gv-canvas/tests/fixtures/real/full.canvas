@@ -1,0 +1,163 @@
+{
+	"nodes": [
+		{
+			"id": "grp-research",
+			"type": "group",
+			"x": -620.5,
+			"y": -400,
+			"width": 1240,
+			"height": 760,
+			"label": "Research ☕",
+			"background": "Attachments/paper.png",
+			"backgroundStyle": "ratio",
+			"color": "5"
+		},
+		{
+			"id": "grp-unlabelled",
+			"type": "group",
+			"x": 700,
+			"y": -400,
+			"width": 400,
+			"height": 300
+		},
+		{
+			"id": "txt-question",
+			"type": "text",
+			"text": "## Question\r\n\r\nDoes *the* tide follow the moon?\r\n\r\n- [ ] read [[Tides#Causes]]\r\n- [x] sketch\r\n\r\n> [!note] Callout\r\n> inside a card\r\n\r\n$E = mc^2$",
+			"x": -600,
+			"y": -380,
+			"width": 420.25,
+			"height": 330,
+			"color": "#e0f2fe",
+			"styleAttributes": {
+				"textAlign": "center",
+				"shape": "pill"
+			}
+		},
+		{
+			"id": "file-note",
+			"type": "file",
+			"file": "Notes/Tides.md",
+			"subpath": "#Causes#Moon",
+			"x": -120,
+			"y": -380,
+			"width": 400,
+			"height": 400
+		},
+		{
+			"id": "file-block",
+			"type": "file",
+			"file": "Notes/Tides.md",
+			"subpath": "#^a1b2c3",
+			"x": 320,
+			"y": -380,
+			"width": 280,
+			"height": 160
+		},
+		{
+			"id": "file-pdf",
+			"type": "file",
+			"file": "Papers/Laplace 1775.pdf",
+			"subpath": "#page=3",
+			"x": 320,
+			"y": -180,
+			"width": 280,
+			"height": 360
+		},
+		{
+			"id": "file-image",
+			"type": "file",
+			"file": "Attachments/moon phases.png",
+			"x": -600,
+			"y": 0,
+			"width": 300,
+			"height": 200,
+			"color": "3"
+		},
+		{
+			"id": "file-canvas",
+			"type": "file",
+			"file": "Boards/Sub board.canvas",
+			"x": -260,
+			"y": 60,
+			"width": 300,
+			"height": 200
+		},
+		{
+			"id": "file-missing",
+			"type": "file",
+			"file": "Gone/Deleted note.md",
+			"x": 720,
+			"y": -380,
+			"width": 360,
+			"height": 120
+		},
+		{
+			"id": "link-wiki",
+			"type": "link",
+			"url": "https://en.wikipedia.org/wiki/Tide",
+			"x": 720,
+			"y": -240,
+			"width": 360,
+			"height": 120,
+			"color": "1"
+		},
+		{
+			"id": "portal-1",
+			"type": "portal",
+			"x": 60,
+			"y": 120,
+			"width": 200,
+			"height": 120,
+			"portalToFile": "Boards/Sub board.canvas"
+		}
+	],
+	"edges": [
+		{
+			"id": "e-question-note",
+			"fromNode": "txt-question",
+			"fromSide": "right",
+			"toNode": "file-note",
+			"toSide": "left",
+			"label": "see"
+		},
+		{
+			"id": "e-note-block",
+			"fromNode": "file-note",
+			"fromSide": "right",
+			"toNode": "file-block",
+			"toSide": "left",
+			"fromEnd": "arrow",
+			"toEnd": "none",
+			"color": "4"
+		},
+		{
+			"id": "e-auto",
+			"fromNode": "file-block",
+			"toNode": "file-pdf",
+			"color": "#ff6600",
+			"styleAttributes": {
+				"path": "dotted"
+			}
+		},
+		{
+			"id": "e-to-group",
+			"fromNode": "link-wiki",
+			"fromSide": "left",
+			"toNode": "grp-research",
+			"toSide": "right",
+			"label": "context\nfor all"
+		},
+		{
+			"id": "e-dangling",
+			"fromNode": "file-image",
+			"fromSide": "top",
+			"toNode": "node-that-was-deleted",
+			"toSide": "bottom"
+		}
+	],
+	"metadata": {
+		"version": "1.0-1.0",
+		"frontmatter": {}
+	}
+}

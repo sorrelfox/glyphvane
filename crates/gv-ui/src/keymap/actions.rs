@@ -126,6 +126,7 @@ command_actions! {
         ZoomIn = "view.zoom_in",
         ZoomOut = "view.zoom_out",
         ZoomReset = "view.zoom_reset",
+        ZoomToFit = "view.zoom_to_fit",
         Fold = "view.fold",
         Unfold = "view.unfold",
         FoldAll = "view.fold_all",

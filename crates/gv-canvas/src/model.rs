@@ -286,9 +286,14 @@ pub struct Canvas {
 impl Canvas {
     /// Parses and validates a `.canvas` file. Fails only when the text is not
     /// a JSON object; everything else is reported through [`Canvas::issues`].
+    /// An empty file (or white space only) is an empty canvas, as Obsidian
+    /// opens it.
     pub fn parse(src: &str) -> Result<Self, ParseError> {
         // A leading byte-order mark is not JSON, but editors write one.
         let src = src.strip_prefix('\u{feff}').unwrap_or(src);
+        if src.trim().is_empty() {
+            return Ok(Self::empty());
+        }
         let value: Value = serde_json::from_str(src).map_err(|e| ParseError::Json {
             message: e.to_string(),
             line: e.line(),

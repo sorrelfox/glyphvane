@@ -213,6 +213,7 @@ fn the_menus_follow_each_platform() {
                 "view.zoom_in",
                 "view.zoom_out",
                 "view.zoom_reset",
+                "view.zoom_to_fit",
                 "window.toggle_full_screen",
             ]
         );

@@ -376,6 +376,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             item("view.zoom_in", "Zoom in"),
             item("view.zoom_out", "Zoom out"),
             item("view.zoom_reset", "Reset zoom"),
+            item("view.zoom_to_fit", "Zoom to fit"),
             SEPARATOR,
             item("window.toggle_full_screen", "Full screen"),
         ],

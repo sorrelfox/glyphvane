@@ -4,7 +4,8 @@
 //! The Bases view in headless GPUI windows: reading and evaluating a base,
 //! the table, cards and list layouts, view tabs and keys, clicks that
 //! open files and follow links, error cells, problems, notices, empty
-//! states, covers, stale runs and the content index.
+//! states, covers, stale runs and the content index; what assistive
+//! technology is told; the sidebar base panel.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,8 @@ use gv_bases::{FileInfo, Link, MemoryData, Value, ViewKind};
 use super::cards::{CardLine, card_lines};
 use super::cells::html_text;
 use super::table::{Line, lines};
-use super::{BaseData, BasesEvent, BasesStatus, BasesView, count_text, vault_path};
+use super::{BaseData, BasesEvent, BasesPanel, BasesStatus, BasesView, count_text, vault_path};
+use crate::a11y::{Role, testing};
 use crate::reader::Disposition;
 use crate::{AppSettings, ThemeChoice};
 
@@ -552,4 +554,319 @@ fn counts_paths_and_card_lines() {
         "a/b.base"
     );
     assert_eq!(&*vault_path(&PathBuf::from("/x/b.base"), None), "b.base");
+}
+
+/// The one element with `role` named `label`.
+fn role_named(vcx: &mut VisualTestContext, role: Role, label: &str) -> testing::Node {
+    let found: Vec<testing::Node> = testing::with_role(vcx, role)
+        .into_iter()
+        .filter(|n| n.label.as_deref() == Some(label))
+        .collect();
+    assert_eq!(found.len(), 1, "one {role:?} named {label:?}");
+    found.into_iter().next().expect("checked")
+}
+
+fn labels(nodes: &[testing::Node]) -> Vec<String> {
+    nodes.iter().filter_map(|n| n.label.clone()).collect()
+}
+
+#[gpui::test]
+fn the_table_is_a_table_for_assistive_technology(cx: &mut TestAppContext) {
+    let (_dir, _view, mut vcx) = shown(cx, LIBRARY, Some(library()));
+    // The table is named after its view, as its tab is.
+    role_named(&mut vcx, Role::Table, "All");
+    // The views are tabs.
+    let tabs = testing::named(&mut vcx, "Views");
+    assert_eq!(tabs.role, Some(Role::TabList));
+    let tab_nodes = testing::with_role(&mut vcx, Role::Tab);
+    assert_eq!(
+        labels(&tab_nodes),
+        ["All", "By status", "Shelf", "Plain", "Where"]
+    );
+    assert_eq!(tab_nodes[0].selected, Some(true));
+    assert_eq!(tab_nodes[0].position, Some((1, 5)));
+    assert_eq!(tab_nodes[1].selected, Some(false));
+    assert!(tab_nodes.iter().all(|t| t.focusable && t.clickable));
+    // Column headers, then a row per file with a cell per column.
+    let headers = labels(&testing::with_role(&mut vcx, Role::ColumnHeader));
+    assert_eq!(headers[..3], ["file name", "pages", "Pages left"]);
+    let rows = labels(&testing::with_role(&mut vcx, Role::Row));
+    assert!(
+        rows.starts_with(&["Emma.md".to_owned(), "Dune.md".to_owned()]),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.starts_with("Summaries: pages Sum 906")),
+        "{rows:?}"
+    );
+    let cells = labels(&testing::with_role(&mut vcx, Role::Cell));
+    assert_eq!(cells[..4], ["Emma.md", "474", "0", "Austen"]);
+    assert!(cells.contains(&"book, done".to_owned()), "{cells:?}");
+    assert!(cells.contains(&"checked".to_owned()));
+    assert!(cells.contains(&"not checked".to_owned()));
+    assert!(
+        cells
+            .iter()
+            .any(|c| c.starts_with("Error: Unsupported function: nope()")),
+        "{cells:?}"
+    );
+    // `html()` is read as its text.
+    assert!(cells.contains(&"Big & bold".to_owned()), "{cells:?}");
+    // The count is a polite status; the problems chip a button.
+    let count = testing::named(&mut vcx, "3 results");
+    assert_eq!(count.role, Some(Role::Status));
+    assert!(count.live.is_some());
+    let chip = testing::with_role(&mut vcx, Role::Button)
+        .into_iter()
+        .find(|b| {
+            b.label
+                .as_deref()
+                .is_some_and(|l| l.ends_with("problems") || l.ends_with("problem"))
+        })
+        .expect("the problems chip");
+    assert_eq!(chip.expanded, Some(false));
+    assert!(chip.focusable);
+    click(&mut vcx, "bases-problems-chip", Modifiers::none());
+    let chip_label = chip.label.expect("named");
+    assert_eq!(testing::named(&mut vcx, &chip_label).expanded, Some(true));
+    let panel = testing::named(&mut vcx, "Problems");
+    assert_eq!(panel.role, Some(Role::List));
+}
+
+#[gpui::test]
+fn grouped_tables_name_their_groups(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, LIBRARY, Some(library()));
+    view.update(&mut vcx, |v, cx| v.select_view(1, cx));
+    draw(&mut vcx);
+    draw(&mut vcx);
+    let rows = labels(&testing::with_role(&mut vcx, Role::Row));
+    assert!(rows.contains(&"Group done, 1 file".to_owned()), "{rows:?}");
+    assert!(
+        rows.iter().any(|r| r.starts_with("Summaries: pages Sum")),
+        "{rows:?}"
+    );
+    assert_eq!(
+        testing::with_role(&mut vcx, Role::Tab)[1].selected,
+        Some(true)
+    );
+}
+
+#[gpui::test]
+fn cards_and_lists_are_lists(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, LIBRARY, Some(library()));
+    view.update(&mut vcx, |v, cx| v.select_view(2, cx));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    role_named(&mut vcx, Role::List, "Shelf");
+    let cards = testing::with_role(&mut vcx, Role::ListItem);
+    assert_eq!(labels(&cards), ["Dune", "Emma", "Notes"]);
+    assert_eq!(cards[1].position, Some((2, 3)));
+    assert_eq!(cards[0].description.as_deref(), Some("author: Herbert"));
+    assert!(cards.iter().all(|c| c.focusable && c.clickable));
+
+    view.update(&mut vcx, |v, cx| v.select_view(3, cx));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    role_named(&mut vcx, Role::List, "Plain");
+    let items = testing::with_role(&mut vcx, Role::ListItem);
+    assert_eq!(labels(&items), ["Dune, Herbert", "Emma, Austen", "Notes"]);
+    assert_eq!(items[2].position, Some((3, 3)));
+}
+
+const BACKLINKS: &str = r#"
+filters:
+  and:
+    - 'file.hasLink(this.file)'
+views:
+  - type: table
+    name: Linked here
+    order: [file.name]
+  - type: list
+    name: As a list
+    order: [file.name]
+"#;
+
+fn linked_vault() -> BaseData {
+    let mut a = FileInfo::new("Notes/A.md");
+    a.links.push(gv_bases::LinkInfo {
+        text: "Hub".into(),
+        target: Some("Hub.md".into()),
+    });
+    let mut b = FileInfo::new("Notes/B.md");
+    b.links.push(gv_bases::LinkInfo {
+        text: "Hub".into(),
+        target: Some("Hub.md".into()),
+    });
+    b.links.push(gv_bases::LinkInfo {
+        text: "Other".into(),
+        target: Some("Other.md".into()),
+    });
+    Arc::new(MemoryData::new([
+        a,
+        b,
+        FileInfo::new("Hub.md"),
+        FileInfo::new("Other.md"),
+        FileInfo::new("Bases/Backlinks.base"),
+        FileInfo::new("Bases/Library.base"),
+    ]))
+}
+
+fn open_panel(
+    cx: &mut TestAppContext,
+    root: &Path,
+) -> (AnyWindowHandle, Entity<BasesPanel>, VisualTestContext) {
+    let root = root.to_path_buf();
+    let (window, panel) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(320.0), px(HEIGHT)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        gpui::open_window(options, cx, |_, cx| BasesPanel::new(Some(root), cx))
+            .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    (window, panel, vcx)
+}
+
+fn shown_names(panel: &Entity<BasesPanel>, vcx: &mut VisualTestContext) -> Vec<String> {
+    panel.read_with(vcx, |p, cx| {
+        p.view()
+            .and_then(|v| v.read(cx).result().cloned())
+            .map(|r| r.rows().map(|row| row.path.to_string()).collect())
+            .unwrap_or_default()
+    })
+}
+
+#[gpui::test]
+fn the_sidebar_base_follows_the_active_file(cx: &mut TestAppContext) {
+    let dir = fixture(LIBRARY);
+    std::fs::write(dir.path().join("Bases/Backlinks.base"), BACKLINKS).expect("write");
+    let (_window, panel, mut vcx) = open_panel(cx, dir.path());
+    // Nothing chosen yet.
+    assert!(vcx.debug_bounds("bases-panel-empty").is_some());
+    panel.update(&mut vcx, |p, cx| {
+        p.set_bases(
+            vec!["Bases/Library.base".into(), "Bases/Backlinks.base".into()],
+            cx,
+        );
+        p.set_data(linked_vault(), cx);
+        p.set_active_path(Some(&dir.path().join("Hub.md")), cx);
+    });
+    draw(&mut vcx);
+    assert_eq!(
+        panel.read_with(&vcx, |p, _| p.bases().to_vec()),
+        [
+            Arc::from("Bases/Backlinks.base"),
+            Arc::from("Bases/Library.base")
+        ]
+    );
+    assert_eq!(
+        panel
+            .read_with(&vcx, |p, _| p.active().map(str::to_owned))
+            .as_deref(),
+        Some("Hub.md")
+    );
+
+    // The picker lists the bases; choosing one shows it for the active file.
+    let picker = testing::named(&mut vcx, "Choose a base");
+    assert_eq!(
+        (picker.role, picker.expanded),
+        (Some(Role::Button), Some(false))
+    );
+    click(&mut vcx, "bases-panel-picker", Modifiers::none());
+    let options = testing::with_role(&mut vcx, Role::ListBoxOption);
+    assert_eq!(
+        labels(&options),
+        ["Bases/Backlinks.base", "Bases/Library.base"]
+    );
+    click(&mut vcx, "bases-panel-option:0", Modifiers::none());
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    assert!(!panel.read_with(&vcx, |p, _| p.picker_open()));
+    assert_eq!(
+        panel
+            .read_with(&vcx, |p, _| p.chosen().map(str::to_owned))
+            .as_deref(),
+        Some("Bases/Backlinks.base")
+    );
+    assert!(testing::has(&mut vcx, "Base: Backlinks"));
+    assert!(testing::has(&mut vcx, "For Hub.md"));
+    let this = panel.read_with(&vcx, |p, cx| {
+        p.view().and_then(|v| v.read(cx).this().map(str::to_owned))
+    });
+    assert_eq!(this.as_deref(), Some("Hub.md"), "not the base file");
+    assert_eq!(shown_names(&panel, &mut vcx), ["Notes/A.md", "Notes/B.md"]);
+
+    // Another active file: evaluated again for it.
+    panel.update(&mut vcx, |p, cx| {
+        p.set_active_path(Some(&dir.path().join("Other.md")), cx);
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    assert_eq!(shown_names(&panel, &mut vcx), ["Notes/B.md"]);
+    assert!(testing::has(&mut vcx, "For Other.md"));
+    // A file outside the vault, or none: `this` is empty.
+    panel.update(&mut vcx, |p, cx| {
+        p.set_active_path(Some(Path::new("/elsewhere/x.md")), cx)
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    assert!(shown_names(&panel, &mut vcx).is_empty());
+    assert!(testing::has(&mut vcx, "No active file"));
+
+    // The base's views are its tabs; choosing one through the panel works.
+    panel.update(&mut vcx, |p, cx| p.choose_view(1, cx));
+    let index = panel.read_with(&vcx, |p, cx| p.view().map(|v| v.read(cx).view_index()));
+    assert_eq!(index, Some(1));
+}
+
+#[gpui::test]
+fn the_sidebar_base_passes_on_open_requests(cx: &mut TestAppContext) {
+    let dir = fixture(LIBRARY);
+    std::fs::write(dir.path().join("Bases/Backlinks.base"), BACKLINKS).expect("write");
+    let (_window, panel, mut vcx) = open_panel(cx, dir.path());
+    panel.update(&mut vcx, |p, cx| {
+        p.set_data(linked_vault(), cx);
+        p.set_active(Some("Hub.md".into()), cx);
+        p.choose_base("Bases/Backlinks.base".into(), cx);
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    vcx.update(|_, cx| {
+        cx.subscribe(&panel, move |_, e: &BasesEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+    click(&mut vcx, "bases-link:0:0:0", Modifiers::none());
+    assert_eq!(
+        seen.borrow().clone(),
+        [BasesEvent::OpenFile {
+            path: dir.path().join("Notes").join("A.md"),
+            fragment: None,
+            disposition: Disposition::InPlace,
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_vault_without_bases_says_so(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (_window, panel, mut vcx) = open_panel(cx, dir.path());
+    click(&mut vcx, "bases-panel-picker", Modifiers::none());
+    assert!(panel.read_with(&vcx, |p, _| p.picker_open()));
+    assert!(vcx.debug_bounds("bases-panel-list").is_some());
+    assert!(testing::with_role(&mut vcx, Role::ListBoxOption).is_empty());
 }

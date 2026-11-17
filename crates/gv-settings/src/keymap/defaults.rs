@@ -126,6 +126,7 @@ const BUILTIN: &[Row] = &[
     ("view.zoom_in", "Zoom in", Category::View, None, &[("secondary-=", ALL)]),
     ("view.zoom_out", "Zoom out", Category::View, None, &[("secondary--", ALL)]),
     ("view.zoom_reset", "Reset zoom", Category::View, None, &[("secondary-0", ALL)]),
+    ("view.zoom_to_fit", "Zoom to fit", Category::View, None, &[]),
     ("view.fold", "Fold", Category::View, Some(EDITOR), &[]),
     ("view.unfold", "Unfold", Category::View, Some(EDITOR), &[]),
     ("view.fold_all", "Fold all", Category::View, Some(EDITOR), &[]),
