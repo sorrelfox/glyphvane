@@ -276,3 +276,43 @@ fn malformed_inputs_end_cleanly() {
         assert!(!matches!(o, Outcome::Cancelled));
     }
 }
+
+#[test]
+fn links_and_internal_links_are_clickable_parts() {
+    let src = "graph TD\n  A[Web] --> B[My Note]\n  B --> C[Plain]\n  click A href \"https://example.com/x\"\n  class B internal-link;\n";
+    let Outcome::Rendered(d) = engine().render(src, Trust::Interactive) else {
+        panic!("rendered");
+    };
+    let targets: Vec<&gv_diagram::LinkTarget> = d.links.iter().map(|l| &l.target).collect();
+    assert_eq!(
+        targets,
+        [
+            &gv_diagram::LinkTarget::Href("https://example.com/x".into()),
+            &gv_diagram::LinkTarget::Note("My Note".into()),
+        ],
+        "{:?}",
+        d.links
+    );
+    for l in &d.links {
+        let r = l.rect;
+        assert!(r.width > 0.0 && r.height > 0.0);
+        assert!(r.x >= 0.0 && r.y >= 0.0);
+        assert!(r.x + r.width <= d.width + 0.5 && r.y + r.height <= d.height + 0.5);
+    }
+    // The web node is above the note node (top to bottom).
+    assert!(d.links[0].rect.y < d.links[1].rect.y);
+    // Unsafe links are dropped by merman's sanitizer, never surfaced.
+    let Outcome::Rendered(d) = engine().render(
+        "graph TD\n  A --> B\n  click A href \"javascript:alert(1)\"\n",
+        Trust::Interactive,
+    ) else {
+        panic!("rendered");
+    };
+    assert!(
+        d.links.iter().all(
+            |l| !matches!(&l.target, gv_diagram::LinkTarget::Href(h) if h.contains("javascript"))
+        ),
+        "{:?}",
+        d.links
+    );
+}

@@ -54,6 +54,25 @@ impl MediaKey {
         })
     }
 
+    /// The modification time and length of the file the key was made
+    /// for (`None` for in-memory bytes): a change means the file changed.
+    pub fn file_stamp(&self) -> Option<(Option<std::time::SystemTime>, u64)> {
+        match &self.source {
+            Source::File { mtime, len, .. } => Some((*mtime, *len)),
+            Source::Bytes { .. } => None,
+        }
+    }
+
+    /// The same source decoded for `request` (no hashing again: keys of
+    /// in-memory bytes made once can be reused for every box size).
+    #[must_use]
+    pub fn with_request(&self, request: DecodeRequest) -> Self {
+        Self {
+            source: self.source.clone(),
+            request,
+        }
+    }
+
     /// The key of in-memory `bytes`.
     pub fn for_bytes(bytes: &[u8], request: DecodeRequest) -> Self {
         let mut h = std::collections::hash_map::DefaultHasher::new();

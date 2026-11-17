@@ -37,7 +37,9 @@ mod engine;
 mod palette;
 
 pub use card::{CardKind, FallbackCard};
-pub use display::{Diagram, DiagramItem, DiagramPath, FillRule, Paint, PathEl, Rect};
+pub use display::{
+    Diagram, DiagramItem, DiagramLink, DiagramPath, FillRule, LinkTarget, Paint, PathEl, Rect,
+};
 pub use engine::{
     CacheStats, Canceller, DiagramEngine, DiagramFonts, DiagramKey, Job, Limits,
     NOT_RECOGNISED_NOTE, Outcome, SetupError, Trust, TrustLimits,

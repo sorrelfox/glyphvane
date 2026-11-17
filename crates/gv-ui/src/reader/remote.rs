@@ -570,7 +570,7 @@ impl Reader {
 
     /// Asks the render tree for the sizes of the images at `dests` again
     /// (their targets changed). Returns whether any item changed.
-    fn refresh_images(&mut self, dests: &HashSet<String>) -> bool {
+    pub(super) fn refresh_images(&mut self, dests: &HashSet<String>) -> bool {
         let Some(path) = self.path.clone() else {
             return false;
         };

@@ -37,7 +37,7 @@ use gv_syntax::inline::{
     Children, InlineKind, InlineNode, InlineTree, LinkKind as SynLinkKind, TextProjection,
 };
 
-use crate::footnote::FootnoteIndex;
+use crate::footnote::{FootnoteIndex, inline_label};
 use crate::metrics::Metrics;
 use crate::node::{
     BoxRef, FootnoteRefInfo, ImageInfo, InlineContent, InlineRole, InlineSpan, LinkInfo, MathInfo,
@@ -56,6 +56,8 @@ pub(crate) struct InlineCx<'a> {
     pub footnotes: Option<&'a FootnoteIndex>,
     /// Soft line breaks are line breaks.
     pub soft_breaks: bool,
+    /// An image's alt text may end with `|W` or `|WxH`.
+    pub alt_sizes: bool,
     /// A callout's title: bold, in this colour, after a gutter of this
     /// width for the type's icon.
     pub title: Option<(ColorToken, f32)>,
@@ -105,6 +107,26 @@ pub(crate) fn build_with_backrefs(
     b.finish()
 }
 
+/// The definition of the inline footnote of `tree` that starts at
+/// `start` (absolute), for the footnote section: its text, then one
+/// backreference. The node starts at `base`.
+pub(crate) fn build_inline_note(
+    tree: &InlineTree,
+    start: usize,
+    base: usize,
+    cx: &InlineCx<'_>,
+) -> Option<InlineContent> {
+    let note = tree
+        .nodes()
+        .find(|n| n.kind() == InlineKind::InlineFootnote && n.range().start == start)?;
+    let end = note.range().end;
+    let mut b = Builder::new(cx, TextRole::Body, base);
+    b.para.source_anchor(start.saturating_sub(base));
+    b.walk(note.children());
+    b.backrefs(end, 1);
+    Some(b.finish())
+}
+
 /// Inline content of only the backreferences of a footnote referenced
 /// `count` times, at `at` (absolute; the node starts there).
 pub(crate) fn build_backrefs_only(at: usize, count: u32, cx: &InlineCx<'_>) -> InlineContent {
@@ -112,6 +134,14 @@ pub(crate) fn build_backrefs_only(at: usize, count: u32, cx: &InlineCx<'_>) -> I
     b.para.source_anchor(0);
     b.backrefs(at, count);
     b.finish()
+}
+
+/// The size at the end of an image's alt text (`alt|300`, `alt|300x200`)
+/// and where the alt text proper ends.
+fn alt_size(alt: &str) -> Option<((u32, Option<u32>), usize)> {
+    let at = alt.rfind('|')?;
+    let size = gv_syntax::inline::image_size(&alt[at + 1..])?;
+    Some((size, alt[..at].trim_end().len()))
 }
 
 /// Inline content of plain text (no Markdown): a `<details>` summary.
@@ -329,6 +359,7 @@ impl Builder<'_, '_> {
                     state.mark = Some(mark_color(&node));
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
+                InlineKind::InlineFootnote if self.inline_note_ref(&node, state) => {}
                 InlineKind::InlineFootnote => {
                     let saved = state;
                     state.note = true;
@@ -450,6 +481,34 @@ impl Builder<'_, '_> {
         };
         self.piece(&number.to_string(), source, false, key);
         self.flush();
+    }
+
+    /// An inline footnote numbered into the footnote section: its number,
+    /// raised, like a reference. False when it is not numbered (it shows
+    /// in place).
+    fn inline_note_ref(&mut self, node: &InlineNode<'_>, state: State) -> bool {
+        if state.alt.is_some() {
+            return false;
+        }
+        let source = node.range();
+        let label = inline_label(source.start);
+        let Some(number) = self.cx.footnotes.and_then(|f| f.number(&label)) else {
+            return false;
+        };
+        let index = u32::try_from(self.footnotes.len()).unwrap_or(u32::MAX);
+        self.footnotes.push(FootnoteRefInfo {
+            label: Arc::from(label),
+            number,
+            source: self.rel(source.clone()),
+        });
+        self.flush();
+        let key = RunKey {
+            state,
+            role: InlineRole::FootnoteRef(index),
+        };
+        self.piece(&number.to_string(), source, false, key);
+        self.flush();
+        true
     }
 
     /// The backreferences of a footnote after its last paragraph, at `at`
@@ -792,6 +851,15 @@ impl Builder<'_, '_> {
             range: l.range.clone(),
             block: self.cx.block,
         });
+        // Obsidian: `![alt|300](x.png)` is 300 px wide.
+        let wanted = if self.cx.alt_sizes {
+            alt_size(&alt)
+        } else {
+            None
+        };
+        if let Some((_, at)) = wanted {
+            alt.truncate(at);
+        }
         let index = u32::try_from(self.images.len()).unwrap_or(u32::MAX);
         let source = self.rel(l.range.clone());
         self.images.push(ImageInfo {
@@ -807,13 +875,7 @@ impl Builder<'_, '_> {
             ImageSize::Known { width, height }
                 if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
             {
-                let zoom = self.cx.styles.zoom();
-                let (mut w, mut h) = (width * zoom, height * zoom);
-                let max = self.cx.metrics.image_max_width;
-                if w > max && max > 0.0 {
-                    h *= max / w;
-                    w = max;
-                }
+                let (w, h) = self.image_box(width, height, wanted.map(|(s, _)| s));
                 let b =
                     InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(BoxRef::Image(index).id());
                 self.push_box(b, l.range, InlineRole::Image(index), state.link);
@@ -821,6 +883,27 @@ impl Builder<'_, '_> {
             }
             _ => Some(index),
         }
+    }
+
+    /// The box of an image `width` × `height` px, at `wanted` size when
+    /// given (`|W` keeps the aspect ratio), zoomed and capped at the
+    /// image width limit.
+    fn image_box(&self, width: f32, height: f32, wanted: Option<(u32, Option<u32>)>) -> (f32, f32) {
+        let zoom = self.cx.styles.zoom();
+        #[allow(clippy::cast_precision_loss)]
+        let (mut w, mut h) = match wanted {
+            Some((ww, Some(hh))) if ww > 0 && hh > 0 => (ww as f32, hh as f32),
+            Some((ww, _)) if ww > 0 => (ww as f32, ww as f32 * height / width),
+            _ => (width, height),
+        };
+        w *= zoom;
+        h *= zoom;
+        let max = self.cx.metrics.image_max_width;
+        if w > max && max > 0.0 {
+            h *= max / w;
+            w = max;
+        }
+        (w, h)
     }
 
     /// A wikilink: its display text as a link (status from the resolver),
@@ -891,20 +974,7 @@ impl Builder<'_, '_> {
             ImageSize::Known { width, height }
                 if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
             {
-                let zoom = self.cx.styles.zoom();
-                #[allow(clippy::cast_precision_loss)]
-                let (mut w, mut h) = match wanted {
-                    Some((ww, Some(hh))) => (ww as f32, hh as f32),
-                    Some((ww, None)) => (ww as f32, ww as f32 * height / width),
-                    None => (width, height),
-                };
-                w *= zoom;
-                h *= zoom;
-                let max = self.cx.metrics.image_max_width;
-                if w > max && max > 0.0 {
-                    h *= max / w;
-                    w = max;
-                }
+                let (w, h) = self.image_box(width, height, wanted);
                 let b =
                     InlineBox::new(BoxKind::Image, w, h, 0.0).with_id(BoxRef::Image(index).id());
                 self.push_box(b, range, InlineRole::Image(index), state.link);

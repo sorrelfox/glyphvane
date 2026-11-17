@@ -288,7 +288,7 @@ pub fn tooltip(text: String, at: Point<Pixels>, cx: &App) -> AnyElement {
                     .rounded(px(radius::CONTROL))
                     .bg(theme.text.primary)
                     .text_color(theme.surface.page)
-                    .text_size(px(text::TOOLTIP_SIZE))
+                    .text_size(px(text::tooltip_size()))
                     .children(lines.into_iter().map(|l| div().child(l))),
             ),
     )

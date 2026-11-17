@@ -159,6 +159,9 @@ pub(crate) enum ControlKind {
     RenderAnyway { block: BlockId },
     /// *Copy source* on the card of the diagram of node `node`.
     CopySource { node: usize },
+    /// The zoom buttons of the diagram of block `block`: in (`1`), out
+    /// (`-1`) or back to its fitted size (`0`).
+    DiagramZoom { block: BlockId, step: i8 },
     /// *Open externally* on an image card: the file is
     /// [`Geometry::external`]`[slot]`.
     OpenExternally { slot: usize },
@@ -191,6 +194,9 @@ pub(crate) enum Hover {
     None,
     Text,
     Link(LinkHit),
+    /// A local image (not inside a link), whose click opens it in the
+    /// image viewer, or a diagram's link.
+    Target(LinkHit),
     Button(CodeButton),
     Control(Control),
     Footnote(FootnoteHit),
@@ -357,7 +363,8 @@ pub(crate) struct State {
     /// Tables not at their natural width get an Expand button while the
     /// pointer is over them (not in the expanded view itself).
     pub expandable: bool,
-    /// The table under the pointer.
+    /// The table or rendered diagram under the pointer (the block of
+    /// its rows or its fence).
     pub hover_table: Option<BlockId>,
 }
 
@@ -414,6 +421,7 @@ impl State {
             self.cache.live.retain_tree(&doc.tree);
         } else {
             self.cache.live.clear();
+            self.cache.reset_diagram_zoom();
         }
         if self
             .doc
@@ -506,6 +514,85 @@ impl State {
             image: false,
             range,
         })
+    }
+
+    /// The local image file under a window position that a click opens
+    /// in the image viewer (an image inside a link follows the link): its
+    /// destination, as a link of the image's kind (`image` set; `link` is
+    /// the image's index).
+    pub fn image_at(&self, position: Point<Pixels>) -> Option<LinkHit> {
+        let y = f32::from(position.y);
+        let g = self
+            .geometry
+            .items
+            .iter()
+            .find(|g| g.top <= y && y < g.bottom)?;
+        let block = g.text.as_ref()?;
+        let piece = block.borrow().item_at(position)?;
+        let doc = self.doc.as_ref()?;
+        let content = doc.tree.item_inline(g.ix)?;
+        let span = content.spans.get(piece)?;
+        let (InlineRole::Image(i), None) = (span.role, span.link) else {
+            return None;
+        };
+        let info = content.images.get(i as usize)?;
+        let target = self.cache.targets.as_ref()?.get(&info.destination)?;
+        if !matches!(target, super::media::ImageTarget::Local { .. }) {
+            return None;
+        }
+        let start = doc.tree.node_of(g.ix).map(|n| n.source.start);
+        let range = start
+            .map(|s| s + info.source.start..s + info.source.end)
+            .filter(|r| doc.text.get(r.clone()).is_some_and(|t| t.starts_with('!')));
+        Some(LinkHit {
+            item: g.ix,
+            link: i,
+            destination: info.destination.clone(),
+            kind: info.kind,
+            image: true,
+            range,
+        })
+    }
+
+    /// The link of a diagram under a window position (`link` is its
+    /// index in the diagram; the diagram's item has no other links).
+    pub fn diagram_link_at(&self, position: Point<Pixels>) -> Option<LinkHit> {
+        let doc = self.doc.as_ref()?;
+        let y = f32::from(position.y);
+        let g = self
+            .geometry
+            .items
+            .iter()
+            .find(|g| g.top <= y && y < g.bottom)?;
+        if !matches!(
+            doc.tree.items().get(g.ix)?.kind,
+            gv_render_tree::ItemKind::Diagram { .. }
+        ) || !g.code?.clip.contains(&position)
+        {
+            return None;
+        }
+        let block = g.text.as_ref()?.borrow();
+        let (k, l) = diagram_link_in(&block, position)?;
+        let (destination, kind) = match &l.target {
+            gv_diagram::LinkTarget::Href(h) => (h.as_str(), gv_model::LinkKind::Inline),
+            gv_diagram::LinkTarget::Note(n) => (n.as_str(), gv_model::LinkKind::Wikilink),
+        };
+        Some(LinkHit {
+            item: g.ix,
+            link: k,
+            destination: Arc::from(destination),
+            kind,
+            image: false,
+            range: None,
+        })
+    }
+
+    /// The link under a window position, else the image a click opens or
+    /// the diagram link.
+    pub fn target_at(&self, position: Point<Pixels>) -> Option<LinkHit> {
+        self.link_at(position)
+            .or_else(|| self.image_at(position))
+            .or_else(|| self.diagram_link_at(position))
     }
 
     pub fn button_at(&self, position: Point<Pixels>) -> Option<CodeButton> {
@@ -667,6 +754,12 @@ impl State {
         if let Some(link) = self.link_at(position) {
             return Hover::Link(link);
         }
+        if let Some(target) = self
+            .image_at(position)
+            .or_else(|| self.diagram_link_at(position))
+        {
+            return Hover::Target(target);
+        }
         let y = f32::from(position.y);
         let x = f32::from(position.x);
         let over_text = self.geometry.items.iter().any(|g| {
@@ -718,17 +811,34 @@ impl State {
         }
     }
 
-    /// The table whose drawn rows hold a window position.
+    /// The table whose drawn rows hold a window position, or the
+    /// rendered diagram that does.
     pub fn table_at(&self, position: Point<Pixels>) -> Option<BlockId> {
         let doc = self.doc.as_ref()?;
         self.geometry.items.iter().find_map(|g| {
             let code = g.code?;
-            (matches!(
-                doc.tree.items().get(g.ix)?.kind,
-                gv_render_tree::ItemKind::TableRow { .. }
-            ) && code.clip.contains(&position))
-            .then_some(code.block)
+            let item = doc.tree.items().get(g.ix)?;
+            let kind_ok = match item.kind {
+                gv_render_tree::ItemKind::TableRow { .. } => true,
+                gv_render_tree::ItemKind::Diagram { .. } => {
+                    !self.cache.diagram_frames.contains_key(&item.id)
+                }
+                _ => false,
+            };
+            (kind_ok && code.clip.contains(&position)).then_some(code.block)
         })
+    }
+
+    /// Zooms the diagram of block `block` in (`step` 1) or out (-1) one
+    /// step, or back to its fitted size (0).
+    pub fn zoom_diagram(&mut self, block: BlockId, step: i8, ts: &WindowTextSystem) {
+        let zoom = self.cache.diagram_zoom(block);
+        let next = super::items::diagram_zoom_step(zoom, step);
+        if (next - zoom).abs() < f32::EPSILON {
+            return;
+        }
+        self.cache.set_diagram_zoom(block, next);
+        self.changed(&[ItemId { block, chunk: 0 }], ts);
     }
 
     /// The sideways scrollbar whose zone holds a window position.
@@ -785,4 +895,44 @@ impl State {
             engine.invalidate(&items, ixs);
         }
     }
+}
+
+/// The link of the diagram drawn in `block` (its one box) under a window
+/// position, with its index: the last one drawn there.
+pub(crate) fn diagram_link_in(
+    block: &InlineBlock,
+    position: Point<Pixels>,
+) -> Option<(u32, gv_diagram::DiagramLink)> {
+    let origin = block.bounds()?.origin;
+    let layout = block.layout()?;
+    let line = layout.lines().first()?;
+    let f = layout.line_fragments(0).iter().find(|f| {
+        layout
+            .paragraph()
+            .items()
+            .get(f.item)
+            .is_some_and(|i| i.inline_box().is_some())
+    })?;
+    let b = layout.paragraph().items().get(f.item)?.inline_box()?;
+    let Some(crate::inline::BoxContent::Diagram { diagram, .. }) = block.box_content(b.id) else {
+        return None;
+    };
+    if diagram.width <= 0.0 || f.width <= 0.0 {
+        return None;
+    }
+    let scale = f.width / diagram.width;
+    let x = (f32::from(position.x - origin.x) - f.x) / scale;
+    let y = (f32::from(position.y - origin.y) - (line.baseline - f.ascent)) / scale;
+    diagram
+        .links
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| {
+            x >= l.rect.x
+                && x < l.rect.x + l.rect.width
+                && y >= l.rect.y
+                && y < l.rect.y + l.rect.height
+        })
+        .map(|(k, l)| (u32::try_from(k).unwrap_or(u32::MAX), l.clone()))
 }

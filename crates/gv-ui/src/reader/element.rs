@@ -1113,6 +1113,80 @@ impl Element for ReaderElement {
                             scroll,
                             fades: (false, false),
                         });
+                        // A rendered diagram under the pointer: its zoom
+                        // buttons at the top right of its visible part.
+                        if framed.is_none() && *hover_table == Some(item.id.block) {
+                            let level = cache.diagram_zoom(item.id.block);
+                            let mut buttons = vec![
+                                (
+                                    "+",
+                                    ControlKind::DiagramZoom {
+                                        block: item.id.block,
+                                        step: 1,
+                                    },
+                                ),
+                                (
+                                    "\u{2212}",
+                                    ControlKind::DiagramZoom {
+                                        block: item.id.block,
+                                        step: -1,
+                                    },
+                                ),
+                            ];
+                            if (level - 1.0).abs() > 1e-3 {
+                                buttons.insert(
+                                    0,
+                                    (
+                                        "Fit",
+                                        ControlKind::DiagramZoom {
+                                            block: item.id.block,
+                                            step: 0,
+                                        },
+                                    ),
+                                );
+                            }
+                            let pad = CARD_BUTTON_PAD_X * zoom;
+                            let h = label_spec.line_height + 4.0 * zoom;
+                            let top_y = f32::from(clip.top()).max(f32::from(bounds.top()));
+                            let y = top_y + code_head::PAD_RIGHT;
+                            let mut x = f32::from(clip.right()) - code_head::PAD_RIGHT;
+                            for (label, kind) in buttons {
+                                let line = shape(
+                                    window,
+                                    label,
+                                    label_font.clone(),
+                                    label_spec.size,
+                                    color(Token::TextSecondary),
+                                );
+                                let w = (f32::from(line.width()) + 2.0 * pad).max(h);
+                                x -= w;
+                                let control = Control {
+                                    bounds: bounds_of(x, y, w, h),
+                                    kind,
+                                };
+                                let hovered = *hover == Hover::Control(control);
+                                out.over.push(Op::Rect {
+                                    bounds: control.bounds,
+                                    color: color(Token::SurfaceSunken),
+                                    radius: px(radius::SMALL_CONTROL),
+                                });
+                                if hovered {
+                                    out.over.push(Op::Rect {
+                                        bounds: control.bounds,
+                                        color: color(Token::StateHover),
+                                        radius: px(radius::SMALL_CONTROL),
+                                    });
+                                }
+                                let text_w = f32::from(line.width());
+                                out.over.push(Op::Text {
+                                    line: Box::new(line),
+                                    origin: point(px(x + (w - text_w) / 2.0), px(y + 2.0 * zoom)),
+                                    line_height: px(label_spec.line_height),
+                                });
+                                geometry.controls.push(control);
+                                x -= CARD_BUTTON_GAP * zoom;
+                            }
+                        }
                     }
                 }
                 ItemKind::Live { .. } => {
@@ -1741,6 +1815,16 @@ impl Element for ReaderElement {
         if !images.is_empty() {
             start_images(self.reader.clone(), images, cx);
         }
+        let changed = cache.images.take_changed_files();
+        if !changed.is_empty() {
+            let reader = self.reader.clone();
+            cx.spawn(async move |cx| {
+                reader
+                    .update(cx, |r, cx| r.reprobe_images(changed, cx))
+                    .ok();
+            })
+            .detach();
+        }
         let live = cache.live.take_requests();
         if !live.is_empty() {
             start_live(self.reader.clone(), live, cx);
@@ -1874,9 +1958,11 @@ impl Element for ReaderElement {
             let dragging_text = matches!(st.press, Press::Select { moved: true, .. });
             let cursor = match &hover {
                 _ if dragging_text => Some(CursorStyle::IBeam),
-                Hover::Link(_) | Hover::Button(_) | Hover::Control(_) | Hover::Footnote(_) => {
-                    Some(CursorStyle::PointingHand)
-                }
+                Hover::Link(_)
+                | Hover::Target(_)
+                | Hover::Button(_)
+                | Hover::Control(_)
+                | Hover::Footnote(_) => Some(CursorStyle::PointingHand),
                 Hover::Text => Some(CursorStyle::IBeam),
                 Hover::Scrollbar | Hover::None => None,
             };
@@ -2015,7 +2101,7 @@ impl ReaderElement {
                         press_left(&mut st, e);
                     }
                     MouseButton::Middle => {
-                        if let Some(link) = st.link_at(e.position) {
+                        if let Some(link) = st.target_at(e.position) {
                             st.press = Press::Middle(link);
                         }
                     }
@@ -2116,6 +2202,10 @@ impl ReaderElement {
                                     let ts = window.text_system().clone();
                                     st.render_anyway(block, &ts);
                                 }
+                                ControlKind::DiagramZoom { block, step } => {
+                                    let ts = window.text_system().clone();
+                                    st.zoom_diagram(block, step, &ts);
+                                }
                                 ControlKind::CopySource { node } => {
                                     if let Some(code) = st.code_text(node) {
                                         cx.write_to_clipboard(ClipboardItem::new_string(code));
@@ -2170,10 +2260,14 @@ impl ReaderElement {
                             st.tag_search = Some(format!("tag:#{}", link.destination).into());
                             tag_search = true;
                         } else if let Some(link) = link.filter(|_| !moved)
-                            && st.link_at(e.position).is_some_and(|l| same_link(&l, &link))
+                            && st
+                                .target_at(e.position)
+                                .is_some_and(|l| same_link(&l, &link))
                         {
                             st.selection = None;
-                            let disposition = if e.modifiers.secondary(cx) {
+                            // An image opens in the image viewer, in a tab
+                            // of its own.
+                            let disposition = if e.modifiers.secondary(cx) || link.image {
                                 Disposition::NewTab
                             } else {
                                 Disposition::InPlace
@@ -2182,7 +2276,10 @@ impl ReaderElement {
                         }
                     }
                     (Press::Middle(link), MouseButton::Middle) => {
-                        if st.link_at(e.position).is_some_and(|l| same_link(&l, &link)) {
+                        if st
+                            .target_at(e.position)
+                            .is_some_and(|l| same_link(&l, &link))
+                        {
                             follow = Some(request(&link, Disposition::Background));
                         }
                     }
@@ -2337,7 +2434,7 @@ fn resolve_sync(engine: &mut Engine, items: &mut DocItems<'_>, request: SyncRequ
 }
 
 fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
-    a.item == b.item && a.link == b.link
+    a.item == b.item && a.link == b.link && a.image == b.image
 }
 
 fn request(link: &LinkHit, disposition: Disposition) -> LinkRequest {
@@ -2401,7 +2498,7 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
     let link = if e.modifiers.shift {
         None
     } else {
-        st.link_at(pos)
+        st.target_at(pos)
     };
     st.selection = match (st.selection, e.modifiers.shift) {
         (Some(s), true) => Some(Selection {

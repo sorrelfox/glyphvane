@@ -891,6 +891,7 @@ mod constructs_tests;
 mod embeds_tests;
 mod expand_tests;
 mod find_tests;
+mod image_diagram_tests;
 mod media_tests;
 mod obsidian_tests;
 mod remote_tests;

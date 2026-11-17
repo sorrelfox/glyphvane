@@ -20,6 +20,7 @@
 //! - Audio (the `audio` feature): [`audio::AudioEngine`] and
 //!   [`audio::Player`] decode with symphonia and libopus and play through
 //!   cpal.
+//! - `data:` image URLs: [`decode_data_url`] (raster types only, capped).
 //! - Results are fitted to the display box with fast_image_resize and
 //!   delivered as straight RGBA8 frames.
 //!
@@ -42,6 +43,7 @@
 #[cfg(feature = "audio")]
 pub mod audio;
 mod color;
+mod data_url;
 mod engine;
 mod error;
 mod format;
@@ -53,6 +55,7 @@ mod resize;
 mod svg;
 mod types;
 
+pub use data_url::{MAX_DATA_IMAGE_BYTES, decode_data_url, is_data_url};
 pub use engine::{CacheStats, LoadResult, MediaEngine, MediaKey};
 pub use error::MediaError;
 pub use format::ImageFormat;

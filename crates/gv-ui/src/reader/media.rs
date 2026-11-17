@@ -43,6 +43,7 @@ use gv_media::{
 use gv_render_tree::{ImageSize, ImageSizeSource, ItemId, LinkTarget};
 use gv_vault::url::UrlClass;
 
+use super::Reader;
 use super::links::Resolver;
 
 /// The box of an image that cannot be decoded: room for its card.
@@ -145,8 +146,40 @@ pub(crate) enum ImageTarget {
         path: PathBuf,
         probe: Result<Probe, MediaError>,
     },
+    /// A `data:` image: its bytes (at most
+    /// [`gv_media::MAX_DATA_IMAGE_BYTES`]), their cache key and header
+    /// facts, or why it cannot be shown.
+    Data(Result<DataImage, MediaError>),
     /// Missing, outside the root, blocked or not an image URL: the alt text.
     None,
+}
+
+/// The decoded payload of a `data:` image URL.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DataImage {
+    pub bytes: Arc<[u8]>,
+    /// The key of the bytes (hashed once), for any box size.
+    pub key: MediaKey,
+    pub probe: Result<Probe, MediaError>,
+}
+
+impl DataImage {
+    /// Decodes and probes `url` (blocking: off the UI thread). SVG and
+    /// other types are refused, the bytes are capped.
+    pub fn from_url(url: &str) -> Result<DataImage, MediaError> {
+        let bytes: Arc<[u8]> =
+            gv_media::decode_data_url(url, gv_media::MAX_DATA_IMAGE_BYTES)?.into();
+        let key = MediaKey::for_bytes(
+            &bytes,
+            DecodeRequest {
+                fit: None,
+                animate: false,
+            },
+        );
+        // The remote engine: no file is ever read for it.
+        let probe = remote_engine().probe_bytes(&bytes);
+        Ok(DataImage { bytes, key, probe })
+    }
 }
 
 /// Which scheme an image is for, by its GitHub fragment.
@@ -223,6 +256,17 @@ impl ImageTargets {
             .any(|t| matches!(t, ImageTarget::Fetched { url: u, .. } if u == url))
     }
 
+    /// The destinations that resolved to local file `path`.
+    pub fn local_destinations(&self, path: &Path) -> Vec<String> {
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, t)| matches!(t, ImageTarget::Local { path: p, .. } if p == path))
+            .map(|(d, _)| d.clone())
+            .collect()
+    }
+
     /// Sets what `destination` resolves to (a remote image fetched, or
     /// one that may no longer show).
     pub fn set(&self, destination: &str, target: ImageTarget) {
@@ -262,6 +306,7 @@ fn image_target(destination: &str, resolver: &Resolver, root: &Path) -> ImageTar
                 None => ImageTarget::Remote(url),
             };
         }
+        UrlClass::DataImage { .. } => return ImageTarget::Data(DataImage::from_url(bare)),
         UrlClass::Relative(_) | UrlClass::Fragment(_) | UrlClass::LocalFile { .. } => {}
         _ => return ImageTarget::None,
     }
@@ -297,7 +342,9 @@ pub(crate) struct ImageSizes<'a> {
 impl ImageSizeSource for ImageSizes<'_> {
     fn size(&self, image: &LinkTarget<'_>) -> ImageSize {
         match self.targets.resolve(image.destination, &self.resolver) {
-            ImageTarget::Local { probe: Ok(p), .. } | ImageTarget::Fetched { probe: Ok(p), .. }
+            ImageTarget::Local { probe: Ok(p), .. }
+            | ImageTarget::Fetched { probe: Ok(p), .. }
+            | ImageTarget::Data(Ok(DataImage { probe: Ok(p), .. }))
                 if p.width > 0 && p.height > 0 =>
             {
                 #[allow(clippy::cast_precision_loss)]
@@ -313,12 +360,14 @@ impl ImageSizeSource for ImageSizes<'_> {
                     height: CARD_HEIGHT,
                 }
             }
-            // A remote image not fetched or that cannot be shown: its
-            // placeholder card.
-            ImageTarget::Remote(_) | ImageTarget::Fetched { .. } => ImageSize::Known {
-                width: CARD_WIDTH,
-                height: CARD_HEIGHT,
-            },
+            // A remote image not fetched or that cannot be shown, or a
+            // `data:` image that cannot: its card.
+            ImageTarget::Remote(_) | ImageTarget::Fetched { .. } | ImageTarget::Data(_) => {
+                ImageSize::Known {
+                    width: CARD_WIDTH,
+                    height: CARD_HEIGHT,
+                }
+            }
             _ => ImageSize::Failed,
         }
     }
@@ -355,6 +404,9 @@ pub(crate) struct ImageRequest {
     pub cancel: CancelFlag,
     /// A fetched remote image: decoded without access to any file.
     pub remote: bool,
+    /// A `data:` image: these bytes, not `path`, decoded without access
+    /// to any file.
+    pub bytes: Option<Arc<[u8]>>,
 }
 
 /// Decodes a request into a GPUI image (blocking: the background executor
@@ -362,12 +414,13 @@ pub(crate) struct ImageRequest {
 pub(crate) fn load(r: &ImageRequest) -> Result<Arc<RenderImage>, MediaError> {
     #[cfg(test)]
     tests::count_job();
-    let engine = if r.remote {
-        remote_engine()
+    let decoded = if let Some(bytes) = &r.bytes {
+        remote_engine().load_bytes(bytes, r.request, &r.cancel)?
+    } else if r.remote {
+        remote_engine().load_path(&r.path, r.request, &r.cancel)?
     } else {
-        media_engine(&r.root)
+        media_engine(&r.root).load_path(&r.path, r.request, &r.cancel)?
     };
-    let decoded = engine.load_path(&r.path, r.request, &r.cancel)?;
     if r.cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
@@ -403,7 +456,25 @@ pub(crate) struct Images {
     tick: u64,
     /// Images evicted, for the window to drop from its atlas.
     evicted: Vec<Arc<RenderImage>>,
+    /// The stamp each local image file was first drawn with.
+    stamps: HashMap<PathBuf, Stamp>,
+    /// Image files whose stamp changed since: their sizes are probed
+    /// again ([`crate::reader::Reader::reprobe_images`]).
+    changed: Vec<PathBuf>,
+    /// When the image files were last checked for changes, and where the
+    /// next check starts in `stamps`.
+    polled: Option<std::time::Instant>,
+    poll_from: usize,
 }
+
+/// How often the image files drawn are checked for changes on disk while
+/// the view draws (each check `stat`s at most [`POLL_FILES`] of them).
+const POLL_EVERY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_secs(2)
+};
+const POLL_FILES: usize = 64;
 
 fn image_bytes(image: &RenderImage) -> usize {
     (0..image.frame_count())
@@ -427,6 +498,57 @@ impl Images {
             Ok(k) => k,
             Err(e) => return ImageShown::Failed(e),
         };
+        if let Some(stamp) = key.file_stamp() {
+            match self.stamps.get_mut(path) {
+                Some(old) if *old != stamp => {
+                    *old = stamp;
+                    if !self.changed.iter().any(|p| p == path) {
+                        self.changed.push(path.to_path_buf());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    self.stamps.insert(path.to_path_buf(), stamp);
+                }
+            }
+        }
+        self.shown_key(key, item, |key, cancel| ImageRequest {
+            key,
+            path: path.to_path_buf(),
+            root: root.to_path_buf(),
+            request,
+            cancel,
+            remote,
+            bytes: None,
+        })
+    }
+
+    /// What `data:` image `data` shows in a box of `request`'s device
+    /// pixels, for item `item`: starts a job when it is not decoded yet.
+    pub fn shown_data(
+        &mut self,
+        data: &DataImage,
+        request: DecodeRequest,
+        item: ItemId,
+    ) -> ImageShown {
+        let key = data.key.with_request(request);
+        self.shown_key(key, item, |key, cancel| ImageRequest {
+            key,
+            path: PathBuf::new(),
+            root: PathBuf::new(),
+            request,
+            cancel,
+            remote: true,
+            bytes: Some(Arc::clone(&data.bytes)),
+        })
+    }
+
+    fn shown_key(
+        &mut self,
+        key: MediaKey,
+        item: ItemId,
+        make: impl FnOnce(MediaKey, CancelFlag) -> ImageRequest,
+    ) -> ImageShown {
         self.tick += 1;
         match self.entries.get_mut(&key) {
             Some(Entry::Ready { image, used }) => {
@@ -444,14 +566,7 @@ impl Images {
                         seen: true,
                     },
                 );
-                self.requests.push(ImageRequest {
-                    key: key.clone(),
-                    path: path.to_path_buf(),
-                    root: root.to_path_buf(),
-                    request,
-                    cancel,
-                    remote,
-                });
+                self.requests.push(make(key.clone(), cancel));
             }
         }
         let waiting = self.waiting.entry(key).or_default();
@@ -459,6 +574,42 @@ impl Images {
             waiting.push(item);
         }
         ImageShown::Pending
+    }
+
+    /// The image files that changed on disk since they were first drawn
+    /// (checked while drawing, at most every [`POLL_EVERY`]).
+    pub fn take_changed_files(&mut self) -> Vec<PathBuf> {
+        let due = self.polled.is_none_or(|t| t.elapsed() >= POLL_EVERY);
+        if due && !self.stamps.is_empty() {
+            self.polled = Some(std::time::Instant::now());
+            self.poll_files();
+        }
+        std::mem::take(&mut self.changed)
+    }
+
+    /// `stat`s the next [`POLL_FILES`] image files drawn; those whose
+    /// time or size changed are taken as changed.
+    fn poll_files(&mut self) {
+        let n = self.stamps.len();
+        let start = self.poll_from % n;
+        let mut seen = Vec::new();
+        for (path, stamp) in self.stamps.iter_mut().skip(start).take(POLL_FILES) {
+            let now = std::fs::metadata(path)
+                .map(|m| (m.modified().ok(), m.len()))
+                .ok();
+            if let Some(now) = now
+                && now != *stamp
+            {
+                *stamp = now;
+                seen.push(path.clone());
+            }
+        }
+        self.poll_from = (start + POLL_FILES) % n.max(1);
+        for p in seen {
+            if !self.changed.contains(&p) {
+                self.changed.push(p);
+            }
+        }
     }
 
     /// The jobs to start.
@@ -578,6 +729,8 @@ impl Images {
         self.waiting.clear();
         self.requests.clear();
         self.bytes = 0;
+        self.stamps.clear();
+        self.changed.clear();
     }
 
     /// Images decoded and kept.
@@ -596,6 +749,94 @@ impl Images {
             .values()
             .filter(|e| matches!(e, Entry::Pending { .. }))
             .count()
+    }
+}
+
+impl Reader {
+    /// Image files that changed on disk: probed again off the UI thread;
+    /// the images whose size changed get boxes of the new size.
+    pub(crate) fn reprobe_images(&mut self, paths: Vec<PathBuf>, cx: &mut gpui::Context<'_, Self>) {
+        let Some(targets) = self
+            .state
+            .borrow()
+            .doc
+            .as_ref()
+            .map(|d| Arc::clone(&d.images))
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let job = Arc::clone(&targets);
+            let probes = cx
+                .background_executor()
+                .spawn_with_priority(gpui::Priority::Low, async move {
+                    let engine = media_engine(job.root());
+                    paths
+                        .into_iter()
+                        .map(|p| {
+                            let r = probe(&engine, &p);
+                            (p, r)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |reader, cx| reader.reprobed(&targets, probes, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// New probes of changed image files landed.
+    fn reprobed(
+        &mut self,
+        targets: &Arc<ImageTargets>,
+        probes: Vec<(PathBuf, Result<Probe, MediaError>)>,
+        cx: &mut gpui::Context<'_, Self>,
+    ) {
+        let current = self
+            .state
+            .borrow()
+            .doc
+            .as_ref()
+            .is_some_and(|d| Arc::ptr_eq(&d.images, targets));
+        if !current {
+            // The document was built again meanwhile, with new probes.
+            return;
+        }
+        let mut dests = std::collections::HashSet::new();
+        for (path, probe) in probes {
+            for d in targets.local_destinations(&path) {
+                targets.set(
+                    &d,
+                    ImageTarget::Local {
+                        path: path.clone(),
+                        probe: probe.clone(),
+                    },
+                );
+                dests.insert(d);
+            }
+        }
+        if dests.is_empty() {
+            return;
+        }
+        // Sizes that changed lay their items out again; the items whose
+        // image kept its size are drawn again for the new pixels.
+        self.refresh_images(&dests);
+        let mut st = self.state.borrow_mut();
+        let ids: Vec<ItemId> = st.doc.as_ref().map_or_else(Vec::new, |doc| {
+            (0..doc.tree.items().len())
+                .filter(|&ix| {
+                    doc.tree
+                        .item_inline(ix)
+                        .is_some_and(|c| c.images.iter().any(|i| dests.contains(&*i.destination)))
+                })
+                .map(|ix| doc.tree.items()[ix].id)
+                .collect()
+        });
+        st.cache.forget(ids.iter().copied());
+        st.stale.extend(ids);
+        drop(st);
+        cx.notify();
     }
 }
 

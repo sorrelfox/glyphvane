@@ -357,3 +357,116 @@ fn edits_next_to_embeds_and_callouts_keep_the_tree_valid() {
     let fresh = ob_with(&d.text.clone(), &vault);
     assert_eq!(outline(&d.render), outline(&fresh.render));
 }
+
+fn ob_unchecked(text: &str) -> Doc {
+    build_with(
+        text,
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources::default(),
+    )
+}
+
+#[test]
+fn inline_footnotes_are_numbered_into_the_footnote_section() {
+    let md = "Text^[note *one*] and[^a] more^[two].\n\n[^a]: Def a.\n";
+    let d = ob_unchecked(md);
+    let rt = &d.render;
+    // One sequence with the references, in document order.
+    let c = rt.nodes()[0].inline().expect("paragraph");
+    let numbers: Vec<u32> = c.footnotes.iter().map(|f| f.number).collect();
+    assert_eq!(numbers, [1, 2, 3]);
+    assert_eq!(rt.item_text(0).text, "Text1 and2 more3.");
+    let section = rt.footnote_section_start();
+    let texts: Vec<String> = (section..rt.items().len())
+        .map(|ix| rt.item_text(ix).text.clone())
+        .collect();
+    assert_eq!(texts, ["", "note one", "Def a.", "two"]);
+    // The definition is styled like the reference's text (emphasis kept).
+    let def = rt.item_inline(section + 1).expect("definition");
+    assert!(
+        def.spans
+            .iter()
+            .any(|s| matches!(s.role, InlineRole::FootnoteBackref(0)))
+    );
+    // Jumps both ways go through the inline footnote's label.
+    let label = c.footnotes[0].label.to_string();
+    assert_eq!(rt.footnote_item(&label), Some(section + 1));
+    let back = rt.footnote_refs(&label);
+    assert_eq!(back.len(), 1);
+    assert_eq!(&md[back[0].1.clone()], "^[note *one*]");
+    // A position inside the note still finds the paragraph.
+    let inside = md.find("one").expect("one");
+    assert_eq!(rt.item_at(inside), Some(0));
+}
+
+#[test]
+fn a_document_with_only_inline_footnotes_gets_a_section() {
+    let d = ob_unchecked("# Head^[in heading]\n\n| a |\n|---|\n| cell^[in cell] |\n");
+    let rt = &d.render;
+    let section = rt.footnote_section_start();
+    assert!(section < rt.items().len());
+    let texts: Vec<String> = (section + 1..rt.items().len())
+        .map(|ix| rt.item_text(ix).text.clone())
+        .collect();
+    assert_eq!(texts, ["in heading", "in cell"]);
+    // Profiles without inline footnotes keep the text.
+    let gfm = common::build_with(
+        "A^[b].\n",
+        ParseOptions::builtin(ProfileId::GfmFile),
+        RenderOptions::builtin(ProfileId::GfmFile),
+        Sources::default(),
+    );
+    assert_eq!(gfm.render.item_text(0).text, "A^[b].");
+    assert_eq!(
+        gfm.render.footnote_section_start(),
+        gfm.render.items().len()
+    );
+}
+
+#[test]
+fn typing_an_inline_footnote_rebuilds_the_document() {
+    let mut d = ob_unchecked("one\n\ntwo\n");
+    let at = d.text.find("two").expect("two") + 3;
+    let (_, report) = d.edit(at..at, "^[x]", Sources::default());
+    assert!(report.full);
+    let fresh = RenderTree::build(
+        &d.tree,
+        &d.model,
+        d.text.as_str(),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources::default(),
+    );
+    assert_eq!(common::canonical(&d.render), common::canonical(&fresh));
+    assert_eq!(d.render.item_text(1).text, "two1");
+    // Removing it drops the section again.
+    let (_, report) = d.edit(at..at + 4, "", Sources::default());
+    assert!(report.full);
+    assert_eq!(d.render.footnote_section_start(), d.render.items().len());
+}
+
+#[test]
+fn markdown_images_take_a_size_from_their_alt_text() {
+    let d = ob("![cat|60](a.png) ![dog | 30x20](https://x.test/b.png) ![plain|wide](c.png)\n");
+    let c = d.render.nodes()[0].inline().expect("inline");
+    let alts: Vec<&str> = c.images.iter().map(|i| &*i.alt).collect();
+    // The size is not part of the alt text; a non-size suffix stays.
+    assert_eq!(alts, ["cat", "dog", "plain|wide"]);
+    let dump = d.render.dump();
+    for size in ["60x30", "30x20", "200x100"] {
+        assert!(dump.contains(size), "{size} in {dump}");
+    }
+    // GitHub reads the alt text as written.
+    let gfm = common::build_with(
+        "![cat|60](a.png)\n",
+        ParseOptions::builtin(ProfileId::GfmFile),
+        RenderOptions::builtin(ProfileId::GfmFile),
+        Sources {
+            links: &Vault::default(),
+            images: &Images,
+        },
+    );
+    let c = gfm.render.nodes()[0].inline().expect("inline");
+    assert_eq!(&*c.images[0].alt, "cat|60");
+    assert!(gfm.render.dump().contains("200x100"));
+}

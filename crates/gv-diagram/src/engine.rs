@@ -476,15 +476,19 @@ impl DiagramEngine {
             max_elements: caps.max_elements,
         };
         match convert::convert(&fixed, &options, list_caps) {
-            Ok((width, height, items, skipped)) => {
-                if skipped > 0 {
-                    log::debug!("gv-diagram: {family}: {skipped} unsupported SVG nodes skipped");
+            Ok(c) => {
+                if c.skipped > 0 {
+                    log::debug!(
+                        "gv-diagram: {family}: {} unsupported SVG nodes skipped",
+                        c.skipped
+                    );
                 }
                 Outcome::Rendered(Arc::new(Diagram {
                     family,
-                    width,
-                    height,
-                    items,
+                    width: c.width,
+                    height: c.height,
+                    items: c.items,
+                    links: c.links,
                 }))
             }
             Err(ConvertError::TooLarge { what, max }) => too_large(

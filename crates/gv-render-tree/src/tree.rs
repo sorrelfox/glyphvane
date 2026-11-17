@@ -86,6 +86,10 @@ pub struct RenderOptions {
     /// br`: Obsidian unless `strictLineBreaks`, GitHub comments), not a
     /// space.
     pub soft_breaks: bool,
+    /// A Markdown image's alt text may end with its size, as Obsidian
+    /// reads it (`![alt|300](x.png)`, `![alt|300x200](x.png)`); the
+    /// profiles with note embeds.
+    pub alt_sizes: bool,
 }
 
 /// The macros in force for every formula of a tree, from one pass over
@@ -112,6 +116,7 @@ impl RenderOptions {
             mermaid: false,
             obsidian_fences: false,
             soft_breaks: false,
+            alt_sizes: false,
         }
     }
 
@@ -124,6 +129,7 @@ impl RenderOptions {
             mermaid: profile.switches.mermaid,
             obsidian_fences: profile.switches.embeds,
             soft_breaks: profile.switches.soft_break == SoftBreak::Br,
+            alt_sizes: profile.switches.embeds,
             ..Self::commonmark()
         }
     }
@@ -136,6 +142,7 @@ impl RenderOptions {
             mermaid: switches.mermaid,
             obsidian_fences: switches.embeds,
             soft_breaks: switches.soft_break == SoftBreak::Br,
+            alt_sizes: switches.embeds,
             ..Self::commonmark()
         }
     }
@@ -150,6 +157,7 @@ impl RenderOptions {
             mermaid: p.mermaid,
             obsidian_fences: p.obsidian_fences,
             soft_breaks: p.soft_breaks,
+            alt_sizes: p.alt_sizes,
             ..self
         }
     }
@@ -214,6 +222,11 @@ pub struct RenderTree {
 
 /// The block id of the rule above the footnote section.
 pub const FOOTNOTE_RULE: BlockId = BlockId(u64::MAX);
+
+/// Inline footnote `n`'s definition in the footnote section is block
+/// `INLINE_NOTE_IDS - n` (below the ids of the backreference lines, which
+/// count down from `u64::MAX - 1`; above the synthetic ids of embeds).
+const INLINE_NOTE_IDS: u64 = u64::MAX - (1 << 33);
 
 impl RenderTree {
     /// Builds the render tree of `tree` (the parse of `text`), with
@@ -291,6 +304,8 @@ impl RenderTree {
             .into_iter()
             .filter(|s| s.number.is_some())
             .collect();
+        let refs = self.refs.clone().unwrap_or_else(|| tree.ref_map(text));
+        defs.extend(self.inline_notes(&index, tree, text, sources, &refs));
         defs.sort_by_key(|s| s.number);
         defs.dedup_by_key(|s| s.number);
         if defs.is_empty() {
@@ -307,8 +322,12 @@ impl RenderTree {
             lookups: None,
             table: false,
         });
-        let refs = self.refs.clone().unwrap_or_else(|| tree.ref_map(text));
         for mut def in defs {
+            if def.label.starts_with('\u{1}') {
+                // An inline footnote: built whole, backreference included.
+                self.nodes.extend(def.nodes);
+                continue;
+            }
             let count = index.references(&def.label);
             let last = def.nodes.last();
             let ends_with_paragraph = last
@@ -359,6 +378,7 @@ impl RenderTree {
                     block: def.id,
                     footnotes: Some(&index),
                     soft_breaks: self.opts.soft_breaks,
+                    alt_sizes: self.opts.alt_sizes,
                     title: None,
                 };
                 let content = crate::inline::build_backrefs_only(at, count, &cx);
@@ -375,6 +395,87 @@ impl RenderTree {
             }
             self.nodes.extend(def.nodes);
         }
+    }
+
+    /// The definitions of the inline footnotes (`^[…]`) for the footnote
+    /// section: one paragraph each, its text then its backreference.
+    fn inline_notes<S: TextSource + ?Sized>(
+        &self,
+        index: &FootnoteIndex,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        refs: &RefMap,
+    ) -> Vec<Section> {
+        let opts = tree.options().inline();
+        let mut out = Vec::with_capacity(index.inline.len());
+        for note in &index.inline {
+            let parsed = if note.cell {
+                let Some(cell) = note.segments.first() else {
+                    continue;
+                };
+                gv_syntax::inline::parse_table_cell(
+                    text,
+                    cell.clone(),
+                    refs,
+                    gv_syntax::inline::InlineOptions {
+                        block_ids: false,
+                        ..opts
+                    },
+                )
+            } else {
+                gv_syntax::inline::parse_inlines_with(
+                    text,
+                    gv_syntax::inline::InlineInput {
+                        segments: &note.segments,
+                    },
+                    refs,
+                    opts,
+                )
+            };
+            let id = BlockId(INLINE_NOTE_IDS - u64::from(note.number));
+            let cx = crate::inline::InlineCx {
+                styles: &self.opts.styles,
+                metrics: &self.opts.metrics,
+                sources,
+                block: id,
+                footnotes: Some(index),
+                soft_breaks: self.opts.soft_breaks,
+                alt_sizes: self.opts.alt_sizes,
+                title: None,
+            };
+            let base = note.source.start;
+            let Some(content) =
+                crate::inline::build_inline_note(&parsed, note.source.start, base, &cx)
+            else {
+                continue;
+            };
+            let label: Arc<str> = Arc::from(note.label.as_str());
+            let context = Context::from(vec![crate::node::Frame {
+                id,
+                kind: crate::node::FrameKind::Footnote {
+                    number: note.number,
+                    label: Arc::clone(&label),
+                },
+            }]);
+            out.push(Section {
+                label,
+                number: Some(note.number),
+                id,
+                range: note.source.clone(),
+                nodes: vec![BlockNode {
+                    id,
+                    kind: NodeKind::Paragraph(Arc::new(content)),
+                    source: note.source.clone(),
+                    context,
+                    block: note.block_range.clone(),
+                    top: note.source.clone(),
+                    lookups: None,
+                    table: false,
+                }],
+            });
+        }
+        out
     }
 
     /// The document's footnote numbers, if it defines footnotes.
@@ -496,6 +597,11 @@ impl RenderTree {
             (s, e) = (s2, e2);
         }
         if !stable {
+            return self.rebuild(tree, model, text, sources);
+        }
+        if tree.options().inline().inline_footnotes && holds_inline_note(text, s..e) {
+            // The region may now hold an inline footnote: numbered
+            // document-wide.
             return self.rebuild(tree, model, text, sources);
         }
         let old_end = (e as isize - delta).max(s as isize) as usize;
@@ -1174,4 +1280,12 @@ impl<S: TextSource + ?Sized> Visitor for LeafFinder<'_, S> {
             self.found = self.builder.nodes.pop();
         }
     }
+}
+
+/// Whether `range` of `text` holds `^[` (an inline footnote may start
+/// there).
+fn holds_inline_note<S: TextSource + ?Sized>(text: &S, range: Range<usize>) -> bool {
+    let mut buf = Vec::new();
+    text.copy_range(range, &mut buf);
+    buf.windows(2).any(|w| w == b"^[")
 }

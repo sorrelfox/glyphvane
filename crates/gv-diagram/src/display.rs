@@ -77,6 +77,25 @@ pub struct DiagramItem {
     pub clip: Option<Rect>,
 }
 
+/// Where a clickable part of a diagram goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// A Mermaid link (`click A href "…"`, `click A "…"`), as written
+    /// after merman's sanitizing: the host applies its own link policy.
+    Href(String),
+    /// An Obsidian internal link: a node of class `internal-link`, whose
+    /// text names the note.
+    Note(String),
+}
+
+/// A clickable part of a diagram: its bounds in CSS pixels at zoom 1, and
+/// where it goes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagramLink {
+    pub rect: Rect,
+    pub target: LinkTarget,
+}
+
 /// A rendered Mermaid diagram, independent of theme and scale.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diagram {
@@ -89,6 +108,9 @@ pub struct Diagram {
     /// What is drawn, in paint order. The ground is not included: the host
     /// paints [`Role::Background`] (or nothing) under it.
     pub items: Vec<DiagramItem>,
+    /// The clickable parts, in document order (a later one is drawn over
+    /// an earlier one).
+    pub links: Vec<DiagramLink>,
 }
 
 impl Diagram {
@@ -102,6 +124,16 @@ impl Diagram {
                 .map(|i| {
                     std::mem::size_of::<DiagramItem>()
                         + i.path.els.len() * std::mem::size_of::<PathEl>()
+                })
+                .sum::<usize>()
+            + self
+                .links
+                .iter()
+                .map(|l| {
+                    std::mem::size_of::<DiagramLink>()
+                        + match &l.target {
+                            LinkTarget::Href(s) | LinkTarget::Note(s) => s.len(),
+                        }
                 })
                 .sum::<usize>()
     }

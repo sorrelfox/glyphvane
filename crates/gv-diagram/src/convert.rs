@@ -6,7 +6,9 @@
 
 use usvg::tiny_skia_path::{self, PathSegment, PathStroker, Transform};
 
-use crate::display::{DiagramItem, DiagramPath, FillRule, Paint, PathEl, Rect};
+use crate::display::{
+    DiagramItem, DiagramLink, DiagramPath, FillRule, LinkTarget, Paint, PathEl, Rect,
+};
 use crate::palette::{self, Role};
 
 /// Why a conversion stopped.
@@ -36,14 +38,24 @@ struct Builder {
     skipped: usize,
 }
 
+/// What a conversion made.
+pub(crate) struct Converted {
+    /// Size in CSS pixels.
+    pub width: f32,
+    pub height: f32,
+    pub items: Vec<DiagramItem>,
+    pub links: Vec<DiagramLink>,
+    /// Unsupported nodes skipped.
+    pub skipped: usize,
+}
+
 /// Parses `svg` with `options` (its font database must hold the fonts
-/// merman measured with) and converts it. Returns the size in CSS pixels,
-/// the items and the number of unsupported nodes skipped.
+/// merman measured with) and converts it.
 pub(crate) fn convert(
     svg: &str,
     options: &usvg::Options<'_>,
     caps: ListCaps,
-) -> Result<(f32, f32, Vec<DiagramItem>, usize), ConvertError> {
+) -> Result<Converted, ConvertError> {
     let xml = usvg::roxmltree::ParsingOptions {
         allow_dtd: false,
         nodes_limit: u32::try_from(caps.max_elements).unwrap_or(u32::MAX),
@@ -61,7 +73,80 @@ pub(crate) fn convert(
         skipped: 0,
     };
     b.group(tree.root(), Transform::identity(), 1.0, None)?;
-    Ok((size.width(), size.height(), b.items, b.skipped))
+    let links = links(&doc, &tree);
+    Ok(Converted {
+        width: size.width(),
+        height: size.height(),
+        items: b.items,
+        links,
+        skipped: b.skipped,
+    })
+}
+
+/// Links found at most per diagram.
+const MAX_LINKS: usize = 1_000;
+
+/// The clickable parts of the SVG: `<a>` elements with a link (Mermaid's
+/// `click`), and nodes of class `internal-link` (Obsidian's internal
+/// links, named by their text). Each is placed by the first element with
+/// an id at or below it, through usvg's tree (transforms applied).
+fn links(doc: &usvg::roxmltree::Document<'_>, tree: &usvg::Tree) -> Vec<DiagramLink> {
+    const XLINK: &str = "http://www.w3.org/1999/xlink";
+    let mut out = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        if out.len() >= MAX_LINKS {
+            break;
+        }
+        let target = if node.tag_name().name() == "a" {
+            let href = node
+                .attribute((XLINK, "href"))
+                .or_else(|| node.attribute("href"))
+                .map(str::trim)
+                .filter(|h| !h.is_empty() && *h != "about:blank" && !h.starts_with('#'));
+            match href {
+                Some(h) => LinkTarget::Href(h.to_owned()),
+                None => continue,
+            }
+        } else if node
+            .attribute("class")
+            .is_some_and(|c| c.split_ascii_whitespace().any(|c| c == "internal-link"))
+        {
+            let mut text = String::new();
+            for t in node.descendants().filter(|n| n.is_text()) {
+                let piece = t.text().unwrap_or("").trim();
+                if !piece.is_empty() {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(piece);
+                }
+            }
+            if text.is_empty() {
+                continue;
+            }
+            LinkTarget::Note(text)
+        } else {
+            continue;
+        };
+        let rect = node
+            .descendants()
+            .filter_map(|n| n.attribute("id"))
+            .find_map(|id| tree.node_by_id(id))
+            .map(usvg::Node::abs_bounding_box)
+            .filter(|r| r.width() > 0.0 && r.height() > 0.0);
+        if let Some(r) = rect {
+            out.push(DiagramLink {
+                rect: Rect {
+                    x: r.x(),
+                    y: r.y(),
+                    width: r.width(),
+                    height: r.height(),
+                },
+                target,
+            });
+        }
+    }
+    out
 }
 
 impl Builder {

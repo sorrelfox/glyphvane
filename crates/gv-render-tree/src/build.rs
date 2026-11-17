@@ -179,6 +179,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             block,
             footnotes: self.footnotes.as_deref(),
             soft_breaks: self.opts.soft_breaks,
+            alt_sizes: self.opts.alt_sizes,
             title: self.title_cx,
         }
     }
@@ -436,6 +437,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             block: leaf.id,
             footnotes: footnotes.as_deref(),
             soft_breaks: self.opts.soft_breaks,
+            alt_sizes: self.opts.alt_sizes,
             title: None,
         };
         let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));

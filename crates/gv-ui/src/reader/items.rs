@@ -290,7 +290,21 @@ pub(crate) fn fit_item(
 ) -> (f32, f32) {
     let content = box_width(item, column, m, cache, block);
     let w = text_width_in(item, content, m, wrapped);
-    fit_boxes(item, block, w);
+    let zoom = if matches!(item.kind, ItemKind::Diagram { .. }) {
+        cache.diagram_zoom(item.id.block)
+    } else {
+        1.0
+    };
+    if zoom > 1.0 {
+        // Zoomed in: its own size times the zoom (built so), scrolling
+        // sideways when wider than the column.
+    } else if zoom < 1.0 {
+        // Zoomed out: a part of its fitted size.
+        let fitted = block.borrow().widest_box().min(w);
+        fit_boxes(item, block, fitted * zoom);
+    } else {
+        fit_boxes(item, block, w);
+    }
     (content, w)
 }
 
@@ -992,6 +1006,30 @@ pub(crate) struct ItemCache {
     /// The tables and diagrams whose layout depends on [`Self::limit`]:
     /// too wide for the text column, so grown or able to grow.
     wide: std::collections::HashSet<BlockId>,
+    /// The diagrams zoomed with their buttons, by fence block: a factor
+    /// of the diagram's own size (absent: 1, fitted to the column).
+    diagram_zoom: HashMap<BlockId, f32>,
+}
+
+/// The zoom steps of a diagram: factors of its own size.
+const DIAGRAM_ZOOMS: [f32; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+
+/// The zoom one step in (`step` > 0) or out (< 0) from `zoom`, or 1 (`0`).
+pub(crate) fn diagram_zoom_step(zoom: f32, step: i8) -> f32 {
+    match step.cmp(&0) {
+        std::cmp::Ordering::Equal => 1.0,
+        std::cmp::Ordering::Greater => DIAGRAM_ZOOMS
+            .iter()
+            .copied()
+            .find(|z| *z > zoom + 1e-3)
+            .unwrap_or(zoom),
+        std::cmp::Ordering::Less => DIAGRAM_ZOOMS
+            .iter()
+            .rev()
+            .copied()
+            .find(|z| *z < zoom - 1e-3)
+            .unwrap_or(zoom),
+    }
 }
 
 /// What the view shows images and pictures with.
@@ -1125,6 +1163,25 @@ impl CodeHighlights {
 }
 
 impl ItemCache {
+    /// The zoom of the diagram of block `block` (1: fitted to the column).
+    pub fn diagram_zoom(&self, block: BlockId) -> f32 {
+        self.diagram_zoom.get(&block).copied().unwrap_or(1.0)
+    }
+
+    /// Sets the zoom of the diagram of block `block`.
+    pub fn set_diagram_zoom(&mut self, block: BlockId, zoom: f32) {
+        if (zoom - 1.0).abs() < 1e-3 {
+            self.diagram_zoom.remove(&block);
+        } else {
+            self.diagram_zoom.insert(block, zoom);
+        }
+    }
+
+    /// Forgets every diagram's zoom (another document).
+    pub fn reset_diagram_zoom(&mut self) {
+        self.diagram_zoom.clear();
+    }
+
     pub fn clear(&mut self) {
         self.items.clear();
         self.tables.clear();
@@ -1364,15 +1421,11 @@ impl ItemCache {
         };
         let (title, card) = match self.diagrams.shown(item.id.block, code, item.id) {
             Shown::Rendered(d) => {
-                let (w, h) = (d.width * zoom, d.height * zoom);
-                return one_box(
-                    w,
-                    h,
-                    Some(BoxContent::Diagram {
-                        diagram: d,
-                        scale: zoom,
-                    }),
-                );
+                // Zoomed in: built bigger; zoomed out: fitted smaller
+                // ([`fit_item`]).
+                let scale = zoom * self.diagram_zoom(item.id.block).max(1.0);
+                let (w, h) = (d.width * scale, d.height * scale);
+                return one_box(w, h, Some(BoxContent::Diagram { diagram: d, scale }));
             }
             Shown::Pending => {
                 *pending = true;
@@ -1583,20 +1636,36 @@ impl ItemCache {
                     .or_default()
                     .push(card(message, None));
             }
+            Some(ImageTarget::Data(Ok(data))) if data.probe.is_ok() => {
+                let request = self.decode_request(w, h);
+                match self.images.shown_data(&data, request, id) {
+                    ImageShown::Image(image) => block.set_box_content(
+                        box_id,
+                        BoxContent::Image(gpui::ImageSource::Render(image)),
+                    ),
+                    ImageShown::Pending => *pending = true,
+                    ImageShown::Failed(e) => {
+                        block.set_box_content(box_id, BoxContent::Blank);
+                        self.image_cards
+                            .entry(id)
+                            .or_default()
+                            .push(card(e.card_message(), None));
+                    }
+                }
+            }
+            Some(ImageTarget::Data(Ok(super::media::DataImage { probe: Err(e), .. })))
+            | Some(ImageTarget::Data(Err(e))) => {
+                block.set_box_content(box_id, BoxContent::Blank);
+                self.image_cards
+                    .entry(id)
+                    .or_default()
+                    .push(card(e.card_message(), None));
+            }
             Some(ImageTarget::Local { path, probe: Ok(_) }) => {
                 let Some(root) = self.targets.as_ref().map(|t| t.root().to_path_buf()) else {
                     return;
                 };
-                let device = |v: f32| {
-                    // In range: a box's side in device pixels.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let d = (v * self.view.scale).ceil().max(1.0) as u32;
-                    d
-                };
-                let request = gv_media::DecodeRequest {
-                    fit: Some((device(w), device(h))),
-                    animate: !self.view.reduce_motion,
-                };
+                let request = self.decode_request(w, h);
                 match self.images.shown(&path, &root, request, id, remote) {
                     ImageShown::Image(image) => block.set_box_content(
                         box_id,
@@ -1625,6 +1694,20 @@ impl ItemCache {
                     .push(card(e.card_message(), open));
             }
             _ => {}
+        }
+    }
+
+    /// What to decode for a box of `w` × `h` px.
+    fn decode_request(&self, w: f32, h: f32) -> gv_media::DecodeRequest {
+        let device = |v: f32| {
+            // In range: a box's side in device pixels.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let d = (v * self.view.scale).ceil().max(1.0) as u32;
+            d
+        };
+        gv_media::DecodeRequest {
+            fit: Some((device(w), device(h))),
+            animate: !self.view.reduce_motion,
         }
     }
 
