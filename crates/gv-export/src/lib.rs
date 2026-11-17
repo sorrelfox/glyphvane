@@ -28,7 +28,10 @@
 //!    `.html` beside them; unresolved links become plain text with a class.
 //!    Local images are read and inlined as `data:` URIs (or listed as
 //!    [`Asset`]s for an `assets/` folder) within size caps; remote images
-//!    stay plain references and are never fetched.
+//!    stay plain references and are never fetched here. With the *embed
+//!    remote images* option, a [`RemoteImages`] given by the caller
+//!    fetches what its remote-content rules allow, and those images are
+//!    embedded like local ones.
 //! 4. **Wrap.** The trusted fragments replace their placeholders, and the
 //!    body goes into a document with a stylesheet built from the light
 //!    theme's tokens ([`ExportTheme`]), a Content Security Policy that
@@ -76,6 +79,15 @@ pub trait WikiResolver: Send + Sync {
     fn resolve(&self, target: &str) -> Option<PathBuf>;
 }
 
+/// Fetches remote images for the *embed remote images* option of an HTML
+/// export. Called off the UI thread, while the export runs.
+pub trait RemoteImages: Send + Sync {
+    /// The file holding the image at `url` (a cache file), or why it was
+    /// not fetched (the remote-content setting does not allow it, or the
+    /// fetch failed), for the export's report.
+    fn fetch(&self, url: &str) -> Result<PathBuf, String>;
+}
+
 /// What an export needs besides the document.
 #[derive(Clone)]
 pub struct ExportOptions {
@@ -96,6 +108,9 @@ pub struct ExportOptions {
     pub theme: ExportTheme,
     pub diagrams: Option<Arc<dyn DiagramRenderer>>,
     pub wiki: Option<Arc<dyn WikiResolver>>,
+    /// Embeds remote images it fetches (HTML only); `None` keeps them as
+    /// references.
+    pub remote: Option<Arc<dyn RemoteImages>>,
 }
 
 impl std::fmt::Debug for ExportOptions {
@@ -107,6 +122,7 @@ impl std::fmt::Debug for ExportOptions {
             .field("images", &self.images)
             .field("strip_style", &self.strip_style)
             .field("toc", &self.toc)
+            .field("remote", &self.remote.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -126,6 +142,7 @@ impl ExportOptions {
             theme,
             diagrams: None,
             wiki: None,
+            remote: None,
         }
     }
 
@@ -203,7 +220,11 @@ pub fn export_html(tree: &RenderTree, opts: &ExportOptions) -> Export {
 /// Reading view copies.
 pub fn rich_copy(tree: &RenderTree, range: Range<usize>, opts: &ExportOptions) -> RichCopy {
     let body = emit::emit(tree, opts, Some(range.clone()));
-    // The clipboard carries one fragment: images are always inlined.
+    // The clipboard carries one fragment: images are always inlined, and
+    // remote ones stay references (a copy never fetches).
+    let mut opts = opts.clone();
+    opts.remote = None;
+    let opts = &opts;
     let store = Arc::new(assets::Store::new(opts, ImageMode::Embed));
     let clean = sanitize::clean(&body.parts(), opts, &store);
     let html = body.restore(&clean);

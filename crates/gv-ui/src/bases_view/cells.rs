@@ -14,11 +14,14 @@
 //!   `script`, `style` and similar elements dropped, entities decoded
 //!   ([`html_text`]). No markup is ever rendered.
 //! - `image()` as a thumbnail (through the covers' loader), `icon()` as
-//!   its name.
+//!   the icon of that name from the app's icon set (Lucide names, with or
+//!   without a `lucide-` prefix, [`icon_path`]); a name the set does not
+//!   have shows as text.
 //! - An error as "Error: ..." in the error colour, the whole message in a
 //!   tooltip.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, InteractiveElement as _,
@@ -38,6 +41,35 @@ pub(crate) const MAX_CHIPS: usize = 12;
 
 /// Height of a thumbnail in a line.
 const THUMB: f32 = 20.0;
+
+/// Size of an `icon()` in a line.
+const ICON: f32 = 14.0;
+
+/// The asset path of `icon()` value `name` in the app's icon set: a Lucide
+/// name (`arrow-up`, `lucide-arrow-up`, any case); `None` when the set
+/// does not have it.
+pub(crate) fn icon_path(name: &str) -> Option<SharedString> {
+    static SERVED: OnceLock<HashSet<SharedString>> = OnceLock::new();
+    let served = SERVED.get_or_init(|| {
+        use gpui::AssetSource as _;
+        crate::icons::Assets
+            .list("icons/")
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    let name = name.trim().to_ascii_lowercase();
+    let name = name.strip_prefix("lucide-").unwrap_or(&name);
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return None;
+    }
+    let path = SharedString::from(format!("icons/{name}.svg"));
+    served.contains(&path).then_some(path)
+}
 
 /// A tooltip (inverted colours, as the window's tooltips).
 pub(crate) struct Tooltip {
@@ -208,10 +240,21 @@ impl BasesView {
             }
             Value::Html(html) => plain(html_text(html), colors.text),
             Value::Image(_) => match Cover::of(v) {
-                Some(cover) => self.thumbnail(&cover, colors, cx),
+                Some(cover) => self.thumbnail(&cover, (place, item), colors, cx),
                 None => plain(v.display(), colors.text),
             },
-            Value::Icon(name) => plain(name.to_string(), colors.secondary),
+            Value::Icon(name) => match icon_path(name) {
+                Some(path) => {
+                    let selector = format!("bases-icon:{name}");
+                    div()
+                        .flex_none()
+                        .debug_selector(move || selector)
+                        .text_color(colors.secondary)
+                        .child(gpui::component::Icon::default().path(path).size(px(ICON)))
+                        .into_any_element()
+                }
+                None => plain(name.to_string(), colors.secondary),
+            },
             _ => plain(v.display(), colors.text),
         }
     }
@@ -272,6 +315,7 @@ impl BasesView {
     fn thumbnail(
         &mut self,
         cover: &Cover,
+        id: (Place, usize),
         colors: &Colors,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
@@ -289,6 +333,11 @@ impl BasesView {
                 .into_any_element(),
             CoverShown::Pending => div().size(px(THUMB)).into_any_element(),
             CoverShown::Message(m) => plain(m.to_string(), colors.tertiary),
+            CoverShown::Waiting { message, host } => {
+                let ((line, col), item) = id;
+                let at = (line, (1 << 30) | (col << 10) | item);
+                self.waiting_cover(message, host, at, colors, cx)
+            }
         }
     }
 }

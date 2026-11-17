@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Local images of an export: read, checked and inlined as `data:` URIs,
-//! or listed for an `assets/` folder beside the HTML file.
+//! Images of an export: read, checked and inlined as `data:` URIs, or
+//! listed for an `assets/` folder beside the HTML file.
 //!
 //! Only files inside the vault root (or, without a root, the document's
 //! folder) are read, never through a network path, and only when their
 //! first bytes are a known image format. Each image is capped, and so is
 //! their total; what is not embedded keeps its relative reference and is
-//! reported. Remote images are never fetched here.
+//! reported.
+//!
+//! Remote images are never fetched here: with the *embed remote images*
+//! option the caller's [`RemoteImages`] fetches them (under its own
+//! remote-content rules) and hands over the file, which then goes through
+//! the same checks and caps as a local one.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::ExportOptions;
 use crate::escape::base64;
+use crate::{ExportOptions, RemoteImages};
 
 /// How local images are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +77,8 @@ struct State {
     done: Vec<(PathBuf, String)>,
     /// The type of each of `done` (PDF export).
     mimes: Vec<&'static str>,
+    /// What each remote URL became.
+    remote: Vec<(String, String)>,
 }
 
 /// The images of one export. Shared with the sanitizer's attribute filter,
@@ -81,6 +88,8 @@ pub(crate) struct Store {
     root: Option<PathBuf>,
     mode: ImageMode,
     limits: Limits,
+    /// Fetches remote images (the *embed remote images* option).
+    remote: Option<Arc<dyn RemoteImages>>,
     state: Mutex<State>,
 }
 
@@ -93,6 +102,7 @@ impl Store {
             root: root.and_then(|r| std::fs::canonicalize(&r).ok()),
             mode,
             limits: opts.limits,
+            remote: opts.remote.clone(),
             state: Mutex::new(State::default()),
         }
     }
@@ -130,16 +140,70 @@ impl Store {
             Fetched::Drop => return None,
             Fetched::Read { path, bytes, mime } => (path, bytes, mime),
         };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(self.place(&mut state, path, &bytes, mime, &name))
+    }
+
+    /// What the remote image `url` becomes: without a fetcher the URL
+    /// itself (never fetched); with one, the fetched image inlined or in
+    /// `assets/` like a local file, or the URL (reported) when it was not
+    /// fetched or fails the checks.
+    pub(crate) fn remote_image(&self, url: &str) -> String {
+        let Some(remote) = &self.remote else {
+            return url.to_owned();
+        };
+        {
+            let state = self.lock();
+            if let Some((_, done)) = state.remote.iter().find(|(u, _)| u == url) {
+                return done.clone();
+            }
+        }
+        // Fetched without holding the lock.
+        let fetched = remote.fetch(url);
+        let mut state = self.lock();
+        let out = match fetched {
+            Err(reason) => {
+                self.note(&mut state, url, reason);
+                url.to_owned()
+            }
+            Ok(path) => match self.read_checked(&mut state, url, path) {
+                Fetched::Done(done) => done,
+                Fetched::Keep | Fetched::Drop => url.to_owned(),
+                Fetched::Read { path, bytes, mime } => {
+                    let name = remote_name(url, mime);
+                    self.place(&mut state, path, &bytes, mime, &name)
+                }
+            },
+        };
+        state.remote.push((url.to_owned(), out.clone()));
+        out
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Writes the image read from `path` as a `data:` URI or an `assets/`
+    /// file named after `name`.
+    fn place(
+        &self,
+        state: &mut State,
+        path: PathBuf,
+        bytes: &[u8],
+        mime: &'static str,
+        name: &str,
+    ) -> String {
         let out = match self.mode {
             ImageMode::Embed => {
                 state.total += bytes.len() as u64;
-                format!("data:{mime};base64,{}", base64(&bytes))
+                format!("data:{mime};base64,{}", base64(bytes))
             }
             ImageMode::Assets => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
                 let safe: String = name
                     .chars()
                     .map(|c| {
@@ -159,7 +223,7 @@ impl Store {
             }
         };
         state.done.push((path, out.clone()));
-        Some(out)
+        out
     }
 
     /// The bytes and type of the local image `src` for a PDF, within the
@@ -217,6 +281,12 @@ impl Store {
             self.note(state, src, "outside the vault");
             return Fetched::Drop;
         }
+        self.read_checked(state, src, path)
+    }
+
+    /// Reads the image file `path` (for reference `src`) within the caps,
+    /// once per file.
+    fn read_checked(&self, state: &mut State, src: &str, path: PathBuf) -> Fetched {
         if let Some((_, done)) = state.done.iter().find(|(p, _)| *p == path) {
             return Fetched::Done(done.clone());
         }
@@ -256,6 +326,31 @@ enum Fetched {
         bytes: Vec<u8>,
         mime: &'static str,
     },
+}
+
+/// The file name of the remote image `url` in an `assets/` folder: its
+/// last path segment, with the extension of its type when it has none.
+fn remote_name(url: &str, mime: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    let path = path.split_once("://").map_or(path, |(_, rest)| rest);
+    let last = path
+        .split_once('/')
+        .and_then(|(_, p)| p.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image");
+    if last.contains('.') {
+        return last.to_owned();
+    }
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        "image/svg+xml" => "svg",
+        _ => "img",
+    };
+    format!("{last}.{ext}")
 }
 
 /// A relative reference as a relative path: percent-decoded, without a
@@ -352,6 +447,20 @@ mod tests {
         ] {
             assert_eq!(decode_path(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn remote_images_are_named_after_their_url() {
+        assert_eq!(
+            remote_name("https://a.example/x/y.png?s=1", "image/png"),
+            "y.png"
+        );
+        assert_eq!(
+            remote_name("https://a.example/avatar", "image/jpeg"),
+            "avatar.jpg"
+        );
+        assert_eq!(remote_name("https://a.example/", "image/gif"), "image.gif");
+        assert_eq!(remote_name("https://a.example", "image/webp"), "image.webp");
     }
 
     #[test]

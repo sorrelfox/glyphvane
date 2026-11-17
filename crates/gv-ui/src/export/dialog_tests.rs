@@ -406,3 +406,36 @@ fn the_dialog_is_a_named_modal_dialog_with_named_controls(cx: &mut TestAppContex
     assert_eq!(f.choices().toc, toc);
     assert!(f.is_open(), "Enter on a control works the control");
 }
+
+#[gpui::test]
+fn html_can_embed_remote_images(cx: &mut TestAppContext) {
+    let mut f = window(cx);
+    f.open(ExportKind::Html, None);
+    assert!(f.drawn("export-remote-images-switch"));
+    assert!(testing::has(&mut f.vcx, "Embed remote images"));
+    assert!(!f.choices().remote_images, "off by default");
+    f.click("export-remote-images-switch");
+    assert!(f.choices().remote_images);
+    f.click("export-confirm");
+    let choices = f.answers()[0].clone().expect("confirmed");
+    assert!(choices.remote_images);
+    // The fetcher and the setting of the moment go with the choices...
+    assert!(choices.remote.is_some());
+    let mut opts = gv_export::ExportOptions::new(None, super::theme());
+    choices.apply(&mut opts);
+    assert!(opts.remote.is_some());
+    // ...but are not remembered: the next export takes them again.
+    f.vcx.update(|_, cx| {
+        let remembered = dialog::remembered(ExportKind::Html, cx);
+        assert!(remembered.remote_images && remembered.remote.is_none());
+    });
+    // Off, nothing is fetched whatever the choices hold.
+    let mut off = choices;
+    off.remote_images = false;
+    off.apply(&mut opts);
+    assert!(opts.remote.is_none());
+
+    // PDF and Print never fetch.
+    f.open(ExportKind::Pdf, None);
+    assert!(!f.drawn("export-remote-images-switch"));
+}

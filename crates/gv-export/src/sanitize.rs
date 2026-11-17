@@ -19,9 +19,10 @@
 //!   confirmation; script and data URLs too. Links get
 //!   `rel="noopener noreferrer"`.
 //! - **Media** (`src`, `poster`, `srcset` candidates): `https` and `http`
-//!   references stay as they are (never fetched), allowed `data:` images
-//!   stay, relative files are embedded (see [`crate::assets`]); anything
-//!   else is dropped, LAN hosts included.
+//!   references stay as they are (fetched and embedded only through the
+//!   caller's [`crate::RemoteImages`], `srcset` candidates never), allowed
+//!   `data:` images stay, relative files are embedded (see
+//!   [`crate::assets`]); anything else is dropped, LAN hosts included.
 //! - **Ids** get [`ID_PREFIX`], and fragment links follow, so a document
 //!   cannot clobber the page's own names.
 
@@ -382,7 +383,8 @@ fn media(value: &str, store: &Store) -> Option<String> {
         return None;
     }
     match class {
-        UrlClass::Web { .. } | UrlClass::DataImage { .. } => Some(value.trim().to_owned()),
+        UrlClass::Web { .. } => Some(store.remote_image(value.trim())),
+        UrlClass::DataImage { .. } => Some(value.trim().to_owned()),
         UrlClass::Relative(path) => store.image(&path),
         _ => None,
     }

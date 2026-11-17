@@ -3,12 +3,15 @@
 
 //! The Canvas view in headless GPUI windows: loading and drawing a fixture
 //! canvas, culling, pan and zoom, keyboard navigation, opening cards,
-//! problems, reduced motion, the minimap, `view.zoom_to_fit`, and what
-//! assistive technology is told.
+//! problems, reduced motion, the minimap, `view.zoom_to_fit`, what
+//! assistive technology is told, PDF first pages, group backgrounds and
+//! the problems chip by keyboard.
 
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use gpui::{
     AnyWindowHandle, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, ScrollDelta,
@@ -789,4 +792,196 @@ fn problems_zoom_and_minimap_are_named(cx: &mut TestAppContext) {
     assert_eq!(zoom.role, Some(Role::Status));
     assert!(zoom.live.is_some());
     assert_eq!(testing::named(&mut vcx, "Minimap").role, Some(Role::Image));
+}
+
+// ----- PDF first pages, group backgrounds, the problems chip by keyboard -----------
+
+/// A PDF engine that draws a 4 × 6 page (or fails), counting the pages
+/// asked for.
+struct FakePdf {
+    pages: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+impl crate::export::PdfEngine for FakePdf {
+    fn render(
+        &self,
+        _: &gv_export::TypstDocument,
+        _: u32,
+        _: &AtomicBool,
+    ) -> Result<Vec<u8>, crate::export::PdfError> {
+        Err(crate::export::PdfError::Failed("not here".into()))
+    }
+
+    fn draws_pages(&self) -> bool {
+        true
+    }
+
+    fn page(
+        &self,
+        pdf: &[u8],
+        page: u32,
+        max_width: u32,
+        max_height: u32,
+        _: &AtomicBool,
+    ) -> Result<crate::export::PageRaster, crate::export::PdfError> {
+        self.pages.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(page, 0, "the first page");
+        assert!(pdf.starts_with(b"%PDF") && max_width > 0 && max_height > 0);
+        if self.fail {
+            return Err(crate::export::PdfError::Failed("broken".into()));
+        }
+        Ok(crate::export::PageRaster {
+            width: 4,
+            height: 6,
+            rgba: vec![200; 4 * 6 * 4],
+            pages: 3,
+        })
+    }
+}
+
+fn install_pdf(vcx: &mut VisualTestContext, fail: bool) -> Arc<AtomicUsize> {
+    let pages = Arc::new(AtomicUsize::new(0));
+    let engine = FakePdf {
+        pages: pages.clone(),
+        fail,
+    };
+    vcx.update(|_, cx| crate::export::set_pdf_engine(cx, Some(Arc::new(engine))));
+    pages
+}
+
+#[gpui::test]
+fn pdf_cards_show_their_first_page(cx: &mut TestAppContext) {
+    let (dir, view, mut vcx) = shown(cx, "board.canvas");
+    let pages = install_pdf(&mut vcx, false);
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    let pdf = node(&view, &mut vcx, "pdf");
+    view.read_with(&vcx, |v, _| {
+        assert!(
+            matches!(v.cards.preview(pdf), Some(Preview::Image(i)) if i.size(0).width == gpui::DevicePixels(4)),
+            "{:?}",
+            v.cards.preview(pdf)
+        );
+    });
+    assert_eq!(pages.load(Ordering::SeqCst), 1);
+    // Read again (a change on disk elsewhere): the page comes from the
+    // cache.
+    view.update(&mut vcx, |v, cx| {
+        v.load(dir.path().join("board.canvas"), cx)
+    });
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    view.read_with(&vcx, |v, _| {
+        assert!(matches!(v.cards.preview(pdf), Some(Preview::Image(_))));
+    });
+    assert_eq!(pages.load(Ordering::SeqCst), 1, "drawn once");
+}
+
+#[gpui::test]
+fn a_pdf_that_cannot_be_drawn_is_a_file_card(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    let pages = install_pdf(&mut vcx, true);
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    let pdf = node(&view, &mut vcx, "pdf");
+    view.read_with(&vcx, |v, _| {
+        assert!(matches!(v.cards.preview(pdf), Some(Preview::Other(e)) if e.as_ref() == "PDF"));
+    });
+    assert_eq!(pages.load(Ordering::SeqCst), 1);
+}
+
+const BACKGROUNDS: &str = r#"{
+  "nodes": [
+    {"id":"tiled","type":"group","x":0,"y":0,"width":300,"height":200,"label":"Tiled","background":"img.png","backgroundStyle":"repeat"},
+    {"id":"cover","type":"group","x":400,"y":0,"width":300,"height":200,"background":"img.png"},
+    {"id":"remote","type":"group","x":0,"y":300,"width":300,"height":200,"background":"https://example.com/bg.png"},
+    {"id":"gone","type":"group","x":400,"y":300,"width":300,"height":200,"background":"missing.png","backgroundStyle":"ratio"},
+    {"id":"t","type":"text","x":20,"y":20,"width":100,"height":60,"text":"in the group"}
+  ]
+}"#;
+
+#[gpui::test]
+fn group_backgrounds_are_painted(cx: &mut TestAppContext) {
+    let dir = fixture();
+    std::fs::write(dir.path().join("bg.canvas"), BACKGROUNDS).expect("write");
+    let (window, view) = open(cx, &dir.path().join("bg.canvas"), dir.path());
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    at_origin(&view, &mut vcx, 20.0, 20.0);
+    let ids = ["tiled", "cover", "remote", "gone"].map(|id| node(&view, &mut vcx, id));
+    view.read_with(&vcx, |v, _| {
+        use super::cards::Background;
+        assert!(matches!(v.cards.background(ids[0]), Some(Background::Ready(b)) if b.width == 1.0));
+        assert!(matches!(
+            v.cards.background(ids[1]),
+            Some(Background::Ready(_))
+        ));
+        // A remote background is never fetched; a missing file is skipped.
+        assert!(matches!(v.cards.background(ids[2]), Some(Background::None)));
+        assert!(matches!(v.cards.background(ids[3]), Some(Background::None)));
+        assert_eq!(v.backgrounds_painted.get(), 2);
+        assert_eq!(v.painted.get(), 4, "every group is still drawn");
+    });
+}
+
+/// Presses and releases `key` (buttons act on the release).
+fn press(vcx: &mut VisualTestContext, key: &'static str) {
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(key).expect("a key"),
+    });
+    draw(vcx);
+}
+
+#[gpui::test]
+fn tab_reaches_the_problems_chip_after_the_last_card(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    let (order, issues) = view.read_with(&vcx, |v, _| {
+        let doc = v.doc.clone().expect("loaded");
+        (
+            doc.layout.reading_order().to_vec(),
+            doc.canvas.issues().len(),
+        )
+    });
+    let chip = format!("{issues} problems");
+    let chip_focused = |vcx: &mut VisualTestContext| {
+        let handle = view.read_with(vcx, |v, _| v.issues_focus.clone());
+        vcx.update(|window, _| handle.is_focused(window))
+    };
+    for _ in 0..order.len() {
+        vcx.simulate_keystrokes("tab");
+    }
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.selected()),
+        order.last().copied()
+    );
+    // Past the last card: the chip, and no card selected.
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), None);
+    assert!(chip_focused(&mut vcx));
+    assert_eq!(
+        testing::focused(&mut vcx).flatten().as_deref(),
+        Some(chip.as_str())
+    );
+    // Enter and Space work it as a button, opening nothing else.
+    let seen = events(&view, &mut vcx);
+    press(&mut vcx, "enter");
+    assert!(view.read_with(&vcx, |v, _| v.issues_open));
+    press(&mut vcx, "space");
+    assert!(!view.read_with(&vcx, |v, _| v.issues_open));
+    assert!(seen.borrow().is_empty());
+    // On to the first card; back to the chip; back to the last card.
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), Some(order[0]));
+    assert!(!chip_focused(&mut vcx));
+    vcx.simulate_keystrokes("shift-tab");
+    assert!(chip_focused(&mut vcx));
+    vcx.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.selected()),
+        order.last().copied()
+    );
 }

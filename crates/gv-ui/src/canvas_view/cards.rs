@@ -13,8 +13,16 @@
 //! - **File cards**: read off the UI thread when first shown. A note shows
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
-//!   engine the Reading view uses, a `.canvas` file shows its shapes, any
-//!   other file a file card. Missing files say so.
+//!   engine the Reading view uses, a PDF shows its first page drawn by the
+//!   PDF engine of the export commands (the helper process; cached by
+//!   file, size and time; a file card without an engine that draws pages
+//!   or when drawing fails), a `.canvas` file shows its shapes, any other
+//!   file a file card. Missing files say so.
+//! - **Group backgrounds**: a group's `background` (a vault path) is
+//!   decoded through the same media engine when the group is first drawn
+//!   and painted under the group's content as `backgroundStyle` says
+//!   (`cover`, the default, `ratio`, `repeat`). A remote address is never
+//!   fetched: the group is drawn without it.
 //! - **Link cards**: the URL only. Nothing is fetched (remote content
 //!   policy).
 //!
@@ -25,7 +33,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
 use gpui::{RenderImage, SharedString};
 use gv_canvas::Subpath;
@@ -35,6 +44,7 @@ use gv_render_tree::{FrameKind, ItemKind, RenderOptions, RenderTree, Sources, St
 use gv_syntax::{ParseOptions, SyntaxTree};
 
 use super::Doc;
+use crate::export::PdfEngine;
 use crate::inline::{FontFamilies, FontTable, InlineBlock, InlineText, font_of};
 
 /// The most of a note read for its preview.
@@ -45,6 +55,12 @@ const PREVIEW_BYTES: usize = 4 * 1024;
 const TEXT_CAP: usize = 16 * 1024;
 /// Longest side of a decoded image preview, in device pixels.
 const IMAGE_FIT: u32 = 1024;
+/// The largest PDF whose first page is drawn.
+const PDF_CAP: u64 = 64 * 1024 * 1024;
+/// First pages kept drawn, most recent last.
+const PDF_CACHE: usize = 16;
+/// Longest side of a decoded group background, in device pixels.
+const BACKGROUND_FIT: u32 = 2048;
 
 /// Steps of the zoom buckets per doubling.
 const BUCKETS_PER_OCTAVE: f64 = 8.0;
@@ -77,6 +93,24 @@ impl Parsed {
             model,
         }
     }
+}
+
+/// A group's decoded background image and its size as a source (world
+/// units for `repeat`).
+#[derive(Debug, Clone)]
+pub(crate) struct BackgroundImage {
+    pub image: Arc<RenderImage>,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A group's background.
+#[derive(Debug, Clone)]
+pub(crate) enum Background {
+    Pending,
+    Ready(BackgroundImage),
+    /// Not shown (missing, unreadable, remote): the group is drawn plain.
+    None,
 }
 
 /// What a file card shows, as loaded off the UI thread.
@@ -157,6 +191,8 @@ pub(crate) struct Cards {
     previews: HashMap<usize, Preview>,
     /// Built Markdown, by node, at its last bucket.
     pub(super) built: HashMap<usize, Built>,
+    /// Groups' background images, by node (absent: not asked for yet).
+    backgrounds: HashMap<usize, Background>,
     /// Builds made (for tests and the culling check).
     pub builds: u64,
 }
@@ -174,6 +210,7 @@ impl Cards {
             parsed: HashMap::new(),
             previews: HashMap::new(),
             built: HashMap::new(),
+            backgrounds: HashMap::new(),
             builds: 0,
         }
     }
@@ -183,6 +220,33 @@ impl Cards {
         self.parsed.clear();
         self.previews.clear();
         self.built.clear();
+        self.backgrounds.clear();
+    }
+
+    /// Group `node`'s background; `None` when it was never asked for.
+    pub fn background(&self, node: usize) -> Option<&Background> {
+        self.backgrounds.get(&node)
+    }
+
+    /// Marks group `node`'s background as being loaded.
+    pub fn start_background(&mut self, node: usize) {
+        self.backgrounds.insert(node, Background::Pending);
+    }
+
+    /// A background landed.
+    pub fn set_background(&mut self, node: usize, background: Background) {
+        self.backgrounds.insert(node, background);
+    }
+
+    /// The backgrounds ready to paint, by node.
+    pub fn ready_backgrounds(&self) -> HashMap<usize, BackgroundImage> {
+        self.backgrounds
+            .iter()
+            .filter_map(|(n, b)| match b {
+                Background::Ready(image) => Some((*n, image.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn profile(&self) -> Arc<CompiledProfile> {
@@ -360,13 +424,14 @@ fn extension(path: &Path) -> String {
 
 /// Loads what file card `path` shows (blocking: the background executor
 /// only). `root` bounds what an SVG may load; `animate` is false with
-/// reduced motion.
+/// reduced motion; `pdf` draws a PDF's first page.
 pub(crate) fn load_preview(
     path: &Path,
     root: &Path,
     subpath: Option<&Subpath>,
     profile: &CompiledProfile,
     animate: bool,
+    pdf: Option<&dyn PdfEngine>,
 ) -> Loaded {
     use std::io::Read as _;
     let ext = extension(path);
@@ -407,6 +472,14 @@ pub(crate) fn load_preview(
             Err(e) => Loaded::Missing(format!("Cannot show the image: {e}").into()),
         };
     }
+    if ext == "pdf" {
+        if let Some(engine) = pdf
+            && let Some(image) = pdf_first_page(path, engine)
+        {
+            return Loaded::Image(image);
+        }
+        return Loaded::Other("PDF".into());
+    }
     if ext == "canvas" {
         return match std::fs::read_to_string(path) {
             Ok(text) => match gv_canvas::Canvas::parse(&text) {
@@ -417,6 +490,84 @@ pub(crate) fn load_preview(
         };
     }
     Loaded::Other(ext.to_uppercase().into())
+}
+
+/// First pages drawn, by file, size and modification time.
+type PdfPages = Vec<((PathBuf, u64, Option<SystemTime>), Arc<RenderImage>)>;
+
+fn pdf_pages() -> &'static Mutex<PdfPages> {
+    static PAGES: Mutex<PdfPages> = Mutex::new(Vec::new());
+    &PAGES
+}
+
+/// The first page of the PDF at `path` drawn by `engine` (blocking), from
+/// the cache when the file did not change; `None` when it cannot be drawn.
+fn pdf_first_page(path: &Path, engine: &dyn PdfEngine) -> Option<Arc<RenderImage>> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > PDF_CAP {
+        return None;
+    }
+    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+    {
+        let mut pages = pdf_pages().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = pages.iter().position(|(k, _)| *k == key) {
+            let hit = pages.remove(i);
+            let image = Arc::clone(&hit.1);
+            pages.push(hit);
+            return Some(image);
+        }
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(PDF_CAP).read_to_end(&mut bytes))
+        .ok()?;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let raster = match engine.page(&bytes, 0, IMAGE_FIT, IMAGE_FIT, &cancel) {
+        Ok(raster) => raster,
+        Err(e) => {
+            tracing::debug!("canvas: no first page for a PDF card: {e}");
+            return None;
+        }
+    };
+    let (image, _, _) = crate::export::dialog::raster_image(raster)?;
+    let mut pages = pdf_pages().lock().unwrap_or_else(PoisonError::into_inner);
+    pages.retain(|(k, _)| k.0 != key.0);
+    if pages.len() >= PDF_CACHE {
+        pages.remove(0);
+    }
+    pages.push((key, Arc::clone(&image)));
+    Some(image)
+}
+
+/// Loads group background `background` (a vault path from `root`;
+/// blocking: the background executor only). Remote addresses are not
+/// fetched.
+pub(crate) fn load_background(root: &Path, background: &str) -> Background {
+    if background.contains("://") || background.starts_with("//") {
+        return Background::None;
+    }
+    let path = file_path(root, background);
+    if !path.is_file() {
+        return Background::None;
+    }
+    let request = gv_media::DecodeRequest {
+        fit: Some((BACKGROUND_FIT, BACKGROUND_FIT)),
+        animate: false,
+    };
+    let engine = crate::reader::media::media_engine(root);
+    match engine.load_path(&path, request, &gv_media::CancelFlag::new()) {
+        Ok(decoded) => match crate::reader::media::render_image(&decoded) {
+            #[allow(clippy::cast_precision_loss)]
+            Some(image) => Background::Ready(BackgroundImage {
+                image,
+                width: decoded.source_width.max(1) as f32,
+                height: decoded.source_height.max(1) as f32,
+            }),
+            None => Background::None,
+        },
+        Err(_) => Background::None,
+    }
 }
 
 /// The part of `text` a subpath names: a heading's section (a chain
@@ -500,19 +651,19 @@ mod tests {
         .expect("write");
         let p = obsidian();
         assert!(matches!(
-            load_preview(&root.join("n.md"), root, None, &p, false),
+            load_preview(&root.join("n.md"), root, None, &p, false, None),
             Loaded::Markdown(m) if m.text.contains("Body text.")
         ));
         assert!(matches!(
-            load_preview(&root.join("x.pdf"), root, None, &p, false),
+            load_preview(&root.join("x.pdf"), root, None, &p, false, None),
             Loaded::Other(e) if e.as_ref() == "PDF"
         ));
         assert!(matches!(
-            load_preview(&root.join("c.canvas"), root, None, &p, false),
+            load_preview(&root.join("c.canvas"), root, None, &p, false, None),
             Loaded::Canvas(d) if d.canvas.nodes().len() == 1
         ));
         assert!(matches!(
-            load_preview(&root.join("gone.md"), root, None, &p, false),
+            load_preview(&root.join("gone.md"), root, None, &p, false, None),
             Loaded::Missing(_)
         ));
     }

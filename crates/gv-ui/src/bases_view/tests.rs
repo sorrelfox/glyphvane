@@ -870,3 +870,126 @@ fn a_vault_without_bases_says_so(cx: &mut TestAppContext) {
     assert!(vcx.debug_bounds("bases-panel-list").is_some());
     assert!(testing::with_role(&mut vcx, Role::ListBoxOption).is_empty());
 }
+
+// ----- icons and remote covers ------------------------------------------------------
+
+const ICONS: &str = r#"
+formulas:
+  up: 'icon("arrow-up")'
+  down: 'icon("Lucide-Arrow-Down")'
+  odd: 'icon("no-such-icon")'
+views:
+  - type: table
+    name: Icons
+    order: [file.name, formula.up, formula.down, formula.odd]
+"#;
+
+#[test]
+fn icon_names_are_found_in_the_icon_set() {
+    use super::cells::icon_path;
+    assert_eq!(icon_path("arrow-up").as_deref(), Some("icons/arrow-up.svg"));
+    assert_eq!(
+        icon_path(" Lucide-Arrow-Down ").as_deref(),
+        Some("icons/arrow-down.svg")
+    );
+    for unknown in ["no-such-icon", "", "../x", "arrow up", "icons/arrow-up.svg"] {
+        assert_eq!(icon_path(unknown), None, "{unknown}");
+    }
+}
+
+#[gpui::test]
+fn icon_cells_draw_icons_or_their_name(cx: &mut TestAppContext) {
+    let data: BaseData = Arc::new(MemoryData::new([FileInfo::new("A.md")]));
+    let (_dir, _view, mut vcx) = shown(cx, ICONS, Some(data));
+    assert!(vcx.debug_bounds("bases-icon:arrow-up").is_some());
+    assert!(vcx.debug_bounds("bases-icon:Lucide-Arrow-Down").is_some());
+    assert!(
+        vcx.debug_bounds("bases-icon:no-such-icon").is_none(),
+        "an unknown name is text"
+    );
+    assert!(testing::has(&mut vcx, "no-such-icon icon"));
+}
+
+/// Serves one PNG on the loopback interface and counts the requests.
+fn png_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("address").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                    break;
+                }
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                PNG.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(PNG);
+        }
+    });
+    (format!("http://127.0.0.1:{port}/cover.png"), hits)
+}
+
+const REMOTE_SHELF: &str = r#"
+views:
+  - type: cards
+    name: Shelf
+    image: note.cover
+    order: [file.basename]
+"#;
+
+#[gpui::test]
+fn remote_covers_wait_for_load_once(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    let (url, hits) = png_server();
+    let cache = tempfile::tempdir().expect("cache dir");
+    cx.update(|cx| {
+        crate::reader::remote::RemoteSession::use_cache_dir(cx, cache.path().to_path_buf());
+    });
+    let mut f = FileInfo::new("Dune.md");
+    f.properties
+        .push(("cover".into(), Value::Image(url.as_str().into())));
+    let data: BaseData = Arc::new(MemoryData::new([f]));
+    let (_dir, view, mut vcx) = shown(cx, REMOTE_SHELF, Some(data));
+    // Ask (the default): the cover waits, nothing is fetched.
+    let cover = gv_bases::Cover::Url(url.as_str().into());
+    let waiting = view.update(&mut vcx, |v, cx| v.cover_shown(&cover, (200.0, 200.0), cx));
+    assert!(matches!(
+        &waiting,
+        super::cards::CoverShown::Waiting { host, .. } if host.as_ref() == "127.0.0.1"
+    ));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert!(testing::has(&mut vcx, "Load once from 127.0.0.1"));
+
+    // Load once: fetched for this base, and shown; the card is not opened.
+    let seen = events(&view, &mut vcx);
+    click(&mut vcx, "bases-load-once:0:0", Modifiers::none());
+    for _ in 0..6 {
+        draw(&mut vcx);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let shown = view.update(&mut vcx, |v, cx| v.cover_shown(&cover, (200.0, 200.0), cx));
+    assert!(matches!(shown, super::cards::CoverShown::Image(_)));
+    assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+    assert!(vcx.debug_bounds("bases-load-once:0:0").is_none());
+    // Nothing was written to the settings.
+    vcx.update(|_, cx| {
+        let allow = cx
+            .global::<AppSettings>()
+            .settings()
+            .privacy_and_security
+            .remote_allow_sites
+            .clone();
+        assert!(allow.is_empty());
+    });
+}

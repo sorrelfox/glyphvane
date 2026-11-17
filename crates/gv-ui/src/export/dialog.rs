@@ -7,8 +7,11 @@
 //! The options are the plan's:
 //!
 //! - **HTML:** a table of contents; images inside the file (as `data:`
-//!   URIs) or copied to an `assets/` folder beside it. The page is always
-//!   the light, print-friendly one.
+//!   URIs) or copied to an `assets/` folder beside it; *embed remote
+//!   images* (off by default: remote images stay references), which
+//!   fetches only what the remote-content setting allows ([`RemoteEmbed`],
+//!   the setting as it is when the dialog is confirmed). The page is
+//!   always the light, print-friendly one.
 //! - **PDF:** paper (A4, A5, A3, Letter, Legal), orientation, margins
 //!   (5–60 mm by 5), the title at the top of every page after the first,
 //!   page numbers, a page break before each level-1 heading, a table of
@@ -52,7 +55,7 @@ use gpui::{
 };
 use gv_export::{ImageMode, PageOptions, Paper};
 
-use super::{PageRaster, PdfError};
+use super::{PageRaster, PdfError, RemoteEmbed};
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::metrics::size::switcher as size;
@@ -128,6 +131,12 @@ pub struct ExportChoices {
     pub toc: bool,
     /// Where the images of an HTML export go.
     pub images: ImageMode,
+    /// Fetch and embed remote images (HTML), as the remote-content setting
+    /// allows.
+    pub remote_images: bool,
+    /// The fetcher and setting for `remote_images`, taken when the dialog
+    /// is confirmed; without it remote images stay references.
+    pub remote: Option<RemoteEmbed>,
     /// The page of a PDF; for Print, only the header, page numbers and
     /// page breaks are used (the print dialog gives the paper).
     pub page: PageOptions,
@@ -138,6 +147,8 @@ impl Default for ExportChoices {
         Self {
             toc: false,
             images: ImageMode::Embed,
+            remote_images: false,
+            remote: None,
             page: PageOptions::default(),
         }
     }
@@ -148,6 +159,13 @@ impl ExportChoices {
     pub fn apply(&self, opts: &mut gv_export::ExportOptions) {
         opts.toc = self.toc;
         opts.images = self.images;
+        opts.remote = if self.remote_images {
+            self.remote
+                .clone()
+                .map(|r| Arc::new(r) as Arc<dyn gv_export::RemoteImages>)
+        } else {
+            None
+        };
     }
 
     /// The page for printing on a page set-up from the print dialog:
@@ -428,13 +446,19 @@ impl ExportDialog {
         }
     }
 
-    /// Remembers the choices, closes and hands them over.
+    /// Remembers the choices, closes and hands them over (with the
+    /// remote-content fetcher and setting of this moment when remote
+    /// images are embedded).
     pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let choices = self.choices.clone();
+        let mut choices = self.choices.clone();
+        choices.remote = None;
         if let Some(request) = self.close(window, cx) {
             cx.default_global::<Remembered>()
                 .0
                 .insert(request.kind, choices.clone());
+            if choices.remote_images && request.kind == ExportKind::Html {
+                choices.remote = Some(RemoteEmbed::of_app(cx));
+            }
             (request.on_done)(Some(choices), window, cx);
         }
     }
@@ -458,7 +482,7 @@ impl ExportDialog {
 }
 
 /// The GPUI image of a drawn page, and its size.
-fn raster_image(raster: PageRaster) -> Option<(Arc<RenderImage>, u32, u32)> {
+pub(crate) fn raster_image(raster: PageRaster) -> Option<(Arc<RenderImage>, u32, u32)> {
     let PageRaster {
         width,
         height,
@@ -688,6 +712,15 @@ impl ExportDialog {
                 .accessible()
                 .into_any_element(),
             );
+            rows.push(self.switch_row(
+                "export-remote-images",
+                "Embed remote images",
+                Some("Only what the remote-content setting allows; others stay links."),
+                c.remote_images,
+                |c| c.remote_images = !c.remote_images,
+                theme,
+                cx,
+            ));
         }
         if kind != ExportKind::Html {
             rows.push(self.switch_row(

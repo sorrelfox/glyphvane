@@ -30,7 +30,9 @@
 //!   follows its URL through the window's link policy. Nothing is ever
 //!   moved or written.
 //! - Keys ([`key_bindings`]): Tab and Shift+Tab walk the cards in reading
-//!   order, the arrows go to the nearest card that way, Enter opens the
+//!   order and then, when the file has problems, the problems chip (Enter
+//!   or Space opens its list; Tab goes on to the first card), the arrows
+//!   go to the nearest card that way, Enter opens the
 //!   selected card's file (Mod+Enter in a new tab), Shift+1 or Home fits
 //!   the whole canvas (the `view.zoom_to_fit` command), Shift+arrows pan,
 //!   Escape clears the selection. Moving to a card off screen pans to it,
@@ -285,11 +287,15 @@ pub struct CanvasView {
     drag: Option<Drag>,
     animation: Option<Animation>,
     issues_open: bool,
+    /// The problems chip's focus: a stop of Tab after the last card.
+    issues_focus: FocusHandle,
     minimap: MinimapState,
     cards: Cards,
     /// Items painted straight to the scene in the last frame (groups and
     /// edges), and node elements made in the last render.
     painted: Rc<Cell<usize>>,
+    /// Group background images painted in the last frame.
+    backgrounds_painted: Rc<Cell<usize>>,
     nodes_drawn: usize,
     _load: Option<Task<()>>,
 }
@@ -338,9 +344,11 @@ impl CanvasView {
             drag: None,
             animation: None,
             issues_open: false,
+            issues_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             minimap: MinimapState::default(),
             cards: Cards::new(&families),
             painted: Rc::new(Cell::new(0)),
+            backgrounds_painted: Rc::new(Cell::new(0)),
             nodes_drawn: 0,
             _load: None,
         }
@@ -564,6 +572,42 @@ impl CanvasView {
         cx.notify();
     }
 
+    /// Tab (`forward`) or Shift+Tab: the next or previous card in reading
+    /// order; past the last (before the first) card, the problems chip
+    /// when the file has problems, and from the chip on to the first (last)
+    /// card.
+    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.clone() else {
+            return;
+        };
+        let chip = !doc.canvas.issues().is_empty();
+        let step = |current| {
+            if forward {
+                doc.layout.next_node(current)
+            } else {
+                doc.layout.prev_node(current)
+            }
+        };
+        if chip && self.issues_focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+            self.select(step(None), cx);
+            return;
+        }
+        let order = doc.layout.reading_order();
+        let edge = if forward { order.last() } else { order.first() };
+        let at_edge = match self.selected {
+            Some(s) => edge == Some(&s),
+            None => order.is_empty(),
+        };
+        if chip && at_edge {
+            self.selected = None;
+            window.focus(&self.issues_focus, cx);
+            cx.notify();
+            return;
+        }
+        self.select(step(self.selected), cx);
+    }
+
     fn select_toward(&mut self, dir: Direction, cx: &mut Context<'_, Self>) {
         let Some(doc) = &self.doc else {
             return;
@@ -734,6 +778,7 @@ impl CanvasView {
         };
         let root = self.root();
         let animate = !cx.reduce_motion();
+        let pdf = crate::export::pdf_engine(cx).filter(|e| e.draws_pages());
         for node in nodes {
             let NodeKind::File { file, subpath, .. } = &doc.canvas.nodes()[node].kind else {
                 continue;
@@ -744,10 +789,18 @@ impl CanvasView {
             let root = root.clone();
             let profile = self.cards.profile();
             let weak = Rc::downgrade(&doc);
+            let pdf = pdf.clone();
             cx.spawn(async move |this, cx| {
                 let loaded = cx
                     .background_spawn(async move {
-                        cards::load_preview(&path, &root, subpath.as_ref(), &profile, animate)
+                        cards::load_preview(
+                            &path,
+                            &root,
+                            subpath.as_ref(),
+                            &profile,
+                            animate,
+                            pdf.as_deref(),
+                        )
                     })
                     .await;
                 this.update(cx, |view, cx| {
@@ -757,6 +810,43 @@ impl CanvasView {
                         .is_some_and(|d| view.doc.as_ref().is_some_and(|v| Rc::ptr_eq(&d, v)));
                     if same {
                         view.cards.set_preview(node, loaded);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Starts loading the background images of groups `nodes`.
+    fn load_backgrounds(&mut self, nodes: Vec<usize>, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.clone() else {
+            return;
+        };
+        let root = self.root();
+        for node in nodes {
+            let NodeKind::Group {
+                background: Some(background),
+                ..
+            } = &doc.canvas.nodes()[node].kind
+            else {
+                continue;
+            };
+            self.cards.start_background(node);
+            let background = background.clone();
+            let root = root.clone();
+            let weak = Rc::downgrade(&doc);
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_spawn(async move { cards::load_background(&root, &background) })
+                    .await;
+                this.update(cx, |view, cx| {
+                    let same = weak
+                        .upgrade()
+                        .is_some_and(|d| view.doc.as_ref().is_some_and(|v| Rc::ptr_eq(&d, v)));
+                    if same {
+                        view.cards.set_background(node, loaded);
                         cx.notify();
                     }
                 })
@@ -957,6 +1047,7 @@ impl CanvasView {
         let mut labels = Vec::new();
         let mut nodes = Vec::new();
         let mut to_load = Vec::new();
+        let mut backgrounds = Vec::new();
         self.nodes_drawn = 0;
         for &item in visible {
             match item {
@@ -1022,6 +1113,14 @@ impl CanvasView {
                                 .into_any_element(),
                         );
                     }
+                    if let NodeKind::Group {
+                        background: Some(_),
+                        ..
+                    } = &n.kind
+                        && self.cards.background(i).is_none()
+                    {
+                        backgrounds.push(i);
+                    }
                     if n.kind.is_group() {
                         continue;
                     }
@@ -1081,6 +1180,9 @@ impl CanvasView {
         if !to_load.is_empty() {
             self.load_previews(to_load, cx);
         }
+        if !backgrounds.is_empty() {
+            self.load_backgrounds(backgrounds, cx);
+        }
         // Groups' and edges' labels sit under the cards, as their shapes do.
         labels.extend(nodes);
         labels
@@ -1111,6 +1213,7 @@ impl CanvasView {
             };
             let chip = div()
                 .id("canvas-issues")
+                .track_focus(&self.issues_focus)
                 .debug_selector(|| "canvas-issues".into())
                 .a11y_button(label.clone())
                 .aria_expanded(self.issues_open)
@@ -1298,20 +1401,10 @@ impl Render for CanvasView {
             .bg(colors.background)
             .font_family(Appearance::interface_font(cx))
             .text_color(colors.text)
-            .on_action(cx.listener(|this, _: &NextCard, _, cx| {
-                let next = this
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.layout.next_node(this.selected));
-                this.select(next, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PreviousCard, _, cx| {
-                let prev = this
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.layout.prev_node(this.selected));
-                this.select(prev, cx);
-            }))
+            .on_action(cx.listener(|this, _: &NextCard, window, cx| this.tab(true, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousCard, window, cx| this.tab(false, window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &CardLeft, _, cx| this.select_toward(Direction::Left, cx)),
             )
@@ -1322,7 +1415,12 @@ impl Render for CanvasView {
             .on_action(
                 cx.listener(|this, _: &CardDown, _, cx| this.select_toward(Direction::Down, cx)),
             )
-            .on_action(cx.listener(|this, _: &OpenCard, _, cx| {
+            .on_action(cx.listener(|this, _: &OpenCard, window, cx| {
+                if this.issues_focus.is_focused(window) {
+                    // Enter works the problems chip, as a button.
+                    cx.propagate();
+                    return;
+                }
                 if let Some(n) = this.selected {
                     this.open_node(n, Disposition::InPlace, cx);
                 }
@@ -1371,6 +1469,8 @@ impl Render for CanvasView {
         // where the view is, for the next frame's culling and the pointer.
         let frame = self.frame.clone();
         let painted = self.painted.clone();
+        let backgrounds_painted = self.backgrounds_painted.clone();
+        let images = self.cards.ready_backgrounds();
         let doc = self.doc.clone();
         let t = self.transform;
         let entity = cx.entity_id();
@@ -1387,9 +1487,11 @@ impl Render for CanvasView {
                 },
                 move |bounds, (), window, _| {
                     painted.set(0);
+                    backgrounds_painted.set(0);
                     let Some(doc) = doc else {
                         return;
                     };
+                    let mut with_image = 0;
                     let viewport = gv_canvas::Size::new(
                         f64::from(f32::from(bounds.size.width)),
                         f64::from(f32::from(bounds.size.height)),
@@ -1414,7 +1516,17 @@ impl Render for CanvasView {
                             ItemId::Node(n) if doc.canvas.nodes()[n].kind.is_group() => {
                                 if lod.detail(&doc.canvas.nodes()[n].rect, t.zoom) != Detail::Hidden
                                 {
-                                    paint::group(window, &doc, n, &t, bounds.origin, &colors);
+                                    if paint::group(
+                                        window,
+                                        &doc,
+                                        n,
+                                        &t,
+                                        bounds.origin,
+                                        &colors,
+                                        images.get(&n),
+                                    ) {
+                                        with_image += 1;
+                                    }
                                     count += 1;
                                 }
                             }
@@ -1422,6 +1534,7 @@ impl Render for CanvasView {
                         }
                     }
                     painted.set(count);
+                    backgrounds_painted.set(with_image);
                 },
             )
             .absolute()

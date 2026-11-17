@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! Colours and the shapes painted straight to the scene: group boxes,
-//! edges (Bézier strokes and arrowheads) and, for shapes-only previews
-//! (`.canvas` file cards, embeds), every node as a block.
+//! Colours and the shapes painted straight to the scene: group boxes and
+//! their background images, edges (Bézier strokes and arrowheads) and,
+//! for shapes-only previews (`.canvas` file cards, embeds), every node as
+//! a block.
 //!
 //! Colours come from the theme: a preset (`"1"`–`"6"`) is its
 //! `canvas.preset.N` token, a hex colour is used as written.
 
-use gpui::{Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, size};
+use gpui::{
+    Bounds, ContentMask, Corners, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, size,
+};
 use gv_canvas::{
-    CanvasColor, Detail, EdgeGeometry, ItemId, LodThresholds, NodeKind, Rect, Transform,
+    BackgroundStyle, CanvasColor, Detail, EdgeGeometry, ItemId, LodThresholds, NodeKind, Rect,
+    Transform,
 };
 
 use super::Doc;
+use super::cards::BackgroundImage;
 use crate::theme::Theme;
 
 /// Lengths of the canvas in world units (they scale with the zoom). Not
@@ -197,7 +202,68 @@ pub(crate) fn edge(
     }
 }
 
-/// Paints group `node`'s box (its label is an element of the view).
+/// The most tiles a `repeat` background paints; smaller tiles are drawn
+/// larger.
+const MAX_TILES: f32 = 1024.0;
+
+/// Where a background image `image` (its size in px, a world size at
+/// zoom 1) goes in a group drawn at `group` at `zoom`: `cover` fills the
+/// group (cropped by the group), `ratio` fits inside it, centred, keeping
+/// the image's proportions, `repeat` tiles it from the group's top-left
+/// at its own size (larger when it would take more than [`MAX_TILES`]).
+pub(crate) fn background_rects(
+    group: Bounds<Pixels>,
+    image: (f32, f32),
+    style: BackgroundStyle,
+    zoom: f32,
+) -> Vec<Bounds<Pixels>> {
+    let (gw, gh) = (f32::from(group.size.width), f32::from(group.size.height));
+    let (iw, ih) = (image.0.max(1.0), image.1.max(1.0));
+    if gw <= 0.0 || gh <= 0.0 {
+        return Vec::new();
+    }
+    let centred = |scale: f32| {
+        let (w, h) = (iw * scale, ih * scale);
+        Bounds::new(
+            point(
+                group.origin.x + px((gw - w) / 2.0),
+                group.origin.y + px((gh - h) / 2.0),
+            ),
+            size(px(w), px(h)),
+        )
+    };
+    match style {
+        BackgroundStyle::Cover => vec![centred((gw / iw).max(gh / ih))],
+        BackgroundStyle::Ratio => vec![centred((gw / iw).min(gh / ih))],
+        BackgroundStyle::Repeat => {
+            let (mut tw, mut th) = (iw * zoom, ih * zoom);
+            let count = (gw / tw).ceil() * (gh / th).ceil();
+            if count > MAX_TILES {
+                let k = (count / MAX_TILES).sqrt();
+                tw *= k;
+                th *= k;
+            }
+            let mut out = Vec::new();
+            let mut y = 0.0;
+            while y < gh {
+                let mut x = 0.0;
+                while x < gw {
+                    out.push(Bounds::new(
+                        point(group.origin.x + px(x), group.origin.y + px(y)),
+                        size(px(tw), px(th)),
+                    ));
+                    x += tw;
+                }
+                y += th;
+            }
+            out
+        }
+    }
+}
+
+/// Paints group `node`'s box (its label is an element of the view), with
+/// its background image when it has one loaded. Returns whether a
+/// background image was painted.
 pub(crate) fn group(
     window: &mut Window,
     doc: &Doc,
@@ -205,17 +271,50 @@ pub(crate) fn group(
     t: &Transform,
     origin: Point<Pixels>,
     colors: &Colors,
-) {
+    image: Option<&BackgroundImage>,
+) -> bool {
     let n = &doc.canvas.nodes()[node];
     let bounds = rect_to_window(t, origin, &n.rect);
     let (border, background) = colors.frame(n.color, true);
     let radius = px((world::RADIUS * t.zoom) as f32);
+    let border_width = px(stroke(world::BORDER, t.zoom));
+    let NodeKind::Group {
+        background_style, ..
+    } = &n.kind
+    else {
+        return false;
+    };
+    let Some(image) = image else {
+        window.paint_quad(
+            fill(bounds, background)
+                .corner_radii(radius)
+                .border_widths(border_width)
+                .border_color(border),
+        );
+        return false;
+    };
+    window.paint_quad(fill(bounds, background).corner_radii(radius));
+    let style = background_style.unwrap_or(BackgroundStyle::Cover);
+    let rects = background_rects(bounds, (image.width, image.height), style, t.zoom as f32);
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for rect in rects {
+            let (clip, corners) = match style {
+                BackgroundStyle::Cover => (bounds, Corners::all(radius)),
+                BackgroundStyle::Ratio | BackgroundStyle::Repeat => (rect, Corners::default()),
+            };
+            if let Err(e) = window.paint_image(clip, rect, corners, image.image.clone(), 0, false) {
+                tracing::debug!("canvas: a group background was not painted: {e}");
+                break;
+            }
+        }
+    });
     window.paint_quad(
-        fill(bounds, background)
+        fill(bounds, gpui::transparent_black())
             .corner_radii(radius)
-            .border_widths(px(stroke(world::BORDER, t.zoom)))
+            .border_widths(border_width)
             .border_color(border),
     );
+    true
 }
 
 /// Paints the whole of `doc` as shapes in `bounds`, fitted with `padding`
@@ -255,7 +354,7 @@ pub(crate) fn shapes_only(
                         continue;
                     }
                     if matches!(node.kind, NodeKind::Group { .. }) {
-                        group(window, doc, n, &t, origin, colors);
+                        group(window, doc, n, &t, origin, colors, None);
                     } else {
                         let b = rect_to_window(&t, origin, &node.rect);
                         let radius = px((world::RADIUS * t.zoom) as f32);
@@ -297,6 +396,40 @@ mod tests {
         assert_ne!(
             ThemeId::Light.theme().canvas.preset,
             ThemeId::Dark.theme().canvas.preset
+        );
+    }
+
+    #[test]
+    fn background_styles_cover_fit_or_tile() {
+        let group = Bounds::new(point(px(10.0), px(20.0)), size(px(200.0), px(100.0)));
+        let one = |style| background_rects(group, (100.0, 100.0), style, 1.0);
+        // Cover: 200 × 200, centred, cropped by the group.
+        assert_eq!(
+            one(BackgroundStyle::Cover),
+            vec![Bounds::new(
+                point(px(10.0), px(-30.0)),
+                size(px(200.0), px(200.0))
+            )]
+        );
+        // Ratio: 100 × 100, centred.
+        assert_eq!(
+            one(BackgroundStyle::Ratio),
+            vec![Bounds::new(
+                point(px(60.0), px(20.0)),
+                size(px(100.0), px(100.0))
+            )]
+        );
+        // Repeat: tiles of the image's size times the zoom.
+        let tiles = background_rects(group, (100.0, 100.0), BackgroundStyle::Repeat, 0.5);
+        assert_eq!(tiles.len(), 8);
+        assert_eq!(tiles[0].size, size(px(50.0), px(50.0)));
+        assert_eq!(tiles[5].origin, point(px(60.0), px(70.0)));
+        // A tiny image zoomed out is never thousands of tiles.
+        let big = Bounds::new(point(px(0.0), px(0.0)), size(px(4000.0), px(4000.0)));
+        let many = background_rects(big, (2.0, 2.0), BackgroundStyle::Repeat, 0.5);
+        assert!(many.len() <= MAX_TILES as usize + 128, "{}", many.len());
+        assert!(
+            background_rects(Bounds::default(), (5.0, 5.0), BackgroundStyle::Cover, 1.0).is_empty()
         );
     }
 

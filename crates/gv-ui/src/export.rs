@@ -21,7 +21,8 @@
 //!   separate helper process, which compiles it within a deadline and can
 //!   be cancelled.
 //! - The commands ask for their options first in an [`ExportDialog`]
-//!   ([`dialog`]): the table of contents and where images go for HTML;
+//!   ([`dialog`]): the table of contents, where images go and whether
+//!   remote images are embedded ([`RemoteEmbed`]) for HTML;
 //!   paper, orientation, margins, header, page numbers, page breaks and the
 //!   table of contents for PDF, with a preview of the first page; the same
 //!   without the paper, orientation and margins (the print dialog's) for
@@ -30,8 +31,10 @@
 pub mod dialog;
 #[cfg(test)]
 mod dialog_tests;
+mod remote;
 
 pub use dialog::{ExportChoices, ExportDialog, ExportKind, ExportRequest, PreviewFn, dialog_of};
+pub use remote::RemoteEmbed;
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};

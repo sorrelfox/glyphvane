@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gv_export::{
-    DiagramRenderer, ExportOptions, ExportTheme, ImageMode, Limits, WikiResolver, export_html,
-    rich_copy, wikilink_href,
+    DiagramRenderer, ExportOptions, ExportTheme, ImageMode, Limits, RemoteImages, WikiResolver,
+    export_html, rich_copy, wikilink_href,
 };
 use gv_model::DocModel;
 use gv_profile::ProfileId;
@@ -529,6 +529,113 @@ fn remote_images_are_never_fetched_or_embedded() {
     assert!(html.contains("<img src=\"https://example.com/r.png\" alt=\"r\">"));
     // A LAN host would make the reader's browser call into the network.
     assert!(html.contains("<img alt=\"l\">"), "{html}");
+}
+
+/// Remote images served from files; anything else "not allowed".
+struct FakeRemote {
+    files: Vec<(&'static str, PathBuf)>,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl RemoteImages for FakeRemote {
+    fn fetch(&self, url: &str) -> Result<PathBuf, String> {
+        self.asked.lock().expect("lock").push(url.to_owned());
+        self.files
+            .iter()
+            .find(|(u, _)| *u == url)
+            .map(|(_, p)| p.clone())
+            .ok_or_else(|| "not allowed by the remote-content setting".to_owned())
+    }
+}
+
+#[test]
+fn remote_images_are_embedded_through_the_fetcher() {
+    let dir = image_dir(&[("cached.bin", 100)]);
+    std::fs::write(dir.path().join("page.bin"), b"<html>not an image").expect("write");
+    let remote = Arc::new(FakeRemote {
+        files: vec![
+            ("https://img.example/a/logo", dir.path().join("cached.bin")),
+            ("https://img.example/page.png", dir.path().join("page.bin")),
+        ],
+        asked: std::sync::Mutex::default(),
+    });
+    let src = "![l](https://img.example/a/logo) ![again](https://img.example/a/logo) \
+               ![no](https://other.example/n.png) ![html](https://img.example/page.png) \
+               ![lan](http://192.168.1.1/x.png)\n\n\
+               <img srcset=\"https://img.example/a/logo 2x\">\n";
+    let mut opts = options(&dir.path().join("doc.md"));
+    opts.remote = Some(remote.clone());
+    let out = export_html(&tree(src, ProfileId::Extended), &opts);
+    assert_eq!(
+        out.html.matches("data:image/png;base64,").count(),
+        2,
+        "the same image twice: {}",
+        out.html
+    );
+    assert!(
+        out.html
+            .contains("<img src=\"https://other.example/n.png\" alt=\"no\">")
+    );
+    assert!(
+        out.html
+            .contains("<img src=\"https://img.example/page.png\" alt=\"html\">")
+    );
+    assert!(out.html.contains("<img alt=\"lan\">"), "{}", out.html);
+    assert!(
+        out.html
+            .contains("srcset=\"https://img.example/a/logo 2x\""),
+        "srcset candidates stay references"
+    );
+    // Each URL asked once; LAN hosts and srcset candidates never.
+    assert_eq!(
+        *remote.asked.lock().expect("lock"),
+        [
+            "https://img.example/a/logo",
+            "https://other.example/n.png",
+            "https://img.example/page.png"
+        ]
+    );
+    let notes: Vec<_> = out
+        .notes
+        .iter()
+        .map(|n| (n.src.as_str(), n.reason.as_str()))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            (
+                "https://other.example/n.png",
+                "not allowed by the remote-content setting"
+            ),
+            ("https://img.example/page.png", "not a known image format"),
+        ]
+    );
+
+    // In an assets folder, named after the URL.
+    opts.images = ImageMode::Assets;
+    let out = export_html(
+        &tree("![l](https://img.example/a/logo)\n", ProfileId::Extended),
+        &opts,
+    );
+    assert!(
+        out.html
+            .contains("<img src=\"assets/1-logo.png\" alt=\"l\">"),
+        "{}",
+        out.html
+    );
+    assert_eq!(out.assets.len(), 1);
+    assert_eq!(out.assets[0].source, dir.path().join("cached.bin"));
+
+    // A rich copy never fetches.
+    let before = remote.asked.lock().expect("lock").len();
+    let src = "![l](https://img.example/a/logo)\n";
+    let copy = rich_copy(&tree(src, ProfileId::Extended), 0..src.len(), &opts);
+    assert!(
+        copy.html.contains("https://img.example/a/logo"),
+        "{}",
+        copy.html
+    );
+    assert_eq!(remote.asked.lock().expect("lock").len(), before);
 }
 
 #[test]

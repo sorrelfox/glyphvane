@@ -14,19 +14,22 @@
 //! - Covers from the vault are decoded on the low-priority pool by the
 //!   reader's media engine (SVGs may only load files of the vault).
 //!   Remote covers follow the remote-content setting: fetched (and decoded
-//!   with no file access) only where it allows them without asking;
-//!   otherwise the cover says why it is not shown. There is no *Load once*
-//!   here: approving a site in a note's infobar or the allow list shows
-//!   them.
+//!   with no file access) where it allows them without asking; otherwise
+//!   the cover says why it is not shown. A cover waiting for approval (Ask
+//!   mode) offers *Load once*, as the Reading view's infobar does: the
+//!   site's images load for this base (the base file, or the note that
+//!   embeds it) for the rest of the session; nothing is written anywhere.
+//!   Blocked covers offer nothing.
 //! - A click on a card opens its file (Mod-click a new tab, a middle
 //!   click a background tab).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ObjectFit, ParentElement as _, RenderImage, SharedString,
+    AnyElement, App, ClickEvent, Context, FontWeight, Global, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ObjectFit, ParentElement as _, RenderImage, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, canvas, div, img, list,
     px,
 };
@@ -63,6 +66,24 @@ pub(crate) enum CoverShown {
     Color(Hsla),
     /// Why there is no image.
     Message(SharedString),
+    /// A remote image waiting for approval: why, and the site *Load once*
+    /// approves.
+    Waiting {
+        message: SharedString,
+        host: SharedString,
+    },
+}
+
+/// *Load once* approvals of remote covers in this session: (base, site).
+/// Never written anywhere.
+#[derive(Default)]
+struct Approvals(HashSet<(PathBuf, String)>);
+
+impl Global for Approvals {}
+
+fn approved(cx: &App, doc: &std::path::Path, host: &str) -> bool {
+    cx.try_global::<Approvals>()
+        .is_some_and(|a| a.0.contains(&(doc.to_path_buf(), host.to_owned())))
 }
 
 /// Covers loaded or loading, by path or URL.
@@ -81,6 +102,13 @@ impl Covers {
         }
         self.tasks.clear();
         self.shown.clear();
+    }
+
+    /// Forgets the covers of `host`'s URLs, so they are asked for again.
+    fn forget_host(&mut self, host: &str) {
+        self.shown.retain(|key, _| {
+            !(key.contains("://") && gv_media::remote::host_of(key).as_deref() == Some(host))
+        });
     }
 }
 
@@ -187,7 +215,8 @@ impl BasesView {
                     self.covers.shown.insert(key, shown.clone());
                     return shown;
                 };
-                match policy.decide(&host, false) {
+                let doc = self.approval_doc();
+                match policy.decide(&host, approved(cx, &doc, &host)) {
                     Decision::Load { private_ok } => {
                         let fetcher = crate::reader::remote::shared_fetcher(cx);
                         let url = url.to_string();
@@ -206,9 +235,12 @@ impl BasesView {
                         })
                     }
                     Decision::Ask => {
-                        let shown = CoverShown::Message(
-                            RemoteShown::Waiting { host }.card_message("").into(),
-                        );
+                        let shown = CoverShown::Waiting {
+                            message: RemoteShown::Waiting { host: host.clone() }
+                                .card_message("")
+                                .into(),
+                            host: host.into(),
+                        };
                         self.covers.shown.insert(key, shown.clone());
                         return shown;
                     }
@@ -243,6 +275,73 @@ impl BasesView {
         });
         self.covers.tasks.insert(key, (cancel, task));
         CoverShown::Pending
+    }
+
+    /// The document *Load once* approves for: the base file, or the note
+    /// embedding the base.
+    fn approval_doc(&self) -> PathBuf {
+        match (&self.source, &self.this) {
+            (Some(super::Source::File(p)), _) => p.clone(),
+            (_, Some(this)) => self.file_path(this),
+            _ => self.root(),
+        }
+    }
+
+    /// *Load once* for `host`'s covers: approved for this base for the
+    /// session, and fetched now.
+    pub(crate) fn load_once(&mut self, host: &str, cx: &mut Context<'_, Self>) {
+        let doc = self.approval_doc();
+        cx.default_global::<Approvals>()
+            .0
+            .insert((doc, host.to_owned()));
+        self.covers.forget_host(host);
+        cx.notify();
+    }
+
+    /// A waiting cover's line and its *Load once* button.
+    pub(crate) fn waiting_cover(
+        &mut self,
+        message: SharedString,
+        host: SharedString,
+        id: (usize, usize),
+        colors: &Colors,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = crate::appearance::Appearance::theme(cx);
+        let selector = format!("bases-load-once:{}:{}", id.0, id.1);
+        let debug = selector.clone();
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .text_size(px(text::UI_SMALL.size))
+            .text_color(colors.tertiary)
+            .child(div().min_w_0().child(message))
+            .child(
+                div()
+                    .id(gpui::ElementId::Name(selector.into()))
+                    .debug_selector(move || debug)
+                    .a11y_button(format!("Load once from {host}"))
+                    .keyboard_control(theme)
+                    .flex_none()
+                    .px(px(6.0))
+                    .rounded(px(radius::CONTROL))
+                    .border_1()
+                    .border_color(colors.border_strong)
+                    .bg(colors.page)
+                    .text_color(colors.text)
+                    .cursor_pointer()
+                    .child("Load once")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        // The card under it does not open its file.
+                        cx.stop_propagation();
+                        this.load_once(&host, cx);
+                    }))
+                    .accessible(),
+            )
+            .into_any_element()
     }
 
     /// The card's width, cover height and height for `result`.
@@ -468,6 +567,9 @@ impl BasesView {
                         .text_color(colors.tertiary)
                         .child(m),
                 ),
+                Some(CoverShown::Waiting { message, host }) => frame
+                    .p(px(PAD))
+                    .child(self.waiting_cover(message, host, (line, r), colors, cx)),
                 Some(CoverShown::Pending) | None => frame,
             };
             card = card.child(frame);
