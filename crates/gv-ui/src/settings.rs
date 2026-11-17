@@ -579,8 +579,17 @@ impl AppSettings {
 
     /// Pushes the settings in effect into the UI.
     pub(crate) fn apply(cx: &mut App) {
-        let (choice, preferred_light) = cx.global::<Self>().theme_preference();
+        let this = cx.global::<Self>();
+        let (choice, preferred_light) = this.theme_preference();
+        let appearance = &this.settings().appearance;
+        let (family, size) = (
+            appearance.interface_font.clone(),
+            appearance.interface_font_size,
+        );
         Appearance::set_preference(cx, choice, preferred_light);
+        if cx.has_global::<Appearance>() {
+            Appearance::set_interface(cx, &family, size);
+        }
     }
 }
 

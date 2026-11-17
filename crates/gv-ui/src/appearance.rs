@@ -9,6 +9,7 @@ use gpui::{App, Fill, Global, Hsla, Rgba, SharedString, WindowAppearance, px};
 
 use crate::chrome::WindowChrome;
 use crate::metrics::{font, radius, text};
+use crate::settings::AppSettings;
 use crate::theme::{Color, OsAppearance, PreferredLight, Scheme, Theme, ThemeChoice, ThemeId};
 
 impl From<Color> for Rgba {
@@ -50,26 +51,32 @@ pub struct Appearance {
     choice: ThemeChoice,
     preferred_light: PreferredLight,
     os: OsAppearance,
+    /// The interface font family in effect (installed, or the system's).
     interface_font: SharedString,
+    /// The interface font setting it came from, to skip work when an
+    /// unrelated setting changes.
+    interface_font_setting: String,
+    /// The interface font size in pixels.
+    interface_font_size: f32,
 }
 
 impl Global for Appearance {}
 
 impl Appearance {
     /// Installs the theme state and applies it. Call once at startup, after
-    /// GPUI Component is initialised.
+    /// GPUI Component is initialised. The interface font and size come from
+    /// the [`AppSettings`] global when it is installed, else their defaults.
     pub fn init(cx: &mut App, choice: ThemeChoice, preferred_light: PreferredLight) {
-        let installed = cx.text_system().all_font_names();
-        let interface_font = if installed.iter().any(|name| name == font::INTERFACE) {
-            font::INTERFACE
-        } else {
-            font::SYSTEM_FALLBACK
-        };
+        let (family, size) = interface_settings(cx);
+        let interface_font = resolve_interface_font(cx, &family);
+        text::set_interface_scale(text::scale_for_size(size));
         cx.set_global(Self {
             choice,
             preferred_light,
             os: os_appearance(cx.window_appearance()),
-            interface_font: interface_font.into(),
+            interface_font,
+            interface_font_setting: family,
+            interface_font_size: size,
         });
         Self::apply(cx);
     }
@@ -79,9 +86,44 @@ impl Appearance {
         cx.global::<Self>().theme_id().theme()
     }
 
-    /// The interface font family: Inter when installed, else the system font.
+    /// The interface font family: the one the settings name when it is
+    /// installed, else the system's interface font.
     pub fn interface_font(cx: &App) -> SharedString {
         cx.global::<Self>().interface_font.clone()
+    }
+
+    /// The interface font size in pixels, as the settings give it.
+    pub fn interface_font_size(cx: &App) -> f32 {
+        cx.global::<Self>().interface_font_size
+    }
+
+    /// Sets the interface font family (a family name, or
+    /// [`font::SYSTEM_SETTING`]) and size in pixels. The interface sizes of
+    /// [`text`] follow the size at once, and every window redraws when
+    /// either changed. Returns whether anything changed.
+    pub fn set_interface(cx: &mut App, family: &str, size: f32) -> bool {
+        let size = if size.is_finite() {
+            size
+        } else {
+            text::base::UI.size
+        };
+        let this = cx.global::<Self>();
+        let family_changed = this.interface_font_setting != family;
+        let size_changed = this.interface_font_size.to_bits() != size.to_bits();
+        if !family_changed && !size_changed {
+            return false;
+        }
+        if family_changed {
+            let resolved = resolve_interface_font(cx, family);
+            let this = cx.global_mut::<Self>();
+            this.interface_font = resolved;
+            this.interface_font_setting = family.to_owned();
+        }
+        cx.global_mut::<Self>().interface_font_size = size;
+        text::set_interface_scale(text::scale_for_size(size));
+        Self::apply(cx);
+        cx.refresh_windows();
+        true
     }
 
     /// The theme choice in effect (from settings or the command line).
@@ -157,6 +199,39 @@ impl Appearance {
             component.window_radius = px(WindowChrome::current().window_radius());
             map_colors(theme, component);
         });
+    }
+}
+
+/// The interface font family and size the settings give, or their
+/// defaults without settings.
+fn interface_settings(cx: &App) -> (String, f32) {
+    let defaults;
+    let appearance = match cx.try_global::<AppSettings>() {
+        Some(settings) => &settings.settings().appearance,
+        None => {
+            defaults = gv_settings::Appearance::default();
+            &defaults
+        }
+    };
+    (
+        appearance.interface_font.clone(),
+        appearance.interface_font_size,
+    )
+}
+
+/// The family GPUI draws the interface with for the setting `family`: that
+/// family when installed, else the system's interface font (also for
+/// [`font::SYSTEM_SETTING`] and an empty name).
+fn resolve_interface_font(cx: &App, family: &str) -> SharedString {
+    let family = family.trim();
+    if family.is_empty() || family == font::SYSTEM_SETTING {
+        return font::SYSTEM_FALLBACK.into();
+    }
+    let installed = cx.text_system().all_font_names();
+    if installed.iter().any(|name| name == family) {
+        SharedString::from(family.to_owned())
+    } else {
+        font::SYSTEM_FALLBACK.into()
     }
 }
 

@@ -538,3 +538,98 @@ fn vault_ids_are_safe_and_distinct() {
     let locations = Locations::with_root("/x");
     assert!(locations.vault_settings_file(&odd).is_ok());
 }
+
+#[gpui::test]
+fn the_interface_font_and_size_apply_to_the_chrome_at_once(cx: &mut TestAppContext) {
+    use crate::metrics::{font, text};
+
+    let mut f = fixture(cx, GLOBAL_TEXT);
+    assert_eq!(text::UI.size, 12.0);
+    assert_eq!(text::UI.line, 16.0);
+
+    // The size field scales every interface size, and GPUI Component's
+    // default text size with it.
+    f.commit("appearance.interface_font_size", "15");
+    assert_eq!(f.settings().appearance.interface_font_size, 15.0);
+    assert_eq!(
+        f.vcx.update(|_, cx| Appearance::interface_font_size(cx)),
+        15.0
+    );
+    assert_eq!(text::UI.size, 15.0);
+    assert_eq!(text::UI.line, 20.0);
+    assert_eq!(text::UI_SMALL.size, 13.75);
+    assert_eq!(
+        f.vcx
+            .update(|_, cx| gpui::component::Theme::global(cx).font_size),
+        px(15.0)
+    );
+    assert!(f.global_text().contains("interface_font_size = 15"));
+
+    // Out of range: refused, the scale stays.
+    f.commit("appearance.interface_font_size", "40");
+    assert!(f.error("appearance.interface_font_size").is_some());
+    assert_eq!(text::UI.size, 15.0);
+
+    // The family menu offers the system font first; picking it uses GPUI's
+    // name for the platform font.
+    f.click("settings-select-appearance.interface_font");
+    assert!(f.drawn("settings-list-appearance.interface_font"));
+    f.click("settings-option-appearance.interface_font-system");
+    assert_eq!(f.settings().appearance.interface_font, "system");
+    assert_eq!(
+        f.vcx
+            .update(|_, cx| Appearance::interface_font(cx))
+            .as_ref(),
+        font::SYSTEM_FALLBACK
+    );
+    assert_eq!(
+        f.vcx
+            .update(|_, cx| gpui::component::Theme::global(cx).font_family.clone())
+            .as_ref(),
+        font::SYSTEM_FALLBACK
+    );
+
+    // An installed family is used as is; one that is not installed falls
+    // back to the system font.
+    let installed = f
+        .vcx
+        .update(|_, cx| cx.text_system().all_font_names())
+        .into_iter()
+        .find(|name| !name.starts_with('.'));
+    if let Some(installed) = installed {
+        f.commit_family(&installed);
+        assert_eq!(
+            f.vcx
+                .update(|_, cx| Appearance::interface_font(cx))
+                .as_ref(),
+            installed
+        );
+    }
+    f.commit_family("No Such Family");
+    assert_eq!(
+        f.vcx
+            .update(|_, cx| Appearance::interface_font(cx))
+            .as_ref(),
+        font::SYSTEM_FALLBACK
+    );
+
+    // Removing the size brings back the design size.
+    f.vcx.update(|_, cx| {
+        AppSettings::reset_value(cx, Target::AllVaults, "appearance.interface_font_size")
+            .expect("the size is removed");
+    });
+    draw(&mut f.vcx);
+    assert_eq!(text::UI.size, 12.0);
+    assert_eq!(text::UI.line, 16.0);
+}
+
+impl Fixture {
+    fn commit_family(&mut self, family: &str) {
+        let value = toml::Value::String(family.to_owned());
+        self.vcx.update(|_, cx| {
+            AppSettings::set_value(cx, Target::AllVaults, "appearance.interface_font", &value)
+                .expect("a family is saved");
+        });
+        draw(&mut self.vcx);
+    }
+}

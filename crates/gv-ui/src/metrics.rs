@@ -492,7 +492,17 @@ pub mod icon {
 }
 
 /// Type scale: size and line height.
+///
+/// The interface sizes ([`UI`](text::UI), [`UI_SMALL`](text::UI_SMALL),
+/// [`UI_SECTION`](text::UI_SECTION), [`UI_TITLE`](text::UI_TITLE) and
+/// [`SWITCHER_INPUT`](text::SWITCHER_INPUT)) follow the interface font size
+/// setting: they read like constants (`text::UI.size`) but give the design
+/// value times [`interface_scale`](text::interface_scale). Their design
+/// values are in [`text::base`].
 pub mod text {
+    use std::cell::RefCell;
+    use std::ops::Deref;
+
     /// A size and its line height.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Scale {
@@ -500,26 +510,177 @@ pub mod text {
         pub line: f32,
     }
 
+    impl Scale {
+        /// This size times `factor`; the line height is rounded to whole
+        /// pixels so rows stay crisp.
+        pub fn scaled(self, factor: f32) -> Self {
+            Self {
+                size: self.size * factor,
+                line: (self.line * factor).round(),
+            }
+        }
+    }
+
+    /// The design values of the interface sizes, at the default interface
+    /// font size ([`base::UI`]`.size`).
+    pub mod base {
+        use super::Scale;
+
+        /// Interface text.
+        pub const UI: Scale = Scale {
+            size: 12.0,
+            line: 16.0,
+        };
+        /// Status bar, counts, descriptions, paths.
+        pub const UI_SMALL: Scale = Scale {
+            size: 11.0,
+            line: 14.0,
+        };
+        /// Panel section headers, settings group headings (weight 600).
+        pub const UI_SECTION: Scale = Scale {
+            size: 11.5,
+            line: 16.0,
+        };
+        /// Settings page title, quick switcher results (weight 600).
+        pub const UI_TITLE: Scale = Scale {
+            size: 13.0,
+            line: 20.0,
+        };
+        /// The quick switcher's and the command palette's query: 14 px.
+        pub const SWITCHER_INPUT: Scale = Scale {
+            size: 14.0,
+            line: 20.0,
+        };
+    }
+
+    /// The interface sizes at one scale.
+    #[derive(Debug)]
+    struct Interface {
+        factor: f32,
+        ui: Scale,
+        ui_small: Scale,
+        ui_section: Scale,
+        ui_title: Scale,
+        switcher_input: Scale,
+    }
+
+    impl Interface {
+        fn at(factor: f32) -> Self {
+            Self {
+                factor,
+                ui: base::UI.scaled(factor),
+                ui_small: base::UI_SMALL.scaled(factor),
+                ui_section: base::UI_SECTION.scaled(factor),
+                ui_title: base::UI_TITLE.scaled(factor),
+                switcher_input: base::SWITCHER_INPUT.scaled(factor),
+            }
+        }
+    }
+
+    thread_local! {
+        /// The interface sizes in effect on this thread. GPUI's `App` lives
+        /// on one thread, so this is the application's value there; other
+        /// threads (and tests running side by side) keep their own.
+        static CURRENT: RefCell<&'static Interface> = RefCell::new(default_interface());
+        /// Every scale used on this thread, so that changing back and forth
+        /// does not allocate again. A handful of entries in practice.
+        static KNOWN: RefCell<Vec<&'static Interface>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn default_interface() -> &'static Interface {
+        interned(1.0)
+    }
+
+    fn interned(factor: f32) -> &'static Interface {
+        KNOWN.with(|known| {
+            let mut known = known.borrow_mut();
+            if let Some(found) = known
+                .iter()
+                .find(|i| i.factor.to_bits() == factor.to_bits())
+            {
+                return *found;
+            }
+            let leaked: &'static Interface = Box::leak(Box::new(Interface::at(factor)));
+            known.push(leaked);
+            leaked
+        })
+    }
+
+    /// The narrowest and widest interface scale (the settings' range of
+    /// interface font sizes, 8 to 32 px, over the design's 12).
+    pub const MIN_SCALE: f32 = 8.0 / 12.0;
+    pub const MAX_SCALE: f32 = 32.0 / 12.0;
+
+    /// The factor the interface sizes are drawn at: the interface font size
+    /// over the design's 12 px.
+    pub fn interface_scale() -> f32 {
+        CURRENT.with(|c| c.borrow().factor)
+    }
+
+    /// Sets the interface scale for this thread. Not a finite number falls
+    /// back to 1; the value is clamped to [`MIN_SCALE`]..=[`MAX_SCALE`].
+    /// Returns whether it changed.
+    pub fn set_interface_scale(factor: f32) -> bool {
+        let factor = if factor.is_finite() {
+            factor.clamp(MIN_SCALE, MAX_SCALE)
+        } else {
+            1.0
+        };
+        let next = interned(factor);
+        CURRENT.with(|c| {
+            let mut c = c.borrow_mut();
+            let changed = !std::ptr::eq(*c, next);
+            *c = next;
+            changed
+        })
+    }
+
+    /// The interface scale for an interface font size in pixels.
+    pub fn scale_for_size(size: f32) -> f32 {
+        size / base::UI.size
+    }
+
+    /// Which interface size a [`Scaled`] reads.
+    #[derive(Debug, Clone, Copy)]
+    enum Role {
+        Ui,
+        UiSmall,
+        UiSection,
+        UiTitle,
+        SwitcherInput,
+    }
+
+    /// An interface size that follows the interface scale. Reads like a
+    /// [`Scale`] constant: `text::UI.size`, `text::UI.line`, `*text::UI`.
+    #[derive(Debug)]
+    pub struct Scaled(Role);
+
+    impl Deref for Scaled {
+        type Target = Scale;
+
+        fn deref(&self) -> &Scale {
+            let current: &'static Interface = CURRENT.with(|c| *c.borrow());
+            match self.0 {
+                Role::Ui => &current.ui,
+                Role::UiSmall => &current.ui_small,
+                Role::UiSection => &current.ui_section,
+                Role::UiTitle => &current.ui_title,
+                Role::SwitcherInput => &current.switcher_input,
+            }
+        }
+    }
+
     /// Interface text.
-    pub const UI: Scale = Scale {
-        size: 12.0,
-        line: 16.0,
-    };
+    pub static UI: Scaled = Scaled(Role::Ui);
     /// Status bar, counts, descriptions, paths.
-    pub const UI_SMALL: Scale = Scale {
-        size: 11.0,
-        line: 14.0,
-    };
+    pub static UI_SMALL: Scaled = Scaled(Role::UiSmall);
     /// Panel section headers, settings group headings (weight 600).
-    pub const UI_SECTION: Scale = Scale {
-        size: 11.5,
-        line: 16.0,
-    };
+    pub static UI_SECTION: Scaled = Scaled(Role::UiSection);
     /// Settings page title, quick switcher results (weight 600).
-    pub const UI_TITLE: Scale = Scale {
-        size: 13.0,
-        line: 20.0,
-    };
+    pub static UI_TITLE: Scaled = Scaled(Role::UiTitle);
+    /// The quick switcher's and the command palette's query: 14 px.
+    pub static SWITCHER_INPUT: Scaled = Scaled(Role::SwitcherInput);
+
     pub const PREVIEW_BODY: Scale = Scale {
         size: 15.0,
         line: 24.0,
@@ -560,11 +721,6 @@ pub mod text {
         size: 11.0,
         line: 20.0,
     };
-    /// The quick switcher's and the command palette's query: 14 px.
-    pub const SWITCHER_INPUT: Scale = Scale {
-        size: 14.0,
-        line: 20.0,
-    };
     pub const KEYCAP_SIZE: f32 = 11.5;
     /// The find field's toggles (`Aa`, `ab`, `.*`), mono.
     pub const FIELD_TOGGLE_SIZE: f32 = 10.5;
@@ -574,6 +730,27 @@ pub mod text {
     pub const INLINE_CODE_SIZE: f32 = 13.0;
     /// Tooltips.
     pub const TOOLTIP_SIZE: f32 = 11.5;
+
+    /// [`KEYCAP_SIZE`] at the interface scale. The plain constants above are
+    /// the design values; chrome takes these.
+    pub fn keycap_size() -> f32 {
+        KEYCAP_SIZE * interface_scale()
+    }
+
+    /// [`FIELD_TOGGLE_SIZE`] at the interface scale.
+    pub fn field_toggle_size() -> f32 {
+        FIELD_TOGGLE_SIZE * interface_scale()
+    }
+
+    /// [`MENU_SHORTCUT_SIZE`] at the interface scale.
+    pub fn menu_shortcut_size() -> f32 {
+        MENU_SHORTCUT_SIZE * interface_scale()
+    }
+
+    /// [`TOOLTIP_SIZE`] at the interface scale.
+    pub fn tooltip_size() -> f32 {
+        TOOLTIP_SIZE * interface_scale()
+    }
 
     /// Letter spacing of H1 and H2, in em.
     pub const H1_TRACKING: f32 = -0.02;
@@ -595,6 +772,9 @@ pub mod font {
     pub const EDITOR: &str = "JetBrains Mono";
     /// GPUI's name for the platform's interface font.
     pub const SYSTEM_FALLBACK: &str = ".SystemUIFont";
+    /// The value of the interface font setting that picks the platform's
+    /// interface font.
+    pub const SYSTEM_SETTING: &str = "system";
 }
 
 /// Width of every line: borders, rings, separators.
@@ -610,3 +790,34 @@ pub const DISABLED_OPACITY: f32 = 0.5;
 /// Opacity of the `selection.text` tint drawn over a selected image, math
 /// formula or checkbox in the preview, as browsers do for replaced content.
 pub const SELECTED_BOX_TINT_OPACITY: f32 = 0.45;
+
+#[cfg(test)]
+mod tests {
+    use super::text;
+
+    #[test]
+    fn interface_sizes_follow_the_interface_scale() {
+        text::set_interface_scale(1.0);
+        assert_eq!(*text::UI, text::base::UI);
+        assert_eq!(*text::UI_SMALL, text::base::UI_SMALL);
+
+        assert!(text::set_interface_scale(text::scale_for_size(18.0)));
+        assert_eq!(text::UI.size, 18.0);
+        assert_eq!(text::UI.line, 24.0);
+        assert_eq!(text::UI_SMALL.size, 16.5);
+        assert_eq!(text::UI_SMALL.line, 21.0);
+        assert_eq!(text::UI_TITLE.size, 19.5);
+        assert_eq!(text::SWITCHER_INPUT.size, 21.0);
+        assert_eq!(text::tooltip_size(), 17.25);
+        assert_eq!(text::menu_shortcut_size(), 15.75);
+        // The same scale again is no change.
+        assert!(!text::set_interface_scale(1.5));
+
+        // Out of range and nonsense values are kept in bounds.
+        text::set_interface_scale(100.0);
+        assert_eq!(text::interface_scale(), text::MAX_SCALE);
+        text::set_interface_scale(f32::NAN);
+        assert_eq!(text::interface_scale(), 1.0);
+        assert_eq!(text::UI.size, 12.0);
+    }
+}

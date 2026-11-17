@@ -418,7 +418,7 @@ pub(crate) fn key_caps(label: impl Into<SharedString>, theme: &Theme) -> gpui::D
         .border_color(theme.border.default)
         .bg(theme.surface.raised)
         .font_family(font::EDITOR)
-        .text_size(px(text::MENU_SHORTCUT_SIZE))
+        .text_size(px(text::menu_shortcut_size()))
         .text_color(theme.text.secondary)
         .child(label.into())
 }
@@ -712,7 +712,7 @@ impl KeymapEditor {
                             .border_color(theme.accent.default)
                             .bg(theme.surface.raised)
                             .font_family(font::EDITOR)
-                            .text_size(px(text::MENU_SHORTCUT_SIZE))
+                            .text_size(px(text::menu_shortcut_size()))
                             .when(recorded.is_none(), |d| d.text_color(theme.text.secondary))
                             .child(prompt),
                     )

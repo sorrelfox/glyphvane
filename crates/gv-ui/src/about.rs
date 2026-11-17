@@ -73,7 +73,9 @@ const PAD: f32 = 24.0;
 /// Space between the About page's paragraphs and between its buttons.
 const GAP: f32 = 8.0;
 /// Height of a notices line.
-const NOTICE_LINE: f32 = text::UI_SMALL.line;
+fn notice_line() -> f32 {
+    text::UI_SMALL.line
+}
 
 gpui::actions!(
     about,
@@ -308,7 +310,7 @@ impl AboutWindow {
                     .p(px(GAP))
                     .font_family(font::EDITOR)
                     .text_size(px(text::UI_SMALL.size))
-                    .line_height(px(NOTICE_LINE))
+                    .line_height(px(notice_line()))
                     .child(
                         uniform_list(
                             "about-notices",
@@ -317,7 +319,7 @@ impl AboutWindow {
                                 range
                                     .map(|ix| {
                                         div()
-                                            .h(px(NOTICE_LINE))
+                                            .h(px(notice_line()))
                                             .whitespace_nowrap()
                                             .child(this.lines[ix].clone())
                                     })

@@ -22,7 +22,7 @@ use super::controls::{self, Segment};
 use super::metrics::{field, row, theme_card};
 use crate::appearance::Appearance;
 use crate::metrics::size::THEME_CARD_PREVIEW;
-use crate::metrics::{DISABLED_OPACITY, HAIRLINE, text};
+use crate::metrics::{DISABLED_OPACITY, HAIRLINE, font, text};
 use crate::settings::AppSettings;
 use crate::theme::{Theme, ThemeChoice, ThemeId};
 
@@ -38,12 +38,17 @@ const CODE_THEME: &str = "appearance.code_theme";
 /// The zoom stepper's step, in percent.
 const ZOOM_STEP: i64 = 10;
 
+const INTERFACE_FONT: &str = "appearance.interface_font";
+/// The interface font menu's entry for the platform's interface font (not
+/// designed: the design shows only installed families).
+const SYSTEM_FONT_LABEL: &str = "System default";
+
 /// The font rows: label, description, family key, size key.
 const FONTS: [(&str, Option<&str>, &str, &str); 3] = [
     (
         "Interface font",
         None,
-        "appearance.interface_font",
+        INTERFACE_FONT,
         "appearance.interface_font_size",
     ),
     (
@@ -189,6 +194,15 @@ impl SettingsWindow {
                 .iter()
                 .map(|f| (f.to_string(), f.to_string()))
                 .collect();
+            if family_key == INTERFACE_FONT {
+                fonts.insert(
+                    0,
+                    (
+                        font::SYSTEM_SETTING.to_owned(),
+                        SYSTEM_FONT_LABEL.to_owned(),
+                    ),
+                );
+            }
             if !fonts.iter().any(|(f, _)| *f == family) {
                 fonts.insert(0, (family.clone(), family.clone()));
             }

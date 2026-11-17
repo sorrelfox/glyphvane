@@ -328,9 +328,12 @@ define_settings! {
         preferred_light_theme: PreferredLightTheme = PreferredLightTheme::Light,
         /// When the high-contrast themes are used.
         high_contrast: HighContrast = HighContrast::FollowSystem,
-        /// The interface font family.
+        /// The interface font family: an installed family, or `system` for
+        /// the operating system's interface font. A family that is not
+        /// installed falls back to the system font.
         interface_font: String = "Inter".to_owned(),
-        /// The interface font size in pixels.
+        /// The interface font size in pixels. The interface text and its
+        /// line heights scale with it (12 is the design size).
         @range(8, 32)
         interface_font_size: f32 = 12.0,
         /// The Reading view font family.
