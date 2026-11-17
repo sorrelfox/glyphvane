@@ -377,6 +377,9 @@ pub enum NodeKind {
         title: Arc<InlineContent>,
         fold: CalloutFold,
     },
+    /// A live block (a canvas or base embed, a ` ```base ` or ` ```query `
+    /// fence): the view fills it in ([`crate::live`]).
+    Live(Arc<crate::live::LiveBlock>),
 }
 
 /// A `<source>` of a `<picture>`: its media query and the first URL of
@@ -443,6 +446,7 @@ impl NodeKind {
             Self::Details { .. } => "details",
             Self::Picture(_) => "picture",
             Self::CalloutTitle { .. } => "callout-title",
+            Self::Live(_) => "live",
         }
     }
 }

@@ -963,6 +963,9 @@ pub(crate) struct ItemCache {
     pub folds: HashMap<BlockId, bool>,
     /// Mermaid diagrams drawn and their jobs.
     pub diagrams: Diagrams,
+    /// Live blocks (canvas and base embeds, base and query fences) and
+    /// their content, by key: kept across rebuilds of the document.
+    pub live: super::embeds::LiveBlocks,
     /// Decoded images and their jobs.
     pub images: Images,
     /// What the document's images resolved to.
@@ -1266,6 +1269,9 @@ impl ItemCache {
             (NodeKind::Diagram(code), _) => {
                 Some(self.diagram_block(tree, item, code, &mut pending))
             }
+            (NodeKind::Live(live), _) => {
+                Some(self.live_block(tree, item, node, live, &mut pending))
+            }
             (NodeKind::Picture(p), ItemKind::Picture) => {
                 self.scheme_items.insert(item.id);
                 self.picture_block(tree, item, node, p, &mut pending)
@@ -1407,6 +1413,36 @@ impl ItemCache {
             push_code_lines(&mut b, code, 0..code.lines.len(), styles, spans.as_ref());
         }
         InlineBlock::new(Arc::new(b.build()))
+    }
+
+    /// The block of a live item: one box as tall as what it shows (its
+    /// reserved height while pending), which the view draws over
+    /// ([`super::embeds`]). It maps to the whole node, for selection.
+    fn live_block(
+        &mut self,
+        tree: &RenderTree,
+        item: &Item,
+        node: &BlockNode,
+        live: &Arc<gv_render_tree::LiveBlock>,
+        pending: &mut bool,
+    ) -> InlineBlock {
+        let styles = &tree.options().styles;
+        let line = styles.role(TextRole::Body).line_height;
+        let shown = self.live.shown(live, item.id);
+        if matches!(shown, super::embeds::Shown::Pending) {
+            *pending = true;
+        }
+        let reserve = item.estimate.height(0.0);
+        let h = super::embeds::box_height(&shown, reserve, line, styles.zoom());
+        self.live.set_height(live.key, h);
+        let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Body));
+        b.inline_box(
+            InlineBox::new(BoxKind::Other, 1.0, h, 0.0),
+            0..node.source.len(),
+        );
+        let mut block = InlineBlock::new(Arc::new(b.build()));
+        block.set_box_content(0, BoxContent::Blank);
+        block
     }
 
     /// The block of a `<picture>`: one image box, the source picked by the
@@ -1787,7 +1823,16 @@ impl Items for DocItems<'_> {
         if self.cache.hidden(self.tree, ix) {
             return 0.0;
         }
-        self.tree.items()[ix].height_estimate(width)
+        let item = &self.tree.items()[ix];
+        // A live block whose content was measured: that height.
+        if let ItemKind::Live { .. } = item.kind
+            && let Some(NodeKind::Live(live)) = self.tree.node_of(ix).map(|n| &n.kind)
+            && let Some(h) = self.cache.live.height(live.key)
+        {
+            let (above, below) = item.frame_insets();
+            return item.gap_before + above + h + below;
+        }
+        item.height_estimate(width)
     }
 
     fn measure(&mut self, ix: usize, width: f32) -> f32 {

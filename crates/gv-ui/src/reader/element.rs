@@ -92,6 +92,12 @@ enum Op {
         path: SharedString,
         color: Hsla,
     },
+    /// A canvas embed's shapes, fitted in `bounds` with `padding` around.
+    Canvas {
+        doc: Arc<crate::canvas_view::Doc>,
+        bounds: Bounds<Pixels>,
+        padding: f32,
+    },
 }
 
 impl Op {
@@ -139,6 +145,14 @@ impl Op {
                     *color,
                     cx,
                 );
+            }
+            Self::Canvas {
+                doc,
+                bounds,
+                padding,
+            } => {
+                let theme = crate::appearance::Appearance::theme(cx);
+                crate::canvas_view::paint_preview(window, doc, *bounds, *padding, theme);
             }
         }
     }
@@ -265,6 +279,19 @@ fn start_images(
         })
         .detach();
     }
+}
+
+/// Fetches the content of the live blocks asked for while drawing
+/// ([`Reader::fetch_live`]).
+fn start_live(
+    reader: WeakEntity<Reader>,
+    blocks: Vec<Arc<gv_render_tree::LiveBlock>>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        reader.update(cx, |r, cx| r.fetch_live(blocks, cx)).ok();
+    })
+    .detach();
 }
 
 /// Label buttons on a card: text in the accent colour, a hover fill.
@@ -1088,6 +1115,58 @@ impl Element for ReaderElement {
                         });
                     }
                 }
+                ItemKind::Live { .. } => {
+                    if let gv_render_tree::NodeKind::Live(live) = &node.kind {
+                        let area = bounds_of(left, content_top, content_w, bottom - content_top);
+                        let selected_here = selected.as_ref().is_some_and(|r| {
+                            r.start <= node.source.start
+                                && node.source.end <= r.end
+                                && !node.source.is_empty()
+                        });
+                        let mut live_out = LiveOut {
+                            out: &mut out,
+                            geometry,
+                            hover: &*hover,
+                        };
+                        paint_live(
+                            &mut live_out,
+                            LivePlace {
+                                area,
+                                node: item.node,
+                                selected: selected_here,
+                            },
+                            live,
+                            cache.live.get(live.key).cloned(),
+                            &LiveStyle {
+                                palette,
+                                body_font: &body_font,
+                                label_font: &label_font,
+                                body,
+                                label: label_spec,
+                                zoom,
+                                border: m.code_border,
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                    // The box, for selection and hit testing (it draws
+                    // nothing).
+                    if let Some(block) = &block {
+                        out.children.push(host.child(
+                            block,
+                            None,
+                            Vec::new(),
+                            Place {
+                                origin: point(px(left), px(content_top)),
+                                width: content_w,
+                                mask: None,
+                            },
+                            window,
+                            cx,
+                        ));
+                    }
+                }
                 kind if is_code(kind) => {
                     let (first, last) = chunk_ends(kind);
                     let r = px(radius::BLOCK);
@@ -1662,6 +1741,10 @@ impl Element for ReaderElement {
         if !images.is_empty() {
             start_images(self.reader.clone(), images, cx);
         }
+        let live = cache.live.take_requests();
+        if !live.is_empty() {
+            start_live(self.reader.clone(), live, cx);
+        }
 
         // The Expand button of the table under the pointer when it is not at
         // its natural width (its cells wrap or it scrolls sideways): a code
@@ -1836,6 +1919,10 @@ impl ReaderElement {
                 if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
                     return;
                 }
+                if state.borrow().in_host(e.position) {
+                    // An embedded base scrolls itself.
+                    return;
+                }
                 let d = e.delta.pixel_delta(px(text::PREVIEW_BODY.line));
                 let (mut dx, dy) = (f32::from(d.x), f32::from(d.y));
                 if e.modifiers.shift && dx == 0.0 {
@@ -1918,6 +2005,10 @@ impl ReaderElement {
                     return;
                 }
                 let mut st = state.borrow_mut();
+                if st.in_host(e.position) {
+                    // An embedded base takes its own presses.
+                    return;
+                }
                 match e.button {
                     MouseButton::Left => {
                         focus.focus(window, cx);
@@ -2032,6 +2123,14 @@ impl ReaderElement {
                                 }
                                 ControlKind::OpenExternally { slot } => {
                                     open_file = st.geometry.external.get(slot).cloned();
+                                }
+                                ControlKind::Live { slot } => {
+                                    let disposition = if e.modifiers.secondary(cx) {
+                                        Disposition::NewTab
+                                    } else {
+                                        Disposition::InPlace
+                                    };
+                                    follow = live_request(&st, slot, disposition);
                                 }
                             }
                         }
@@ -2470,4 +2569,312 @@ fn frame_title_is(item: &gv_render_tree::Item, i: usize, title: gv_syntax::Block
         .get(i + 1)
         .is_some_and(|f| matches!(f.kind, FrameKind::Details) && f.id == title)
         || item.context.len() == i + 1
+}
+
+/// Where a live block's drawing and hit geometry go.
+struct LiveOut<'a> {
+    out: &'a mut Prepaint,
+    geometry: &'a mut super::state::Geometry,
+    hover: &'a Hover,
+}
+
+/// A live block's place: its content box, its node, and whether the
+/// selection covers it.
+struct LivePlace {
+    area: Bounds<Pixels>,
+    node: usize,
+    selected: bool,
+}
+
+/// What live blocks are drawn with.
+struct LiveStyle<'a> {
+    palette: &'a Arc<Palette>,
+    body_font: &'a gpui::Font,
+    label_font: &'a gpui::Font,
+    body: gv_render_tree::StyleSpec,
+    label: gv_render_tree::StyleSpec,
+    zoom: f32,
+    border: f32,
+}
+
+/// The title of a live block's header: the file's name (and the base's
+/// view), the query, or *Base* for a base fence.
+fn live_title(live: &gv_render_tree::LiveBlock) -> String {
+    use gv_render_tree::LiveKind;
+    match (&live.target, live.kind) {
+        (Some(t), _) => {
+            let name = t.rsplit('/').next().unwrap_or(t);
+            match &live.anchor {
+                Some(view) => format!("{name} \u{203a} {view}"),
+                None => name.to_owned(),
+            }
+        }
+        (None, LiveKind::Query) => live
+            .fence_text()
+            .and_then(|t| t.lines().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or("")
+            .to_owned(),
+        (None, _) => "Base".to_owned(),
+    }
+}
+
+/// The link a click on live control `slot` of the last frame follows.
+fn live_request(st: &State, slot: usize, disposition: Disposition) -> Option<LinkRequest> {
+    let target = *st.geometry.live.get(slot)?;
+    let doc = st.doc.as_ref()?;
+    let gv_render_tree::NodeKind::Live(live) = &doc.tree.nodes().get(target.node)?.kind else {
+        return None;
+    };
+    super::embeds::open_request(live, st.cache.live.get(live.key), target.row, disposition)
+}
+
+/// Draws a live block in `place.area` (its box, header and content) and
+/// records its controls and hosted views ([`super::embeds`]). Not
+/// designed: built plainly.
+#[allow(clippy::too_many_lines)]
+fn paint_live(
+    o: &mut LiveOut<'_>,
+    place: LivePlace,
+    live: &gv_render_tree::LiveBlock,
+    shown: Option<super::embeds::Shown>,
+    s: &LiveStyle<'_>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use super::embeds::{PAD, QueryRow, Shown};
+    use gv_render_tree::LiveKind;
+    let color = |t: Token| s.palette.color(t);
+    let area = place.area;
+    let (x, y) = (f32::from(area.left()), f32::from(area.top()));
+    let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+    let pad = PAD * s.zoom;
+    let line = s.body.line_height;
+    let head = line + 2.0 * pad;
+    o.out.under.push(Op::Frame {
+        bounds: area,
+        borders: Edges::all(px(HAIRLINE)),
+        corners: Corners::all(px(radius::BLOCK)),
+        fill: color(Token::SurfaceWindow),
+        border: color(Token::BorderDefault),
+    });
+    // The header: icon, title, and a query's count on the right.
+    let icon_name = match live.kind {
+        LiveKind::Canvas => Icon::Canvas,
+        LiveKind::Base => Icon::Base,
+        LiveKind::Query => Icon::Search,
+    };
+    let icon_size = icon::INLINE * s.zoom;
+    o.out.over.push(Op::Icon {
+        bounds: bounds_of(
+            x + pad,
+            y + pad + (line - icon_size) / 2.0,
+            icon_size,
+            icon_size,
+        ),
+        path: icon_name.name().path(),
+        color: color(Token::TextSecondary),
+    });
+    let count = match &shown {
+        Some(Shown::Query(q)) => Some(q.count()),
+        _ => None,
+    };
+    let count_w = count.as_ref().map_or(0.0, |c| {
+        let line_c = shape(
+            window,
+            c,
+            s.label_font.clone(),
+            s.label.size,
+            color(Token::TextTertiary),
+        );
+        let cw = f32::from(line_c.width());
+        o.out.over.push(Op::Text {
+            origin: point(
+                px(x + w - pad - cw),
+                px(y + pad + (line - s.label.line_height) / 2.0),
+            ),
+            line: Box::new(line_c),
+            line_height: px(s.label.line_height),
+        });
+        cw + pad
+    });
+    let title_x = x + pad + icon_size + CALLOUT_ICON_GAP * s.zoom;
+    let title = fit_text(
+        &live_title(live),
+        x + w - pad - count_w - title_x,
+        s.body.size,
+    );
+    let title_line = shape(
+        window,
+        &title,
+        s.body_font.clone(),
+        s.body.size,
+        color(Token::TextSecondary),
+    );
+    o.out.over.push(Op::Text {
+        line: Box::new(title_line),
+        origin: point(px(title_x), px(y + pad)),
+        line_height: px(line),
+    });
+    // A control: hovered, it gets the hover fill.
+    let control = |o: &mut LiveOut<'_>, bounds: Bounds<Pixels>, row: Option<usize>| {
+        let c = Control {
+            bounds,
+            kind: ControlKind::Live {
+                slot: o.geometry.live.len(),
+            },
+        };
+        o.geometry.live.push(super::state::LiveTarget {
+            node: place.node,
+            row,
+        });
+        if *o.hover == Hover::Control(c) {
+            o.out.under.push(Op::Rect {
+                bounds,
+                color: color(Token::StateHover),
+                radius: px(radius::SMALL_CONTROL),
+            });
+        }
+        o.geometry.controls.push(c);
+    };
+    if live.target.is_some() {
+        control(o, bounds_of(x, y, w, head), None);
+    }
+    let body = bounds_of(
+        x + s.border,
+        y + head,
+        w - 2.0 * s.border,
+        (h - head - s.border).max(0.0),
+    );
+    let text_line =
+        |o: &mut LiveOut<'_>, text: &str, at: (f32, f32), font: &gpui::Font, c: Token| {
+            let room = x + w - pad - at.0;
+            let shaped = shape(
+                window,
+                &fit_text(text, room, s.body.size),
+                font.clone(),
+                s.body.size,
+                color(c),
+            );
+            o.out.over.push(Op::Text {
+                line: Box::new(shaped),
+                origin: point(px(at.0), px(at.1)),
+                line_height: px(line),
+            });
+        };
+    match shown.unwrap_or(Shown::Pending) {
+        Shown::Pending => {
+            text_line(
+                o,
+                "Loading\u{2026}",
+                (x + pad, y + head),
+                s.body_font,
+                Token::TextTertiary,
+            );
+        }
+        Shown::Notice(why) => {
+            text_line(
+                o,
+                &why,
+                (x + pad, y + head),
+                s.body_font,
+                Token::TextSecondary,
+            );
+        }
+        Shown::Canvas(doc) => {
+            o.out.under.push(Op::Canvas {
+                doc,
+                bounds: body,
+                padding: pad,
+            });
+            control(o, body, None);
+        }
+        Shown::Base(view) => {
+            // The Bases view, hosted: pointer input over it is its own.
+            let mut element = view.into_any_element();
+            element.layout_as_root(
+                size(
+                    AvailableSpace::Definite(body.size.width),
+                    AvailableSpace::Definite(body.size.height),
+                ),
+                window,
+                cx,
+            );
+            window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
+                element.prepaint_at(body.origin, window, cx);
+            });
+            o.out.children.push(Child {
+                element,
+                mask: Some(body),
+            });
+            o.geometry.hosts.push(body);
+        }
+        Shown::Query(q) => {
+            let mut row_y = y + head;
+            for row in &q.rows {
+                match *row {
+                    QueryRow::Note(i) => {
+                        let Some(f) = q.files.get(i) else {
+                            continue;
+                        };
+                        control(
+                            o,
+                            bounds_of(x + s.border, row_y, w - 2.0 * s.border, line),
+                            Some(i),
+                        );
+                        text_line(
+                            o,
+                            &f.title,
+                            (x + pad, row_y),
+                            s.body_font,
+                            Token::AccentDefault,
+                        );
+                    }
+                    QueryRow::Line(i, j) => {
+                        let Some(snip) = q.files.get(i).and_then(|f| f.snippets.get(j)) else {
+                            continue;
+                        };
+                        let mut text = String::new();
+                        if snip.clipped_start {
+                            text.push('\u{2026}');
+                        }
+                        text.push_str(snip.text.trim());
+                        text_line(
+                            o,
+                            &text,
+                            (x + 3.0 * pad, row_y),
+                            s.label_font,
+                            Token::TextSecondary,
+                        );
+                    }
+                    QueryRow::More(n) => {
+                        let what = if n == 1 { "note" } else { "notes" };
+                        text_line(
+                            o,
+                            &format!("and {} more {what}", crate::search_panel::grouped_count(n)),
+                            (x + pad, row_y),
+                            s.body_font,
+                            Token::TextTertiary,
+                        );
+                    }
+                    QueryRow::Empty => {
+                        text_line(
+                            o,
+                            "No results",
+                            (x + pad, row_y),
+                            s.body_font,
+                            Token::TextSecondary,
+                        );
+                    }
+                }
+                row_y += line;
+            }
+        }
+    }
+    if place.selected {
+        o.out.over.push(Op::Rect {
+            bounds: area,
+            color: color(Token::Selection),
+            radius: px(radius::BLOCK),
+        });
+    }
 }

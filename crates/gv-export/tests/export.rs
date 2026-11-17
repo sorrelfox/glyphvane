@@ -596,3 +596,17 @@ fn rich_copy_of_a_selection() {
         "<pre class=\"gv-code\"><code>second</code></pre>"
     );
 }
+
+#[test]
+fn live_blocks_fall_back_to_their_link_or_code() {
+    let src = "![[Plan.canvas]]\n\n```base\nviews: []\n```\n\n```query\ntag:#book\n```\n";
+    let html = export(src, ProfileId::Obsidian);
+    // The embed's line is kept; the fences are code blocks.
+    assert!(html.contains("Plan.canvas"), "{html}");
+    assert!(html.contains("views: []"), "{html}");
+    assert!(html.contains("tag:#book"), "{html}");
+    assert_eq!(html.matches("<pre").count(), 2, "{html}");
+    // The same as a profile where these are not live blocks.
+    let gfm = export(src, ProfileId::GfmFile);
+    assert_eq!(gfm.matches("<pre").count(), 2, "{gfm}");
+}

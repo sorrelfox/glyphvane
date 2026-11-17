@@ -78,6 +78,10 @@ pub struct RenderOptions {
     /// ` ```mermaid ` fences are diagrams (the profile's `mermaid` switch),
     /// not code.
     pub mermaid: bool,
+    /// ` ```base ` and ` ```query ` fences are live blocks
+    /// ([`LiveBlock`](crate::LiveBlock)), not code: Obsidian's bases and
+    /// search embeds (the profiles with note embeds).
+    pub obsidian_fences: bool,
     /// A soft line break is a line break (the profile's `soft_break =
     /// br`: Obsidian unless `strictLineBreaks`, GitHub comments), not a
     /// space.
@@ -106,6 +110,7 @@ impl RenderOptions {
             chunk_lines: 50,
             math_fences: false,
             mermaid: false,
+            obsidian_fences: false,
             soft_breaks: false,
         }
     }
@@ -117,6 +122,7 @@ impl RenderOptions {
         Self {
             math_fences: profile.switches.math == Math::GitHub,
             mermaid: profile.switches.mermaid,
+            obsidian_fences: profile.switches.embeds,
             soft_breaks: profile.switches.soft_break == SoftBreak::Br,
             ..Self::commonmark()
         }
@@ -128,6 +134,7 @@ impl RenderOptions {
         Self {
             math_fences: switches.math == Math::GitHub,
             mermaid: switches.mermaid,
+            obsidian_fences: switches.embeds,
             soft_breaks: switches.soft_break == SoftBreak::Br,
             ..Self::commonmark()
         }
@@ -141,6 +148,7 @@ impl RenderOptions {
         Self {
             math_fences: p.math_fences,
             mermaid: p.mermaid,
+            obsidian_fences: p.obsidian_fences,
             soft_breaks: p.soft_breaks,
             ..self
         }

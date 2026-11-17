@@ -42,7 +42,9 @@
 //! [`FrameKind::Alert`] box). Raw HTML (blocks and inline) is shown as
 //! text and flagged `raw_html_pending` until the HTML pipeline exists,
 //! except `<details>` (a summary row folding the blocks up to its end) and
-//! `<picture>`; front matter is a property list (or hidden).
+//! `<picture>`; front matter is a property list (or hidden). Canvas and
+//! base embeds and ` ```base ` and ` ```query ` fences are live blocks the
+//! view fills in itself ([`LiveBlock`], see `live`).
 //!
 //! # Coordinates
 //!
@@ -57,6 +59,7 @@ mod footnote;
 mod html;
 mod inline;
 mod item;
+mod live;
 mod metrics;
 mod node;
 mod properties;
@@ -72,6 +75,7 @@ pub use find::{FindError, FindIndex, Finder, Matches};
 pub use footnote::FootnoteIndex;
 pub use inline::MATH_DISPLAY_SCALE;
 pub use item::{Estimate, Item, ItemId, ItemKind, indent, right_indent};
+pub use live::{LIVE_EMBED_HEIGHT, LIVE_QUERY_HEIGHT, LiveBlock, LiveKey, LiveKind};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
     BlockNode, BoxRef, CalloutType, CodeBlock, CodeLine, Context, FootnoteRefInfo, Frame,

@@ -888,6 +888,7 @@ fn a_table_wider_than_the_column_wraps_its_cells_to_fit(cx: &mut TestAppContext)
 
 mod code_tests;
 mod constructs_tests;
+mod embeds_tests;
 mod expand_tests;
 mod find_tests;
 mod media_tests;

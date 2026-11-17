@@ -310,7 +310,8 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
             | ItemKind::Html { .. }
             | ItemKind::Properties { .. }
             | ItemKind::Math { .. }
-            | ItemKind::Diagram { .. } => {
+            | ItemKind::Diagram { .. }
+            | ItemKind::Live { .. } => {
                 let src = parsed.text.get(item.source.clone()).unwrap_or_default();
                 let text: String = src
                     .lines()

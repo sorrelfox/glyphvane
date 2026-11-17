@@ -323,9 +323,21 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 let fenced = leaf.kind == LeafKind::FencedCode;
                 let code = Arc::new(self.code_block(leaf, range.start, fenced, !fenced));
                 let lang = code.language.as_deref().filter(|_| fenced);
-                let kind = match lang {
-                    Some("math") if self.opts.math_fences => NodeKind::Math(code),
-                    Some("mermaid") if self.opts.mermaid => NodeKind::Diagram(code),
+                let live = lang
+                    .filter(|_| self.opts.obsidian_fences)
+                    .and_then(crate::live::LiveKind::of_fence);
+                let kind = match (lang, live) {
+                    (_, Some(kind)) => NodeKind::Live(Arc::new(crate::live::LiveBlock::new(
+                        kind,
+                        None,
+                        None,
+                        Some(code),
+                        None,
+                        None,
+                        0,
+                    ))),
+                    (Some("math"), _) if self.opts.math_fences => NodeKind::Math(code),
+                    (Some("mermaid"), _) if self.opts.mermaid => NodeKind::Diagram(code),
                     _ => NodeKind::Code(code),
                 };
                 (kind, range.start, None)

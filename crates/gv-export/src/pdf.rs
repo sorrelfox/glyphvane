@@ -718,6 +718,16 @@ impl Emitter<'_> {
                     self.out.push_str("\n\n");
                 }
             }
+            // A live block (canvas or base embed, base or query fence) is
+            // not drawn in exports: the embed's line, or the fence as code.
+            NodeKind::Live(live) => {
+                if let Some(c) = &live.label {
+                    self.inline(c, 0..c.spans.len(), ix, 0);
+                    self.out.push_str("\n\n");
+                } else if let Some(c) = &live.code {
+                    self.code(c);
+                }
+            }
         }
     }
 

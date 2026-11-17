@@ -66,6 +66,8 @@ use crate::metrics::spacing::{find as field_spacing, list_row, panel_head, searc
 use crate::metrics::{FOCUS_HALO, HAIRLINE, font, icon, radius, size, text};
 use crate::reader::Disposition;
 use crate::theme::Theme;
+/// `n` with thousands separators ("1,204"), as the panel counts.
+pub(crate) use model::grouped as grouped_count;
 pub use model::{Progress, Row};
 use model::{Results, grouped};
 

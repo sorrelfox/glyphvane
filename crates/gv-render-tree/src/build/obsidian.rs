@@ -15,6 +15,11 @@
 //! budgets: [`MAX_EMBED_DEPTH`] nested embeds, [`MAX_EMBED_NODES`] blocks
 //! and [`MAX_EMBED_BYTES`] of embedded text per outermost embed. A cycle
 //! (the same note and section again inside itself) shows a notice instead.
+//!
+//! A paragraph that is only a canvas or base embed is a live block instead
+//! ([`crate::live`]); inside an embedded note, canvas and base embeds and
+//! ` ```base ` and ` ```query ` fences are live blocks too, counted
+//! against the depth limit.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -30,7 +35,10 @@ use gv_text::TextSource;
 
 use super::{NodeBuilder, Open};
 use crate::inline::{self, is_image_path};
-use crate::node::{BlockNode, CalloutType, Frame, FrameKind, NodeKind, default_callout_title};
+use crate::live::{LiveBlock, LiveKind, split_embed};
+use crate::node::{
+    BlockNode, CalloutType, CodeBlock, CodeLine, Frame, FrameKind, NodeKind, default_callout_title,
+};
 use crate::status::EmbedFetch;
 use crate::style::TextRole;
 
@@ -143,6 +151,10 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         let Some((inner, anchor)) = self.only_note_embed(leaf) else {
             return false;
         };
+        if let Some(kind) = LiveKind::of_embed(split_embed(&inner).0) {
+            self.live_embed(leaf, kind, &inner);
+            return true;
+        }
         let frame = self.frames.len() < super::MAX_FRAMES;
         if frame {
             self.frames.push(Frame {
@@ -182,6 +194,56 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             self.ctx = None;
         }
         true
+    }
+
+    /// A paragraph that is only a canvas or base embed: a live block,
+    /// its own line kept as its label (copy, find, exports).
+    fn live_embed(&mut self, leaf: &Leaf<'_>, kind: LiveKind, inner: &str) {
+        let Some(mut node) = self.build_leaf(leaf) else {
+            return;
+        };
+        let label = match &node.kind {
+            NodeKind::Paragraph(c) => Some(Arc::clone(c)),
+            _ => None,
+        };
+        let (path, anchor) = split_embed(inner);
+        node.kind = NodeKind::Live(Arc::new(LiveBlock::new(
+            kind,
+            Some(path.into()),
+            anchor.map(Into::into),
+            None,
+            label,
+            None,
+            0,
+        )));
+        self.push(node, None);
+    }
+
+    /// A live block inside a note embed, mapped to `at`: its label is
+    /// `label`.
+    fn live_node(&mut self, live: LiveBlock, at: usize) {
+        self.synthetic += 1;
+        let id = BlockId(SYNTHETIC | self.synthetic);
+        let context = self.context();
+        self.push(
+            BlockNode {
+                id,
+                kind: NodeKind::Live(Arc::new(live)),
+                source: at..at,
+                context,
+                block: at..at,
+                top: at..at,
+                lookups: None,
+                table: false,
+            },
+            None,
+        );
+    }
+
+    /// The plain label of an embed inside a note embed.
+    fn plain_label(&mut self, text: &str, at: usize) -> Arc<crate::node::InlineContent> {
+        let cx = self.inline_cx(BlockId(SYNTHETIC | self.synthetic));
+        Arc::new(inline::build_plain(text, at..at, at, TextRole::Body, &cx))
     }
 
     /// The embed of a paragraph that holds only a note embed (not an
@@ -279,6 +341,7 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             out: Vec::new(),
             items: 0,
             first_in_item: false,
+            fences: self.opts.obsidian_fences,
         };
         tree.walk_range(range.clone(), &mut blocks);
         for block in blocks.out {
@@ -292,6 +355,55 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             }
             match block.kind {
                 Block::Text { role, text } => self.plain_node(&text, role, at),
+                Block::Fence { kind, code } => {
+                    if depth + 1 >= MAX_EMBED_DEPTH {
+                        self.notice(
+                            &format!(
+                                "Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown."
+                            ),
+                            at,
+                        );
+                        continue;
+                    }
+                    let live = LiveBlock::new(
+                        kind,
+                        None,
+                        None,
+                        Some(Arc::new(code)),
+                        None,
+                        Some(Arc::clone(key)),
+                        u16::try_from(depth + 1).unwrap_or(u16::MAX),
+                    );
+                    self.live_node(live, at);
+                }
+                Block::Embed { inner, .. }
+                    if LiveKind::of_embed(split_embed(&inner).0).is_some() =>
+                {
+                    // A canvas or base inside the embedded note: live too,
+                    // its `this` the embedded note, within the depth limit.
+                    if depth + 1 >= MAX_EMBED_DEPTH {
+                        self.notice(
+                            &format!(
+                                "Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown."
+                            ),
+                            at,
+                        );
+                        continue;
+                    }
+                    let (path, view) = split_embed(&inner);
+                    let kind = LiveKind::of_embed(path).unwrap_or(LiveKind::Canvas);
+                    let label = self.plain_label(&format!("\u{29c9} {inner}"), at);
+                    let live = LiveBlock::new(
+                        kind,
+                        Some(path.into()),
+                        view.map(Into::into),
+                        None,
+                        Some(label),
+                        Some(Arc::clone(key)),
+                        u16::try_from(depth + 1).unwrap_or(u16::MAX),
+                    );
+                    self.live_node(live, at);
+                }
                 Block::Embed { inner, anchor } => {
                     let pushed = self.frames.len() < super::MAX_FRAMES;
                     if pushed {
@@ -471,6 +583,11 @@ enum Block {
         inner: String,
         anchor: Option<String>,
     },
+    /// A ` ```base ` or ` ```query ` fence (live where fences are).
+    Fence {
+        kind: LiveKind,
+        code: CodeBlock,
+    },
 }
 
 /// Collects the embedded blocks of a range as plain text.
@@ -482,6 +599,8 @@ struct Blocks<'t> {
     items: usize,
     /// The next leaf is the first of a list item.
     first_in_item: bool,
+    /// ` ```base ` and ` ```query ` fences are live blocks.
+    fences: bool,
 }
 
 impl Visitor for Blocks<'_> {
@@ -535,6 +654,15 @@ impl Visitor for Blocks<'_> {
                 }
                 (TextRole::Body, self.inline_text(leaf))
             }
+            LeafKind::FencedCode if self.fences && self.live_fence(leaf).is_some() => {
+                if let Some((kind, code)) = self.live_fence(leaf) {
+                    self.out.push(EmbeddedBlock {
+                        start,
+                        kind: Block::Fence { kind, code },
+                    });
+                }
+                return;
+            }
             LeafKind::FencedCode
             | LeafKind::IndentedCode
             | LeafKind::MathBlock
@@ -574,6 +702,39 @@ impl Visitor for Blocks<'_> {
 }
 
 impl Blocks<'_> {
+    /// A ` ```base ` or ` ```query ` fence's kind and lines (mapped to
+    /// the embed's line, like the other embedded blocks).
+    fn live_fence(&self, leaf: &Leaf<'_>) -> Option<(LiveKind, CodeBlock)> {
+        let info = self.text.get(leaf.info.clone()?)?.trim();
+        let kind = LiveKind::of_fence(info.split_ascii_whitespace().next()?)?;
+        let mut text = String::new();
+        let mut lines = Vec::with_capacity(leaf.lines.len());
+        for (i, l) in leaf.lines.iter().enumerate() {
+            if i > 0 {
+                text.push('\n');
+            }
+            let start = text.len();
+            text.push_str(self.text.get(l.content.clone()).unwrap_or(""));
+            lines.push(CodeLine {
+                units: crate::inline::width_units(&text[start..]),
+                text: start..text.len(),
+                source: 0..0,
+                start: 0,
+                indent: 0,
+            });
+        }
+        Some((
+            kind,
+            CodeBlock {
+                fenced: true,
+                info: Some(info.into()),
+                language: Some(kind.name().into()),
+                text,
+                lines: lines.into_boxed_slice(),
+            },
+        ))
+    }
+
     /// The text of a paragraph or heading as a reader sees it.
     fn inline_text(&self, leaf: &Leaf<'_>) -> String {
         let tree = self.tree.inlines(leaf, self.text);

@@ -119,6 +119,7 @@ fn dump_item(ix: usize, item: &Item, out: &mut String) {
                 lines.end
             )
         }
+        ItemKind::Live { kind } => format!("live {}", kind.name()),
         k => k.name().to_owned(),
     };
     let _ = writeln!(
@@ -251,6 +252,18 @@ fn dump_node(node: &BlockNode, out: &mut String) {
                 p.alt,
                 p.pick(false).unwrap_or(""),
                 p.pick(true).unwrap_or("")
+            );
+        }
+        NodeKind::Live(l) => {
+            let _ = writeln!(
+                out,
+                "  live {} target={:?} anchor={:?} host={:?} depth={} fence_lines={}",
+                l.kind.name(),
+                l.target.as_deref().unwrap_or(""),
+                l.anchor.as_deref().unwrap_or(""),
+                l.host.as_deref().unwrap_or(""),
+                l.depth,
+                l.code.as_ref().map_or(0, |c| c.lines.len())
             );
         }
         NodeKind::ThematicBreak | NodeKind::EmptyItem | NodeKind::EmptyQuote => {}

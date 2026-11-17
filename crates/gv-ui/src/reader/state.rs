@@ -162,6 +162,17 @@ pub(crate) enum ControlKind {
     /// *Open externally* on an image card: the file is
     /// [`Geometry::external`]`[slot]`.
     OpenExternally { slot: usize },
+    /// A live block's header or canvas (opens its file), or a query
+    /// block's result row: [`Geometry::live`]`[slot]`.
+    Live { slot: usize },
+}
+
+/// What a click on a live block opens: the block's node, and the result
+/// row of a query block (`None`: the block's own file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveTarget {
+    pub node: usize,
+    pub row: Option<usize>,
 }
 
 /// A footnote reference or backreference under the pointer.
@@ -284,6 +295,11 @@ pub(crate) struct Geometry {
     pub thumb: Option<Bounds<Pixels>>,
     /// The sideways scrollbars of the blocks that scroll sideways.
     pub hbars: Vec<HBar>,
+    /// What the live blocks' controls open.
+    pub live: Vec<LiveTarget>,
+    /// Where hosted views (embedded bases) are: pointer input there is
+    /// theirs.
+    pub hosts: Vec<Bounds<Pixels>>,
 }
 
 /// Frame timings, for the log and the debug benchmark.
@@ -393,6 +409,12 @@ impl State {
 
     /// Shows `doc`, scrolled to the top.
     pub fn install(&mut self, doc: Loaded) {
+        // Live blocks keep their content across builds of the same file.
+        if self.doc.as_ref().is_some_and(|d| d.path == doc.path) {
+            self.cache.live.retain_tree(&doc.tree);
+        } else {
+            self.cache.live.clear();
+        }
         if self
             .doc
             .as_ref()
@@ -625,6 +647,9 @@ impl State {
 
     /// What is under the pointer at `position`.
     pub fn hover_at(&self, position: Point<Pixels>) -> Hover {
+        if self.in_host(position) {
+            return Hover::None;
+        }
         if self.geometry.track.is_some_and(|t| t.contains(&position))
             || self.hbar_at(position).is_some()
         {
@@ -649,6 +674,11 @@ impl State {
             g.text.is_some() && g.top <= y && y < g.bottom && x >= x0 && x < x0 + w
         });
         if over_text { Hover::Text } else { Hover::None }
+    }
+
+    /// Whether `position` is over a hosted view (an embedded base).
+    pub fn in_host(&self, position: Point<Pixels>) -> bool {
+        self.geometry.hosts.iter().any(|b| b.contains(&position))
     }
 
     /// The whole text of code block node `node`.

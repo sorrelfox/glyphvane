@@ -36,6 +36,10 @@
 //!   that scroll sideways (with fades over their hidden sides), and the
 //!   keys of [`key_bindings`].
 //! - A code block's head copies the block and toggles its soft wrap.
+//! - Live blocks ([`embeds`]): canvas embeds are drawn as shapes (a click
+//!   opens the canvas), bases are hosted Bases views (they scroll and
+//!   open files themselves), query blocks list their results (a click
+//!   opens the note).
 //! - A table whose cells wrap or that scrolls sideways shows an Expand
 //!   button while the pointer is over it; the window then shows the table
 //!   on its own over its content area ([`expanded`]).
@@ -56,6 +60,7 @@ pub(crate) mod code_highlight;
 pub(crate) mod diagram;
 mod edited;
 mod element;
+pub(crate) mod embeds;
 mod engine;
 pub(crate) mod expanded;
 mod find;
@@ -283,6 +288,12 @@ pub struct Reader {
     remote: remote::RemoteImages,
     /// The tooltip of the link under the pointer.
     link_tip: link_tip::LinkTip,
+    /// The vault's content snapshot live blocks use ([`embeds`]).
+    content: Option<gv_vault::content::ContentSnapshot>,
+    /// The window gives the snapshots ([`Reader::set_content`]); else the
+    /// view reads the vault's content index itself.
+    content_given: bool,
+    _content_poll: Option<Task<()>>,
     _settings: Subscription,
 }
 
@@ -330,6 +341,9 @@ impl Reader {
             _refresh: None,
             remote: remote::RemoteImages::default(),
             link_tip: link_tip::LinkTip::default(),
+            content: None,
+            content_given: false,
+            _content_poll: None,
             _settings: cx.observe_global::<AppSettings>(|this, cx| {
                 this.sync_typography(cx);
                 this.sync_remote(cx);
@@ -650,6 +664,11 @@ impl Reader {
         self.index = index;
         if changed && self.status == LoadStatus::Ready {
             self.refresh_statuses(cx);
+            // Embeds of canvases and bases resolve again; the vault's
+            // content may be new too.
+            self.refresh_live_targets();
+            self.poll_content(cx);
+            cx.notify();
         }
     }
 

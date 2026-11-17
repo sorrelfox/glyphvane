@@ -187,6 +187,34 @@ impl Doc {
     }
 }
 
+/// A canvas file's text parsed and laid out for a shapes-only preview
+/// (a `.canvas` embed in the Reading view). Blocking: the background
+/// executor only.
+pub(crate) fn preview_doc(text: &str) -> Result<Arc<Doc>, String> {
+    let canvas = Canvas::parse(text).map_err(|e| e.to_string())?;
+    Ok(Arc::new(Doc::new(canvas)))
+}
+
+/// Paints `doc` as shapes in `bounds` (groups, edges, every other node as
+/// a block, no text: [`LodThresholds::SHAPES_ONLY`]), fitted with
+/// `padding` px around, in `theme`'s colours. Returns the number of items
+/// painted.
+pub(crate) fn paint_preview(
+    window: &mut Window,
+    doc: &Doc,
+    bounds: Bounds<Pixels>,
+    padding: f32,
+    theme: &crate::theme::Theme,
+) -> usize {
+    paint::shapes_only(window, doc, bounds, padding, &Colors::of(theme))
+}
+
+/// The number of nodes and edges of a previewed canvas.
+#[cfg(test)]
+pub(crate) fn preview_size(doc: &Doc) -> (usize, usize) {
+    (doc.canvas.nodes().len(), doc.canvas.edges().len())
+}
+
 /// What the Canvas view asks of its window.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanvasEvent {

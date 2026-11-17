@@ -275,7 +275,14 @@ impl RenderTree {
             text: String::new(),
             segs: Vec::new(),
         };
-        if let Some(c) = node.item_inline(&item.kind) {
+        if let crate::NodeKind::Live(live) = &node.kind {
+            // An embed's own line, or a fence's lines.
+            if let Some(c) = &live.label {
+                paragraph_text(c, node.source.start, &mut b);
+            } else if let Some(code) = &live.code {
+                lines_text(code, 0..code.lines.len(), node, &mut b);
+            }
+        } else if let Some(c) = node.item_inline(&item.kind) {
             paragraph_text(c, node.source.start, &mut b);
         } else if let (Some(code), Some(lines)) = (node.lines(), item.kind.lines()) {
             lines_text(code, lines.start as usize..lines.end as usize, node, &mut b);

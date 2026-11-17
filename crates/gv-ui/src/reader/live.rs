@@ -352,6 +352,7 @@ fn splice(st: &mut State, doc: Loaded, report: Option<UpdateReport>) {
         changed,
     );
     st.cache.targets = Some(Arc::clone(&doc.images));
+    st.cache.live.retain_tree(&doc.tree);
     st.doc = Some(doc);
     st.selection = None;
     st.hover = Hover::None;

@@ -215,6 +215,26 @@ impl Resolver {
 }
 
 impl Resolver {
+    /// Resolves an embed (`![[destination]]`) from the document, or from
+    /// the embedding note `from` (a vault path) inside a note embed.
+    /// Without the window's vault, the files below the document's folder
+    /// are checked directly.
+    pub fn resolve_embed(&self, destination: &str, from: Option<&str>) -> Resolution {
+        let source = from
+            .and_then(|f| VaultPath::new(f).ok())
+            .unwrap_or_else(|| self.source.clone());
+        let link = LinkRef::new(LinkKind::Embed, destination, source, self.profile);
+        let mut res = match &self.probe {
+            Some(probe) => resolve_with_probe(&self.index, &link, &self.params, probe),
+            None => resolve(&self.index, &link, &self.params),
+        };
+        if !self.vault && !res.status.is_resolved() {
+            let probe = FsProbe::new(self.index.root().to_path_buf(), PlatformRules::host());
+            res = resolve_with_probe(&self.index, &link, &self.params, &probe);
+        }
+        res
+    }
+
     /// Whether the status of `link` can change when the index does. URLs
     /// are classified by their text alone, except web URLs this vault maps
     /// to its own files; local paths, fragments, `file:` and `obsidian:`
@@ -255,20 +275,7 @@ impl LinkStatusSource for Resolver {
     /// A note embed's note, read from the disk: resolved from the
     /// document, or from the embedding note `from` inside an embed.
     fn embed(&self, destination: &str, from: Option<&str>) -> EmbedFetch {
-        let source = from
-            .and_then(|f| VaultPath::new(f).ok())
-            .unwrap_or_else(|| self.source.clone());
-        let link = LinkRef::new(LinkKind::Embed, destination, source, self.profile);
-        let mut res = match &self.probe {
-            Some(probe) => resolve_with_probe(&self.index, &link, &self.params, probe),
-            None => resolve(&self.index, &link, &self.params),
-        };
-        if !self.vault && !res.status.is_resolved() {
-            // Without the window's vault: the files below the document's
-            // folder, checked directly.
-            let probe = FsProbe::new(self.index.root().to_path_buf(), PlatformRules::host());
-            res = resolve_with_probe(&self.index, &link, &self.params, &probe);
-        }
+        let res = self.resolve_embed(destination, from);
         if res.status == Status::Pending {
             return EmbedFetch::Pending;
         }

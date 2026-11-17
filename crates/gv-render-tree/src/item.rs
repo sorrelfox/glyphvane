@@ -100,6 +100,11 @@ pub enum ItemKind {
     Details,
     /// A `<picture>` element.
     Picture,
+    /// A live block ([`crate::LiveBlock`]), one item estimated at its
+    /// reserved height.
+    Live {
+        kind: crate::LiveKind,
+    },
 }
 
 impl ItemKind {
@@ -151,6 +156,7 @@ impl ItemKind {
             Self::EmptyQuote => "empty-quote",
             Self::Details => "details",
             Self::Picture => "picture",
+            Self::Live { .. } => "live",
         }
     }
 }
@@ -433,6 +439,11 @@ impl Flatten<'_> {
                     Estimate::fixed(h),
                 ));
             }
+            NodeKind::Live(live) => {
+                let h = live.kind.reserved_height() * self.styles.zoom();
+                let kind = ItemKind::Live { kind: live.kind };
+                out.push(mk(0, kind, node.source.clone(), Estimate::fixed(h)));
+            }
             NodeKind::EmptyItem | NodeKind::EmptyQuote => {
                 let kind = if matches!(node.kind, NodeKind::EmptyItem) {
                     ItemKind::EmptyItem
@@ -569,7 +580,8 @@ fn own_spacing(item: &Item, m: &Metrics) -> Spacing {
         ItemKind::Code { .. }
         | ItemKind::Html { .. }
         | ItemKind::TableRow { .. }
-        | ItemKind::Diagram { .. } => m.code,
+        | ItemKind::Diagram { .. }
+        | ItemKind::Live { .. } => m.code,
         ItemKind::Properties { .. } => m.properties,
         ItemKind::Math { .. } => m.paragraph,
         ItemKind::ThematicBreak => m.rule,
