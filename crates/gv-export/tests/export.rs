@@ -562,7 +562,9 @@ fn remote_images_are_embedded_through_the_fetcher() {
     let src = "![l](https://img.example/a/logo) ![again](https://img.example/a/logo) \
                ![no](https://other.example/n.png) ![html](https://img.example/page.png) \
                ![lan](http://192.168.1.1/x.png)\n\n\
-               <img srcset=\"https://img.example/a/logo 2x\">\n";
+               <img srcset=\"https://img.example/a/logo 2x\">\n\n\
+               <video src=\"https://img.example/a/logo\" poster=\"https://img.example/p.png\"></video>\n\n\
+               <audio src=\"https://img.example/s.ogg\"></audio>\n";
     let mut opts = options(&dir.path().join("doc.md"));
     opts.remote = Some(remote.clone());
     let out = export_html(&tree(src, ProfileId::Extended), &opts);
@@ -586,7 +588,17 @@ fn remote_images_are_embedded_through_the_fetcher() {
             .contains("srcset=\"https://img.example/a/logo 2x\""),
         "srcset candidates stay references"
     );
-    // Each URL asked once; LAN hosts and srcset candidates never.
+    // Video, audio and posters keep their URLs, even one the image fetch
+    // embedded.
+    for kept in [
+        "<video src=\"https://img.example/a/logo\"",
+        "poster=\"https://img.example/p.png\"",
+        "<audio src=\"https://img.example/s.ogg\"",
+    ] {
+        assert!(out.html.contains(kept), "{kept}: {}", out.html);
+    }
+    // Each URL asked once; LAN hosts, srcset candidates and other media
+    // never.
     assert_eq!(
         *remote.asked.lock().expect("lock"),
         [

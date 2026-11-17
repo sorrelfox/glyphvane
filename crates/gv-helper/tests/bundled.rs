@@ -160,3 +160,35 @@ fn the_first_page_is_drawn_to_fit_a_box() {
     });
     assert!(missing.is_err());
 }
+
+/// The dark pixels of `src`'s first page drawn 1000 px wide.
+fn ink(src: &str) -> usize {
+    let image = gv_helper::raster::page(&PageJob {
+        pdf: compile(src, &PageOptions::default()).pdf,
+        page: 0,
+        max_width: 1000,
+        max_height: 1500,
+    })
+    .expect("drawn");
+    image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[0] < 128 && p[1] < 128 && p[2] < 128)
+        .count()
+}
+
+#[test]
+fn bold_text_is_heavier_than_regular() {
+    // The bundled Inter is a variable font: **bold** must reach the bold
+    // instance, not the default (regular) one.
+    let words = "Heavy strokes make bold words stand out ".repeat(6);
+    let regular = ink(&format!("{words}\n"));
+    let bold = ink(&format!("**{}**\n", words.trim_end()));
+    assert!(regular > 1000, "text is drawn ({regular} dark pixels)");
+    assert!(
+        bold * 10 > regular * 11,
+        "bold ({bold} dark pixels) should be heavier than regular ({regular})"
+    );
+}

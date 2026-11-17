@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use gpui::AppContext as _;
 use gpui::{
     AnyWindowHandle, Bounds, Entity, Modifiers, MouseButton, Pixels, Point, ScrollDelta,
     ScrollEvent, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point, px, size,
@@ -973,15 +974,318 @@ fn tab_reaches_the_problems_chip_after_the_last_card(cx: &mut TestAppContext) {
     press(&mut vcx, "space");
     assert!(!view.read_with(&vcx, |v, _| v.issues_open));
     assert!(seen.borrow().is_empty());
-    // On to the first card; back to the chip; back to the last card.
-    vcx.simulate_keystrokes("tab");
-    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), Some(order[0]));
-    assert!(!chip_focused(&mut vcx));
+    // Shift+Tab goes back to the last card, Tab to the chip again.
     vcx.simulate_keystrokes("shift-tab");
+    assert!(!chip_focused(&mut vcx));
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.selected()),
+        order.last().copied()
+    );
+    vcx.simulate_keystrokes("tab");
     assert!(chip_focused(&mut vcx));
+    // Tab past the chip is the window's: nothing wraps round to the first
+    // card (the focus goes to the window's next stop, here the canvas
+    // itself, with no card selected).
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert!(!chip_focused(&mut vcx));
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), None);
+}
+
+/// A window with a stop before and after a canvas, moving the focus as
+/// the app's window root does with the Tab keys the canvas leaves alone.
+struct Around {
+    before: gpui::FocusHandle,
+    canvas: Entity<CanvasView>,
+    after: gpui::FocusHandle,
+}
+
+impl gpui::Render for Around {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<'_, Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .on_action(cx.listener(|_, _: &super::NextCard, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &super::PreviousCard, window, cx| window.focus_prev(cx)))
+            .child(gpui::div().h(px(20.0)).track_focus(&self.before))
+            .child(gpui::div().flex_1().child(self.canvas.clone()))
+            .child(gpui::div().h(px(20.0)).track_focus(&self.after))
+    }
+}
+
+#[gpui::test]
+fn tab_leaves_the_canvas_past_its_last_stop(cx: &mut TestAppContext) {
+    let dir = fixture();
+    let (file, root) = (dir.path().join("board.canvas"), dir.path().to_path_buf());
+    let (window, around) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        cx.set_reduce_motion(true);
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(WIDTH), px(HEIGHT)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        gpui::open_window(options, cx, |_, cx| {
+            cx.new(|cx| Around {
+                before: cx.focus_handle().tab_index(0).tab_stop(true),
+                canvas: CanvasView::open(file, Some(root), cx),
+                after: cx.focus_handle().tab_index(0).tab_stop(true),
+            })
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let (view, before, after) = around.read_with(&vcx, |a, _| {
+        (a.canvas.clone(), a.before.clone(), a.after.clone())
+    });
+    let focused = |vcx: &mut VisualTestContext, h: &gpui::FocusHandle| {
+        let h = h.clone();
+        vcx.update(|window, _| h.is_focused(window))
+    };
+    let canvas_focus = view.read_with(&vcx, |v, _| v.focus.clone());
+    let order = view.read_with(&vcx, |v, _| {
+        v.doc
+            .clone()
+            .expect("loaded")
+            .layout
+            .reading_order()
+            .to_vec()
+    });
+    let f = canvas_focus.clone();
+    vcx.update(|window, cx| window.focus(&f, cx));
+
+    // The cards, the problems chip, then on out of the canvas.
+    for _ in 0..order.len() + 1 {
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+    }
+    assert!(!focused(&mut vcx, &after));
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert!(focused(&mut vcx, &after), "Tab leaves the canvas");
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), None);
+
+    // Back in from behind: the last card; Shift+Tab before the first card
+    // leaves the other way.
+    let f = canvas_focus.clone();
+    vcx.update(|window, cx| window.focus(&f, cx));
     vcx.simulate_keystrokes("shift-tab");
     assert_eq!(
         view.read_with(&vcx, |v, _| v.selected()),
         order.last().copied()
+    );
+    view.update(&mut vcx, |v, cx| v.select(Some(order[0]), cx));
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("shift-tab");
+    draw(&mut vcx);
+    assert!(focused(&mut vcx, &before), "Shift+Tab leaves the canvas");
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), None);
+    // Coming back with Tab starts at the first card again.
+    let f = canvas_focus.clone();
+    vcx.update(|window, cx| window.focus(&f, cx));
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), Some(order[0]));
+}
+
+// ----- the PDF queue, file paths, the minimap drag ---------------------------------
+
+const PDFS: &str = r#"{
+  "nodes": [
+    {"id":"a","type":"file","x":0,"y":0,"width":200,"height":150,"file":"a.pdf"},
+    {"id":"b","type":"file","x":250,"y":0,"width":200,"height":150,"file":"b.pdf"},
+    {"id":"c","type":"file","x":0,"y":200,"width":200,"height":150,"file":"c.pdf"},
+    {"id":"d","type":"file","x":250,"y":200,"width":200,"height":150,"file":"d.pdf"}
+  ]
+}"#;
+
+/// The PDF board opened with a page-drawing engine, drawn until its
+/// pages are in.
+fn pdf_board(
+    cx: &mut TestAppContext,
+) -> (
+    tempfile::TempDir,
+    Entity<CanvasView>,
+    VisualTestContext,
+    Arc<AtomicUsize>,
+) {
+    let dir = fixture();
+    for name in ["a", "b", "c", "d"] {
+        std::fs::write(dir.path().join(format!("{name}.pdf")), b"%PDF-1.4\n").expect("write");
+    }
+    std::fs::write(dir.path().join("pdfs.canvas"), PDFS).expect("write");
+    let (window, view) = open(cx, &dir.path().join("pdfs.canvas"), dir.path());
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let pages = install_pdf(&mut vcx, false);
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    (dir, view, vcx, pages)
+}
+
+fn all_previews(view: &Entity<CanvasView>, vcx: &mut VisualTestContext, ok: fn(&Preview) -> bool) {
+    view.read_with(vcx, |v, _| {
+        assert!(!v.pdf_busy && v.pdf_queue.is_empty());
+        for n in 0..4 {
+            let p = v.cards.preview(n);
+            assert!(p.is_some_and(ok), "{n}: {p:?}");
+        }
+    });
+}
+
+#[gpui::test]
+fn pdf_cards_are_drawn_one_at_a_time(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx, pages) = pdf_board(cx);
+    all_previews(&view, &mut vcx, |p| matches!(p, Preview::Image(_)));
+    assert_eq!(pages.load(Ordering::SeqCst), 4);
+    // Asked for again: one page goes to the background executor, the
+    // others wait in the queue.
+    view.update(&mut vcx, |v, cx| {
+        v.cards.clear();
+        v.load_previews(vec![0, 1, 2, 3], cx);
+        assert!(v.pdf_busy);
+        assert_eq!(v.pdf_queue.len(), 3);
+    });
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    all_previews(&view, &mut vcx, |p| matches!(p, Preview::Image(_)));
+}
+
+#[gpui::test]
+fn queued_pdf_pages_are_dropped_when_no_longer_wanted(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx, _pages) = pdf_board(cx);
+    let elsewhere = tempfile::tempdir().expect("dir");
+    view.update(&mut vcx, |v, cx| {
+        v.cards.clear();
+        v.load_previews(vec![0, 1, 2, 3], cx);
+        let old = v.pdf_cancel.clone();
+        // Another vault: what was asked for is cancelled, the queue
+        // dropped.
+        v.set_vault_root(Some(elsewhere.path().to_path_buf()), cx);
+        assert!(old.load(Ordering::SeqCst));
+        assert!(v.pdf_queue.is_empty());
+        // The job in flight still ends before the next one starts.
+        assert!(v.pdf_busy);
+    });
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    // The cards are looked up again in the other vault, where they are
+    // missing; the cancelled job left nothing behind.
+    all_previews(&view, &mut vcx, |p| matches!(p, Preview::Missing(_)));
+    // A closed view cancels its pages too.
+    let flag = vcx.update(|_, cx| {
+        let other = cx.new(CanvasView::new);
+        let flag = other.read(cx).pdf_cancel.clone();
+        drop(other);
+        flag
+    });
+    vcx.run_until_parked();
+    assert!(flag.load(Ordering::SeqCst));
+}
+
+#[gpui::test]
+fn file_cards_outside_the_vault_are_not_read_or_opened(cx: &mut TestAppContext) {
+    let outer = fixture();
+    let vault = outer.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("folder");
+    std::fs::write(outer.path().join("secret.md"), "# Secret\n").expect("write");
+    let board = r#"{
+  "nodes": [
+    {"id":"up","type":"file","x":0,"y":0,"width":200,"height":150,"file":"../secret.md"},
+    {"id":"unc","type":"file","x":250,"y":0,"width":200,"height":150,"file":"\\\\server\\share\\x.md"},
+    {"id":"drive","type":"file","x":0,"y":200,"width":200,"height":150,"file":"C:/x.md"},
+    {"id":"bg","type":"group","x":-50,"y":-50,"width":600,"height":500,"background":"../img.png"}
+  ]
+}"#;
+    std::fs::write(vault.join("b.canvas"), board).expect("write");
+    let (window, view) = open(cx, &vault.join("b.canvas"), &vault);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    let seen = events(&view, &mut vcx);
+    for id in ["up", "unc", "drive"] {
+        let n = node(&view, &mut vcx, id);
+        view.read_with(&vcx, |v, _| {
+            assert!(
+                matches!(v.cards.preview(n), Some(Preview::Missing(why)) if why.contains("outside")),
+                "{id}: {:?}",
+                v.cards.preview(n)
+            );
+        });
+        view.update(&mut vcx, |v, cx| v.open_node(n, Disposition::InPlace, cx));
+    }
+    assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+    let bg = node(&view, &mut vcx, "bg");
+    view.read_with(&vcx, |v, _| {
+        assert!(matches!(
+            v.cards.background(bg),
+            Some(super::cards::Background::None)
+        ));
+    });
+}
+
+#[gpui::test]
+fn a_minimap_drag_holds_the_map_still_and_ends_on_any_release(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    let map = view.read_with(&vcx, |v, _| v.minimap_layout().expect("map"));
+    let origin = view.read_with(&vcx, |v, _| v.minimap.bounds.get().origin);
+    let on_map = |x: f64, y: f64| {
+        let p = map.map.world_to_screen(gv_canvas::Point::new(x, y));
+        point(origin.x + px(p.x as f32), origin.y + px(p.y as f32))
+    };
+    let none = Modifiers::none();
+    vcx.simulate_mouse_down(on_map(500.0, 200.0), MouseButton::Left, none);
+    draw(&mut vcx);
+    // Each step lands where the map of the press says, frames between.
+    let tolerance = 2.0 / map.map.zoom;
+    for (x, y) in [(300.0, 100.0), (3000.0, 3000.0), (6000.0, 6100.0)] {
+        vcx.simulate_mouse_move(on_map(x, y), MouseButton::Left, none);
+        draw(&mut vcx);
+        let c = view_centre(&view, &mut vcx);
+        assert!(
+            near(c, gv_canvas::Point::new(x, y), tolerance),
+            "{c:?} for {x}, {y}"
+        );
+        let now = view.read_with(&vcx, |v, _| v.minimap_layout().expect("map"));
+        assert_eq!(now.world, map.world, "the map holds still");
+    }
+    // Released off the map: the drag is over all the same.
+    vcx.simulate_mouse_up(point(px(100.0), px(100.0)), MouseButton::Left, none);
+    draw(&mut vcx);
+    view.read_with(&vcx, |v, _| {
+        assert!(!v.minimap.dragging && v.minimap.frozen.is_none());
+    });
+    // A later pan that crosses the map only pans.
+    let before = view.read_with(&vcx, |v, _| v.transform());
+    let b = vcx.debug_bounds("canvas-minimap").expect("drawn");
+    let start = point(b.left() - px(100.0), b.center().y);
+    vcx.simulate_mouse_down(start, MouseButton::Left, none);
+    vcx.simulate_mouse_move(b.center(), MouseButton::Left, none);
+    draw(&mut vcx);
+    vcx.simulate_mouse_move(
+        b.center() + point(px(20.0), px(10.0)),
+        MouseButton::Left,
+        none,
+    );
+    draw(&mut vcx);
+    vcx.simulate_mouse_up(b.center(), MouseButton::Left, none);
+    let after = view.read_with(&vcx, |v, _| v.transform());
+    let moved = b.center() + point(px(20.0), px(10.0)) - start;
+    let expected = before.panned(f64::from(f32::from(moved.x)), f64::from(f32::from(moved.y)));
+    assert!(
+        (after.pan.x - expected.pan.x).abs() < 1e-3 && (after.pan.y - expected.pan.y).abs() < 1e-3,
+        "{after:?} vs {expected:?}"
     );
 }

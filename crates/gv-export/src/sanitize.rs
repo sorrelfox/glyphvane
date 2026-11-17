@@ -19,8 +19,9 @@
 //!   confirmation; script and data URLs too. Links get
 //!   `rel="noopener noreferrer"`.
 //! - **Media** (`src`, `poster`, `srcset` candidates): `https` and `http`
-//!   references stay as they are (fetched and embedded only through the
-//!   caller's [`crate::RemoteImages`], `srcset` candidates never), allowed
+//!   references stay as they are (an `img`'s `src` is fetched and
+//!   embedded only through the caller's [`crate::RemoteImages`]; video,
+//!   audio, `source`, `poster` and `srcset` addresses never are), allowed
 //!   `data:` images stay, relative files are embedded (see
 //!   [`crate::assets`]); anything else is dropped, LAN hosts included.
 //! - **Ids** get [`ID_PREFIX`], and fragment links follow, so a document
@@ -287,7 +288,9 @@ fn filter<'u>(
 ) -> Option<Cow<'u, str>> {
     match attribute {
         "href" | "cite" => rewrite_link(value).map(Cow::Owned),
-        "src" | "poster" => media(value, store).map(Cow::Owned),
+        "src" | "poster" => {
+            media(value, store, element == "img" && attribute == "src").map(Cow::Owned)
+        }
         "srcset" => {
             let kept: Vec<String> = parse_srcset(value)
                 .into_iter()
@@ -377,13 +380,17 @@ fn relative_link(path: &str) -> String {
     out.replace(' ', "%20")
 }
 
-fn media(value: &str, store: &Store) -> Option<String> {
+/// What a media reference becomes. Only an image's `src` (`image`) is
+/// ever fetched for embedding; video, audio, `source` and `poster`
+/// addresses keep their URL.
+fn media(value: &str, store: &Store, image: bool) -> Option<String> {
     let class = classify(value);
     if class.policy(UrlContext::Media) != UrlPolicy::Allow {
         return None;
     }
     match class {
-        UrlClass::Web { .. } => Some(store.remote_image(value.trim())),
+        UrlClass::Web { .. } if image => Some(store.remote_image(value.trim())),
+        UrlClass::Web { .. } => Some(value.trim().to_owned()),
         UrlClass::DataImage { .. } => Some(value.trim().to_owned()),
         UrlClass::Relative(path) => store.image(&path),
         _ => None,

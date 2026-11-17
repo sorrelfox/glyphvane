@@ -14,10 +14,12 @@
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
 //!   engine the Reading view uses, a PDF shows its first page drawn by the
-//!   PDF engine of the export commands (the helper process; cached by
-//!   file, size and time; a file card without an engine that draws pages
-//!   or when drawing fails), a `.canvas` file shows its shapes, any other
-//!   file a file card. Missing files say so.
+//!   PDF engine of the export commands (the helper process, asked for one
+//!   page at a time by the view's queue; cached by file, size and time; a
+//!   file card without an engine that draws pages or when drawing fails),
+//!   a `.canvas` file shows its shapes, any other file a file card.
+//!   Missing files say so, and so do paths that leave the vault
+//!   ([`file_path`]), which are never read.
 //! - **Group backgrounds**: a group's `background` (a vault path) is
 //!   decoded through the same media engine when the group is first drawn
 //!   and painted under the group's content as `backgroundStyle` says
@@ -33,6 +35,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
@@ -406,14 +409,47 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 /// Note extensions previewed as Markdown.
 const NOTE_EXTENSIONS: &[&str] = &["md", "markdown"];
 
-/// The absolute path of a file node's `file` (a vault path). Without a
-/// vault, paths are taken from the canvas's folder.
-pub(crate) fn file_path(root: &Path, file: &str) -> PathBuf {
+/// The absolute path of a file node's `file` (a vault path; without a
+/// vault, paths are taken from the canvas's folder), or `None` when it
+/// would leave `root`:
+///
+/// - every `/`-separated part must be a plain name: no `..`, no `\`, no
+///   `:` (a Windows drive, `\\server\share` or stream), nothing a
+///   platform reads as a root or prefix;
+/// - its real path (links resolved; of its nearest existing folder when
+///   it is not there) must be inside the real `root`.
+///
+/// Blocking (it reads the file system): the background executor, or once
+/// per user action.
+pub(crate) fn file_path(root: &Path, file: &str) -> Option<PathBuf> {
+    let p = lexical_path(root, file)?;
+    let real_root = std::fs::canonicalize(root).ok()?;
+    // The file, or its nearest folder that is there.
+    let real = p
+        .ancestors()
+        .take_while(|a| a.starts_with(root))
+        .find_map(|a| std::fs::canonicalize(a).ok())?;
+    real.starts_with(&real_root).then_some(p)
+}
+
+/// `file`'s parts joined to `root`, when every part is a plain name.
+fn lexical_path(root: &Path, file: &str) -> Option<PathBuf> {
+    use std::path::Component;
     let mut p = root.to_path_buf();
     for part in file.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        if part == ".." || part.contains(['\\', ':', '\0']) {
+            return None;
+        }
+        let mut parts = Path::new(part).components();
+        if !matches!(
+            (parts.next(), parts.next()),
+            (Some(Component::Normal(_)), None)
+        ) {
+            return None;
+        }
         p.push(part);
     }
-    p
+    Some(p)
 }
 
 fn extension(path: &Path) -> String {
@@ -422,16 +458,42 @@ fn extension(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Whether file card `file` is a PDF (its first page is drawn through the
+/// view's one-at-a-time queue).
+pub(crate) fn is_pdf(file: &str) -> bool {
+    extension(Path::new(file)) == "pdf"
+}
+
+/// A PDF engine and the flag that stops its work.
+pub(crate) type PdfPass<'a> = (&'a dyn PdfEngine, &'a AtomicBool);
+
+/// Loads what file card `file` (a vault path from `root`) shows, nothing
+/// when it would leave `root` (blocking: the background executor only).
+/// See [`load_preview`].
+pub(crate) fn load_file(
+    root: &Path,
+    file: &str,
+    subpath: Option<&Subpath>,
+    profile: &CompiledProfile,
+    animate: bool,
+    pdf: Option<PdfPass<'_>>,
+) -> Loaded {
+    match file_path(root, file) {
+        Some(path) => load_preview(&path, root, subpath, profile, animate, pdf),
+        None => Loaded::Missing("The file is outside the vault".into()),
+    }
+}
+
 /// Loads what file card `path` shows (blocking: the background executor
 /// only). `root` bounds what an SVG may load; `animate` is false with
-/// reduced motion; `pdf` draws a PDF's first page.
+/// reduced motion; `pdf` draws a PDF's first page unless its flag is set.
 pub(crate) fn load_preview(
     path: &Path,
     root: &Path,
     subpath: Option<&Subpath>,
     profile: &CompiledProfile,
     animate: bool,
-    pdf: Option<&dyn PdfEngine>,
+    pdf: Option<PdfPass<'_>>,
 ) -> Loaded {
     use std::io::Read as _;
     let ext = extension(path);
@@ -473,8 +535,8 @@ pub(crate) fn load_preview(
         };
     }
     if ext == "pdf" {
-        if let Some(engine) = pdf
-            && let Some(image) = pdf_first_page(path, engine)
+        if let Some((engine, cancel)) = pdf
+            && let Some(image) = pdf_first_page(path, engine, cancel)
         {
             return Loaded::Image(image);
         }
@@ -502,7 +564,11 @@ fn pdf_pages() -> &'static Mutex<PdfPages> {
 
 /// The first page of the PDF at `path` drawn by `engine` (blocking), from
 /// the cache when the file did not change; `None` when it cannot be drawn.
-fn pdf_first_page(path: &Path, engine: &dyn PdfEngine) -> Option<Arc<RenderImage>> {
+fn pdf_first_page(
+    path: &Path,
+    engine: &dyn PdfEngine,
+    cancel: &AtomicBool,
+) -> Option<Arc<RenderImage>> {
     use std::io::Read as _;
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > PDF_CAP {
@@ -522,8 +588,10 @@ fn pdf_first_page(path: &Path, engine: &dyn PdfEngine) -> Option<Arc<RenderImage
     std::fs::File::open(path)
         .and_then(|f| f.take(PDF_CAP).read_to_end(&mut bytes))
         .ok()?;
-    let cancel = std::sync::atomic::AtomicBool::new(false);
-    let raster = match engine.page(&bytes, 0, IMAGE_FIT, IMAGE_FIT, &cancel) {
+    if cancel.load(Ordering::Acquire) {
+        return None;
+    }
+    let raster = match engine.page(&bytes, 0, IMAGE_FIT, IMAGE_FIT, cancel) {
         Ok(raster) => raster,
         Err(e) => {
             tracing::debug!("canvas: no first page for a PDF card: {e}");
@@ -547,7 +615,9 @@ pub(crate) fn load_background(root: &Path, background: &str) -> Background {
     if background.contains("://") || background.starts_with("//") {
         return Background::None;
     }
-    let path = file_path(root, background);
+    let Some(path) = file_path(root, background) else {
+        return Background::None;
+    };
     if !path.is_file() {
         return Background::None;
     }
@@ -695,6 +765,50 @@ mod tests {
                 .any(|b| matches!(b, Block::Code { text, .. } if text.as_ref() == "code"))
         );
         assert!(blocks.iter().any(|b| matches!(b, Block::Rule { .. })));
+    }
+
+    #[test]
+    fn file_paths_stay_in_the_root() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().join("vault");
+        std::fs::create_dir_all(root.join("notes")).expect("folder");
+        std::fs::write(root.join("notes/a.md"), "a").expect("write");
+        std::fs::write(dir.path().join("secret.md"), "s").expect("write");
+        let inside = root.join("notes").join("a.md");
+        assert_eq!(file_path(&root, "notes/a.md"), Some(inside.clone()));
+        assert_eq!(file_path(&root, "./notes//a.md"), Some(inside));
+        // Not there (yet): plain names are still inside.
+        assert_eq!(
+            file_path(&root, "notes/new.md"),
+            Some(root.join("notes").join("new.md"))
+        );
+        for bad in [
+            "../secret.md",
+            "notes/../../secret.md",
+            "..",
+            "C:/Windows/x.md",
+            "C:\\x.md",
+            "\\\\server\\share\\x.md",
+            "notes\\..\\..\\secret.md",
+            "notes/a.md:stream",
+        ] {
+            assert_eq!(file_path(&root, bad), None, "{bad}");
+        }
+        assert!(matches!(
+            load_file(&root, "../secret.md", None, &obsidian(), false, None),
+            Loaded::Missing(why) if why.contains("outside")
+        ));
+        assert!(matches!(
+            load_background(&root, "../secret.md"),
+            Background::None
+        ));
+        // A link inside the vault to a file outside it.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path(), root.join("out")).expect("link");
+            assert_eq!(file_path(&root, "out/secret.md"), None);
+            assert_eq!(file_path(&root, "out/missing.md"), None);
+        }
     }
 
     #[test]

@@ -31,7 +31,8 @@
 //!   moved or written.
 //! - Keys ([`key_bindings`]): Tab and Shift+Tab walk the cards in reading
 //!   order and then, when the file has problems, the problems chip (Enter
-//!   or Space opens its list; Tab goes on to the first card), the arrows
+//!   or Space opens its list); Tab past the last stop and Shift+Tab before
+//!   the first card leave the canvas (the window's focus order), the arrows
 //!   go to the nearest card that way, Enter opens the
 //!   selected card's file (Mod+Enter in a new tab), Shift+1 or Home fits
 //!   the whole canvas (the `view.zoom_to_fit` command), Shift+arrows pan,
@@ -67,9 +68,11 @@ mod paint;
 mod tests;
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -297,7 +300,22 @@ pub struct CanvasView {
     /// Group background images painted in the last frame.
     backgrounds_painted: Rc<Cell<usize>>,
     nodes_drawn: usize,
+    /// PDF cards waiting for their first page (node, file). The helper
+    /// draws one page at a time, so the view asks for one at a time
+    /// instead of holding a background thread per card.
+    pdf_queue: VecDeque<(usize, String)>,
+    /// A first page is being drawn.
+    pdf_busy: bool,
+    /// Set when the pages asked for are no longer wanted (another file,
+    /// another vault, the view closed); checked before each request.
+    pdf_cancel: Arc<AtomicBool>,
     _load: Option<Task<()>>,
+}
+
+impl Drop for CanvasView {
+    fn drop(&mut self) {
+        self.pdf_cancel.store(true, Ordering::Release);
+    }
 }
 
 impl std::fmt::Debug for CanvasView {
@@ -332,7 +350,9 @@ impl CanvasView {
     pub fn new(cx: &mut Context<'_, Self>) -> Self {
         let families = FontFamilies::from_app(cx);
         Self {
-            focus: cx.focus_handle(),
+            // A stop of the window's Tab order, so Tab past the last
+            // card goes on to what follows the canvas.
+            focus: cx.focus_handle().tab_index(0).tab_stop(true),
             path: None,
             vault_root: None,
             status: CanvasStatus::Empty,
@@ -350,14 +370,25 @@ impl CanvasView {
             painted: Rc::new(Cell::new(0)),
             backgrounds_painted: Rc::new(Cell::new(0)),
             nodes_drawn: 0,
+            pdf_queue: VecDeque::new(),
+            pdf_busy: false,
+            pdf_cancel: Arc::new(AtomicBool::new(false)),
             _load: None,
         }
+    }
+
+    /// Drops the PDF pages asked for and stops the one being drawn.
+    fn cancel_pdfs(&mut self) {
+        self.pdf_cancel.store(true, Ordering::Release);
+        self.pdf_cancel = Arc::new(AtomicBool::new(false));
+        self.pdf_queue.clear();
     }
 
     /// Sets the vault the file cards' paths are in.
     pub fn set_vault_root(&mut self, root: Option<PathBuf>, cx: &mut Context<'_, Self>) {
         if root != self.vault_root {
             self.vault_root = root;
+            self.cancel_pdfs();
             self.cards.clear();
             cx.notify();
         }
@@ -390,6 +421,7 @@ impl CanvasView {
 
     fn finish_load(&mut self, result: Result<Doc, String>, cx: &mut Context<'_, Self>) {
         self._load = None;
+        self.cancel_pdfs();
         self.cards.clear();
         match result {
             Ok(doc) => {
@@ -573,39 +605,45 @@ impl CanvasView {
     }
 
     /// Tab (`forward`) or Shift+Tab: the next or previous card in reading
-    /// order; past the last (before the first) card, the problems chip
-    /// when the file has problems, and from the chip on to the first (last)
-    /// card.
-    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+    /// order, the problems chip (when the file has problems) after the last
+    /// card. Past the last stop (before the first card) the key is not
+    /// handled (`false`), so the window's focus order leaves the canvas;
+    /// the selection is cleared so coming back starts again at an end.
+    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
         let Some(doc) = self.doc.clone() else {
-            return;
+            return false;
         };
         let chip = !doc.canvas.issues().is_empty();
-        let step = |current| {
-            if forward {
-                doc.layout.next_node(current)
-            } else {
-                doc.layout.prev_node(current)
-            }
-        };
-        if chip && self.issues_focus.is_focused(window) {
-            window.focus(&self.focus, cx);
-            self.select(step(None), cx);
-            return;
-        }
         let order = doc.layout.reading_order();
+        if chip && self.issues_focus.is_focused(window) {
+            let Some(&last) = order.last().filter(|_| !forward) else {
+                return false;
+            };
+            window.focus(&self.focus, cx);
+            self.select(Some(last), cx);
+            return true;
+        }
         let edge = if forward { order.last() } else { order.first() };
         let at_edge = match self.selected {
             Some(s) => edge == Some(&s),
             None => order.is_empty(),
         };
-        if chip && at_edge {
+        if at_edge {
             self.selected = None;
-            window.focus(&self.issues_focus, cx);
             cx.notify();
-            return;
+            if chip && forward {
+                window.focus(&self.issues_focus, cx);
+                return true;
+            }
+            return false;
         }
-        self.select(step(self.selected), cx);
+        let next = if forward {
+            doc.layout.next_node(self.selected)
+        } else {
+            doc.layout.prev_node(self.selected)
+        };
+        self.select(next, cx);
+        true
     }
 
     fn select_toward(&mut self, dir: Direction, cx: &mut Context<'_, Self>) {
@@ -631,7 +669,10 @@ impl CanvasView {
             NodeKind::File {
                 file, subpath_raw, ..
             } => {
-                let path = cards::file_path(&self.root(), file);
+                let Some(path) = cards::file_path(&self.root(), file) else {
+                    tracing::warn!(file, "canvas: a file card outside the vault is not opened");
+                    return;
+                };
                 let fragment = subpath_raw
                     .as_deref()
                     .map(|s| s.strip_prefix('#').unwrap_or(s))
@@ -687,6 +728,7 @@ impl CanvasView {
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         window.focus(&self.focus, cx);
+        self.end_minimap_drag();
         if let Some(a) = self.animation.take() {
             self.transform = a.to;
         }
@@ -771,36 +813,33 @@ impl CanvasView {
 
     // ----- drawing -------------------------------------------------------------------
 
-    /// Starts loading the previews of file cards `nodes`.
+    /// Starts loading the previews of file cards `nodes`. PDFs whose
+    /// first page is drawn wait in the view's queue.
     fn load_previews(&mut self, nodes: Vec<usize>, cx: &mut Context<'_, Self>) {
         let Some(doc) = self.doc.clone() else {
             return;
         };
         let root = self.root();
         let animate = !cx.reduce_motion();
-        let pdf = crate::export::pdf_engine(cx).filter(|e| e.draws_pages());
+        let pages = crate::export::pdf_engine(cx).is_some_and(|e| e.draws_pages());
         for node in nodes {
             let NodeKind::File { file, subpath, .. } = &doc.canvas.nodes()[node].kind else {
                 continue;
             };
             self.cards.start_preview(node);
-            let path = cards::file_path(&root, file);
+            if pages && cards::is_pdf(file) {
+                self.pdf_queue.push_back((node, file.clone()));
+                continue;
+            }
+            let file = file.clone();
             let subpath = subpath.clone();
             let root = root.clone();
             let profile = self.cards.profile();
             let weak = Rc::downgrade(&doc);
-            let pdf = pdf.clone();
             cx.spawn(async move |this, cx| {
                 let loaded = cx
                     .background_spawn(async move {
-                        cards::load_preview(
-                            &path,
-                            &root,
-                            subpath.as_ref(),
-                            &profile,
-                            animate,
-                            pdf.as_deref(),
-                        )
+                        cards::load_file(&root, &file, subpath.as_ref(), &profile, animate, None)
                     })
                     .await;
                 this.update(cx, |view, cx| {
@@ -817,6 +856,70 @@ impl CanvasView {
             })
             .detach();
         }
+        self.next_pdf(cx);
+    }
+
+    /// Draws the first page of the next queued PDF card, unless one is
+    /// being drawn: one background job at a time, so cards never hold
+    /// several background threads waiting for the helper.
+    fn next_pdf(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pdf_busy {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else {
+            self.pdf_queue.clear();
+            return;
+        };
+        let Some(engine) = crate::export::pdf_engine(cx).filter(|e| e.draws_pages()) else {
+            // The engine went: what is left shows as file cards.
+            for (node, _) in std::mem::take(&mut self.pdf_queue) {
+                self.cards
+                    .set_preview(node, cards::Loaded::Other("PDF".into()));
+            }
+            return;
+        };
+        let Some((node, file)) = self.pdf_queue.pop_front() else {
+            return;
+        };
+        self.pdf_busy = true;
+        let root = self.root();
+        let profile = self.cards.profile();
+        let cancel = self.pdf_cancel.clone();
+        let stale = cancel.clone();
+        let weak = Rc::downgrade(&doc);
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move {
+                    if cancel.load(Ordering::Acquire) {
+                        return None;
+                    }
+                    Some(cards::load_file(
+                        &root,
+                        &file,
+                        None,
+                        &profile,
+                        false,
+                        Some((&*engine, &*cancel)),
+                    ))
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                view.pdf_busy = false;
+                let same = weak
+                    .upgrade()
+                    .is_some_and(|d| view.doc.as_ref().is_some_and(|v| Rc::ptr_eq(&d, v)));
+                if let Some(loaded) = loaded
+                    && same
+                    && !stale.load(Ordering::Acquire)
+                {
+                    view.cards.set_preview(node, loaded);
+                    cx.notify();
+                }
+                view.next_pdf(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Starts loading the background images of groups `nodes`.
@@ -1401,10 +1504,16 @@ impl Render for CanvasView {
             .bg(colors.background)
             .font_family(Appearance::interface_font(cx))
             .text_color(colors.text)
-            .on_action(cx.listener(|this, _: &NextCard, window, cx| this.tab(true, window, cx)))
-            .on_action(
-                cx.listener(|this, _: &PreviousCard, window, cx| this.tab(false, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &NextCard, window, cx| {
+                if !this.tab(true, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousCard, window, cx| {
+                if !this.tab(false, window, cx) {
+                    cx.propagate();
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &CardLeft, _, cx| this.select_toward(Direction::Left, cx)),
             )

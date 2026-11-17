@@ -56,7 +56,8 @@ use windows::Win32::Graphics::Printing::PrintTicket::{
     PTCloseProvider, PTConvertDevModeToPrintTicket, PTOpenProvider, kPTJobScope,
 };
 use windows::Win32::Storage::Xps::Printing::{
-    IPrintDocumentPackageTargetFactory, PrintDocumentPackageTargetFactory,
+    IPrintDocumentPackageTarget, IPrintDocumentPackageTargetFactory,
+    PrintDocumentPackageTargetFactory,
 };
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 use windows::Win32::System::Com::{
@@ -285,7 +286,11 @@ fn read_choice(
     let devmode = unsafe {
         let size = GlobalSize(dialog.hDevMode);
         let bytes = GlobalLock(dialog.hDevMode) as *const u8;
-        if bytes.is_null() || size < std::mem::size_of::<DEVMODEW>() {
+        if bytes.is_null() {
+            return Err("the print dialog returned no device mode".to_owned());
+        }
+        if size < std::mem::size_of::<DEVMODEW>() {
+            let _ = GlobalUnlock(dialog.hDevMode);
             return Err("the print dialog returned no device mode".to_owned());
         }
         let devmode = DevMode::from_bytes(std::slice::from_raw_parts(bytes, size));
@@ -430,6 +435,9 @@ fn spool(pdf: &[u8], title: &str, prepared: &Prepared) -> Result<u32, String> {
                 &ticket,
             )
             .map_err(failed("the print job could not be started"))?;
+        // From here on, any failure cancels the job so no half-built job
+        // is left in the queue; a closed print control disarms it.
+        let mut cancel = CancelJob(Some(&target));
         let properties = D2D1_PRINT_CONTROL_PROPERTIES {
             // Only for content Direct2D cannot keep as vectors.
             rasterDPI: 300.0,
@@ -476,7 +484,22 @@ fn spool(pdf: &[u8], title: &str, prepared: &Prepared) -> Result<u32, String> {
         control
             .Close()
             .map_err(failed("the print job could not be finished"))?;
+        cancel.0 = None;
         Ok(pages.len() as u32)
+    }
+}
+
+/// Cancels a print job when dropped while still armed.
+struct CancelJob<'a>(Option<&'a IPrintDocumentPackageTarget>);
+
+impl Drop for CancelJob<'_> {
+    fn drop(&mut self) {
+        if let Some(target) = self.0 {
+            // SAFETY: a plain COM call on a live target.
+            if let Err(e) = unsafe { target.Cancel() } {
+                tracing::debug!("print: the job could not be cancelled: {e}");
+            }
+        }
     }
 }
 

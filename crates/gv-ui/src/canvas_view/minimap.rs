@@ -4,7 +4,9 @@
 //! The minimap (Should, 08 § Canvas view): an overview in the bottom right
 //! corner with every group and card as a shape and the part the view
 //! shows as a rectangle. A click centres the view there (animated unless
-//! the system asks for reduced motion), a drag moves the view along.
+//! the system asks for reduced motion), a drag moves the view along. The
+//! map holds still from the press to the release (only its view rectangle
+//! moves), so moving the view does not move the map under the pointer.
 //!
 //! It is shown only when part of the canvas is out of view and the view
 //! is big enough for it ([`MinimapPolicy`]); the plan names no command to
@@ -46,6 +48,8 @@ pub(crate) struct MinimapState {
     pub bounds: Rc<Cell<Bounds<Pixels>>>,
     /// A press on the map is being dragged.
     pub dragging: bool,
+    /// The layout at the press, used until the release.
+    pub frozen: Option<Minimap>,
 }
 
 impl CanvasView {
@@ -66,6 +70,14 @@ impl CanvasView {
     pub(crate) fn layout_minimap(&mut self, doc: &Doc) -> Option<Minimap> {
         let viewport = self.viewport();
         let t = self.transform;
+        if self.minimap.dragging
+            && let Some(frozen) = self.minimap.frozen
+        {
+            let mut map = frozen;
+            map.viewport = frozen.rect(&t.visible_world(viewport));
+            self.minimap.map = Some(map);
+            return self.minimap.map;
+        }
         let content = doc.layout.bounds();
         let visible = t.visible_world(viewport);
         self.minimap.map = MinimapPolicy::default()
@@ -78,7 +90,7 @@ impl CanvasView {
     /// The transform that centres the view on the world point under
     /// window point `at` of the map.
     fn minimap_target(&self, at: gpui::Point<Pixels>) -> Option<Transform> {
-        let map = self.minimap.map?;
+        let map = self.minimap.frozen.or(self.minimap.map)?;
         let origin = self.minimap.bounds.get().origin;
         let p = gv_canvas::Point::new(
             f64::from(f32::from(at.x - origin.x)),
@@ -97,6 +109,7 @@ impl CanvasView {
         window.focus(&self.focus, cx);
         self.drag = None;
         self.minimap.dragging = true;
+        self.minimap.frozen = self.minimap.map;
         if let Some(to) = self.minimap_target(e.position) {
             self.move_to(to, cx);
         }
@@ -107,13 +120,19 @@ impl CanvasView {
             return;
         }
         if e.pressed_button != Some(MouseButton::Left) {
-            self.minimap.dragging = false;
+            self.end_minimap_drag();
             return;
         }
         cx.stop_propagation();
         if let Some(to) = self.minimap_target(e.position) {
             self.set_transform(to, cx);
         }
+    }
+
+    /// Ends a drag on the map (a release anywhere, or a press elsewhere).
+    pub(crate) fn end_minimap_drag(&mut self) {
+        self.minimap.dragging = false;
+        self.minimap.frozen = None;
     }
 
     /// The minimap element: the box, painted shapes, and the pointer
@@ -150,9 +169,13 @@ impl CanvasView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.minimap.dragging = false;
+                    this.end_minimap_drag();
                     cx.stop_propagation();
                 }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.end_minimap_drag()),
             )
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
