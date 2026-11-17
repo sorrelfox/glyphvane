@@ -232,6 +232,8 @@ fn the_menus_follow_each_platform() {
                 "links.preview",
                 "links.list",
                 "notes.daily_note",
+                "notes.previous_daily_note",
+                "notes.next_daily_note",
                 "navigation.next_misspelling",
                 "workspace.focus_next_pane",
                 "workspace.focus_previous_pane",
@@ -836,8 +838,9 @@ fn the_menu_shows_shortcuts_checks_and_disabled_items(cx: &mut TestAppContext) {
     let close = f.bounds("app-menu-item:tabs.close").expect("drawn");
     assert_eq!(close.size.height, px(MENU_ROW));
 
-    // A disabled item does nothing and keeps the menu open.
-    f.click("app-menu-item:file.history");
+    // A disabled item does nothing and keeps the menu open (Bookmark
+    // needs the window's vault, which this window has not made).
+    f.click("app-menu-item:bookmarks.toggle");
     assert!(f.is_open());
 
     // View: the current mode is checked; chords are labelled in full.

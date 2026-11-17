@@ -342,7 +342,9 @@ fn more_actions_opens_below_its_button(cx: &mut TestAppContext) {
     assert_eq!(menu.right(), button.right());
     assert_eq!(menu.top(), button.bottom() + px(spacing::OFFSET_Y));
     assert!(!f.has("context-menu-disabled:file.copy_path"));
-    assert!(f.has("context-menu-disabled:file.history"));
+    assert!(!f.has("context-menu-disabled:file.history"));
+    // Bookmarks belong to a vault, and this window has none yet.
+    assert!(f.has("context-menu-disabled:bookmarks.toggle"));
     f.click("context-menu-item:file.copy_path");
     let copied = f.vcx.read_from_clipboard().and_then(|c| c.text());
     assert_eq!(copied, Some(path_text(&f.path("a.md"))));
@@ -505,8 +507,7 @@ fn a_menu_stays_inside_a_short_window(cx: &mut TestAppContext) {
 
 // --- Side panels ----------------------------------------------------------------
 
-/// The switcher's buttons pick the panel; a panel not built yet shows its
-/// head and an empty state.
+/// The switcher's buttons pick the panel, each drawn in the sidebar.
 #[gpui::test]
 fn the_sidebar_switcher_switches_panels(cx: &mut TestAppContext) {
     let mut f = fixture(cx);
@@ -523,11 +524,6 @@ fn the_sidebar_switcher_switches_panels(cx: &mut TestAppContext) {
         assert_eq!(shown, panel);
         assert!(!f.has("files-panel"));
         assert!(f.has(&format!("sidebar-panel:{id}")));
-        // The Search and Tags panels are built; Bookmarks is not yet.
-        assert_eq!(
-            f.has(&format!("empty-{id}")),
-            panel == SidebarPanel::Bookmarks
-        );
     }
     f.click("panel-switch:files");
     assert!(f.has("files-panel"));

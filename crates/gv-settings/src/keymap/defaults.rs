@@ -78,6 +78,8 @@ const BUILTIN: &[Row] = &[
     ("file.print", "Print", Category::File, None, &[]),
     ("file.open_in_browser", "Open in browser", Category::File, None, &[]),
     ("notes.daily_note", "Open today's note", Category::File, None, &[]),
+    ("notes.previous_daily_note", "Open previous daily note", Category::File, None, &[]),
+    ("notes.next_daily_note", "Open next daily note", Category::File, None, &[]),
     ("bookmarks.toggle", "Bookmark this note", Category::File, None, &[]),
 
     // Tabs

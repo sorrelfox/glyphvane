@@ -75,6 +75,8 @@ command_actions! {
     }
     notes {
         DailyNote = "notes.daily_note",
+        PreviousDailyNote = "notes.previous_daily_note",
+        NextDailyNote = "notes.next_daily_note",
         InsertTemplate = "notes.insert_template",
     }
     bookmarks {

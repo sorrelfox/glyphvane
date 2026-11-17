@@ -399,6 +399,8 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             item("links.list", "Links in this note…"),
             SEPARATOR,
             item("notes.daily_note", "Today's note"),
+            item("notes.previous_daily_note", "Previous daily note"),
+            item("notes.next_daily_note", "Next daily note"),
             item("navigation.next_misspelling", "Next misspelling"),
             SEPARATOR,
             item("workspace.focus_next_pane", "Next pane"),

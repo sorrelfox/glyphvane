@@ -400,6 +400,7 @@ impl Workspace {
                     let (_, copy) = self.safety.compare_after_load.remove(at);
                     editor.update(cx, |e, cx| e.compare_with_copy(copy, cx));
                 }
+                self.version_after_load(editor, cx);
             }
             DocEvent::EditableChanged => {
                 let index = self

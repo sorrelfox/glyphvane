@@ -6,20 +6,20 @@
 //! - **Sidebar:** the switcher in its head picks Files, Search, Tags or
 //!   Bookmarks (SPEC § Sidebar); Recent and Sync conflicts open from the
 //!   View menu (`workspace.show_*`) and have no switcher button; File ▸
-//!   Open recent… shows Recent too. The Files, Search
-//!   ([`crate::search_panel`]), Tags ([`crate::tags_panel`]), Recent and
-//!   Sync conflicts ([`crate::conflicts`]) panels are built; Bookmarks
-//!   shows its panel head and a one-line empty state (empty states are
-//!   not designed).
+//!   Open recent… shows Recent too, and File ▸ File history shows the
+//!   File history panel ([`crate::history`]). The Files, Search
+//!   ([`crate::search_panel`]), Tags ([`crate::tags_panel`]), Bookmarks
+//!   ([`super::bookmarks`]), Recent, Sync conflicts
+//!   ([`crate::conflicts`]) and File history panels are built.
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
 //!   checker ([`super::link_checker`]) joins it once asked for.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Corners, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight,
-    InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    Context, Corners, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight,
+    InteractiveElement as _, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 
 use super::Workspace;
@@ -31,7 +31,7 @@ use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::workspace as commands;
 use crate::metrics::size::icon_button as button;
-use crate::metrics::spacing::{list, list_row, panel_head, section_head, sidebar_head};
+use crate::metrics::spacing::{section_head, sidebar_head};
 use crate::metrics::{HAIRLINE, icon, size, text};
 use crate::theme::Theme;
 
@@ -45,22 +45,12 @@ pub enum SidebarPanel {
     Bookmarks,
     Recent,
     SyncConflicts,
+    FileHistory,
 }
 
 impl SidebarPanel {
     /// The panels of the switcher, in order.
     pub const SWITCHER: [Self; 4] = [Self::Files, Self::Search, Self::Tags, Self::Bookmarks];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Files => "Files",
-            Self::Search => "Search",
-            Self::Tags => "Tags",
-            Self::Bookmarks => "Bookmarks",
-            Self::Recent => "Recent",
-            Self::SyncConflicts => "Sync conflicts",
-        }
-    }
 
     /// The name in debug selectors.
     pub fn id(self) -> &'static str {
@@ -71,12 +61,13 @@ impl SidebarPanel {
             Self::Bookmarks => "bookmarks",
             Self::Recent => "recent",
             Self::SyncConflicts => "sync-conflicts",
+            Self::FileHistory => "file-history",
         }
     }
 
     fn icon(self) -> Icon {
         match self {
-            Self::Files | Self::Recent | Self::SyncConflicts => Icon::Files,
+            Self::Files | Self::Recent | Self::SyncConflicts | Self::FileHistory => Icon::Files,
             Self::Search => Icon::Search,
             Self::Tags => Icon::Tags,
             Self::Bookmarks => Icon::Bookmarks,
@@ -109,6 +100,14 @@ pub(super) struct Panels {
     /// The Sync conflicts panel, once shown ([`super::sync_conflicts`]).
     pub conflicts: Option<Entity<crate::conflicts::SyncConflictsPanel>>,
     pub _conflicts_events: Option<Subscription>,
+    /// The File history panel, once shown ([`super::file_history`]).
+    pub history: Option<Entity<crate::history::HistoryPanel>>,
+    pub _history_events: Option<Subscription>,
+    /// Versions to compare or restore once a Source view has loaded.
+    pub versions_after_load: Vec<(gpui::EntityId, super::file_history::VersionRequest)>,
+    /// The Bookmarks panel, once shown ([`super::bookmarks`]).
+    pub bookmarks: Option<Entity<super::bookmarks_panel::BookmarksPanel>>,
+    pub _bookmarks_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -165,7 +164,14 @@ impl Workspace {
                     Some(conflicts) => sidebar.child(conflicts),
                     None => sidebar,
                 },
-                (other, _) => sidebar.child(empty_panel(other, theme)),
+                (SidebarPanel::FileHistory, _) => match self.panels.history.clone() {
+                    Some(history) => sidebar.child(history),
+                    None => sidebar,
+                },
+                (SidebarPanel::Bookmarks, _) => match self.panels.bookmarks.clone() {
+                    Some(bookmarks) => sidebar.child(bookmarks),
+                    None => sidebar,
+                },
             })
     }
 
@@ -243,7 +249,18 @@ impl Workspace {
                         .as_ref()
                         .map(|c| c.read(cx).focus_handle(cx)),
                 ),
-                SidebarPanel::Bookmarks => false,
+                SidebarPanel::FileHistory => focused(
+                    self.panels
+                        .history
+                        .as_ref()
+                        .map(|h| h.read(cx).focus_handle(cx)),
+                ),
+                SidebarPanel::Bookmarks => focused(
+                    self.panels
+                        .bookmarks
+                        .as_ref()
+                        .map(|b| b.read(cx).focus_handle(cx)),
+                ),
             };
         self.panels.sidebar = panel;
         let takes_keyboard = matches!(
@@ -253,6 +270,8 @@ impl Workspace {
                 | SidebarPanel::Search
                 | SidebarPanel::Tags
                 | SidebarPanel::SyncConflicts
+                | SidebarPanel::FileHistory
+                | SidebarPanel::Bookmarks
         );
         if had_keyboard && !(focus && takes_keyboard) {
             self.focus_document(window, cx);
@@ -279,6 +298,18 @@ impl Workspace {
             let conflicts = self.ensure_conflicts_panel(window, cx);
             if focus {
                 conflicts.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+        if panel == SidebarPanel::FileHistory {
+            let history = self.ensure_history_panel(window, cx);
+            if focus {
+                history.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+        if panel == SidebarPanel::Bookmarks {
+            let bookmarks = self.ensure_bookmarks_panel(window, cx);
+            if focus {
+                bookmarks.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
         if panel == SidebarPanel::Search {
@@ -399,57 +430,6 @@ impl Workspace {
             }),
         )
     }
-}
-
-/// A panel that is not built yet: its head and a one-line empty state
-/// (not designed).
-fn empty_panel(panel: SidebarPanel, theme: &Theme) -> Div {
-    let id = panel.id();
-    div()
-        .debug_selector(move || format!("sidebar-panel:{id}"))
-        .flex_1()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .h(px(size::PANEL_HEADER))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(panel_head::GAP))
-                .pl(px(panel_head::PAD_LEFT))
-                .pr(px(panel_head::PAD_RIGHT))
-                .font_weight(FontWeight(text::weight::STRONG))
-                .child(div().min_w_0().truncate().child(panel.title())),
-        )
-        .child(empty_state(
-            ElementId::Name(format!("empty-{id}").into()),
-            "Not available yet",
-            theme,
-        ))
-}
-
-/// The one-line empty state of a panel or section that is not built yet,
-/// where its rows would be: `text.secondary`, lined up with list rows.
-fn empty_state(id: ElementId, note: &'static str, theme: &Theme) -> AnyElement {
-    let selector: SharedString = match &id {
-        ElementId::Name(name) => name.clone(),
-        _ => "empty".into(),
-    };
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_string())
-        .h(px(size::LIST_ROW))
-        .flex_none()
-        .mt(px(list::PAD_Y))
-        .mx(px(size::LIST_ROW_INSET))
-        .pl(px(list_row::PAD_LEFT))
-        .flex()
-        .items_center()
-        .text_color(theme.text.secondary)
-        .child(note)
-        .into_any_element()
 }
 
 /// The right panel: collapsible sections stacked from the top. The Outline

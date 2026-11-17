@@ -474,6 +474,7 @@ impl Workspace {
             }
         };
         self.follow_moves(&plan.root, &plan.moved, window, cx);
+        self.carry_history(&plan.root, &plan.moved, cx);
         let changes: Vec<Change> = plan
             .moves
             .iter()
@@ -586,6 +587,7 @@ impl Workspace {
             }
         }
         self.follow_moves(&applied.root, &moved, window, cx);
+        self.carry_history(&applied.root, &back, cx);
         let changes: Vec<Change> = back
             .iter()
             .map(|(from, to)| Change::Rename {

@@ -6,10 +6,17 @@
 mod bases_tabs;
 #[cfg(test)]
 mod bases_tabs_tests;
+mod bookmarks;
+mod bookmarks_panel;
+#[cfg(test)]
+mod bookmarks_tests;
 mod canvas_tabs;
 #[cfg(test)]
 mod canvas_tabs_tests;
 mod controls;
+mod daily_notes;
+#[cfg(test)]
+mod daily_notes_tests;
 mod document;
 mod drag_drop;
 #[cfg(test)]
@@ -18,6 +25,9 @@ mod expanded_table;
 mod export;
 #[cfg(test)]
 mod export_tests;
+mod file_history;
+#[cfg(test)]
+mod file_history_tests;
 mod file_ops;
 #[cfg(test)]
 mod file_ops_tests;
@@ -1129,6 +1139,8 @@ impl Workspace {
         }
         self.sync_outline(cx);
         self.sync_links(cx);
+        self.sync_file_history(cx);
+        self.sync_bookmarks(cx);
         self.session_changed(cx);
         cx.notify();
     }
@@ -1190,6 +1202,7 @@ impl Workspace {
         self.sync_viewer_roots(cx);
         self.sync_search(cx);
         self.sync_conflicts(cx);
+        self.sync_bookmarks(cx);
         self.sync_tags(cx);
         self.sync_links(cx);
         self.push_reader_content(cx);
@@ -2020,6 +2033,9 @@ impl Render for Workspace {
             .map(|root| self.preview_actions(root, window, cx))
             .map(|root| self.link_list_actions(root, cx))
             .map(|root| self.vault_op_actions(root, window, cx))
+            .map(|root| self.file_history_actions(root, cx))
+            .map(|root| self.bookmark_actions(root, cx))
+            .map(|root| self.daily_note_actions(root, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
