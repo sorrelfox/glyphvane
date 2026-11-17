@@ -22,6 +22,13 @@
 //! window, opening another folder) cancels it. Each snapshot it publishes
 //! is announced with a [`ContentUpdated`] event (the quick switcher
 //! follows them).
+//!
+//! Once the path index is built the vault also starts its **Git watcher**
+//! ([`GitWatcher`], FR-VAULT-12) when the folder is in a Git work tree:
+//! started off the UI thread (finding the repository reads the disk), told
+//! about every snapshot the vault publishes, and announcing each new status
+//! with a [`GitUpdated`] event (the status bar's branch and the Files
+//! panel's badges follow it). A vault outside any work tree has none.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -32,6 +39,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, EventEmitter, Global, SharedString, Task};
 use gv_vault::content::{ContentEvent, ContentIndexer, ContentOptions, ContentSnapshot};
+use gv_vault::git::{GitStatus, GitWatchOptions, GitWatcher};
 use gv_vault::root::{self, RootDetection, RootMarker, RootReason};
 use gv_vault::{IndexConfig, IndexError, PathIndex, ProfileId, ProfileParams, SharedPathIndex};
 
@@ -73,6 +81,10 @@ fn auto_index_limit(cx: &App) -> Option<usize> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContentUpdated;
 
+/// The Git watcher read a new status, or the vault left its work tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GitUpdated;
+
 /// The vault of one window. Views observe it: it notifies whenever it
 /// publishes a new snapshot of the index.
 pub(crate) struct WindowVault {
@@ -91,9 +103,22 @@ pub(crate) struct WindowVault {
     _content_events: Option<Task<()>>,
     /// The content index published a snapshot not announced yet.
     content_pending: Arc<AtomicBool>,
+    /// Opened as a folder (*Open folder*, a restored window), not found
+    /// from a file: the session keeps it.
+    opened_as_folder: bool,
+    /// The Git watcher, once the index is built, when the vault is in a
+    /// work tree.
+    git: Option<GitWatcher>,
+    /// The status last announced.
+    git_status: Option<Arc<GitStatus>>,
+    _git_start: Option<Task<()>>,
+    _git_events: Option<Task<()>>,
+    /// The Git watcher reported something not announced yet.
+    git_pending: Arc<AtomicBool>,
 }
 
 impl EventEmitter<ContentUpdated> for WindowVault {}
+impl EventEmitter<GitUpdated> for WindowVault {}
 
 impl fmt::Debug for WindowVault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -116,13 +141,21 @@ impl WindowVault {
     /// The vault of a folder the user opened: rooted at that folder.
     pub fn for_folder(folder: &Path, cx: &mut Context<'_, Self>) -> Self {
         let root = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
-        Self::open(
+        let mut this = Self::open(
             RootDetection {
                 root,
                 reason: RootReason::FileFolder,
             },
             cx,
-        )
+        );
+        this.opened_as_folder = true;
+        this
+    }
+
+    /// Whether the vault was opened as a folder rather than found from a
+    /// file.
+    pub fn opened_as_folder(&self) -> bool {
+        self.opened_as_folder
     }
 
     fn open(detected: RootDetection, cx: &mut Context<'_, Self>) -> Self {
@@ -149,6 +182,12 @@ impl WindowVault {
             content: None,
             _content_events: None,
             content_pending: Arc::default(),
+            opened_as_folder: false,
+            git: None,
+            git_status: None,
+            _git_start: None,
+            _git_events: None,
+            git_pending: Arc::default(),
         };
         if let Some(reason) = root::is_refused_root(&detected.root, root::home_dir().as_deref()) {
             this.status = VaultStatus::NotIndexed(format!("Not indexed: {reason}").into());
@@ -236,6 +275,7 @@ impl WindowVault {
                     "path index built"
                 );
                 self.start_content(cx);
+                self.start_git(cx);
                 VaultStatus::Ready
             }
             Err(IndexError::TooManyEntries { limit }) => {
@@ -258,6 +298,9 @@ impl WindowVault {
     pub fn publish(&mut self, index: PathIndex, cx: &mut Context<'_, Self>) {
         if let Some(content) = &self.content {
             content.update_paths(index.clone());
+        }
+        if let Some(git) = &self.git {
+            git.refresh();
         }
         self.index.store(index);
         cx.notify();
@@ -354,6 +397,75 @@ impl WindowVault {
             cx.emit(ContentUpdated);
         }
         fresh
+    }
+
+    /// Starts the Git watcher on a background thread (finding the work
+    /// tree reads the disk), once per built index.
+    fn start_git(&mut self, cx: &mut Context<'_, Self>) {
+        if self.git.is_some() || self._git_start.is_some() {
+            return;
+        }
+        let root = self.root.clone();
+        // As with the content index: the watcher's thread marks each event
+        // and wakes this thread, except under GPUI's test scheduler, where
+        // tests call `poll_git`.
+        let pending = Arc::new(AtomicBool::new(false));
+        self.git_pending = pending.clone();
+        let (published, mut events) = futures::channel::mpsc::unbounded::<()>();
+        let published = (!cx.background_executor().is_test()).then_some(published);
+        let on_event = move |event: gv_vault::git::GitEvent| {
+            if let gv_vault::git::GitEvent::Failed(err) = &event {
+                tracing::debug!("git status: {err}");
+            }
+            pending.store(true, Ordering::Release);
+            if let Some(published) = &published {
+                // Fails only when the vault is gone.
+                let _ = published.unbounded_send(());
+            }
+        };
+        self._git_events = Some(cx.spawn(async move |this, cx| {
+            while events.next().await.is_some() {
+                while events.try_recv().is_ok() {}
+                if this.update(cx, |v, cx| v.poll_git(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+        let start = cx.background_spawn(async move {
+            GitWatcher::start(&root, GitWatchOptions::default(), on_event)
+        });
+        self._git_start = Some(cx.spawn(async move |this, cx| {
+            let watcher = start.await;
+            this.update(cx, |vault, cx| {
+                vault._git_start = None;
+                if watcher.is_some() {
+                    vault.git = watcher;
+                    vault.poll_git(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Announces a status the Git watcher reported since the last call,
+    /// with [`GitUpdated`]. Returns whether there was one.
+    pub fn poll_git(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        if !self.git_pending.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        let status = self.git.as_ref().and_then(GitWatcher::snapshot);
+        if status == self.git_status {
+            return false;
+        }
+        self.git_status = status;
+        cx.emit(GitUpdated);
+        true
+    }
+
+    /// The vault's Git status as last read: `None` outside a work tree
+    /// and until the first reading.
+    pub fn git(&self) -> Option<&Arc<GitStatus>> {
+        self.git_status.as_ref()
     }
 
     /// The content index's current snapshot, once it is built (for the

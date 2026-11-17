@@ -6,10 +6,19 @@
 //!
 //! # What is kept
 //!
-//! Per window: its bounds, its tabs in order, the active tab and whether
-//! each side panel is shown. Per tab: the file, the view mode, the scroll
-//! anchor (the source offset of the block at the top, never pixels) and the
-//! back and forward history. Closed tabs are not kept.
+//! Per window: its bounds, its tabs in order, the active tab, whether each
+//! side panel is shown, which panel the sidebar shows, and the folder it
+//! was opened on (*Open folder*: its vault comes back with it, even without
+//! tabs). Per tab: the file, the view mode, the scroll anchor (the source
+//! offset of the block at the top, never pixels), the back and forward
+//! history, the Split view's divider and the Source view's folds (byte
+//! ranges; restored only where they are still foldable regions). Closed
+//! tabs are not kept.
+//!
+//! Every window that is not created for a file is a session window, so
+//! several windows (`workspace.new_window`, *Open folder* in a window
+//! that already shows something) are saved and restored together, each
+//! with its own vault and tabs.
 //!
 //! # Which windows
 //!
@@ -57,6 +66,7 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 use super::history::HISTORY_LIMIT;
+use super::panels::SidebarPanel;
 use super::{FileLabel, History, HistoryEntry, ViewMode, Workspace, most_recent_window};
 use crate::chrome::WindowChrome;
 use crate::reader::ScrollTarget;
@@ -145,6 +155,13 @@ pub struct WindowState {
     pub sidebar_open: bool,
     #[serde(default)]
     pub panel_open: bool,
+    /// The sidebar's panel ([`SidebarPanel::id`]); the Files panel when
+    /// missing or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_panel: Option<String>,
+    /// The folder the window was opened on: its vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<PathBuf>,
 }
 
 /// Where a window was, in logical pixels.
@@ -209,6 +226,12 @@ pub struct TabState {
     /// Where Forward goes, the next one last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forward: Vec<Place>,
+    /// The Split view's divider, as a share of its width, when moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_ratio: Option<f32>,
+    /// The Source view's folds, as byte ranges `[start, end]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folds: Vec<[usize; 2]>,
 }
 
 /// A place in a tab's history.
@@ -306,10 +329,22 @@ fn history(back: &[Place], forward: &[Place]) -> History {
 
 impl TabState {
     pub(super) fn into_tab(self) -> super::Tab {
-        let mut tab = super::Tab::new(Some(super::OpenTarget::new(self.path)));
+        let mut tab = super::Tab::new(Some(super::OpenTarget::new(self.path.clone())));
         tab.mode = self.mode;
         tab.scroll = self.anchor.map(Anchor::target);
         tab.history = history(&self.back, &self.forward);
+        tab.split_ratio = self
+            .split_ratio
+            .filter(|r| r.is_finite() && *r > 0.0 && *r < 1.0);
+        let folds: Vec<std::ops::Range<usize>> = self
+            .folds
+            .iter()
+            .filter(|[start, end]| start < end)
+            .map(|[start, end]| *start..*end)
+            .collect();
+        if !folds.is_empty() {
+            tab.restored_folds = Some((self.path, folds));
+        }
         tab
     }
 }
@@ -328,12 +363,25 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
         if index == workspace.active {
             active_tab = tabs.len();
         }
+        let split_ratio = tab
+            .split
+            .as_ref()
+            .map(|s| s.read(cx).ratio())
+            .or(tab.split_ratio)
+            .filter(|r| (r - 0.5).abs() > f32::EPSILON);
+        let folds = tab
+            .folds(cx)
+            .into_iter()
+            .map(|r| [r.start, r.end])
+            .collect();
         tabs.push(TabState {
             path: place.path,
             mode: place.mode,
             anchor: place.scroll.as_ref().and_then(Anchor::from_target),
             back: places(tab.history.back()),
             forward: places(tab.history.forward()),
+            split_ratio,
+            folds,
         });
     }
     WindowState {
@@ -342,11 +390,23 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
         active_tab,
         sidebar_open: workspace.sidebar_open,
         panel_open: workspace.panel_open,
+        sidebar_panel: (workspace.panels.sidebar != SidebarPanel::Files)
+            .then(|| workspace.panels.sidebar.saved_id())
+            .flatten()
+            .map(str::to_owned),
+        vault: workspace
+            .vault
+            .as_ref()
+            .map(|v| v.read(cx))
+            .filter(|v| v.opened_as_folder())
+            .map(|v| v.root().to_path_buf())
+            .filter(|p| storable(p)),
     }
 }
 
 /// `state` with the tabs whose files are gone left out, or `None` when it
-/// had tabs and none is left.
+/// had tabs and none is left (a window opened on a folder stays, without
+/// tabs).
 pub fn present(mut state: WindowState, exists: impl Fn(&Path) -> bool) -> Option<WindowState> {
     if state.tabs.is_empty() {
         return Some(state);
@@ -364,11 +424,12 @@ pub fn present(mut state: WindowState, exists: impl Fn(&Path) -> bool) -> Option
             tracing::info!("session: skipped {}: the file is gone", tab.path.display());
         }
     }
+    // A window opened on a folder stays without its files.
     if kept.is_empty() {
-        return None;
+        state.vault.as_ref()?;
     }
     // The active tab, or the nearest kept tab before it, or the first.
-    state.active_tab = new_active.unwrap_or(0);
+    state.active_tab = new_active.filter(|_| !kept.is_empty()).unwrap_or(0);
     state.tabs = kept;
     Some(state)
 }
@@ -840,7 +901,11 @@ pub fn restore(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
     let active = store.session.active_window;
     let mut opened = Vec::new();
     let mut tabs = 0;
-    for (index, state) in windows.into_iter().enumerate() {
+    for (index, mut state) in windows.into_iter().enumerate() {
+        if state.vault.as_deref().is_some_and(|v| !v.is_dir()) {
+            tracing::info!("session: a window's folder is gone");
+            state.vault = None;
+        }
         let Some(state) = present(state, Path::is_file) else {
             tracing::info!("session: skipped a window: none of its files is left");
             continue;

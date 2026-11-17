@@ -30,6 +30,8 @@ fn tab(path: &str) -> TabState {
         anchor: None,
         back: Vec::new(),
         forward: Vec::new(),
+        split_ratio: None,
+        folds: Vec::new(),
     }
 }
 
@@ -63,6 +65,8 @@ fn sample() -> Session {
             active_tab: 1,
             sidebar_open: true,
             panel_open: false,
+            sidebar_panel: None,
+            vault: None,
         }],
         active_window: Some(0),
         recent_files: vec![PathBuf::from("/n/c.md"), PathBuf::from("/n/b.md")],
@@ -138,6 +142,8 @@ fn files_that_are_gone_are_skipped() {
         active_tab: 1,
         sidebar_open: true,
         panel_open: false,
+        sidebar_panel: None,
+        vault: None,
     };
     let exists = |p: &Path| !p.ends_with("gone.md");
     let kept = present(window.clone(), exists).expect("two tabs left");
@@ -537,6 +543,8 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 active_tab: 0,
                 sidebar_open: false,
                 panel_open: true,
+                sidebar_panel: None,
+                vault: None,
             },
             WindowState {
                 bounds: None,
@@ -547,6 +555,8 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 active_tab: 0,
                 sidebar_open: false,
                 panel_open: false,
+                sidebar_panel: None,
+                vault: None,
             },
         ],
         ..Session::default()
@@ -571,4 +581,152 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
     assert_eq!(saved.windows.len(), 1);
     assert_eq!(saved.windows[0].tabs[0].path, a);
     assert!(saved.windows[0].panel_open);
+}
+
+#[test]
+fn panels_folders_dividers_and_folds_survive_json() {
+    let mut session = sample();
+    session.windows[0].sidebar_panel = Some("tags".into());
+    session.windows[0].vault = Some(PathBuf::from("/n"));
+    session.windows[0].tabs[1].split_ratio = Some(0.3);
+    session.windows[0].tabs[1].folds = vec![[0, 40], [60, 90]];
+    let text = serde_json::to_string(&session).expect("serializes");
+    let back: Session = serde_json::from_str(&text).expect("parses");
+    assert_eq!(back, session);
+    // An older session has none of them.
+    let text = serde_json::to_string(&sample()).expect("serializes");
+    assert!(
+        !text.contains("sidebar_panel") && !text.contains("folds"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_window_opened_on_a_folder_stays_without_its_files() {
+    let window = WindowState {
+        bounds: None,
+        tabs: vec![tab("/n/gone.md")],
+        active_tab: 0,
+        sidebar_open: true,
+        panel_open: false,
+        sidebar_panel: None,
+        vault: Some(PathBuf::from("/n")),
+    };
+    let kept = present(window, |_| false).expect("the folder's window stays");
+    assert!(kept.tabs.is_empty());
+    assert_eq!(kept.vault.as_deref(), Some(Path::new("/n")));
+}
+
+#[gpui::test]
+fn folders_panels_dividers_and_folds_come_back(cx: &mut TestAppContext, cx2: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let folder = dir.path().to_path_buf();
+    let a = folder.join("a.md");
+    std::fs::write(&a, long_doc("A")).expect("write");
+
+    // First run: an empty window takes the folder, opens a.md in Split,
+    // moves the divider, folds, and shows the Tags panel.
+    let memory = Arc::new(Memory::default());
+    start(cx, Session::default(), &memory);
+    cx.update(|cx| {
+        assert_eq!(restore(cx).expect("restores"), None);
+        crate::open(cx, Vec::new(), Placement::RecentWindow).expect("an empty window opens");
+    });
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    vcx.update(|window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_folder(folder.clone(), window, cx);
+            ws.open_tab(OpenTarget::new(&a), window, cx);
+            ws.set_mode(ViewMode::Split, cx);
+        });
+    });
+    draw(&mut vcx);
+    let split = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().split().cloned())
+        .expect("a Split view");
+    split.update(&mut vcx, |s, cx| s.set_ratio(0.3, cx));
+    let editor = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("a Source view");
+    vcx.update(|window, cx| {
+        use gpui::Focusable as _;
+        editor.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    vcx.dispatch_action(crate::keymap::actions::view::FoldLevel1);
+    draw(&mut vcx);
+    let folds = editor.read_with(&vcx, |e, _| e.fold_ranges());
+    assert!(!folds.is_empty(), "the section folded");
+    vcx.update(|window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.show_sidebar_panel(SidebarPanel::Tags, false, window, cx);
+        });
+    });
+    draw(&mut vcx);
+    cx.update(save_now);
+
+    let saved = memory.last();
+    let w = &saved.windows[0];
+    assert_eq!(w.vault.as_deref(), Some(folder.as_path()));
+    assert_eq!(w.sidebar_panel.as_deref(), Some("tags"));
+    assert!(w.sidebar_open);
+    let t = &w.tabs[0];
+    assert_eq!(t.mode, ViewMode::Split);
+    assert!(
+        t.split_ratio.is_some_and(|r| (r - 0.3).abs() < 0.001),
+        "{t:?}"
+    );
+    assert_eq!(
+        t.folds,
+        folds.iter().map(|r| [r.start, r.end]).collect::<Vec<_>>()
+    );
+
+    // Second run: all of it comes back.
+    let memory2 = Arc::new(Memory::default());
+    start(cx2, saved.clone(), &memory2);
+    cx2.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx2);
+    let mut vcx = VisualTestContext::from_window(window, cx2);
+    draw(&mut vcx);
+    draw(&mut vcx);
+    let (root, panel) = workspace.read_with(&vcx, |ws, cx| (ws.vault_root(cx), ws.panels.sidebar));
+    assert_eq!(root.as_deref(), Some(folder.as_path()));
+    assert_eq!(panel, SidebarPanel::Tags);
+    let split = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().split().cloned())
+        .expect("a Split view");
+    assert!((split.read_with(&vcx, |s, _| s.ratio()) - 0.3).abs() < 0.001);
+    let editor = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("a Source view");
+    assert_eq!(editor.read_with(&vcx, |e, _| e.fold_ranges()), folds);
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory2.last().windows, saved.windows);
+}
+
+#[gpui::test]
+fn a_folder_window_without_files_comes_back_with_its_vault(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("a.md"), "# A\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            sidebar_open: true,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: Some(dir.path().to_path_buf()),
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let (root, open) = workspace.read_with(&vcx, |ws, cx| (ws.vault_root(cx), ws.sidebar_open));
+    assert_eq!(root.as_deref(), Some(dir.path()));
+    assert!(open);
 }

@@ -34,6 +34,9 @@ mod file_ops_tests;
 mod files_panel;
 #[cfg(test)]
 mod files_panel_tests;
+mod git;
+#[cfg(test)]
+mod git_tests;
 mod history;
 mod infobar;
 mod link_actions;
@@ -402,6 +405,12 @@ pub struct Tab {
     edit_requested: bool,
     /// The document's profile, detected for `path` when first needed.
     profile: Option<crate::profile::TabProfile>,
+    /// The Split view's divider for when the Split view is made (a
+    /// restored tab's).
+    split_ratio: Option<f32>,
+    /// A restored tab's Source-view folds, for its file, until the Source
+    /// view is made.
+    restored_folds: Option<(PathBuf, Vec<std::ops::Range<usize>>)>,
 }
 
 impl Tab {
@@ -428,6 +437,24 @@ impl Tab {
             on_close: None,
             edit_requested: false,
             profile: None,
+            split_ratio: None,
+            restored_folds: None,
+        }
+    }
+
+    /// The Source view's folds of the tab's file, as the session keeps
+    /// them: the Source view's, else those restored and not applied yet.
+    fn folds(&self, cx: &App) -> Vec<std::ops::Range<usize>> {
+        let path = self.path.as_deref();
+        if let Some(editor) = &self.editor {
+            let editor = editor.read(cx);
+            if editor.path().is_some() && editor.path() == path {
+                return editor.fold_ranges();
+            }
+        }
+        match &self.restored_folds {
+            Some((p, folds)) if Some(p.as_path()) == path => folds.clone(),
+            _ => Vec::new(),
         }
     }
 
@@ -627,6 +654,8 @@ pub struct Workspace {
     _files_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
     _content_updates: Option<Subscription>,
+    /// Redraws on the vault's Git status changes ([`git`]).
+    _git_updates: Option<Subscription>,
     /// The workspace-trust prompt of the window's vault, while it asks
     /// ([`trust_prompt`]).
     trust: Option<(Entity<crate::trust::TrustPrompt>, Subscription)>,
@@ -804,6 +833,7 @@ impl Workspace {
             _files_events: None,
             _vault_changed: None,
             _content_updates: None,
+            _git_updates: None,
             trust: None,
             outline: None,
             _outline_events: None,
@@ -862,9 +892,22 @@ impl Workspace {
             this.active = state.active_tab.min(tabs.len() - 1);
             this.tabs = tabs;
         }
+        if let Some(folder) = state.vault {
+            let vault = cx.new(|cx| WindowVault::for_folder(&folder, cx));
+            this.set_vault(vault, cx);
+        }
         this.tabs_changed(window, cx);
+        // The sidebar's panel comes back with the sidebar (a hidden
+        // sidebar shows Files when called).
+        let panel = state
+            .sidebar_panel
+            .as_deref()
+            .and_then(panels::SidebarPanel::from_saved_id);
         if state.sidebar_open {
-            this.set_sidebar_open(true, window, cx);
+            match panel {
+                Some(panel) => this.show_sidebar_panel(panel, false, window, cx),
+                None => this.set_sidebar_open(true, window, cx),
+            }
         }
         if state.panel_open {
             this.set_panel_open(true, window, cx);
@@ -2110,6 +2153,7 @@ impl Render for Workspace {
                     ),
             )
             .child(status_bar::status_bar(
+                self.git_branch(cx),
                 self.active_tab(),
                 self.active_doc(),
                 editor_facts.as_ref(),
@@ -2203,6 +2247,22 @@ pub fn most_recent_window(cx: &mut App) -> Option<WorkspaceWindow> {
     let order = &mut cx.default_global::<RecentWindows>().0;
     order.retain(|w| open.contains(&w.window) && w.workspace.upgrade().is_some());
     order.first().cloned()
+}
+
+/// The open main windows, the one focused last first.
+pub fn main_windows(cx: &mut App) -> Vec<WorkspaceWindow> {
+    most_recent_window(cx);
+    cx.default_global::<RecentWindows>().0.clone()
+}
+
+/// `window.bring_all_to_front` (macOS Window menu): every main window
+/// comes forward, in the order they were last used, the latest on top.
+fn bring_all_to_front(cx: &mut App) {
+    cx.activate(true);
+    for entry in main_windows(cx).into_iter().rev() {
+        // Fails only when the window has closed.
+        let _ = cx.update_window(entry.window, |_, window, _| window.activate_window());
+    }
 }
 
 /// Files opened for an edit someone waits for (`--wait`): Edit mode, and

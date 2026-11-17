@@ -307,3 +307,44 @@ fn each_tab_keeps_its_mode(cx: &mut TestAppContext) {
     .expect("window is open");
     assert_eq!(layout(&workspace, cx), (false, false, ViewMode::Edit));
 }
+
+#[gpui::test]
+fn each_window_has_its_own_vault_and_tabs(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("a.md"), "# A\n").expect("write");
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let (first, workspace) = route(cx, Vec::new(), Placement::RecentWindow);
+    cx.update_window(first, |_, window, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.open_folder(dir.path().to_path_buf(), window, cx);
+        });
+    })
+    .expect("window is open");
+    cx.dispatch_action(first, crate::keymap::actions::workspace::NewWindow);
+    cx.run_until_parked();
+    let windows = cx.update(super::main_windows);
+    assert_eq!(windows.len(), 2);
+    let second = windows
+        .iter()
+        .find(|w| w.window != first)
+        .and_then(|w| w.workspace.upgrade())
+        .expect("a second window");
+    let (root, tabs) = second.read_with(cx, |ws, cx| (ws.vault_root(cx), ws.tabs().len()));
+    assert_eq!((root, tabs), (None, 1), "the new window starts empty");
+    let root = workspace.read_with(cx, |ws, cx| ws.vault_root(cx));
+    assert_eq!(root.as_deref(), Some(dir.path()));
+
+    // The macOS Window menu's commands have handlers in every window (the
+    // test platform cannot minimize or zoom, so only one runs).
+    cx.update_window(first, |_, window, cx| {
+        assert!(window.is_action_available(&crate::keymap::actions::window::Minimize, cx));
+        assert!(window.is_action_available(&crate::keymap::actions::window::Zoom, cx));
+        window.dispatch_action(
+            Box::new(crate::keymap::actions::window::BringAllToFront),
+            cx,
+        );
+    })
+    .expect("window is open");
+    cx.run_until_parked();
+    assert_eq!(cx.update(super::main_windows).len(), 2);
+}

@@ -161,21 +161,30 @@ fn with_window(
     });
 }
 
-/// Uses the settings layers of the vault of `workspace`'s active document.
+/// Uses the settings layers of `workspace`'s vault: the window's own
+/// (opened as a folder, or made for the sidebar), else the one its active
+/// document is in.
 fn use_vault_of(workspace: &Workspace, cx: &mut App) {
-    let Some(path) = workspace.active_tab().path() else {
+    let Some(root) = vault_root_of(workspace, cx) else {
         return;
     };
-    let root = gv_vault::detect_root(path).root;
     cx.defer(move |cx| AppSettings::open_vault(cx, &root));
+}
+
+/// The vault root of `workspace`, as [`use_vault_of`] picks it.
+fn vault_root_of(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+    if let Some(root) = workspace.vault_root(cx) {
+        return Some(root);
+    }
+    let path = workspace.active_tab().path()?;
+    Some(gv_vault::detect_root(path).root)
 }
 
 /// The vault root of the main window focused last.
 fn recent_vault_root(cx: &mut App) -> Option<PathBuf> {
     let recent = most_recent_window(cx)?;
     let workspace = recent.workspace.upgrade()?;
-    let path = workspace.read(cx).active_tab().path()?.to_path_buf();
-    Some(gv_vault::detect_root(&path).root)
+    vault_root_of(workspace.read(cx), cx)
 }
 
 /// The open settings window.

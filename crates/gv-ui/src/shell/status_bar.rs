@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The status bar: where the document is at the left (folder, file, the
-//! heading being read), facts about it at the right: in Preview words and
+//! The status bar: the Git branch ([`super::git`]) and where the document
+//! is at the left (folder, file, the heading being read), facts about it at the right: in Preview words and
 //! reading time, after the note's link findings
 //! ([`super::links_panel`]); in Edit and Split the caret's line and column, words, the
 //! encoding and the line endings ([`EditorFacts`]); in Preview the zoom
@@ -31,6 +31,7 @@ const WORDS_PER_MINUTE: usize = 200;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn status_bar(
+    branch: Option<SharedString>,
     tab: &Tab,
     doc: Option<&DocFacts>,
     editor: Option<&EditorFacts>,
@@ -66,6 +67,7 @@ pub(super) fn status_bar(
                 .flex()
                 .items_center()
                 .gap(px(spacing::GAP))
+                .children(branch.map(super::git::branch_label))
                 .child(breadcrumb(breadcrumb_items(tab, doc), theme)),
         )
         .child(

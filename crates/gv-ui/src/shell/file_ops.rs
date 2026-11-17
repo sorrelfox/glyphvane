@@ -48,7 +48,9 @@ use super::vault::WindowVault;
 use super::{OpenTarget, Tab, Workspace, session};
 use crate::files::notice::{Notice, NoticeAction, Topic};
 use crate::files::open_dialog::{self, OpenAnswer, OpenPrompt};
-use crate::keymap::actions::{file as file_commands, workspace as workspace_commands};
+use crate::keymap::actions::{
+    file as file_commands, window as window_commands, workspace as workspace_commands,
+};
 use crate::platform::{self, FileClass};
 
 /// The name of a new note, before ` 1`, ` 2`, … are added.
@@ -216,6 +218,7 @@ impl Workspace {
         self.index_asked = false;
         self._vault_changed = Some(cx.observe(&vault, |this, _, cx| this.vault_changed(cx)));
         self.follow_content(&vault, cx);
+        self.follow_git(&vault, cx);
         self.vault_opened(cx);
         self.vault_changed(cx);
         if let Some(files) = &self.files {
@@ -524,6 +527,22 @@ impl Workspace {
         .on_action(
             cx.listener(|this, _: &workspace_commands::NewWindow, _, cx| {
                 this.new_window(cx);
+            }),
+        )
+        .on_action(cx.listener(|_, _: &window_commands::Minimize, window, _| {
+            window.minimize_window();
+        }))
+        .on_action(cx.listener(|_, _: &window_commands::Zoom, window, _| {
+            window.zoom_window();
+        }))
+        .on_action(
+            cx.listener(|_, _: &window_commands::ToggleFullScreen, window, _| {
+                window.toggle_fullscreen();
+            }),
+        )
+        .on_action(
+            cx.listener(|_, _: &window_commands::BringAllToFront, _, cx| {
+                cx.defer(super::bring_all_to_front);
             }),
         )
         .on_action(cx.listener(|this, _: &file_commands::Revert, _, cx| {

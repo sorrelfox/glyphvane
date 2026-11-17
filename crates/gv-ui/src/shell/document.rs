@@ -191,9 +191,16 @@ impl Workspace {
             .path
             .clone()
             .unwrap_or_else(|| PathBuf::from(tab.label.name.as_ref()));
+        let ratio = tab.split_ratio;
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let profile = self.tab_profile(index, cx).compiled;
-        let split = cx.new(|cx| SplitView::new(editor, path, snapshot, cx));
+        let split = cx.new(|cx| {
+            let mut split = SplitView::new(editor, path, snapshot, cx);
+            if let Some(ratio) = ratio {
+                split.set_ratio(ratio, cx);
+            }
+            split
+        });
         // A link followed in the preview pane goes where it goes from
         // Preview.
         let reader = split.read(cx).reader().clone();
@@ -405,6 +412,10 @@ impl Workspace {
         };
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let read_only = !self.can_edit(index, cx);
+        let folds = match self.tabs[index].restored_folds.take() {
+            Some((p, folds)) if p == path => folds,
+            _ => Vec::new(),
+        };
         let editor = cx.new(|cx| {
             let mut editor = EditorView::new(profile.parse_options(), cx);
             editor.set_compiled_profile(&profile.compiled, cx);
@@ -415,6 +426,7 @@ impl Workspace {
         self.adopt_editor(&editor, cx);
         editor.update(cx, |editor, cx| {
             editor.open(path, snapshot, cx);
+            editor.restore_folds(folds);
             match top {
                 Some(Top::Offset(offset)) => editor.scroll_to_offset(offset, cx),
                 Some(Top::Line(line)) => editor.scroll_to_line(line, cx),

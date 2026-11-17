@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The Files panel: the vault's folders and files as a tree.
+//! The Files panel: the vault's folders and files as a tree, with Git
+//! status badges when the vault is in a work tree ([`super::git`]).
 //!
 //! The panel shows whatever snapshot of the path index its [`WindowVault`]
 //! last published and redraws when a newer one arrives, keeping open
@@ -552,6 +553,7 @@ impl FilesPanel {
         if selected.is_none_or(|row| !range.contains(&row)) {
             self.selected_bounds.set(None);
         }
+        let git = self.vault.as_ref().and_then(|v| v.read(cx).git().cloned());
         let rows =
             &tree.rows()[range.start.min(tree.rows().len())..range.end.min(tree.rows().len())];
         rows.iter()
@@ -576,6 +578,11 @@ impl FilesPanel {
                     is_dir: e.kind.is_dir(),
                 });
                 let folder = entry.filter(|e| e.kind.is_dir()).map(|e| e.path.clone());
+                let status = git
+                    .as_deref()
+                    .zip(entry)
+                    .and_then(|(git, e)| super::git::row_status(git, &e.path, e.kind.is_dir()));
+                let ignored = status == Some(gv_vault::git::FileStatus::Ignored);
                 let drop_tint = theme.accent.tint;
                 let label = row.name.clone();
                 let row_frame =
@@ -606,7 +613,15 @@ impl FilesPanel {
                                 .text_color(theme.text.secondary)
                                 .child(row_icon(row.kind).sized(icon::ROW)),
                         )
-                        .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .when(ignored, |name| name.text_color(theme.text.secondary))
+                                .child(row.name.clone()),
+                        )
+                        .children(status.and_then(|s| super::git::badge(ix, s, theme)))
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.click_row(ix, window, cx)),
                         )

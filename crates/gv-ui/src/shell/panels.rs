@@ -65,6 +65,31 @@ impl SidebarPanel {
         }
     }
 
+    /// The name the session stores, for the panels a window brings back:
+    /// not the File history and Sync conflicts panels, which follow a
+    /// document or a moment.
+    pub fn saved_id(self) -> Option<&'static str> {
+        match self {
+            Self::Files | Self::Search | Self::Tags | Self::Bookmarks | Self::Recent => {
+                Some(self.id())
+            }
+            Self::SyncConflicts | Self::FileHistory => None,
+        }
+    }
+
+    /// The panel the session stored as `id`.
+    pub fn from_saved_id(id: &str) -> Option<Self> {
+        [
+            Self::Files,
+            Self::Search,
+            Self::Tags,
+            Self::Bookmarks,
+            Self::Recent,
+        ]
+        .into_iter()
+        .find(|p| p.id() == id)
+    }
+
     fn icon(self) -> Icon {
         match self {
             Self::Files | Self::Recent | Self::SyncConflicts | Self::FileHistory => Icon::Files,
@@ -262,6 +287,9 @@ impl Workspace {
                         .map(|b| b.read(cx).focus_handle(cx)),
                 ),
             };
+        if self.panels.sidebar != panel {
+            self.session_changed(cx);
+        }
         self.panels.sidebar = panel;
         let takes_keyboard = matches!(
             panel,

@@ -33,7 +33,10 @@
 //!   meantime.
 //!
 //! Folds belong to the tab's editor, so they stay through mode switches.
-//! They are not saved with the session yet.
+//! The session keeps them per tab as byte ranges ([`EditorView::fold_ranges`]);
+//! a restored tab gets them back with [`EditorView::restore_folds`] once its
+//! document has loaded and its foldable regions are found: only ranges that
+//! are still foldable regions fold, and none if the text was edited first.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -41,8 +44,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{Context, Pixels, Point, Window};
-use gv_editor::SyntaxRef;
 use gv_editor::display_map::{Highlight, PLACEHOLDER, ReplaceSnapshot, StyleId};
+use gv_editor::{Editor, SyntaxRef};
 use gv_text::{Bias, Point as BufferPoint, TextSnapshot};
 
 use super::highlight::{HighlightCache, LineStyle, Style};
@@ -346,6 +349,62 @@ impl EditorView {
                     .into_iter()
                     .fold(false, |any, line| editor.fold_at(line) | any)
             })
+            .unwrap_or(false);
+        if changed {
+            self.folds_changed(false, window, cx);
+        }
+    }
+
+    /// The folded byte ranges, for the session.
+    pub fn fold_ranges(&self) -> Vec<Range<usize>> {
+        if self.status != super::EditorStatus::Ready {
+            return Vec::new();
+        }
+        self.editor().map(Editor::folded_ranges).unwrap_or_default()
+    }
+
+    /// Folds `ranges` (from [`Self::fold_ranges`] of an earlier session)
+    /// once the document has loaded; see the module notes.
+    pub fn restore_folds(&mut self, ranges: Vec<Range<usize>>) {
+        self.restored_folds = (!ranges.is_empty()).then_some((ranges, None));
+    }
+
+    /// The folds of [`Self::restore_folds`], when the foldable regions of
+    /// the loaded text are known.
+    pub(super) fn apply_restored_folds(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.restored_folds.is_none() {
+            return;
+        }
+        self.refresh_foldable();
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let revision = doc.editor.text().revision();
+        let Some((ranges, seen)) = self.restored_folds.as_mut() else {
+            return;
+        };
+        if seen.is_some_and(|seen| seen != revision) {
+            // Edited before the regions were found: the ranges are stale.
+            self.restored_folds = None;
+            return;
+        }
+        *seen = Some(revision);
+        if doc.foldable_at != Some(revision) {
+            return;
+        }
+        let ranges = std::mem::take(ranges);
+        self.restored_folds = None;
+        let foldable: std::collections::HashSet<Range<usize>> =
+            doc.editor.foldable().into_iter().map(|f| f.range).collect();
+        let ranges: Vec<Range<usize>> = ranges
+            .into_iter()
+            .filter(|r| foldable.contains(r))
+            .collect();
+        if ranges.is_empty() {
+            return;
+        }
+        let changed = self
+            .keep_top_line(|editor| editor.fold_ranges(ranges))
             .unwrap_or(false);
         if changed {
             self.folds_changed(false, window, cx);

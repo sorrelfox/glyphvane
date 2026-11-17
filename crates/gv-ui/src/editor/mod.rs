@@ -481,6 +481,9 @@ pub struct EditorView {
     _rewrap_wait: Option<Task<()>>,
     /// The wait before the foldable regions are found again.
     _foldable: Option<Task<()>>,
+    /// Folds of an earlier session waiting for the document, with the text
+    /// revision first seen while waiting ([`fold`]).
+    restored_folds: Option<(Vec<std::ops::Range<usize>>, Option<gv_text::Revision>)>,
     /// Follows the Appearance settings and the zoom.
     _settings: Subscription,
 }
@@ -547,6 +550,7 @@ impl EditorView {
             _rewrap: None,
             _rewrap_wait: None,
             _foldable: None,
+            restored_folds: None,
             _settings: cx.observe_global::<AppSettings>(|this, cx| this.sync_metrics(cx)),
         }
     }
@@ -1388,6 +1392,7 @@ impl Render for EditorView {
         if self.status == EditorStatus::Ready {
             self.debug_replace(window, cx);
             self.debug_fold(window, cx);
+            self.apply_restored_folds(window, cx);
         }
         // The key context is on the element around the editor and the find
         // popover, so the commands bound to it also work from the

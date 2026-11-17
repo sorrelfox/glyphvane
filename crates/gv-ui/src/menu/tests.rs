@@ -899,9 +899,9 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(f.bounds("app-menu-item:editor.bold").is_some());
     f.keys("right");
     assert!(f.bounds("app-menu-item:view.cycle_theme").is_some());
-    // Up wraps to the last enabled item, Reset zoom (full screen is
-    // disabled); three more up is Cycle theme.
-    f.keys("up up up up enter");
+    // Up wraps to the last enabled item, Full screen; four more up is
+    // Cycle theme.
+    f.keys("up up up up up enter");
     assert!(!f.is_open());
     assert_eq!(
         f.vcx.update(|_, cx| Appearance::choice(cx)),
