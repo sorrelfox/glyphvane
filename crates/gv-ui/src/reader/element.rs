@@ -489,11 +489,43 @@ impl Element for ReaderElement {
     type PrepaintState = Prepaint;
 
     fn id(&self) -> Option<ElementId> {
-        None
+        // An id and a role make the document a node for assistive
+        // technology.
+        Some("document".into())
     }
 
     fn source_location(&self) -> Option<&'static panic::Location<'static>> {
         None
+    }
+
+    fn a11y_role(&self) -> Option<gpui::Role> {
+        Some(gpui::Role::Document)
+    }
+
+    fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
+        node.set_label("Document");
+        node.set_read_only();
+    }
+
+    /// The structure of the items on screen and around them
+    /// ([`crate::a11y::document`]).
+    fn a11y_synthetic_children(
+        &mut self,
+        _prepaint: &mut Prepaint,
+        builder: &mut gpui::A11ySubtreeBuilder<'_>,
+    ) {
+        let st = self.state.borrow();
+        let Some(doc) = st.doc.as_ref() else {
+            return;
+        };
+        let placed = st.engine.placed();
+        let shown = match (placed.first(), placed.last()) {
+            (Some(first), Some(last)) => first.ix..last.ix + 1,
+            _ => 0..0,
+        };
+        let items = crate::a11y::document::window_of(shown, doc.tree.items().len());
+        let nodes = crate::a11y::document::describe(&doc.tree, items);
+        crate::a11y::document::push(&nodes, builder);
     }
 
     fn request_layout(

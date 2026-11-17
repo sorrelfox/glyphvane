@@ -34,6 +34,7 @@ use gpui::{
 };
 use gv_render_tree::FindOptions;
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::{CONTROL, SMALL_ICON_BUTTON, find as size};
@@ -392,8 +393,15 @@ fn icon_button(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let (hover, press) = (theme.state.hover, theme.state.press);
+    let label = match id {
+        "find-previous" => "Previous match",
+        "find-next" => "Next match",
+        _ => "Close find",
+    };
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || id.into())
         .flex_none()
         .size(px(SMALL_ICON_BUTTON))
@@ -417,8 +425,15 @@ impl FindBar {
         let on = t.is_on(self.options);
         let hover = theme.state.hover;
         let id = t.id();
+        let name = match t {
+            FindToggle::MatchCase => "Match case",
+            FindToggle::WholeWord => "Whole word",
+            FindToggle::Regex => "Regular expression",
+        };
         div()
             .id(ElementId::from(SharedString::from(id)))
+            .a11y_check_box(name, on)
+            .keyboard_control(theme)
             .debug_selector(move || id.into())
             .flex_none()
             .w(px(size::TOGGLE_WIDTH))
@@ -534,6 +549,12 @@ impl Render for FindBar {
                 .map(|t| self.toggle_button(t, theme, cx).into_any_element()),
         );
         let count = div()
+            .id("find-count")
+            .role(Role::Status)
+            .aria_label("Matches")
+            .when_some(self.status.text(), |d, t| d.aria_value(t))
+            .accessible()
+            .live(Live::Polite)
             .debug_selector(|| "find-count".into())
             .flex_none()
             .min_w(px(size::COUNT_MIN_WIDTH))

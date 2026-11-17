@@ -1159,11 +1159,41 @@ impl Element for EditorElement {
     type PrepaintState = Prepaint;
 
     fn id(&self) -> Option<ElementId> {
-        None
+        // An id and a role make the text a node for assistive technology.
+        Some("source-text".into())
     }
 
     fn source_location(&self) -> Option<&'static panic::Location<'static>> {
         None
+    }
+
+    fn a11y_role(&self) -> Option<gpui::Role> {
+        Some(gpui::Role::MultilineTextInput)
+    }
+
+    fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
+        node.set_label("Source");
+    }
+
+    /// The rows on screen as text runs, in order (best effort: AccessKit
+    /// has no rich-text editing model yet, NFR-A11Y-06).
+    fn a11y_synthetic_children(
+        &mut self,
+        prepaint: &mut Prepaint,
+        builder: &mut gpui::A11ySubtreeBuilder<'_>,
+    ) {
+        for (i, (row, _)) in prepaint.frame.rows.iter().enumerate() {
+            let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
+            let text = row.text.to_string();
+            let lengths: Vec<u8> = text
+                .chars()
+                .map(|c| u8::try_from(c.len_utf8()).unwrap_or(4))
+                .collect();
+            run.set_value(text);
+            run.set_character_lengths(lengths);
+            let id = builder.synthetic_node_id(i);
+            builder.push_child(id, run);
+        }
     }
 
     fn request_layout(

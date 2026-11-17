@@ -31,6 +31,7 @@ use gpui::{
 use gv_vault::files::history::{HistoryStore, Version};
 
 use super::VersionHistory;
+use crate::a11y::A11yExt as _;
 use crate::appearance::Appearance;
 use crate::metrics::spacing::{list, list_row, panel_head};
 use crate::metrics::{DISABLED_OPACITY, font, radius, size, text};
@@ -494,6 +495,9 @@ impl HistoryPanel {
                         .child(
                             div()
                                 .id(("history-row", ix))
+                                .a11y_list_item(when(v.time, now), ix, self.versions().len())
+                                .aria_selected(selected)
+                                .when(selected, |r| r.aria_active_descendant())
                                 .debug_selector(move || format!("history-row-{ix}"))
                                 .size_full()
                                 .flex()
@@ -667,6 +671,8 @@ impl Render for HistoryPanel {
             .then(|| self.render_preview(theme, cx));
         div()
             .id("history-panel")
+            .role(gpui::Role::Group)
+            .aria_label("File history")
             .debug_selector(|| "history-panel".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

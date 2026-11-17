@@ -139,6 +139,7 @@ use gpui::{
 use gv_model::DocModel;
 use serde::{Deserialize, Serialize};
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::editor::{EditorFacts, EditorView};
@@ -2109,7 +2110,7 @@ impl Render for Workspace {
                     .min_h_0()
                     .flex()
                     .when(self.sidebar_open, |row| {
-                        row.child(self.render_sidebar(radii, window, cx))
+                        row.child(self.render_sidebar(radii, window, cx).accessible())
                     })
                     .child(
                         div()
@@ -2117,7 +2118,7 @@ impl Render for Workspace {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(self.render_title_row(radii, window, cx))
+                            .child(self.render_title_row(radii, window, cx).accessible())
                             .child(
                                 // The content area: the expanded table
                                 // covers it.
@@ -2130,6 +2131,8 @@ impl Render for Workspace {
                                         // The infobar spans the document,
                                         // not the right panel.
                                         div()
+                                            .id("main")
+                                            .a11y_group(gpui::Role::Main, "Document area")
                                             .flex_1()
                                             .min_w_0()
                                             .h_full()
@@ -2162,7 +2165,8 @@ impl Render for Workspace {
                 profile_chip,
                 theme,
                 radii,
-            ))
+            )
+            .accessible())
             .children(profile_menu)
             .child(self.menus.popover.clone())
             .children(self.render_link_popover(cx))

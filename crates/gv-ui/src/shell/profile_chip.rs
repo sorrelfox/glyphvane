@@ -40,6 +40,7 @@ use gv_profile::{CompiledProfile, ProfileId, SwitchValue, Switches};
 
 use super::infobar::Tooltip;
 use super::{Workspace, status_bar};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::files::notice::{Notice, Topic};
 use crate::goto::{self, GotoItem, GotoKind, GotoRequest};
 use crate::icons::Icon;
@@ -128,8 +129,13 @@ impl Workspace {
         let anchor = self.profile_menu.anchor.clone();
         let tooltip: SharedString = profile.tooltip().into();
         let hover = theme.state.hover;
+        let name = status_bar::profile_name(profile.id());
         div()
             .id("profile-chip")
+            .a11y_button(format!("Markdown profile: {name}"))
+            .aria_description(tooltip.clone())
+            .aria_expanded(self.profile_menu.open)
+            .keyboard_control(theme)
             .debug_selector(|| "profile-chip".into())
             .h(px(size::PROFILE_CHIP))
             .flex_none()
@@ -158,6 +164,7 @@ impl Workspace {
             .child(Icon::Profile.sized(icon::SMALL))
             .child(status_bar::profile_name(profile.id()))
             .child(Icon::Select.sized(icon::TINY))
+            .accessible()
             .into_any_element()
     }
 
@@ -261,16 +268,21 @@ impl Workspace {
             .as_deref()
             .and_then(|f| ProfileOverrides::get(cx, f, scope));
 
+        let scope_count = Scope::ALL.len();
         let scopes = div()
+            .id("profile-menu-scopes")
+            .a11y_group(Role::TabList, "Apply to")
             .flex()
             .gap(px(menu_spacing::SEPARATOR_MARGIN_Y))
             .px(px(menu_spacing::PAD))
             .pb(px(menu_spacing::PAD))
-            .children(Scope::ALL.into_iter().map(|s| {
+            .children(Scope::ALL.into_iter().enumerate().map(|(index, s)| {
                 let selected = s == scope;
                 let id = format!("profile-menu-scope:{}", scope_id(s));
                 div()
                     .id(SharedString::from(id.clone()))
+                    .a11y_tab(s.label(), selected, index, scope_count)
+                    .keyboard_control(theme)
                     .debug_selector(move || id.clone())
                     .flex_1()
                     .h(px(size::PROFILE_CHIP))
@@ -290,6 +302,7 @@ impl Workspace {
                         cx.notify();
                     }))
                     .child(s.label())
+                    .accessible()
                     .into_any_element()
             }));
 
@@ -307,6 +320,8 @@ impl Workspace {
                 let selector = id.clone();
                 row(theme, false)
                     .id(SharedString::from(id))
+                    .a11y_menu_item(name, Some(checked))
+                    .when(enabled, |r| r.keyboard_control(theme))
                     .debug_selector(move || selector.clone())
                     .map(|r| {
                         if enabled {
@@ -332,6 +347,8 @@ impl Workspace {
                             .text_color(theme.text.secondary)
                             .child(format!("in {release}"))
                     }))
+                    .accessible()
+                    .disabled(!enabled)
                     .into_any_element()
             })
             .collect();
@@ -347,6 +364,8 @@ impl Workspace {
             let selector = id.clone();
             row(theme, false)
                 .id(SharedString::from(id))
+                .a11y_menu_item(title, None)
+                .when(enabled, |r| r.keyboard_control(theme))
                 .debug_selector(move || selector.clone())
                 .map(|r| {
                     if enabled {
@@ -362,10 +381,20 @@ impl Workspace {
                 })
                 .child(div().flex_none().w(px(icon::ROW)))
                 .child(div().flex_1().min_w_0().truncate().child(title))
+                .accessible()
                 .into_any_element()
         });
 
         let menu = panel(theme)
+            .id("profile-menu")
+            .a11y_group(Role::Menu, "Markdown profile")
+            // Escape closes it from a focused item.
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.close_profile_menu(cx);
+                }
+            }))
             .debug_selector(|| "profile-menu".into())
             .child(scopes)
             .children(rows)

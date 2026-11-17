@@ -3,6 +3,7 @@
 
 //! GPUI views: workspace, panes, editor and reader elements, panels, theming.
 
+pub(crate) mod a11y;
 pub mod about;
 pub mod app_state;
 pub mod appearance;

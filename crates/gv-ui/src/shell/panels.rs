@@ -27,6 +27,7 @@ use super::controls::{RowStart, icon_button};
 use super::link_checker::LinkChecker;
 use super::links_panel::LinksPanel;
 use super::outline_panel::OutlinePanel;
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::workspace as commands;
@@ -90,6 +91,19 @@ impl SidebarPanel {
         .find(|p| p.id() == id)
     }
 
+    /// The panel's name for assistive technology.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Search => "Search",
+            Self::Tags => "Tags",
+            Self::Bookmarks => "Bookmarks",
+            Self::Recent => "Recent",
+            Self::SyncConflicts => "Sync conflicts",
+            Self::FileHistory => "File history",
+        }
+    }
+
     fn icon(self) -> Icon {
         match self {
             Self::Files | Self::Recent | Self::SyncConflicts | Self::FileHistory => Icon::Files,
@@ -148,6 +162,7 @@ impl Workspace {
         let panel = self.panels.sidebar;
         div()
             .id("sidebar")
+            .a11y_group(Role::Complementary, format!("Sidebar: {}", panel.title()))
             .debug_selector(|| "sidebar".into())
             .w(px(size::SIDEBAR_WIDTH))
             .flex_none()
@@ -168,7 +183,7 @@ impl Workspace {
                     .px(px(sidebar_head::PAD_X))
                     .children(self.row_start(RowStart::SidebarHead, theme, window, cx))
                     .child(self.drag_region("sidebar-drag", window, cx).flex_1())
-                    .child(self.panel_switcher(theme, cx)),
+                    .child(self.panel_switcher(theme, cx).accessible()),
             )
             .map(|sidebar| match (panel, self.files.clone()) {
                 (SidebarPanel::Files, Some(files)) => sidebar.child(files),
@@ -202,31 +217,45 @@ impl Workspace {
 
     /// Files, Search, Tags and Bookmarks; the active one has an
     /// `accent.tint` fill and `text.primary`.
-    fn panel_switcher(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+    fn panel_switcher(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
         let size = (button::WIDTH, button::HEIGHT);
+        let count = SidebarPanel::SWITCHER.len();
         div()
+            .id("panel-switcher")
+            .a11y_group(Role::TabList, "Sidebar panels")
             .flex()
             .flex_none()
             .gap(px(sidebar_head::SWITCHER_GAP))
-            .children(SidebarPanel::SWITCHER.into_iter().map(|panel| {
-                let id = panel.id();
-                let button = icon_button(
-                    ElementId::Name(format!("panel-{id}").into()),
-                    panel.icon(),
-                    icon::TOOLBAR,
-                    size,
-                    theme,
-                )
-                .debug_selector(move || format!("panel-switch:{id}"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.show_sidebar_panel(panel, false, window, cx);
-                }));
-                if panel == self.panels.sidebar {
-                    button.bg(theme.accent.tint).text_color(theme.text.primary)
-                } else {
-                    button
-                }
-            }))
+            .children(
+                SidebarPanel::SWITCHER
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, panel)| {
+                        let id = panel.id();
+                        let selected = panel == self.panels.sidebar;
+                        let button = icon_button(
+                            ElementId::Name(format!("panel-{id}").into()),
+                            panel.title(),
+                            panel.icon(),
+                            icon::TOOLBAR,
+                            size,
+                            theme,
+                        )
+                        .a11y_tab(panel.title(), selected, index, count)
+                        .debug_selector(move || format!("panel-switch:{id}"))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.show_sidebar_panel(panel, false, window, cx);
+                            },
+                        ));
+                        let button = if selected {
+                            button.bg(theme.accent.tint).text_color(theme.text.primary)
+                        } else {
+                            button
+                        };
+                        button.accessible()
+                    }),
+            )
     }
 
     /// The sidebar's panel.
@@ -468,8 +497,10 @@ pub(super) fn right_panel(
     outline: Option<Entity<OutlinePanel>>,
     links: Option<Entity<LinksPanel>>,
     panels: &Panels,
-) -> Div {
+) -> Stateful<Div> {
     div()
+        .id("right-panel")
+        .a11y_group(Role::Complementary, "Right panel")
         .w(px(size::PANEL_WIDTH))
         .flex_none()
         .h_full()
@@ -506,8 +537,16 @@ pub(super) fn section_head(
     } else {
         Icon::ChevronRight
     };
+    let name = match count {
+        Some(n) => format!("{title} ({n})"),
+        None => title.to_owned(),
+    };
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(name)
+        .aria_expanded(open)
+        .keyboard_control(theme)
         .h(px(height))
         .flex_none()
         .flex()

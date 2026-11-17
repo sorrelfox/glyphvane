@@ -17,11 +17,13 @@ use gpui::{
 };
 
 use super::{Cancel, Confirm, KEY_CONTEXT, PromptRequest, RowStyle};
+use crate::a11y::Role;
 use crate::appearance::Appearance;
 use crate::metrics::size::{SWITCHER_ROW, switcher as size};
 use crate::metrics::spacing::switcher as spacing;
 use crate::metrics::{HAIRLINE, font, radius, text};
 use crate::theme::Theme;
+use gpui::StatefulInteractiveElement as _;
 
 /// The title block's padding (not designed: the input row's sides, and
 /// the footer's top and bottom).
@@ -419,6 +421,8 @@ impl Render for FilePrompt {
             .child(hint("Esc", "cancel".into(), theme));
         let panel = div()
             .id("file-prompt")
+            .role(Role::Dialog)
+            .aria_label(request.title.clone())
             .debug_selector(|| "file-prompt".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

@@ -30,6 +30,7 @@ use super::bookmarks::{self, Bookmark, BookmarksRevision, Kind};
 use super::files_panel::{
     KEY_CONTEXT, OpenSelected, SelectNext, SelectPrevious, list_row_frame, message,
 };
+use crate::a11y::{A11yExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::spacing::{list, panel_head};
@@ -281,6 +282,9 @@ impl BookmarksPanel {
         );
         let quiet = row.target.is_none() || row.missing;
         let frame = list_row_frame(("bookmark-row", ix), row.depth, selected, theme)
+            .a11y_tree_item(row.label.clone(), row.depth + 1, None, selected)
+            .when(row.missing, |r| r.aria_description("Missing"))
+            .when(selected, |r| r.aria_active_descendant())
             .debug_selector(move || format!("bookmark-row-{ix}"))
             .when_some(row.icon.icon(), |frame, row_icon| {
                 frame.child(
@@ -344,6 +348,7 @@ impl Render for BookmarksPanel {
         };
         div()
             .id("bookmarks-panel")
+            .a11y_group(Role::Tree, "Bookmarks")
             .debug_selector(|| "sidebar-panel:bookmarks".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

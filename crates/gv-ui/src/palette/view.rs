@@ -19,6 +19,7 @@ use gpui::{
 
 use super::model::{self, Candidate, Highlight, Row};
 use super::{Cancel, Confirm, KEY_CONTEXT, SelectNext, SelectPrevious};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::{APP_COMMANDS, Keybindings, action_for};
@@ -346,6 +347,10 @@ impl CommandPalette {
         let selected_selector = format!("command-palette-selected:{id}");
         div()
             .id(("command-palette-row", position))
+            .a11y_option(candidate.title.clone(), selected, position, self.rows.len())
+            .when_some(candidate.shortcut.clone(), |row, keys| {
+                row.aria_keyshortcuts(keys)
+            })
             .debug_selector(move || selector.clone())
             .w_full()
             .h(px(SWITCHER_ROW))
@@ -382,6 +387,7 @@ impl CommandPalette {
                     .child(candidate.category.title()),
             )
             .children(shortcut)
+            .accessible()
             .into_any_element()
     }
 
@@ -453,37 +459,50 @@ impl Render for CommandPalette {
                     .child(count),
             );
 
-        let list = div().flex_none().p(px(spacing::LIST_PAD)).map(|list| {
-            if self.rows.is_empty() {
-                list.child(
-                    div()
-                        .debug_selector(|| "command-palette-empty".into())
-                        .h(px(SWITCHER_ROW))
-                        .flex()
-                        .items_center()
-                        .px(px(spacing::ROW_PAD_X))
-                        .text_size(px(text::UI_TITLE.size))
-                        .text_color(theme.text.secondary)
-                        .child("No matching commands"),
-                )
-            } else {
-                let visible = self.visible_rows(viewport.height);
-                list.child(
-                    uniform_list(
-                        "command-palette-rows",
-                        self.rows.len(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|position| this.render_row(position, cx))
-                                .collect::<Vec<_>>()
-                        }),
+        let announcement = crate::a11y::option_announcement(
+            self.rows
+                .get(self.selected)
+                .map(|r| self.candidates[r.index].title.as_str()),
+            self.selected,
+            self.rows.len(),
+            "No matching commands",
+        );
+        let list = div()
+            .id("command-palette-list")
+            .a11y_group(Role::ListBox, "Commands")
+            .flex_none()
+            .p(px(spacing::LIST_PAD))
+            .map(|list| {
+                if self.rows.is_empty() {
+                    list.child(
+                        div()
+                            .debug_selector(|| "command-palette-empty".into())
+                            .h(px(SWITCHER_ROW))
+                            .flex()
+                            .items_center()
+                            .px(px(spacing::ROW_PAD_X))
+                            .text_size(px(text::UI_TITLE.size))
+                            .text_color(theme.text.secondary)
+                            .child("No matching commands"),
                     )
-                    .track_scroll(&self.scroll)
-                    .w_full()
-                    .h(px(visible as f32 * SWITCHER_ROW)),
-                )
-            }
-        });
+                } else {
+                    let visible = self.visible_rows(viewport.height);
+                    list.child(
+                        uniform_list(
+                            "command-palette-rows",
+                            self.rows.len(),
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                range
+                                    .map(|position| this.render_row(position, cx))
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.scroll)
+                        .w_full()
+                        .h(px(visible as f32 * SWITCHER_ROW)),
+                    )
+                }
+            });
 
         let footer = div()
             .flex_none()
@@ -507,6 +526,7 @@ impl Render for CommandPalette {
 
         let panel = div()
             .id("command-palette")
+            .a11y_group(Role::Dialog, "Command palette")
             .debug_selector(|| "command-palette".into())
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(true, cx)))
@@ -534,8 +554,11 @@ impl Render for CommandPalette {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(input_row)
-            .child(list)
-            .child(footer);
+            .child(list.accessible())
+            .child(crate::a11y::announcer("command-palette-status", announcement))
+            .child(footer)
+            .accessible()
+            .modal();
 
         div()
             .id("command-palette-overlay")

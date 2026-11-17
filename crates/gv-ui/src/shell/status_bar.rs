@@ -13,12 +13,13 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Corners, Div, InteractiveElement as _, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    Stateful, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use gv_profile::ProfileId;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::{DocFacts, Tab, ViewMode};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::editor::EditorFacts;
 use crate::icons::Icon;
 use crate::keymap::actions::view::ZoomReset;
@@ -40,9 +41,11 @@ pub(super) fn status_bar(
     profile_chip: AnyElement,
     theme: &Theme,
     radii: Corners<Pixels>,
-) -> Div {
+) -> Stateful<Div> {
     let zoom = zoom_label(tab.mode(), zoom_percent);
     div()
+        .id("status-bar")
+        .a11y_group(Role::Group, "Status bar")
         .h(px(size::STATUS_BAR))
         .flex_none()
         .flex()
@@ -68,7 +71,7 @@ pub(super) fn status_bar(
                 .items_center()
                 .gap(px(spacing::GAP))
                 .children(branch.map(super::git::branch_label))
-                .child(breadcrumb(breadcrumb_items(tab, doc), theme)),
+                .child(breadcrumb(breadcrumb_items(tab, doc), theme).accessible()),
         )
         .child(
             div()
@@ -83,13 +86,17 @@ pub(super) fn status_bar(
                     row.child(
                         div()
                             .id("status-zoom")
+                            .a11y_button(format!("Zoom {label}"))
+                            .aria_description("Reset the zoom")
+                            .keyboard_control(theme)
                             .debug_selector(|| "status-zoom".into())
                             .flex_none()
                             .hover(move |style| style.text_color(hover))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(ZoomReset), cx);
                             })
-                            .child(label),
+                            .child(label)
+                            .accessible(),
                     )
                 })
                 .child(profile_chip),
@@ -161,9 +168,18 @@ fn caret_place(facts: &EditorFacts) -> String {
 
 /// Folder, file and heading separated by chevrons; the last item in
 /// `text.primary`.
-fn breadcrumb(items: Vec<SharedString>, theme: &Theme) -> Div {
+fn breadcrumb(items: Vec<SharedString>, theme: &Theme) -> Stateful<Div> {
     let last = items.len().saturating_sub(1);
+    let path = items
+        .iter()
+        .map(SharedString::as_ref)
+        .collect::<Vec<&str>>()
+        .join(" / ");
     div()
+        .id("breadcrumb")
+        .role(Role::Label)
+        .aria_label("Location")
+        .aria_value(path)
         .min_w_0()
         .flex()
         .items_center()

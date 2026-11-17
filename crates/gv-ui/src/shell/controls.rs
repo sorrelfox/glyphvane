@@ -6,11 +6,12 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, Decorations, Div, ElementId, InteractiveElement as _,
-    IntoElement as _, MouseButton, ParentElement as _, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, WindowControlArea, div, px,
+    IntoElement as _, MouseButton, ParentElement as _, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, px,
 };
 
 use super::Workspace;
+use crate::a11y::{A11yExt as _, Accessible, AccessibleExt as _};
 use crate::chrome::WindowChrome;
 use crate::icons::{CaptionGlyph, Icon};
 use crate::menu::MenuButton;
@@ -22,9 +23,11 @@ use crate::metrics::{DISABLED_OPACITY, icon, radius};
 use crate::theme::{Color, Theme};
 
 /// An icon button: `text.secondary`, no fill at rest, the hover overlay on
-/// hover and the press overlay while pressed.
+/// hover and the press overlay while pressed. `label` names it for
+/// assistive technology; it is a Tab stop (see [`A11yExt::keyboard_control`]).
 pub(crate) fn icon_button(
     id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
     icon: Icon,
     icon_size: f32,
     (width, height): (f32, f32),
@@ -33,6 +36,8 @@ pub(crate) fn icon_button(
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .flex_none()
         .w(px(width))
         .h(px(height))
@@ -47,13 +52,20 @@ pub(crate) fn icon_button(
 }
 
 /// An icon button that cannot be used now: `text.tertiary` at half opacity.
+/// Assistive technology still finds it, as unavailable.
 pub(super) fn disabled_icon_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
     icon: Icon,
     icon_size: f32,
     (width, height): (f32, f32),
     theme: &Theme,
-) -> Div {
+) -> Accessible<Stateful<Div>> {
     div()
+        .id(id)
+        .a11y_button(label)
+        .accessible()
+        .disabled(true)
         .flex_none()
         .w(px(width))
         .h(px(height))
@@ -70,6 +82,7 @@ pub(super) fn disabled_icon_button(
 pub(super) fn menu_button(theme: &Theme) -> Stateful<Div> {
     icon_button(
         "app-menu",
+        "Application menu",
         Icon::Menu,
         icon::TOOLBAR,
         (button::MENU_WIDTH, button::HEIGHT),
@@ -253,8 +266,16 @@ fn caption_button(
     theme: &Theme,
 ) -> Stateful<Div> {
     let press = theme.state.press;
+    // Windows handles the click; assistive technology still sees the
+    // buttons (the system menu, Alt+Space, operates them from the keyboard).
+    let label = match area {
+        WindowControlArea::Min => "Minimize",
+        WindowControlArea::Max => "Maximize",
+        _ => "Close",
+    };
     div()
         .id(id)
+        .a11y_button(label)
         .debug_selector(move || id.into())
         .flex_none()
         .w(px(windows_controls::WIDTH))
@@ -309,7 +330,7 @@ pub(super) fn linux_window_controls(
         .ml(px(linux_controls::MARGIN_LEFT))
         .when(supported.minimize, |row| {
             row.child(window_control(
-                "minimize",
+                ("minimize", "Minimize"),
                 Icon::WindowMinimize,
                 neutral_hover(theme),
                 theme,
@@ -318,7 +339,14 @@ pub(super) fn linux_window_controls(
         })
         .when(supported.maximize, |row| {
             row.child(window_control(
-                "maximize",
+                (
+                    "maximize",
+                    if window.is_maximized() {
+                        "Restore"
+                    } else {
+                        "Maximize"
+                    },
+                ),
                 maximize_icon,
                 neutral_hover(theme),
                 theme,
@@ -326,7 +354,7 @@ pub(super) fn linux_window_controls(
             ))
         })
         .child(window_control(
-            "close",
+            ("close", "Close"),
             Icon::WindowClose,
             close_hover(WindowChrome::Linux, theme),
             theme,
@@ -335,12 +363,12 @@ pub(super) fn linux_window_controls(
 }
 
 fn window_control(
-    id: &'static str,
+    (id, label): (&'static str, &'static str),
     icon: Icon,
     (hover, hover_fg): (Color, Color),
     theme: &Theme,
     action: impl Fn(&mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
+) -> Accessible<Stateful<Div>> {
     // The hover overlay is drawn on top of the press fill.
     let face = div()
         .size_full()
@@ -353,6 +381,8 @@ fn window_control(
     div()
         .id(id)
         .debug_selector(move || format!("window-{id}"))
+        .a11y_button(label)
+        .keyboard_control(theme)
         .flex_none()
         .size(px(linux_controls::DIAMETER))
         .rounded_full()
@@ -360,6 +390,7 @@ fn window_control(
         .text_color(theme.text.primary)
         .child(face)
         .on_click(move |_, window, cx| action(window, cx))
+        .accessible()
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ use super::controls::icon_button;
 use super::drag_drop::{DragPreview, DraggedFile};
 use super::tree::{RowKind, SortOrder, TreeModel};
 use super::vault::{VaultStatus, WindowVault};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::file::{NewFolder, NewNote};
@@ -450,9 +451,9 @@ impl FilesPanel {
             .vault
             .as_ref()
             .map_or_else(|| SharedString::from("Files"), |v| v.read(cx).name());
-        let action = |id: &'static str, icon: Icon| {
+        let action = |id: &'static str, label: &'static str, icon: Icon| {
             let size = (size::SMALL_ICON_BUTTON, size::SMALL_ICON_BUTTON);
-            icon_button(id, icon, icon::ROW, size, theme).debug_selector(move || id.into())
+            icon_button(id, label, icon, icon::ROW, size, theme).debug_selector(move || id.into())
         };
         div()
             .h(px(size::PANEL_HEADER))
@@ -481,20 +482,22 @@ impl FilesPanel {
                             .child(Icon::ChevronDown.sized(icon::CHEVRON)),
                     ),
             )
-            .child(action("new-note", Icon::NewNote).on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(NewNote), cx);
-            }))
             .child(
-                action("new-folder", Icon::NewFolder).on_click(|_, window, cx| {
+                action("new-note", "New note", Icon::NewNote).on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(NewNote), cx);
+                }),
+            )
+            .child(
+                action("new-folder", "New folder", Icon::NewFolder).on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(NewFolder), cx);
                 }),
             )
             .child(
-                action("sort-files", Icon::Sort)
+                action("sort-files", "Sort", Icon::Sort)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(FilesPanelEvent::Sort))),
             )
             .child(
-                action("collapse-all", Icon::CollapseAll)
+                action("collapse-all", "Collapse all", Icon::CollapseAll)
                     .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
             )
     }
@@ -519,6 +522,8 @@ impl FilesPanel {
                 message(note, theme).into_any_element()
             }
             (VaultStatus::Ready, Some(tree)) => div()
+                .id("file-tree-rows")
+                .a11y_group(Role::Tree, "Files")
                 .flex_1()
                 .min_h_0()
                 .py(px(list::PAD_Y))
@@ -585,8 +590,20 @@ impl FilesPanel {
                 let ignored = status == Some(gv_vault::git::FileStatus::Ignored);
                 let drop_tint = theme.accent.tint;
                 let label = row.name.clone();
-                let row_frame =
-                    list_row_frame(("file-row", ix), row.depth, selected == Some(ix), theme)
+                let is_selected = selected == Some(ix);
+                let row_frame = list_row_frame(("file-row", ix), row.depth, is_selected, theme)
+                        .a11y_tree_item(
+                            row.name.clone(),
+                            row.depth + 1,
+                            (row.kind == RowKind::Folder).then_some(row.expanded),
+                            is_selected,
+                        )
+                        .when_some(status.map(|s| s.label()), |r, words| {
+                            r.aria_description(words)
+                        })
+                        // The panel keeps the keyboard; the selected row is
+                        // what assistive technology reads.
+                        .when(is_selected, |r| r.aria_active_descendant())
                         .debug_selector(move || format!("file-row-{ix}"))
                         .when_some(dragged, |frame, dragged| {
                             frame.on_drag(dragged, move |_, _, _, cx| {
@@ -648,7 +665,7 @@ impl FilesPanel {
                     .w_full()
                     .h(px(size::LIST_ROW))
                     .px(px(size::LIST_ROW_INSET))
-                    .child(row_frame)
+                    .child(row_frame.accessible())
             })
             .collect()
     }
@@ -721,6 +738,7 @@ impl Render for FilesPanel {
         let theme = Appearance::theme(cx);
         div()
             .id("files-panel")
+            .a11y_group(Role::Group, "Files panel")
             .debug_selector(|| "files-panel".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

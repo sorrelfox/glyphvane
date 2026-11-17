@@ -17,6 +17,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
+use crate::a11y::A11yExt as _;
 use crate::files::notice::NoticeKind;
 use crate::icons::Icon;
 use crate::metrics::size::infobar as size;
@@ -245,6 +246,8 @@ pub fn render(theme: &Theme, cx: &App) -> Option<AnyElement> {
             .child(
                 div()
                     .id("app-notice-dismiss")
+                    .a11y_button("Dismiss")
+                    .keyboard_control(theme)
                     .debug_selector(|| "app-notice-dismiss".into())
                     .flex_none()
                     .size(px(size::DISMISS))

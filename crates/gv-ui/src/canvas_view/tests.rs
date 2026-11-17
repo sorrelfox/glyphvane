@@ -488,6 +488,19 @@ fn reduced_motion_jumps_and_otherwise_animates(cx: &mut TestAppContext) {
         assert!(v.animation.is_none());
         assert_eq!(v.transform, target);
     });
+    // Reduced motion turned on while the view moves: the next frame lands.
+    at_origin(&view, &mut vcx, 60.0, 80.0);
+    view.update(&mut vcx, |v, cx| v.select(Some(far), cx));
+    assert!(view.read_with(&vcx, |v, _| v.animation.is_some()));
+    let target = view.read_with(&vcx, |v, _| v.transform());
+    vcx.update(|window, cx| {
+        cx.set_reduce_motion(true);
+        window.draw(cx).clear(cx);
+    });
+    view.read_with(&vcx, |v, _| {
+        assert!(v.animation.is_none(), "no motion once reduced");
+        assert_eq!(v.transform, target);
+    });
 }
 
 #[gpui::test]

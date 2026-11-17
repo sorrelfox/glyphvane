@@ -81,6 +81,7 @@ use toml::Value;
 use self::controls::{OnClick, Segment};
 use self::metrics::{content, field, head, row as row_metrics, select, sidebar, window as win};
 use self::model::{Control, SectionId};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::keymap::actions;
@@ -631,6 +632,8 @@ impl Render for SettingsWindow {
                     .child(
                         div()
                             .id("settings-content")
+                            .role(Role::TabPanel)
+                            .aria_label(self.section.label())
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
@@ -647,6 +650,7 @@ impl SettingsWindow {
     fn sidebar(&self, theme: &Theme, window: &Window, cx: &mut Context<'_, Self>) -> AnyElement {
         let search_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
         let listed = self.listed_sections();
+        let count = listed.len();
         let searching = !self.query.trim().is_empty();
         let hover = theme.state.hover;
         div()
@@ -690,15 +694,20 @@ impl SettingsWindow {
             .child(
                 div()
                     .id("settings-sections")
+                    .role(Role::TabList)
+                    .aria_label("Sections")
+                    .aria_orientation(gpui::Orientation::Vertical)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .children(listed.into_iter().map(|section| {
+                    .children(listed.into_iter().enumerate().map(|(index, section)| {
                         let current = !searching && section == self.section;
                         div()
                             .id(section.slug())
+                            .a11y_tab(section.label(), current, index, count)
+                            .keyboard_control(theme)
                             .debug_selector(move || format!("settings-section-{}", section.slug()))
                             .h(px(LIST_ROW))
                             .flex_none()
@@ -723,11 +732,15 @@ impl SettingsWindow {
                                     .child(icon(section_icon(section), icon_size::ROW)),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(section.label()))
+                            .accessible()
                     })),
             )
             .child(
                 div()
                     .id("settings-file")
+                    .role(Role::Link)
+                    .aria_label(format!("Open {}", gv_settings::SETTINGS_FILE))
+                    .keyboard_control(theme)
                     .debug_selector(|| "settings-file".into())
                     .h(px(sidebar::FILE_ROW))
                     .flex_none()
@@ -782,6 +795,8 @@ impl SettingsWindow {
                 d.child(
                     div()
                         .id("settings-close")
+                        .a11y_button("Close")
+                        .keyboard_control(theme)
                         .debug_selector(|| "settings-close".into())
                         .size(px(linux_controls::DIAMETER))
                         .rounded_full()
@@ -1291,6 +1306,8 @@ fn secondary_button(
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(crate::metrics::size::CONTROL))

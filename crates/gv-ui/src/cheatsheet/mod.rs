@@ -27,6 +27,7 @@ use gpui::{
 };
 use gv_settings::keymap::{Category, CheatsheetEntry};
 
+use crate::a11y::A11yExt as _;
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::keymap::{Keybindings, actions};
@@ -302,6 +303,8 @@ impl Cheatsheet {
                 d.child(
                     div()
                         .id("cheatsheet-close")
+                        .a11y_button("Close")
+                        .keyboard_control(theme)
                         .debug_selector(|| "cheatsheet-close".into())
                         .size(px(linux_controls::DIAMETER))
                         .flex_none()

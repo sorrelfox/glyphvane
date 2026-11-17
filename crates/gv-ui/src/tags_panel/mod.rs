@@ -42,6 +42,7 @@ use gpui::{
 use gv_vault::content::ContentSnapshot;
 
 use self::model::{TagRow, TagSort, TagTree};
+use crate::a11y::{A11yExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::spacing::{list, list_row, panel_head};
@@ -438,9 +439,9 @@ impl TagsPanel {
     }
 
     fn render_head(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
-        let action = |id: &'static str, icon: Icon| {
+        let action = |id: &'static str, label: &'static str, icon: Icon| {
             let size = (size::SMALL_ICON_BUTTON, size::SMALL_ICON_BUTTON);
-            icon_button(id, icon, icon::ROW, size, theme).debug_selector(move || id.into())
+            icon_button(id, label, icon, icon::ROW, size, theme).debug_selector(move || id.into())
         };
         div()
             .h(px(size::PANEL_HEADER))
@@ -459,11 +460,11 @@ impl TagsPanel {
                     .child("Tags"),
             )
             .child(
-                action("sort-tags", Icon::Sort)
+                action("sort-tags", "Sort", Icon::Sort)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(TagsPanelEvent::Sort))),
             )
             .child(
-                action("collapse-tags", Icon::CollapseAll)
+                action("collapse-tags", "Collapse all", Icon::CollapseAll)
                     .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
             )
     }
@@ -540,7 +541,19 @@ impl TagsPanel {
                         )
                     })
                     .child(div().flex_1().min_w_0().truncate().child(row.name.clone()));
-                let frame = list_row_frame(("tag-row", ix), row.depth, selected == Some(ix), theme)
+                let is_selected = selected == Some(ix);
+                let notes = match row.notes {
+                    1 => "1 note".to_owned(),
+                    n => format!("{n} notes"),
+                };
+                let frame = list_row_frame(("tag-row", ix), row.depth, is_selected, theme)
+                    .a11y_tree_item(
+                        format!("#{}, {notes}", row.tag),
+                        row.depth + 1,
+                        row.has_children.then_some(row.expanded),
+                        is_selected,
+                    )
+                    .when(is_selected, |r| r.aria_active_descendant())
                     .debug_selector(move || format!("tag-row-{ix}"))
                     .child(chevron)
                     .child(name)
@@ -590,6 +603,7 @@ impl Render for TagsPanel {
         };
         div()
             .id("tags-panel")
+            .a11y_group(Role::Tree, "Tags")
             .debug_selector(|| "sidebar-panel:tags".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

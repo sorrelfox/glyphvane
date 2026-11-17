@@ -137,3 +137,38 @@ fn go_to_heading_in_the_reading_view(cx: &mut TestAppContext) {
     let back = workspace.read_with(&vcx, |ws, _| ws.active_tab().history().len());
     assert_eq!(back, 1);
 }
+
+/// F6 takes in every sidebar panel and the right panel's links list.
+#[gpui::test]
+fn f6_reaches_every_sidebar_panel_and_the_right_panel(cx: &mut TestAppContext) {
+    use super::panels::SidebarPanel;
+    let (_dir, workspace, mut vcx) = open(cx);
+    for panel in [
+        SidebarPanel::Search,
+        SidebarPanel::Tags,
+        SidebarPanel::Bookmarks,
+        SidebarPanel::Recent,
+    ] {
+        vcx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.show_sidebar_panel(panel, false, window, cx));
+        });
+        draw(&mut vcx);
+        let panes = workspace.update(&mut vcx, |ws, cx| ws.panes(cx).len());
+        assert_eq!(panes, 2, "{panel:?} and the document");
+    }
+    workspace.update_in(&mut vcx, |ws, window, cx| ws.toggle_panel(window, cx));
+    draw(&mut vcx);
+    let links = workspace.update(&mut vcx, |ws, cx| {
+        ws.links.as_ref().map(|l| l.read(cx).focus_handle(cx))
+    });
+    let panes = workspace.update(&mut vcx, |ws, cx| ws.panes(cx).len());
+    assert_eq!(panes, 2 + usize::from(links.is_some()));
+    if let Some(links) = links {
+        let mut reached = false;
+        for _ in 0..3 {
+            keys(&mut vcx, "f6");
+            reached |= vcx.update(|window, cx| links.contains_focused(window, cx));
+        }
+        assert!(reached, "F6 reached the links list");
+    }
+}

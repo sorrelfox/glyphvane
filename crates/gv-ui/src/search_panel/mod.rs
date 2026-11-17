@@ -59,6 +59,7 @@ use gpui::{
 use gv_search::{CancelToken, Query, ResultBatch, SearchOptions, VaultSource};
 use gv_vault::content::{ContentSnapshot, DiskSource};
 
+use crate::a11y::Role;
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::find as toggle_size;
@@ -703,8 +704,41 @@ impl SearchPanel {
             Row::Match(f, s) => self.results.heading(f, s).cloned(),
             Row::File(_) => None,
         };
+        let name = match row {
+            Row::File(f) => self.results.files().get(f).map(|file| {
+                let n = file.match_count.max(1);
+                let matches = if n == 1 {
+                    "1 match".to_owned()
+                } else {
+                    format!("{n} matches")
+                };
+                format!("{}, {matches}", file.title)
+            }),
+            Row::Match(f, s) => self
+                .results
+                .files()
+                .get(f)
+                .and_then(|file| file.snippets.get(s))
+                .map(|snippet| snippet.text.trim().to_string()),
+        };
         let frame = body
             .id(ElementId::Name(id))
+            .role(match row {
+                Row::File(_) => Role::TreeItem,
+                Row::Match(..) => Role::ListItem,
+            })
+            .aria_label(name.unwrap_or_default())
+            .aria_level(match row {
+                Row::File(_) => 1,
+                Row::Match(..) => 2,
+            })
+            .aria_selected(selected)
+            .when(matches!(row, Row::File(_)), |r| {
+                r.aria_expanded(!self.results.is_folded(match row {
+                    Row::File(f) | Row::Match(f, _) => f,
+                }))
+            })
+            .when(selected, |r| r.aria_active_descendant())
             .debug_selector(move || selector.to_string())
             .rounded(px(radius::CONTROL))
             .when(selected, |r| r.bg(theme.accent.tint))
@@ -856,6 +890,8 @@ impl Render for SearchPanel {
         let rows = !self.results.rows().is_empty();
         div()
             .id("search-panel")
+            .role(gpui::Role::Group)
+            .aria_label("Search panel")
             .debug_selector(|| "sidebar-panel:search".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

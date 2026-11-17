@@ -43,6 +43,7 @@ use super::popover::{
     panel_height, row, separator,
 };
 use super::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::keymap::{self, action_for};
 use crate::metrics::size::MENU_WIDTH;
@@ -574,6 +575,8 @@ impl Render for ContextMenuPopover {
                                 },
                             ))
                         })
+                        .accessible()
+                        .disabled(!enabled)
                         .into_any_element(),
                     )
                 }
@@ -604,6 +607,8 @@ impl Render for ContextMenuPopover {
                                 },
                             ))
                         })
+                        .accessible()
+                        .disabled(!enabled)
                         .into_any_element(),
                     )
                 }
@@ -612,6 +617,7 @@ impl Render for ContextMenuPopover {
             .collect();
         let menu = panel(theme)
             .id("context-menu")
+            .a11y_group(Role::Menu, "Menu")
             .debug_selector(|| "context-menu".into())
             .w(px(MENU_WIDTH))
             .absolute()
@@ -623,6 +629,7 @@ impl Render for ContextMenuPopover {
             .children(rows);
         let overlay = div()
             .id("context-menu-overlay")
+            .a11y_group(Role::Group, "Menu")
             .key_context(keymap::context::MENU)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, window, cx| this.step(true, window, cx)))
@@ -673,6 +680,8 @@ fn suggestion_row(
             "context-menu-suggestion".into(),
             index as u64,
         ))
+        .a11y_menu_item(format!("Replace with {title}"), None)
+        .when(highlighted, |row| row.aria_active_descendant())
         .debug_selector(move || selector.clone())
         .when(!enabled, |row| {
             row.opacity(crate::metrics::DISABLED_OPACITY)

@@ -28,6 +28,7 @@ use super::files_panel::{
     KEY_CONTEXT, OpenSelected, SelectNext, SelectPrevious, list_row_frame, message,
 };
 use super::session::{self, SessionStore};
+use crate::a11y::{A11yExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::spacing::{list, panel_head};
@@ -127,6 +128,7 @@ impl RecentPanel {
     fn render_head(&self, theme: &Theme, empty: bool, cx: &mut Context<'_, Self>) -> Div {
         let clear = icon_button(
             "recent-clear",
+            "Clear recent",
             Icon::Dismiss,
             icon::ROW,
             (size::SMALL_ICON_BUTTON, size::SMALL_ICON_BUTTON),
@@ -183,6 +185,10 @@ impl RecentPanel {
             .unwrap_or_default()
             .into();
         let frame = list_row_frame(("recent-row", ix), 0, selected, theme)
+            .role(Role::ListItem)
+            .aria_label(format!("{name}, {parent}"))
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
             .debug_selector(move || format!("recent-row-{ix}"))
             .child(
                 div()
@@ -222,6 +228,7 @@ impl Render for RecentPanel {
             .collect();
         div()
             .id("recent-panel")
+            .a11y_group(Role::List, "Recent")
             .debug_selector(|| "sidebar-panel:recent".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

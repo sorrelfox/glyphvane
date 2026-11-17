@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use super::metrics::{field, row, select, stepper};
+use crate::a11y::{A11yExt as _, Role, Toggled};
 use crate::metrics::size::{CONTROL, segment, settings_row, switch};
 use crate::metrics::spacing::mode_switch;
 use crate::metrics::{DISABLED_OPACITY, FOCUS_HALO, HAIRLINE, font, radius, text};
@@ -33,8 +34,18 @@ pub fn row(
     theme: &Theme,
 ) -> Stateful<Div> {
     let has_description = description.is_some() || error.is_some();
+    let label: SharedString = label.into();
+    // The row names the controls in it for assistive technology.
+    let about = match (&error, &description) {
+        (Some(error), _) => Some(error.clone()),
+        (None, Some(description)) => Some(description.clone()),
+        (None, None) => None,
+    };
     div()
         .id(id)
+        .role(Role::Group)
+        .aria_label(label.clone())
+        .when_some(about, |d, about| d.aria_description(about))
         .min_h(px(if has_description {
             settings_row::WITH_DESCRIPTION
         } else {
@@ -56,7 +67,7 @@ pub fn row(
                 .child(
                     div()
                         .font_weight(FontWeight(text::weight::ACTIVE))
-                        .child(label.into()),
+                        .child(label),
                 )
                 .when_some(description, |d, description| {
                     d.child(
@@ -106,6 +117,10 @@ pub fn switch(
     let pad = (switch::HEIGHT - switch::KNOB) / 2.0;
     div()
         .id(id)
+        .role(Role::Switch)
+        .aria_toggled(if on { Toggled::True } else { Toggled::False })
+        .when(enabled, |d| d.keyboard_control(theme))
+        .when(!enabled, |d| d.aria_description("Unavailable"))
         .flex_none()
         .w(px(switch::WIDTH))
         .h(px(switch::HEIGHT))
@@ -151,6 +166,16 @@ pub fn segmented(segments: Vec<Segment>, enabled: bool, theme: &Theme) -> Div {
             let selector = segment.id.clone();
             div()
                 .id(segment.id)
+                .role(Role::RadioButton)
+                .aria_label(segment.label.clone())
+                .aria_toggled(if segment.active {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
+                .when(enabled && segment.on_click.is_some(), |seg| {
+                    seg.keyboard_control(theme)
+                })
                 .debug_selector(move || selector.to_string())
                 .h(px(segment::INNER))
                 .px(px(row::SEGMENT_PAD_X - HAIRLINE))
@@ -187,8 +212,12 @@ pub fn select_button(
     theme: &Theme,
 ) -> Stateful<Div> {
     let (hover, press) = (theme.state.hover, theme.state.press);
+    let value: SharedString = value.into();
     div()
         .id(id)
+        .role(Role::ComboBox)
+        .aria_value(value.clone())
+        .when(enabled, |d| d.keyboard_control(theme))
         .h(px(CONTROL))
         .flex_none()
         .min_w(px(select::MIN_WIDTH))
@@ -201,7 +230,7 @@ pub fn select_button(
         .flex()
         .items_center()
         .gap(px(select::GAP))
-        .child(div().flex_1().min_w_0().truncate().child(value.into()))
+        .child(div().flex_1().min_w_0().truncate().child(value))
         .child(div().text_color(theme.text.secondary).child(super::icon(
             gpui::assets::IconName::ChevronsUpDown,
             select::ICON,
@@ -225,8 +254,10 @@ pub fn select_list(
     theme: &Theme,
 ) -> Stateful<Div> {
     let hover = theme.state.hover;
+    let count = options.len();
     div()
         .id(id)
+        .role(Role::ListBox)
         .occlude()
         .w(px(width))
         .max_h(px(select::LIST_MAX_HEIGHT))
@@ -241,6 +272,8 @@ pub fn select_list(
             |(index, (label, selector, chosen, on_click))| {
                 div()
                     .id(("option", index))
+                    .a11y_option(label.clone(), chosen, index, count)
+                    .keyboard_control(theme)
                     .debug_selector(move || selector)
                     .h(px(crate::metrics::size::MENU_ROW))
                     .px(px(select::PAD_LEFT))
@@ -324,6 +357,12 @@ pub fn stepper(
                 std::sync::Arc::new(id.0.into()),
                 id.1.into(),
             ))
+            .a11y_button(if id.1 == "minus" {
+                "Decrease"
+            } else {
+                "Increase"
+            })
+            .when(handler.is_some(), |d| d.keyboard_control(theme))
             .debug_selector(move || format!("{}-{}", id.0, id.1))
             .w(px(stepper::BUTTON))
             .h_full()
@@ -376,6 +415,8 @@ pub fn quiet_button(
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .flex_none()
         .h(px(CONTROL))
         .px(px(field::PAD_X))

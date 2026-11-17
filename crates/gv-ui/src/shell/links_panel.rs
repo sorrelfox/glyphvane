@@ -61,6 +61,7 @@ use super::links_data::{
 use super::panels::section_head;
 use super::vault::{ContentUpdated, VaultStatus, WindowVault};
 use super::{OpenTarget, ViewMode, Workspace};
+use crate::a11y::Role;
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::workspace::ShowOutgoingLinks;
@@ -925,6 +926,40 @@ impl LinksPanel {
 
     // ----- Drawing ----------------------------------------------------------
 
+    /// What assistive technology calls `row`.
+    fn row_name(&self, row: Row) -> String {
+        let head = |listing: Option<&Listing>, g: usize, what: &str| {
+            listing
+                .and_then(|l| l.groups.get(g))
+                .map(|group| format!("{}, {} {what}", group.title, group.items.len()))
+                .unwrap_or_default()
+        };
+        let line = |listing: Option<&Listing>, g: usize, i: usize| {
+            listing
+                .and_then(|l| l.snippets.get(g))
+                .and_then(|s| s.get(i))
+                .and_then(Option::as_ref)
+                .map(|snippet| snippet.text.trim().to_owned())
+                .unwrap_or_default()
+        };
+        match row {
+            Row::Message(note) => note.to_owned(),
+            Row::Head(g) => head(Some(&self.backlinks), g, "links"),
+            Row::MentionHead(g) => head(self.mentions.as_ref(), g, "mentions"),
+            Row::Line(g, i) => line(Some(&self.backlinks), g, i),
+            Row::MentionLine(g, i) => line(self.mentions.as_ref(), g, i),
+            Row::MentionsHead => "Unlinked mentions".to_owned(),
+            Row::Out(i) => self
+                .outgoing
+                .get(i)
+                .map(|link| match &link.target_name {
+                    Some(target) => format!("{} to {target}", link.label),
+                    None => format!("{}, not found", link.label),
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     fn render_row(&mut self, ix: usize, outgoing: bool, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = Appearance::theme(cx);
         let rows = if outgoing { &self.out_rows } else { &self.rows };
@@ -954,6 +989,13 @@ impl LinksPanel {
         let selector = row.selector();
         let frame = body
             .id(SharedString::from(selector.clone()))
+            .role(match row {
+                Row::Head(_) | Row::MentionHead(_) | Row::MentionsHead => Role::TreeItem,
+                _ => Role::ListItem,
+            })
+            .aria_label(self.row_name(row))
+            .aria_selected(selected)
+            .when(selected, |r| r.aria_active_descendant())
             .debug_selector(move || selector.clone())
             .rounded(px(radius::CONTROL))
             .when(selected, |row| row.bg(theme.accent.tint))
@@ -1200,6 +1242,8 @@ impl Render for LinksPanel {
         let findings = self.findings.filter(|_| self.phase == Phase::Ready);
         div()
             .id("links-panel")
+            .role(gpui::Role::Group)
+            .aria_label("Links")
             .debug_selector(|| "links-panel".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)

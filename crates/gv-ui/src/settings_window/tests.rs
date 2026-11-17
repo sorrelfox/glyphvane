@@ -633,3 +633,47 @@ impl Fixture {
         draw(&mut self.vcx);
     }
 }
+
+/// The sections are a tab list, and Tab reaches every section and the
+/// controls of the one shown, then comes back round: no trap.
+#[gpui::test]
+fn tab_walks_the_settings_window(cx: &mut TestAppContext) {
+    use crate::a11y::Role;
+    use crate::a11y::testing::{focused, with_role};
+
+    let mut f = fixture(cx, GLOBAL_TEXT);
+    let vcx = &mut f.vcx;
+    let sections: Vec<String> = with_role(vcx, Role::Tab)
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(sections.len() >= 5, "{sections:?}");
+    let selected: Vec<_> = with_role(vcx, Role::Tab)
+        .into_iter()
+        .filter(|n| n.selected == Some(true))
+        .collect();
+    assert_eq!(selected.len(), 1, "one section is shown");
+
+    let focus_id = |vcx: &mut VisualTestContext| vcx.update(|window, cx| window.focused(cx));
+    let mut stops = Vec::new();
+    let mut names = Vec::new();
+    for _ in 0..200 {
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+        let Some(handle) = focus_id(vcx) else {
+            continue;
+        };
+        if stops.first() == Some(&handle) {
+            break;
+        }
+        assert!(!stops.contains(&handle), "Tab is stuck in a loop");
+        stops.push(handle);
+        if let Some(Some(name)) = focused(vcx) {
+            names.push(name);
+        }
+    }
+    assert!(stops.len() > sections.len(), "controls are Tab stops too");
+    for section in &sections {
+        assert!(names.contains(section), "Tab never reached {section:?}");
+    }
+}

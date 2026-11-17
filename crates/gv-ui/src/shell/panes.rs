@@ -7,8 +7,8 @@
 //!   `workspace.focus_previous_pane`, NFR-A11Y-01) give the keyboard to the
 //!   next or previous pane, left to right and around: the Files or Tags
 //!   panel when the sidebar shows it, then the document (in Split mode the Source
-//!   pane, then the preview). Panes that take no keyboard (the right panel,
-//!   the sidebar's placeholder panels) are passed over. With nothing
+//!   pane, then the preview), then the right panel's links list when it is
+//!   open. Every sidebar panel takes part. With nothing
 //!   focused, F6 starts at the first pane and Shift+F6 at the last.
 //! - **Go to heading** (Mod+Shift+O) in the Reading view opens the Go
 //!   popover ([`crate::goto`]) with the document's headings; Enter jumps
@@ -58,11 +58,24 @@ impl Workspace {
         {
             panes.push(files.read(cx).focus_handle(cx));
         }
-        if self.sidebar_open
-            && self.panels.sidebar == SidebarPanel::Tags
-            && let Some(tags) = &self.panels.tags
-        {
-            panes.push(tags.read(cx).focus_handle(cx));
+        if self.sidebar_open {
+            let p = &self.panels;
+            let handle = match p.sidebar {
+                SidebarPanel::Files => None,
+                SidebarPanel::Tags => p.tags.as_ref().map(|v| v.read(cx).focus_handle(cx)),
+                SidebarPanel::Search => p.search.as_ref().map(|v| v.read(cx).focus_handle(cx)),
+                SidebarPanel::Bookmarks => {
+                    p.bookmarks.as_ref().map(|v| v.read(cx).focus_handle(cx))
+                }
+                SidebarPanel::Recent => self.recent.as_ref().map(|v| v.read(cx).focus_handle(cx)),
+                SidebarPanel::SyncConflicts => {
+                    p.conflicts.as_ref().map(|v| v.read(cx).focus_handle(cx))
+                }
+                SidebarPanel::FileHistory => {
+                    p.history.as_ref().map(|v| v.read(cx).focus_handle(cx))
+                }
+            };
+            panes.extend(handle);
         }
         if let Some(reader) = self.shown_reader() {
             panes.push(reader.read(cx).focus_handle(cx));
@@ -72,6 +85,12 @@ impl Workspace {
         }
         if let Some(reader) = self.shown_split_reader(cx) {
             panes.push(reader.read(cx).focus_handle(cx));
+        }
+        // The right panel's links list takes the keyboard too.
+        if self.panel_open
+            && let Some(links) = &self.links
+        {
+            panes.push(links.read(cx).focus_handle(cx));
         }
         panes
     }

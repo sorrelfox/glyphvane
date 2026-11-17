@@ -14,11 +14,12 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px,
+    IntoElement, ParentElement as _, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 use super::Workspace;
+use crate::a11y::{A11yExt as _, Accessible, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::files::notice::{Notice, NoticeAction, NoticeKind};
 use crate::icons::Icon;
@@ -60,6 +61,14 @@ impl Workspace {
             .map(|n| (n, NoticeSource::Reader))
     }
 
+    /// Shows a failed-save notice on the active tab.
+    #[cfg(test)]
+    pub(crate) fn show_test_notice(&mut self, cx: &mut Context<'_, Self>) {
+        let active = self.active;
+        self.tabs[active].notice = Some(Notice::save_failed("The disk is full.".into()));
+        cx.notify();
+    }
+
     /// What the infobar shows now, if anything.
     #[cfg(test)]
     pub(crate) fn infobar_notice(&self, cx: &App) -> Option<Notice> {
@@ -78,7 +87,11 @@ impl Workspace {
     }
 
     /// The active tab's infobar, if it has a notice.
-    pub(super) fn render_infobar(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Option<Div> {
+    pub(super) fn render_infobar(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Accessible<Stateful<Div>>> {
         let (notice, source) = self.active_notice(cx)?;
         let (fill, tint, kind_icon) = match notice.kind {
             NoticeKind::Warning => (
@@ -126,6 +139,7 @@ impl Workspace {
                 let id = format!("infobar-action-{index}");
                 let base = div()
                     .id(SharedString::from(id.clone()))
+                    .a11y_button(button.label.clone())
                     .debug_selector(move || id.clone())
                     .flex_none()
                     .h(px(size::BUTTON_HEIGHT))
@@ -143,28 +157,44 @@ impl Workspace {
                     Some(why) => {
                         let why = why.clone();
                         base.opacity(DISABLED_OPACITY)
+                            .aria_description(why.clone())
                             .tooltip(move |_, cx| {
                                 let why = why.clone();
                                 cx.new(|_| Tooltip(why)).into()
                             })
+                            .accessible()
+                            .disabled(true)
                             .into_any_element()
                     }
                     None => {
                         let (hover, press) = (theme.state.hover, theme.state.press);
                         let action = button.action.clone();
-                        base.hover(move |style| style.bg(hover))
+                        base.keyboard_control(theme)
+                            .hover(move |style| style.bg(hover))
                             .active(move |style| style.bg(press))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.run_notice_action(&action, source, window, cx);
                             }))
+                            .accessible()
                             .into_any_element()
                     }
                 }
             })
             .collect();
         let (hover, press) = (theme.state.hover, theme.state.press);
+        // Errors and warnings interrupt; information waits its turn.
+        let (role, live) = match notice.kind {
+            NoticeKind::Warning | NoticeKind::Error => (Role::Alert, Live::Assertive),
+            NoticeKind::Information | NoticeKind::Neutral => (Role::Status, Live::Polite),
+        };
         Some(
             div()
+                .id("infobar")
+                .role(role)
+                .aria_label(notice.title.clone())
+                .when_some(notice.detail.clone(), |bar, detail| {
+                    bar.aria_description(detail)
+                })
                 .debug_selector(|| "infobar".into())
                 .flex_none()
                 .min_h(px(sizes::INFOBAR))
@@ -191,6 +221,8 @@ impl Workspace {
                 .child(
                     div()
                         .id("infobar-dismiss")
+                        .a11y_button("Dismiss")
+                        .keyboard_control(theme)
                         .debug_selector(|| "infobar-dismiss".into())
                         .flex_none()
                         .size(px(size::DISMISS))
@@ -204,8 +236,11 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.dismiss_notice(source, cx);
                         }))
-                        .child(Icon::Dismiss.sized(icon::ROW)),
-                ),
+                        .child(Icon::Dismiss.sized(icon::ROW))
+                        .accessible(),
+                )
+                .accessible()
+                .live(live),
         )
     }
 

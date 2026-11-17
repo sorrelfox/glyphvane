@@ -43,6 +43,7 @@ use gpui::{
 use gv_settings::{RemoteContent, WorkspaceTrust, toml};
 use gv_vault::trust::{TrustSummary, scan_trust};
 
+use crate::a11y::{A11yExt as _, Role, Toggled};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::infobar as size;
@@ -253,6 +254,13 @@ impl TrustPrompt {
         let (hover, press) = (theme.state.hover, theme.state.press);
         div()
             .id(id)
+            .a11y_button(label)
+            .aria_toggled(if pressed {
+                Toggled::True
+            } else {
+                Toggled::False
+            })
+            .keyboard_control(theme)
             .debug_selector(move || id.to_owned())
             .flex_none()
             .h(px(size::BUTTON_HEIGHT))
@@ -321,6 +329,8 @@ impl Render for TrustPrompt {
         let (hover, press) = (theme.state.hover, theme.state.press);
         div()
             .id("trust-prompt")
+            .role(Role::AlertDialog)
+            .aria_label("Trust this vault?")
             .debug_selector(|| "trust-prompt".into())
             .flex_none()
             .min_h(px(sizes::INFOBAR))
@@ -375,6 +385,8 @@ impl Render for TrustPrompt {
             .child(
                 div()
                     .id("trust-dismiss")
+                    .a11y_button("Dismiss")
+                    .keyboard_control(theme)
                     .debug_selector(|| "trust-dismiss".into())
                     .flex_none()
                     .size(px(size::DISMISS))

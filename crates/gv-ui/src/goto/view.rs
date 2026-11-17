@@ -21,6 +21,7 @@ use super::{
     Cancel, Choice, Confirm, GotoEvent, GotoKind, GotoRequest, KEY_CONTEXT, Row, SelectNext,
     SelectPrevious, filter,
 };
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::{SWITCHER_ROW, switcher as size};
@@ -302,6 +303,7 @@ impl GotoPopover {
         let selector = format!("goto-row:{position}");
         div()
             .id(("goto-row", position))
+            .a11y_option(item.label.clone(), selected, position, self.rows.len())
             .debug_selector(move || selector.clone())
             .w_full()
             .h(px(SWITCHER_ROW))
@@ -479,8 +481,26 @@ impl Render for GotoPopover {
             .child(hint("Enter", action, theme))
             .child(div().flex_1())
             .child(hint("Esc", "back".into(), theme));
+        let announcement = match self.request.as_ref().map(|r| &r.kind) {
+            Some(GotoKind::List { items, empty, .. }) => crate::a11y::option_announcement(
+                self.rows
+                    .get(self.selected)
+                    .and_then(|r| items.get(r.index))
+                    .map(|i| i.label.as_ref()),
+                self.selected,
+                self.rows.len(),
+                empty.as_ref(),
+            ),
+            _ => String::new(),
+        };
+        let title = self
+            .request
+            .as_ref()
+            .map(|r| r.title.clone())
+            .unwrap_or_default();
         let panel = div()
             .id("goto-popover")
+            .a11y_group(Role::Dialog, title)
             .debug_selector(|| "goto-popover".into())
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &SelectNext, window, cx| this.step(true, window, cx)))
@@ -508,7 +528,10 @@ impl Render for GotoPopover {
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(input_row)
             .child(body)
-            .child(footer);
+            .child(crate::a11y::announcer("goto-status", announcement))
+            .child(footer)
+            .accessible()
+            .modal();
         div()
             .id("goto-overlay")
             .absolute()

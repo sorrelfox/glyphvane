@@ -22,6 +22,7 @@ use super::{
     Cancel, Choice, Confirm, ConfirmInNewTab, CreateNote, KEY_CONTEXT, SelectNext, SelectPrevious,
     Sources, SwitcherRequest,
 };
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::workspace::QuickSwitcher as ToggleSwitcher;
@@ -499,6 +500,7 @@ impl QuickSwitcher {
             let label = format!("Create “{path}”");
             return self
                 .row_frame(position, selected, theme, cx)
+                .a11y_option(label.clone(), selected, position, self.row_count())
                 .debug_selector(|| "quick-switcher-create".into())
                 .child(
                     div()
@@ -545,7 +547,14 @@ impl QuickSwitcher {
             EntryKind::Heading { level } => f32::from(level.saturating_sub(1)) * spacing::ROW_GAP,
             _ => 0.0,
         };
+        let name = if right.is_empty() {
+            format!("{label}{suffix}")
+        } else {
+            format!("{label}{suffix}, {right}")
+        };
         self.row_frame(position, selected, theme, cx)
+            .a11y_option(name, selected, position, self.row_count())
+            .when(entry.unsaved, |row| row.aria_description("Unsaved changes"))
             .debug_selector(move || selector.clone())
             .child(
                 div()
@@ -658,37 +667,52 @@ impl Render for QuickSwitcher {
                     .child(hint("^", "blocks".to_owned(), theme)),
             );
 
-        let list = div().flex_none().p(px(spacing::LIST_PAD)).map(|list| {
-            if self.row_count() == 0 {
-                list.child(
-                    div()
-                        .debug_selector(|| "quick-switcher-empty".into())
-                        .h(px(SWITCHER_ROW))
-                        .flex()
-                        .items_center()
-                        .px(px(spacing::ROW_PAD_X))
-                        .text_size(px(text::UI_TITLE.size))
-                        .text_color(theme.text.secondary)
-                        .child(self.empty_message()),
-                )
-            } else {
-                let visible = self.visible_rows(viewport.height);
-                list.child(
-                    uniform_list(
-                        "quick-switcher-rows",
-                        self.row_count(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|position| this.render_row(position, cx))
-                                .collect::<Vec<_>>()
-                        }),
+        let selected_name = match self.rows.get(self.selected) {
+            Some(&index) => Some(self.listed_entries()[index].label.to_string()),
+            None => self.create.as_ref().map(|path| format!("Create “{path}”")),
+        };
+        let announcement = crate::a11y::option_announcement(
+            selected_name.as_deref(),
+            self.selected,
+            self.row_count(),
+            self.empty_message(),
+        );
+        let list = div()
+            .id("quick-switcher-list")
+            .a11y_group(Role::ListBox, "Matches")
+            .flex_none()
+            .p(px(spacing::LIST_PAD))
+            .map(|list| {
+                if self.row_count() == 0 {
+                    list.child(
+                        div()
+                            .debug_selector(|| "quick-switcher-empty".into())
+                            .h(px(SWITCHER_ROW))
+                            .flex()
+                            .items_center()
+                            .px(px(spacing::ROW_PAD_X))
+                            .text_size(px(text::UI_TITLE.size))
+                            .text_color(theme.text.secondary)
+                            .child(self.empty_message()),
                     )
-                    .track_scroll(&self.scroll)
-                    .w_full()
-                    .h(px(visible as f32 * SWITCHER_ROW)),
-                )
-            }
-        });
+                } else {
+                    let visible = self.visible_rows(viewport.height);
+                    list.child(
+                        uniform_list(
+                            "quick-switcher-rows",
+                            self.row_count(),
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                range
+                                    .map(|position| this.render_row(position, cx))
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.scroll)
+                        .w_full()
+                        .h(px(visible as f32 * SWITCHER_ROW)),
+                    )
+                }
+            });
 
         let can_create =
             self.mode == Mode::Files && self.sources.can_create && !self.query.trim().is_empty();
@@ -722,6 +746,7 @@ impl Render for QuickSwitcher {
 
         let panel = div()
             .id("quick-switcher")
+            .a11y_group(Role::Dialog, "Quick switcher")
             .debug_selector(|| "quick-switcher".into())
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step(true, cx)))
@@ -759,8 +784,11 @@ impl Render for QuickSwitcher {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(input_row)
-            .child(list)
-            .child(footer);
+            .child(list.accessible())
+            .child(crate::a11y::announcer("quick-switcher-status", announcement))
+            .child(footer)
+            .accessible()
+            .modal();
 
         div()
             .id("quick-switcher-overlay")

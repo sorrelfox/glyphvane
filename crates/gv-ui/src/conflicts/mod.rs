@@ -52,6 +52,7 @@ use gv_vault::files::{SyncChoice, resolve_sync_conflict};
 use gv_vault::index::conflict::SyncService;
 use gv_vault::refactor::{SystemTrash, Trash};
 
+use crate::a11y::{A11yExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::spacing::{list, list_row, panel_head};
@@ -370,6 +371,8 @@ impl SyncConflictsPanel {
         let (hover, press) = (theme.state.hover, theme.state.press);
         let button = div()
             .id(id)
+            .a11y_button(label)
+            .when(enabled, |b| b.keyboard_control(theme))
             .debug_selector(move || selector.clone())
             .flex_none()
             .px(px(list_row::GAP))
@@ -432,6 +435,11 @@ impl SyncConflictsPanel {
         let hover = theme.state.hover;
         div()
             .id(ElementId::Name(format!("conflict-{ix}").into()))
+            .role(Role::ListItem)
+            .aria_label(name.clone())
+            .aria_description(detail.clone())
+            .aria_selected(selected)
+            .when(selected, |r| r.aria_active_descendant())
             .debug_selector(move || format!("conflict-{ix}"))
             .mx(px(size::LIST_ROW_INSET))
             .pl(px(list_row::PAD_LEFT))
@@ -528,6 +536,8 @@ impl Render for SyncConflictsPanel {
         let error = self.error.clone();
         div()
             .id("sync-conflicts-panel")
+            .role(gpui::Role::Group)
+            .aria_label("Sync conflicts panel")
             .debug_selector(|| "sidebar-panel:sync-conflicts".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
@@ -566,6 +576,7 @@ impl Render for SyncConflictsPanel {
                     panel.child(
                         div()
                             .id("conflict-entries")
+                            .a11y_group(Role::List, "Sync conflicts")
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()

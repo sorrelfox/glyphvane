@@ -31,6 +31,7 @@ use super::model::{Entry, Item, Menu, MenuState, app_menus};
 use super::{
     Cancel, CloseSubmenu, Confirm, OpenSubmenu, SelectFirst, SelectLast, SelectNext, SelectPrevious,
 };
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::{self, action_for};
@@ -130,6 +131,7 @@ impl RenderOnce for MenuButton {
         };
         let toggle = popover.clone();
         self.button
+            .aria_expanded(open)
             .on_click(move |_, window, cx| {
                 toggle.update(cx, |popover, cx| popover.toggle(window, cx));
             })
@@ -514,6 +516,11 @@ pub(super) fn item_row(
             format!("{prefix}-item").into(),
             index as u64,
         ))
+        .a11y_menu_item(item.title, check)
+        .when_some(shortcut.clone(), |row, keys| row.aria_keyshortcuts(keys))
+        // The menu keeps the keyboard; the highlighted item is the one
+        // assistive technology reads.
+        .when(highlighted, |row| row.aria_active_descendant())
         .debug_selector(move || format!("{prefix}-item:{command}"))
         .when(!enabled, |row| row.opacity(DISABLED_OPACITY))
         .when_some(check, |row, checked| {
@@ -612,6 +619,13 @@ impl MenuPopover {
     ) -> AnyElement {
         row(theme, self.top == index)
             .id(("app-menu-top", index))
+            .role(Role::MenuItem)
+            .aria_label(title)
+            .aria_expanded(self.submenu && self.top == index)
+            .when(
+                self.top == index && !(self.submenu && self.item.is_some()),
+                |row| row.aria_active_descendant(),
+            )
             .debug_selector(move || format!("app-menu-top:{title}"))
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 if *hovered {
@@ -663,6 +677,8 @@ impl MenuPopover {
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.run(item, window, cx)))
         })
+        .accessible()
+        .disabled(!enabled)
         .into_any_element()
     }
 
@@ -695,6 +711,7 @@ impl MenuPopover {
         Some(
             panel(theme)
                 .id("app-menu-submenu")
+                .a11y_group(Role::Menu, menu.title)
                 .debug_selector(|| "app-menu-submenu".into())
                 .absolute()
                 .left(px(MENU_WIDTH + spacing::SUBMENU_GAP))
@@ -715,6 +732,8 @@ impl Render for MenuPopover {
         let viewport = window.viewport_size();
         let titles: Vec<&'static str> = self.menus.iter().map(|m| m.title).collect();
         let menus = panel(theme)
+            .id("app-menu-menus")
+            .a11y_group(Role::MenuBar, "Application menu")
             .w(px(MENU_WIDTH))
             .debug_selector(|| "app-menu-popover".into())
             .children(
@@ -731,6 +750,7 @@ impl Render for MenuPopover {
         };
         div()
             .id("app-menu-overlay")
+            .a11y_group(Role::Group, "Application menu")
             .key_context(keymap::context::MENU)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectNext, window, cx| this.step(true, window, cx)))

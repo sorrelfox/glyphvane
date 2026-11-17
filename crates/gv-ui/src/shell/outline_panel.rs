@@ -22,6 +22,7 @@ use gv_model::DocModel;
 
 use super::drag_drop::{DragPreview, DraggedHeading};
 use super::panels::section_head;
+use crate::a11y::A11yExt as _;
 use crate::appearance::Appearance;
 use crate::metrics::spacing::outline_row;
 use crate::metrics::{radius, size, text};
@@ -151,6 +152,9 @@ impl OutlinePanel {
                 let label: SharedString = headings[ix].text.to_string().into();
                 let row = div()
                     .id(("outline-row", ix))
+                    .a11y_tree_item(label.clone(), depth as usize + 1, None, current)
+                    .aria_description(format!("Heading {}", headings[ix].level))
+                    .keyboard_control(theme)
                     .debug_selector(move || format!("outline-row-{ix}"))
                     .size_full()
                     .flex()
@@ -235,6 +239,8 @@ impl Render for OutlinePanel {
         let count = self.model.as_ref().map(|m| m.headings().len());
         div()
             .id("outline-panel")
+            .role(gpui::Role::Tree)
+            .aria_label("Outline")
             .debug_selector(|| "outline-panel".into())
             .min_h_0()
             .flex_shrink_1()

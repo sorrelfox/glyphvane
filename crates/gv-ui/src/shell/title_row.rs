@@ -17,6 +17,7 @@ use super::controls::{
     windows_caption_buttons,
 };
 use super::{ViewMode, Workspace};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role, Toggled};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::icons::Icon;
@@ -41,6 +42,7 @@ impl Workspace {
 
         div()
             .id("title-row")
+            .a11y_group(Role::Toolbar, "Title bar")
             .debug_selector(|| "title-row".into())
             .h(px(size::TITLE_ROW))
             .flex_none()
@@ -61,42 +63,50 @@ impl Workspace {
             .child(
                 icon_button(
                     "toggle-sidebar",
+                    "Sidebar",
                     Icon::SidebarToggle,
                     icon::TOOLBAR,
                     wide,
                     theme,
                 )
+                .aria_toggled(pressed(self.sidebar_open))
                 .debug_selector(|| "toggle-sidebar".into())
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+                .accessible(),
             )
             .child(self.history_button(Icon::Back, theme, cx))
             .child(self.history_button(Icon::Forward, theme, cx))
-            .child(self.tab_strip(theme, cx))
+            .child(self.tab_strip(theme, cx).accessible())
             .child(
-                icon_button("new-tab", Icon::NewTab, icon::ROW, square, theme)
+                icon_button("new-tab", "New tab", Icon::NewTab, icon::ROW, square, theme)
                     .debug_selector(|| "new-tab".into())
-                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx)))
+                    .accessible(),
             )
             .child(
                 self.drag_region("title-drag", window, cx)
                     .flex_1()
                     .min_w(px(title_row::DRAG_MIN)),
             )
-            .child(self.mode_switch(theme, cx))
+            .child(self.mode_switch(theme, cx).accessible())
             .child(
                 self.more_actions_button(theme, cx)
-                    .ml(px(title_row::MORE_MARGIN)),
+                    .ml(px(title_row::MORE_MARGIN))
+                    .accessible(),
             )
             .child(
                 icon_button(
                     "toggle-panel",
+                    "Right panel",
                     Icon::PanelToggle,
                     icon::TOOLBAR,
                     wide,
                     theme,
                 )
+                .aria_toggled(pressed(self.panel_open))
                 .debug_selector(|| "toggle-panel".into())
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx)))
+                .accessible(),
             )
             .when(caption_buttons, |row| {
                 row.child(windows_caption_buttons(window, self.chrome, theme))
@@ -119,6 +129,7 @@ impl Workspace {
         let anchor = self.menus.more_anchor.clone();
         icon_button(
             "more-actions",
+            "More actions",
             Icon::MoreActions,
             icon::TOOLBAR,
             square,
@@ -139,16 +150,16 @@ impl Workspace {
     /// Back or Forward: disabled while the active tab has nowhere to go.
     fn history_button(&self, icon: Icon, theme: &Theme, cx: &mut Context<'_, Self>) -> AnyElement {
         let square = (button::SQUARE, button::SQUARE);
-        let (id, enabled) = match icon {
-            Icon::Forward => ("history-forward", self.can_go_forward()),
-            _ => ("history-back", self.can_go_back()),
+        let (id, label, enabled) = match icon {
+            Icon::Forward => ("history-forward", "Forward", self.can_go_forward()),
+            _ => ("history-back", "Back", self.can_go_back()),
         };
         if !enabled {
-            return disabled_icon_button(icon, icon::TOOLBAR, square, theme)
+            return disabled_icon_button(id, label, icon, icon::TOOLBAR, square, theme)
                 .debug_selector(move || id.into())
                 .into_any_element();
         }
-        icon_button(id, icon, icon::TOOLBAR, square, theme)
+        icon_button(id, label, icon, icon::TOOLBAR, square, theme)
             .debug_selector(move || id.into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if icon == Icon::Forward {
@@ -157,6 +168,7 @@ impl Workspace {
                     this.go_back(window, cx);
                 }
             }))
+            .accessible()
             .into_any_element()
     }
 
@@ -167,13 +179,15 @@ impl Workspace {
     }
 
     /// Preview, Edit and Split as a segmented control.
-    fn mode_switch(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+    fn mode_switch(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
         let segments = [
             (ViewMode::Preview, Icon::Preview, Some("Preview")),
             (ViewMode::Edit, Icon::Edit, Some("Edit")),
             (ViewMode::Split, Icon::Split, None),
         ];
         div()
+            .id("mode-switch")
+            .a11y_group(Role::RadioGroup, "View mode")
             .h(px(segment::FRAME))
             .flex_none()
             .flex()
@@ -189,11 +203,20 @@ impl Workspace {
                     .enumerate()
                     .map(|(index, (mode, icon, label))| {
                         let active = self.mode() == mode;
+                        let name = match mode {
+                            ViewMode::Preview => "Preview",
+                            ViewMode::Edit => "Edit",
+                            ViewMode::Split => "Split",
+                        };
                         // Viewer mode: Edit and Split cannot be chosen.
                         let available = self.mode_available(mode, cx);
                         let hover = theme.state.hover;
                         div()
                             .id(("mode", index))
+                            .role(Role::RadioButton)
+                            .aria_label(name)
+                            .aria_toggled(pressed(active))
+                            .when(available, |seg| seg.keyboard_control(theme))
                             .debug_selector(move || {
                                 match mode {
                                     ViewMode::Preview => "mode-preview",
@@ -237,6 +260,8 @@ impl Workspace {
                             })
                             .child(icon.sized(icon::ROW))
                             .when_some(label, |seg, label| seg.child(label))
+                            .accessible()
+                            .disabled(!available)
                     }),
             )
     }
@@ -247,8 +272,11 @@ impl Workspace {
     /// unsaved changes shows a 7 px dot in its title's colour instead of
     /// the close icon; the dot still closes the tab (the text is saved or
     /// kept in the crash journal).
-    fn tab_strip(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+    fn tab_strip(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        let count = self.tabs.len();
         div()
+            .id("tab-strip")
+            .a11y_group(Role::TabList, "Open tabs")
             .flex()
             .min_w_0()
             .overflow_hidden()
@@ -272,6 +300,8 @@ impl Workspace {
                     let press = theme.state.press;
                     div()
                         .id(("close-tab", index))
+                        .a11y_button(format!("Close {} (unsaved changes)", tab.label.name))
+                        .keyboard_control(theme)
                         .debug_selector(move || format!("unsaved-dot-{index}"))
                         .flex_none()
                         .w(px(close.0))
@@ -290,6 +320,7 @@ impl Workspace {
                 } else {
                     icon_button(
                         ("close-tab", index),
+                        format!("Close {}", tab.label.name),
                         Icon::CloseTab,
                         icon::TAB_CLOSE,
                         close,
@@ -304,6 +335,9 @@ impl Workspace {
                 }));
                 div()
                     .id(("tab", index))
+                    .a11y_tab(tab.label.name.clone(), active, index, count)
+                    .when(unsaved, |el| el.aria_description("Unsaved changes"))
+                    .keyboard_control(theme)
                     .h(px(tab::HEIGHT))
                     .min_w_0()
                     .flex()
@@ -340,9 +374,15 @@ impl Workspace {
                     )
                     .debug_selector(move || format!("tab-{index}"))
                     .child(div().min_w_0().truncate().child(tab.label.name.clone()))
-                    .child(trailing)
+                    .child(trailing.accessible())
+                    .accessible()
             }))
     }
+}
+
+/// A toggle button's state.
+fn pressed(on: bool) -> Toggled {
+    if on { Toggled::True } else { Toggled::False }
 }
 
 /// `shadow.tab`, the active tab's lift.

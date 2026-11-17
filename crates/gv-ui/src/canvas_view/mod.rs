@@ -464,13 +464,14 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// Advances a running animation for this frame.
-    fn step_animation(&mut self, window: &mut Window) {
+    /// Advances a running animation for this frame. Reduced motion, turned
+    /// on while it runs, ends it at its target.
+    fn step_animation(&mut self, reduce_motion: bool, window: &mut Window) {
         let Some(a) = self.animation else {
             return;
         };
         let t = a.start.elapsed().as_secs_f64() / ANIMATION.as_secs_f64();
-        if t >= 1.0 {
+        if t >= 1.0 || reduce_motion {
             self.transform = a.to;
             self.animation = None;
             return;
@@ -1239,7 +1240,7 @@ fn link_card(url: &str, text_px: f32, pad: f32, colors: &Colors) -> AnyElement {
 
 impl Render for CanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        self.step_animation(window);
+        self.step_animation(cx.reduce_motion(), window);
         let theme = Appearance::theme(cx);
         let colors = Colors::of(theme);
         let palette = Palette::of(Appearance::current_id(cx));
