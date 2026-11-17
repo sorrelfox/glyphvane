@@ -115,15 +115,12 @@ impl Workspace {
         }
     }
 
-    /// A file Glyphvane does not show: a program is only offered to be
-    /// revealed; anything else opens with the default app once confirmed.
+    /// A file Glyphvane does not show by its name: text opens in the text
+    /// viewer once its first bytes are read; a program is only offered to
+    /// be revealed; anything else opens with the default app once
+    /// confirmed ([`super::viewer_tabs`]).
     pub(super) fn open_other_file(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
-        let notice = match platform::classify(&path) {
-            FileClass::Executable => Notice::executable(&path),
-            FileClass::Html => Notice::confirm_open_file(&path, true),
-            FileClass::Markdown | FileClass::Other => Notice::confirm_open_file(&path, false),
-        };
-        self.ask(notice, cx);
+        self.open_unknown_file(path, cx);
     }
 
     /// `file.open_folder`: asks for a folder and opens it as a vault.
@@ -219,6 +216,7 @@ impl Workspace {
         self.index_asked = false;
         self._vault_changed = Some(cx.observe(&vault, |this, _, cx| this.vault_changed(cx)));
         self.follow_content(&vault, cx);
+        self.vault_opened(cx);
         self.vault_changed(cx);
         if let Some(files) = &self.files {
             files.update(cx, |files, cx| files.set_vault(vault, cx));

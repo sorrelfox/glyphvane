@@ -371,6 +371,8 @@ impl Workspace {
                     (Icon::Canvas, "A canvas. Enter opens it in a tab.")
                 } else if super::bases_tabs::is_base(&path) {
                     (Icon::Base, "A base. Enter opens it in a tab.")
+                } else if crate::file_viewer::kind(&path).is_some() {
+                    (Icon::OtherFile, "Enter opens it in the built-in viewer.")
                 } else {
                     (Icon::OtherFile, "Opens in the default app.")
                 };

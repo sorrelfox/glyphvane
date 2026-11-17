@@ -65,6 +65,9 @@ pub(super) const PENDING_WAIT: Duration = Duration::from_secs(1);
 /// How often the wait looks at the index.
 const PENDING_POLL: Duration = Duration::from_millis(50);
 
+/// Why a link that leaves the app is confirmed when every hand-off is.
+const HANDOFF_CONFIRMED: &str = "Every link that leaves Glyphvane is confirmed for this folder.";
+
 /// Not designed: the popovers' widths and the Create note popover's
 /// padding (12) and gaps.
 mod spacing {
@@ -328,7 +331,13 @@ impl Workspace {
         tracing::debug!(?target, "follow link");
         let (path, fragment) = match target {
             Navigation::External(url) => {
-                crate::platform::launcher(cx).open_url(&url, cx);
+                if crate::trust::confirm_every_handoff(cx) {
+                    // Restricted mode, or the setting: every hand-off asks.
+                    self.activate_tab(index, window, cx);
+                    self.ask(Notice::confirm_url(&url, HANDOFF_CONFIRMED), cx);
+                } else {
+                    crate::platform::launcher(cx).open_url(&url, cx);
+                }
                 return;
             }
             Navigation::Confirm { url, why } => {
@@ -336,9 +345,7 @@ impl Workspace {
                 self.ask(Notice::confirm_url(&url, &why), cx);
                 return;
             }
-            Navigation::OpenFile(path)
-                if super::canvas_tabs::is_canvas(&path) || super::bases_tabs::is_base(&path) =>
-            {
+            Navigation::OpenFile(path) if super::canvas_tabs::opens_as_tab(&path) => {
                 self.open_link_target(index, path, None, disposition, window, cx);
                 return;
             }

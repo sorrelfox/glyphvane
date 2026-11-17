@@ -65,6 +65,9 @@ mod status_bar;
 mod switcher;
 #[cfg(test)]
 mod switcher_tests;
+mod sync_conflicts;
+#[cfg(test)]
+mod sync_conflicts_tests;
 mod tags;
 #[cfg(test)]
 mod tags_tests;
@@ -72,10 +75,16 @@ mod tags_tests;
 mod tests;
 mod title_row;
 mod tree;
+mod trust_prompt;
+#[cfg(test)]
+mod trust_prompt_tests;
 mod vault;
 mod vault_ops;
 #[cfg(test)]
 mod vault_ops_tests;
+mod viewer_tabs;
+#[cfg(test)]
+mod viewer_tabs_tests;
 
 #[cfg(test)]
 pub(crate) use vault::VaultStatus;
@@ -366,6 +375,9 @@ pub struct Tab {
     /// The Bases view, in place of the Reading view, when the file is a
     /// base ([`bases_tabs`]).
     bases: Option<Entity<crate::bases_view::BasesView>>,
+    /// The built-in viewer, in place of the Reading view, when the file is
+    /// not a note, a canvas or a base ([`viewer_tabs`]).
+    viewer: Option<Entity<crate::file_viewer::FileViewer>>,
     /// The number of an untitled document (`tabs.new`), which has no path.
     untitled: Option<u64>,
     /// The tab's own infobar, for what happens to its file while only the
@@ -399,6 +411,7 @@ impl Tab {
             split: None,
             canvas: None,
             bases: None,
+            viewer: None,
             untitled: None,
             notice: None,
             history: History::default(),
@@ -471,10 +484,23 @@ impl Tab {
         self.path.as_deref().is_some_and(bases_tabs::is_base)
     }
 
+    /// The built-in viewer of a tab that shows a file that is not a note.
+    pub fn viewer(&self) -> Option<&Entity<crate::file_viewer::FileViewer>> {
+        self.viewer.as_ref()
+    }
+
+    /// Whether the tab shows its file in the built-in viewer.
+    fn is_viewer(&self) -> bool {
+        self.path
+            .as_deref()
+            .is_some_and(viewer_tabs::is_viewer_file)
+    }
+
     /// Whether the tab shows a file in a read-only view of its own (a
-    /// canvas or a base) instead of the Reading and Source views.
+    /// canvas, a base or the built-in viewer) instead of the Reading and
+    /// Source views.
     fn is_special_view(&self) -> bool {
-        self.is_canvas() || self.is_base()
+        self.is_canvas() || self.is_base() || self.is_viewer()
     }
 
     /// The Split view's preview pane, once the tab has a Split view.
@@ -591,6 +617,9 @@ pub struct Workspace {
     _files_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
     _content_updates: Option<Subscription>,
+    /// The workspace-trust prompt of the window's vault, while it asks
+    /// ([`trust_prompt`]).
+    trust: Option<(Entity<crate::trust::TrustPrompt>, Subscription)>,
     /// The Outline, created with the right panel.
     outline: Option<Entity<OutlinePanel>>,
     _outline_events: Option<Subscription>,
@@ -765,6 +794,7 @@ impl Workspace {
             _files_events: None,
             _vault_changed: None,
             _content_updates: None,
+            trust: None,
             outline: None,
             _outline_events: None,
             links: None,
@@ -999,6 +1029,10 @@ impl Workspace {
                 .bases
                 .as_ref()
                 .is_some_and(|b| b.read(cx).focus_handle(cx).contains_focused(window, cx))
+            || tab
+                .viewer
+                .as_ref()
+                .is_some_and(|v| v.read(cx).focus_handle(cx).contains_focused(window, cx))
     }
 
     fn focus_reader_if(&self, focused: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -1026,6 +1060,10 @@ impl Workspace {
             base.read(cx).focus_handle(cx).focus(window, cx);
             return;
         }
+        if let Some(viewer) = self.shown_viewer() {
+            viewer.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
         match (self.shown_reader(), self.shown_editor()) {
             (Some(reader), _) => reader.read(cx).focus_handle(cx).focus(window, cx),
             (None, Some(editor)) => editor.read(cx).focus_handle(cx).focus(window, cx),
@@ -1045,6 +1083,7 @@ impl Workspace {
             .chain(self.shown_split_reader(cx).map(|r| r.entity_id()))
             .chain(self.shown_canvas().map(Entity::entity_id))
             .chain(self.shown_base().map(Entity::entity_id))
+            .chain(self.shown_viewer().map(Entity::entity_id))
             .collect();
         let readers = self
             .tabs
@@ -1054,11 +1093,13 @@ impl Workspace {
         let editors = self.tabs.iter().filter_map(|t| t.editor.as_ref());
         let canvases = self.tabs.iter().filter_map(|t| t.canvas.as_ref());
         let bases = self.tabs.iter().filter_map(|t| t.bases.as_ref());
+        let viewers = self.tabs.iter().filter_map(|t| t.viewer.as_ref());
         let hidden_focused = readers
             .map(|r| (r.entity_id(), r.read(cx).focus_handle(cx)))
             .chain(editors.map(|e| (e.entity_id(), e.read(cx).focus_handle(cx))))
             .chain(canvases.map(|c| (c.entity_id(), c.read(cx).focus_handle(cx))))
             .chain(bases.map(|b| (b.entity_id(), b.read(cx).focus_handle(cx))))
+            .chain(viewers.map(|v| (v.entity_id(), v.read(cx).focus_handle(cx))))
             .any(|(id, focus)| !shown.contains(&id) && focus.contains_focused(window, cx));
         if hidden_focused || (!shown.is_empty() && self.focus.is_focused(window)) {
             self.focus_document(window, cx);
@@ -1146,7 +1187,9 @@ impl Workspace {
         }
         self.sync_canvas_roots(cx);
         self.sync_base_roots(cx);
+        self.sync_viewer_roots(cx);
         self.sync_search(cx);
+        self.sync_conflicts(cx);
         self.sync_tags(cx);
         self.sync_links(cx);
         self.push_reader_content(cx);
@@ -1219,17 +1262,27 @@ impl Workspace {
         // A canvas file gets a Canvas view instead.
         if canvas_tabs::is_canvas(&path) {
             self.tabs[index].bases = None;
+            self.tabs[index].viewer = None;
             self.ensure_canvas(index, path, window, cx);
             return None;
         }
         // So does a base file.
         if bases_tabs::is_base(&path) {
             self.tabs[index].canvas = None;
+            self.tabs[index].viewer = None;
             self.ensure_base(index, path, window, cx);
+            return None;
+        }
+        // And any other file that is not a note, the built-in viewer.
+        if viewer_tabs::is_viewer_file(&path) {
+            self.tabs[index].canvas = None;
+            self.tabs[index].bases = None;
+            self.ensure_viewer(index, path, window, cx);
             return None;
         }
         self.tabs[index].canvas = None;
         self.tabs[index].bases = None;
+        self.tabs[index].viewer = None;
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let content = self.vault.as_ref().map(|v| v.read(cx).content());
         let profile = self.tab_profile(index, cx).compiled;
@@ -1570,9 +1623,9 @@ impl Workspace {
             self.untrack_if_unused(&left);
         }
         let tab = &mut self.tabs[index];
-        if canvas_tabs::is_canvas(&path) || bases_tabs::is_base(&path) {
+        if !crate::platform::is_markdown(&path) {
             // The Reading view of the file left goes; the Canvas (or
-            // Bases) view shows the file (or loads it in place of another).
+            // Bases, or the built-in) view shows the file (or loads it in place of another).
             if let Some(reader) = tab.reader.take() {
                 self.readers.remove(&reader.entity_id());
             }
@@ -1587,6 +1640,7 @@ impl Workspace {
                 Some(reader) => {
                     self.tabs[index].canvas = None;
                     self.tabs[index].bases = None;
+                    self.tabs[index].viewer = None;
                     reader.update(cx, |r, cx| r.open(path, scroll.clone(), cx));
                 }
                 None => {
@@ -2022,6 +2076,7 @@ impl Render for Workspace {
                                             .h_full()
                                             .flex()
                                             .flex_col()
+                                            .children(self.render_trust_prompt())
                                             .children(crate::updates::notices::render(theme, cx))
                                             .children(self.render_infobar(theme, cx))
                                             .child(self.render_document(theme, cx)),

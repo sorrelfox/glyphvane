@@ -10,8 +10,14 @@
 //!   upwards from the chip, right-aligned with it): a scope switch (this
 //!   file, this folder, this vault), Automatic and the built-in profiles
 //!   with a check at the override of that scope, then *Explain detection*,
-//!   *Show syntax differences* (disabled until the documentation exists)
-//!   and *Open profile documentation* (the profile's upstream reference).
+//!   *Show syntax differences* and *Open profile documentation* (the
+//!   profile's upstream reference).
+//! - **Syntax differences:** the part of the switch matrix where the
+//!   document's profile differs from the other shipped profiles, as a list
+//!   in the Go popover (not designed): one row per switch, "wikilinks: on"
+//!   (marked "set for this folder" when tuning or `.glyphvane.toml` changed
+//!   it), and at its right the other profiles' values, "GitHub off ·
+//!   CommonMark off". Typing filters the rows.
 //!   A profile that has not shipped is listed, disabled, with its release.
 //! - **Hint:** when a document shown in Preview has two or more distinct
 //!   signs of another dialect, the tab shows the information infobar
@@ -29,12 +35,13 @@ use gpui::{
     IntoElement, MouseButton, ParentElement as _, Pixels, Point, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, px,
 };
-use gv_profile::ProfileId;
 use gv_profile::hints::{self, Signals};
+use gv_profile::{CompiledProfile, ProfileId, SwitchValue, Switches};
 
 use super::infobar::Tooltip;
 use super::{Workspace, status_bar};
 use crate::files::notice::{Notice, Topic};
+use crate::goto::{self, GotoItem, GotoKind, GotoRequest};
 use crate::icons::Icon;
 use crate::menu::{panel, row, separator};
 use crate::metrics::spacing::{menu as menu_spacing, profile_chip};
@@ -195,7 +202,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn run_profile_command(&mut self, command: Command, cx: &mut Context<'_, Self>) {
+    fn run_profile_command(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.profile_menu.open = false;
         let profile = self.tab_profile(self.active, cx);
         match command {
@@ -207,7 +219,26 @@ impl Workspace {
             Command::Documentation => {
                 cx.open_url(gv_profile::definition(profile.id()).reference_url);
             }
-            Command::Differences => {}
+            Command::Differences => {
+                let request = GotoRequest {
+                    title: format!(
+                        "Syntax differences: {}",
+                        status_bar::profile_name(profile.id())
+                    )
+                    .into(),
+                    kind: GotoKind::List {
+                        placeholder: "Switch".into(),
+                        action: "close".into(),
+                        empty: "No differences".into(),
+                        items: syntax_differences(&profile.compiled),
+                        initial: 0,
+                    },
+                    on_event: Rc::new(|_, _, _| {}),
+                };
+                window.defer(cx, move |window, cx| {
+                    goto::open(request, window, cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -305,33 +336,34 @@ impl Workspace {
             })
             .collect();
 
-        let commands =
-            [
-                (Command::Explain, "Explain detection", true),
-                (Command::Differences, "Show syntax differences", false),
-                (Command::Documentation, "Open profile documentation", true),
-            ]
-            .into_iter()
-            .map(|(command, title, enabled)| {
-                let id = format!("profile-menu-command:{command:?}");
-                let selector = id.clone();
-                row(theme, false)
-                    .id(SharedString::from(id))
-                    .debug_selector(move || selector.clone())
-                    .map(|r| {
-                        if enabled {
-                            let hover = theme.state.hover;
-                            r.hover(move |s| s.bg(hover)).on_click(cx.listener(
-                                move |this, _, _, cx| this.run_profile_command(command, cx),
-                            ))
-                        } else {
-                            r.opacity(DISABLED_OPACITY)
-                        }
-                    })
-                    .child(div().flex_none().w(px(icon::ROW)))
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .into_any_element()
-            });
+        let commands = [
+            (Command::Explain, "Explain detection", true),
+            (Command::Differences, "Show syntax differences", true),
+            (Command::Documentation, "Open profile documentation", true),
+        ]
+        .into_iter()
+        .map(|(command, title, enabled)| {
+            let id = format!("profile-menu-command:{command:?}");
+            let selector = id.clone();
+            row(theme, false)
+                .id(SharedString::from(id))
+                .debug_selector(move || selector.clone())
+                .map(|r| {
+                    if enabled {
+                        let hover = theme.state.hover;
+                        r.hover(move |s| s.bg(hover)).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.run_profile_command(command, window, cx);
+                            },
+                        ))
+                    } else {
+                        r.opacity(DISABLED_OPACITY)
+                    }
+                })
+                .child(div().flex_none().w(px(icon::ROW)))
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .into_any_element()
+        });
 
         let menu = panel(theme)
             .debug_selector(|| "profile-menu".into())
@@ -430,4 +462,53 @@ fn scope_id(scope: Scope) -> &'static str {
         Scope::Folder => "folder",
         Scope::Vault => "vault",
     }
+}
+
+/// A switch value as the differences list says it.
+fn switch_word(value: &SwitchValue) -> String {
+    match value {
+        SwitchValue::Bool(true) => "on".to_owned(),
+        SwitchValue::Bool(false) => "off".to_owned(),
+        SwitchValue::Int(n) => n.to_string(),
+        SwitchValue::Word(w) => w.clone(),
+    }
+}
+
+/// The rows of *Show syntax differences*: every switch on which a shipped
+/// profile other than `profile`'s differs from it, in matrix order, with
+/// the values of the profiles that differ.
+pub(super) fn syntax_differences(profile: &CompiledProfile) -> Vec<GotoItem> {
+    let others: Vec<(ProfileId, Switches)> = ProfileId::ALL
+        .into_iter()
+        .filter(|id| id.is_shipped() && *id != profile.id)
+        .map(|id| (id, gv_profile::definition(id).switches))
+        .collect();
+    Switches::KEYS
+        .iter()
+        .filter_map(|key| {
+            let mine = profile.switches.get(key)?;
+            let differ: Vec<String> = others
+                .iter()
+                .filter_map(|(id, switches)| {
+                    let theirs = switches.get(key)?;
+                    (theirs != mine).then(|| {
+                        format!("{} {}", status_bar::profile_name(*id), switch_word(&theirs))
+                    })
+                })
+                .collect();
+            let changed = profile.changed.contains(key);
+            if differ.is_empty() && !changed {
+                return None;
+            }
+            let mut label = format!("{key}: {}", switch_word(&mine));
+            if changed {
+                label.push_str(" (set for this folder)");
+            }
+            Some(GotoItem {
+                label: label.into(),
+                detail: (!differ.is_empty()).then(|| differ.join(" \u{b7} ").into()),
+                depth: 0,
+            })
+        })
+        .collect()
 }

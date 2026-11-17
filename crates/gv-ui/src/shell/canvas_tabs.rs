@@ -32,9 +32,13 @@ pub(crate) fn is_canvas(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
 }
 
-/// Whether the window opens `path` as a tab: a note, a canvas or a base.
+/// Whether the window opens `path` as a tab: a note, a canvas, a base, or
+/// a file the built-in viewers show by its name (text, code, images).
 pub(crate) fn opens_as_tab(path: &Path) -> bool {
-    crate::platform::is_markdown(path) || is_canvas(path) || super::bases_tabs::is_base(path)
+    crate::platform::is_markdown(path)
+        || is_canvas(path)
+        || super::bases_tabs::is_base(path)
+        || crate::file_viewer::kind(path).is_some()
 }
 
 impl Workspace {

@@ -7,9 +7,10 @@
 //!   Bookmarks (SPEC § Sidebar); Recent and Sync conflicts open from the
 //!   View menu (`workspace.show_*`) and have no switcher button; File ▸
 //!   Open recent… shows Recent too. The Files, Search
-//!   ([`crate::search_panel`]), Tags ([`crate::tags_panel`]) and Recent
-//!   panels are built; the others show their panel head and a one-line
-//!   empty state (empty states are not designed).
+//!   ([`crate::search_panel`]), Tags ([`crate::tags_panel`]), Recent and
+//!   Sync conflicts ([`crate::conflicts`]) panels are built; Bookmarks
+//!   shows its panel head and a one-line empty state (empty states are
+//!   not designed).
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
 //!   checker ([`super::link_checker`]) joins it once asked for.
@@ -105,6 +106,9 @@ pub(super) struct Panels {
     /// The Tags panel, once shown ([`super::tags`]).
     pub tags: Option<Entity<crate::tags_panel::TagsPanel>>,
     pub _tags_events: Option<Subscription>,
+    /// The Sync conflicts panel, once shown ([`super::sync_conflicts`]).
+    pub conflicts: Option<Entity<crate::conflicts::SyncConflictsPanel>>,
+    pub _conflicts_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -155,6 +159,10 @@ impl Workspace {
                 },
                 (SidebarPanel::Tags, _) => match self.panels.tags.clone() {
                     Some(tags) => sidebar.child(tags),
+                    None => sidebar,
+                },
+                (SidebarPanel::SyncConflicts, _) => match self.panels.conflicts.clone() {
+                    Some(conflicts) => sidebar.child(conflicts),
                     None => sidebar,
                 },
                 (other, _) => sidebar.child(empty_panel(other, theme)),
@@ -229,12 +237,22 @@ impl Workspace {
                         .as_ref()
                         .map(|t| t.read(cx).focus_handle(cx)),
                 ),
-                _ => false,
+                SidebarPanel::SyncConflicts => focused(
+                    self.panels
+                        .conflicts
+                        .as_ref()
+                        .map(|c| c.read(cx).focus_handle(cx)),
+                ),
+                SidebarPanel::Bookmarks => false,
             };
         self.panels.sidebar = panel;
         let takes_keyboard = matches!(
             panel,
-            SidebarPanel::Files | SidebarPanel::Recent | SidebarPanel::Search | SidebarPanel::Tags
+            SidebarPanel::Files
+                | SidebarPanel::Recent
+                | SidebarPanel::Search
+                | SidebarPanel::Tags
+                | SidebarPanel::SyncConflicts
         );
         if had_keyboard && !(focus && takes_keyboard) {
             self.focus_document(window, cx);
@@ -255,6 +273,12 @@ impl Workspace {
             let tags = self.ensure_tags_panel(window, cx);
             if focus {
                 tags.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+        if panel == SidebarPanel::SyncConflicts {
+            let conflicts = self.ensure_conflicts_panel(window, cx);
+            if focus {
+                conflicts.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
         if panel == SidebarPanel::Search {

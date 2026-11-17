@@ -231,3 +231,34 @@ fn the_chip_and_menu_use_tokens_only() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn syntax_differences_list_where_the_profile_differs() {
+    let obsidian = gv_profile::compile_builtin(ProfileId::Obsidian);
+    let rows = super::profile_chip::syntax_differences(&obsidian);
+    let wikilinks = rows
+        .iter()
+        .find(|r| r.label.as_ref() == "wikilinks: on")
+        .expect("a wikilinks row");
+    let detail = wikilinks.detail.as_ref().expect("the others' values");
+    assert!(detail.contains("CommonMark off"), "{detail}");
+    assert!(!detail.contains("Obsidian"), "{detail}");
+    // A switch on which every shipped profile agrees is not listed.
+    let commonmark = gv_profile::compile_builtin(ProfileId::CommonMark);
+    let all = gv_profile::Switches::KEYS.len();
+    assert!(super::profile_chip::syntax_differences(&commonmark).len() < all);
+}
+
+#[gpui::test]
+fn show_syntax_differences_opens_the_list(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let note = dir.path().join("note.md");
+    std::fs::write(&note, "# Notes\n").expect("write");
+    let (window, _workspace) = open(cx, &note);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    click(&mut vcx, "profile-chip");
+    click(&mut vcx, "profile-menu-command:Differences");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("goto-popover").is_some());
+}

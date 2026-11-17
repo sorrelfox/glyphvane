@@ -85,7 +85,7 @@ pub(crate) struct TrashCan(pub Arc<dyn Trash>);
 
 impl Global for TrashCan {}
 
-fn trash_can(cx: &App) -> Arc<dyn Trash> {
+pub(super) fn trash_can(cx: &App) -> Arc<dyn Trash> {
     cx.try_global::<TrashCan>()
         .map_or_else(|| Arc::new(SystemTrash) as Arc<dyn Trash>, |t| t.0.clone())
 }

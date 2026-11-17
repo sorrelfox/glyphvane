@@ -867,6 +867,8 @@ impl Workspace {
                         self.reload_canvas(index, cx);
                     } else if tab.bases.is_some() {
                         self.reload_base(index, cx);
+                    } else if tab.viewer.is_some() {
+                        self.reload_viewer(index, cx);
                     } else if let (Some(reader), Some(file)) =
                         (tab.reader.clone(), tab.path.clone())
                     {

@@ -83,6 +83,10 @@ impl Workspace {
         if let Some(base) = self.shown_base() {
             return area.child(base.clone()).into_any_element();
         }
+        // And any other file, in the built-in viewer.
+        if let Some(viewer) = self.shown_viewer() {
+            return area.child(viewer.clone()).into_any_element();
+        }
         match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
             (ViewMode::Preview, Some(reader), _, _) => {
                 return area.child(reader.clone()).into_any_element();
@@ -144,6 +148,13 @@ impl Workspace {
     pub(super) fn shown_base(&self) -> Option<&Entity<crate::bases_view::BasesView>> {
         let tab = self.active_tab();
         tab.bases.as_ref().filter(|_| tab.is_base())
+    }
+
+    /// The built-in viewer on screen: the active tab's, when it shows a
+    /// file that is not a note, a canvas or a base.
+    pub(super) fn shown_viewer(&self) -> Option<&Entity<crate::file_viewer::FileViewer>> {
+        let tab = self.active_tab();
+        tab.viewer.as_ref().filter(|_| tab.is_viewer())
     }
 
     /// The Source view on screen: the active tab's, in Edit and Split

@@ -18,6 +18,7 @@ pub mod crash_reports;
 pub mod editor;
 pub mod export;
 pub mod file_prompt;
+pub mod file_viewer;
 pub mod files;
 pub mod find;
 pub mod goto;
@@ -92,6 +93,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(audio::key_bindings());
     cx.bind_keys(canvas_view::key_bindings());
     cx.bind_keys(bases_view::key_bindings());
+    cx.bind_keys(file_viewer::key_bindings());
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     cx.bind_keys(search_panel::key_bindings());
