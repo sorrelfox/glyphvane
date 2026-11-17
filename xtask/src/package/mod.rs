@@ -21,6 +21,7 @@
 //! that installs the pinned version.
 
 mod archive;
+mod fonts;
 mod linux;
 mod macos;
 pub(crate) mod size;

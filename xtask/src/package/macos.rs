@@ -12,6 +12,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::archive::Tree;
+use super::fonts::add_pdf_fonts;
 use super::{APP_ID, Arch, Ctx, HELPER_BIN, MAIN_BIN, require_tool, run_checked};
 
 const MACOS_TOOLS_HINT: &str = "It is part of macOS; build macOS artifacts on a Mac.";
@@ -65,6 +66,7 @@ pub(super) fn app_bundle(ctx: &Ctx) -> Result<PathBuf> {
         &ctx.packaging("THIRD-PARTY-NOTICES.txt"),
         0o644,
     );
+    add_pdf_fonts(ctx, &mut tree, "Contents/Resources/fonts");
     tree.materialize(&app, ctx.epoch)?;
 
     if tool_exists("iconutil") {

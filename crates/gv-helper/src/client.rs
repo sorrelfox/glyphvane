@@ -20,7 +20,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use crate::protocol::{self, Hello, Job, Output, PdfJob, PdfOutput, Request, Response};
+use crate::protocol::{
+    self, Hello, Job, Output, PageImage, PageJob, PdfJob, PdfOutput, Request, Response,
+};
 
 /// The helper executable's name.
 pub const HELPER_NAME: &str = "glyphvane-helper";
@@ -307,7 +309,23 @@ impl Helper {
     ) -> Result<PdfOutput, HelperError> {
         match self.run(Job::Pdf(job), deadline, max_output, cancel)? {
             Output::Pdf(pdf) => Ok(pdf),
-            Output::Done => Err(HelperError::Protocol("no PDF".into())),
+            _ => Err(HelperError::Protocol("no PDF".into())),
+        }
+    }
+
+    /// Draws a page of a PDF.
+    pub fn page(
+        &self,
+        job: PageJob,
+        deadline: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<PageImage, HelperError> {
+        let max = u64::from(job.max_width.min(crate::protocol::MAX_PAGE_SIDE))
+            * u64::from(job.max_height.min(crate::protocol::MAX_PAGE_SIDE))
+            * 4;
+        match self.run(Job::Page(job), deadline, max, cancel)? {
+            Output::Page(image) => Ok(image),
+            _ => Err(HelperError::Protocol("no page image".into())),
         }
     }
 

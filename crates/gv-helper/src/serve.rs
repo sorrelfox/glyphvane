@@ -47,6 +47,13 @@ fn run(job: Job, max_output: u64) -> Result<Output, String> {
             }
             Ok(Output::Pdf(pdf))
         }
+        Job::Page(job) => {
+            let image = crate::raster::page(&job)?;
+            if image.rgba.len() as u64 > max_output {
+                return Err("the page image is too large".to_owned());
+            }
+            Ok(Output::Page(image))
+        }
         Job::Fault(Fault::Sleep { ms }) => {
             std::thread::sleep(Duration::from_millis(ms));
             Ok(Output::Done)

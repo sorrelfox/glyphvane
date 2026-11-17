@@ -18,8 +18,8 @@ required-features = ["engine"]
 
 [features]
 default = ["engine"]
-# The engines the helper runs: Typst PDF export.
-engine = ["dep:typst", "dep:typst-pdf", "dep:typst-layout", "dep:fontdb"]
+# The engines the helper runs: Typst PDF export, PDF page raster.
+engine = ["dep:typst", "dep:typst-pdf", "dep:typst-layout", "dep:fontdb", "dep:hayro"]
 
 [dependencies]
 postcard = { workspace = true }
@@ -28,6 +28,9 @@ fontdb = { workspace = true, optional = true }
 typst = { workspace = true, optional = true }
 typst-layout = { workspace = true, optional = true }
 typst-pdf = { workspace = true, optional = true }
+# PDF page raster (previews): the version Typst already pulls in through
+# typst-svg, without its embedded fallback fonts (MIT OR Apache-2.0).
+hayro = { version = "=0.7.1", default-features = false, optional = true }
 
 # The helper's address-space limit.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -41,6 +44,7 @@ gv-profile = { workspace = true }
 gv-render-tree = { workspace = true }
 gv-syntax = { workspace = true }
 lopdf = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

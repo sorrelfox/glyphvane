@@ -4,18 +4,22 @@
 //! The PDF engine of the app and of `glyphvane export --pdf`: generated
 //! Typst documents compiled by the separate `glyphvane-helper` executable,
 //! found next to this one, started on demand and supervised (deadline,
-//! cancellation, memory limit, kill and restart).
+//! cancellation, memory limit, kill and restart). The helper also draws
+//! pages of a PDF for the export dialog's preview.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use gv_export::TypstDocument;
-use gv_helper::{Helper, HelperError, PdfJob};
-use gv_ui::export::{PdfEngine, PdfError};
+use gv_helper::{Helper, HelperError, PageJob, PdfJob};
+use gv_ui::export::{PageRaster, PdfEngine, PdfError};
 
 /// The longest a PDF may take (plan: 60 s; 300 pages took 0.33 s).
 const DEADLINE: Duration = Duration::from_secs(60);
+
+/// The longest drawing a page may take (plan: 5 s per page).
+const PAGE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The largest PDF accepted, in bytes (under the IPC frame cap).
 const MAX_OUTPUT: u64 = 200 * 1024 * 1024;
@@ -60,6 +64,37 @@ impl PdfEngine for HelperEngine {
                 }
                 Ok(out.pdf)
             }
+            Err(HelperError::Cancelled) => Err(PdfError::Cancelled),
+            Err(e) => Err(PdfError::Failed(e.to_string())),
+        }
+    }
+
+    fn draws_pages(&self) -> bool {
+        true
+    }
+
+    fn page(
+        &self,
+        pdf: &[u8],
+        page: u32,
+        max_width: u32,
+        max_height: u32,
+        cancel: &AtomicBool,
+    ) -> Result<PageRaster, PdfError> {
+        let helper = self.helper()?;
+        let job = PageJob {
+            pdf: pdf.to_vec(),
+            page,
+            max_width,
+            max_height,
+        };
+        match helper.page(job, PAGE_DEADLINE, cancel) {
+            Ok(image) => Ok(PageRaster {
+                width: image.width,
+                height: image.height,
+                rgba: image.rgba,
+                pages: image.pages,
+            }),
             Err(HelperError::Cancelled) => Err(PdfError::Cancelled),
             Err(e) => Err(PdfError::Failed(e.to_string())),
         }

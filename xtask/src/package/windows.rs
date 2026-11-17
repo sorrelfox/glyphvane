@@ -13,12 +13,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use super::archive::Tree;
+use super::fonts::add_pdf_fonts;
 use super::{Arch, Ctx, HELPER_BIN, MAIN_BIN, require_tool, run_checked};
 
 /// The pinned WiX Toolset version (a .NET tool) and its UI extension.
 const WIX_VERSION: &str = "6.0.2";
 
-/// `glyphvane-<version>-<triple>.zip`: both executables, licence, notices.
+/// `glyphvane-<version>-<triple>.zip`: both executables, licence, notices,
+/// and the PDF fonts in `share/glyphvane/fonts/`.
 pub(super) fn zip(ctx: &Ctx) -> Result<PathBuf> {
     let top = format!("glyphvane-{}-{}", ctx.version, ctx.target);
     let mut tree = Tree::default();
@@ -49,6 +51,7 @@ pub(super) fn zip(ctx: &Ctx) -> Result<PathBuf> {
         &ctx.packaging("THIRD-PARTY-NOTICES.txt"),
         0o644,
     );
+    add_pdf_fonts(ctx, &mut tree, &format!("{top}/share/glyphvane/fonts"));
     let out = ctx.out.join(format!("{top}.zip"));
     tree.write_zip(&out, ctx.epoch)?;
     Ok(out)
@@ -103,7 +106,10 @@ pub(super) fn msi(ctx: &Ctx) -> Result<PathBuf> {
         .arg("-d")
         .arg(define("IconFile", &ctx.packaging("icons/glyphvane.ico")));
     if ctx.helper_exe.is_some() {
-        cmd.args(["-d", "IncludeHelper=1"]);
+        // The helper's PDF fonts (`share\glyphvane\fonts\` beside it).
+        cmd.args(["-d", "IncludeHelper=1"])
+            .arg("-d")
+            .arg(define("ThirdPartyDir", &ctx.root.join("third_party")));
     }
     cmd.arg("-o").arg(&out);
     run_checked(&mut cmd, "wix build")?;

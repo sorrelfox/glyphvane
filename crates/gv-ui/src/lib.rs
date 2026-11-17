@@ -105,6 +105,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     palette::init(cx);
     goto::init(cx);
     file_prompt::init(cx);
+    export::dialog::init(cx);
     switcher::init(cx);
     settings_window::init(cx);
     cheatsheet::init(cx);

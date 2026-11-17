@@ -20,6 +20,18 @@
 //!   [`PdfEngine`] the application installs ([`set_pdf_engine`]): the
 //!   separate helper process, which compiles it within a deadline and can
 //!   be cancelled.
+//! - The commands ask for their options first in an [`ExportDialog`]
+//!   ([`dialog`]): the table of contents and where images go for HTML;
+//!   paper, orientation, margins, header, page numbers, page breaks and the
+//!   table of contents for PDF, with a preview of the first page; the same
+//!   without the paper, orientation and margins (the print dialog's) for
+//!   Print.
+
+pub mod dialog;
+#[cfg(test)]
+mod dialog_tests;
+
+pub use dialog::{ExportChoices, ExportDialog, ExportKind, ExportRequest, PreviewFn, dialog_of};
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -130,8 +142,23 @@ pub fn export_text(
     profile: &CompiledProfile,
     index: Option<&PathIndex>,
 ) -> Export {
+    export_text_with(text, path, root, profile, index, &ExportChoices::default())
+}
+
+/// Exports `text` (the document at `path`) as a standalone HTML file with
+/// the dialog's `choices` (table of contents, where images go).
+pub fn export_text_with(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    choices: &ExportChoices,
+) -> Export {
     let tree = document_tree(text, path, profile, index);
-    gv_export::export_html(&tree, &options(path, root, profile.id))
+    let mut opts = options(path, root, profile.id);
+    choices.apply(&mut opts);
+    gv_export::export_html(&tree, &opts)
 }
 
 /// The Typst document of `text` (the document at `path`) for a PDF with
@@ -144,8 +171,23 @@ pub fn pdf_document(
     index: Option<&PathIndex>,
     page: &PageOptions,
 ) -> TypstDocument {
+    pdf_document_with(text, path, root, profile, index, page, false)
+}
+
+/// [`pdf_document`] with a table of contents when `toc`.
+pub fn pdf_document_with(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    page: &PageOptions,
+    toc: bool,
+) -> TypstDocument {
     let tree = document_tree(text, path, profile, index);
-    gv_export::export_typst(&tree, &options(path, root, profile.id), page)
+    let mut opts = options(path, root, profile.id);
+    opts.toc = toc;
+    gv_export::export_typst(&tree, &opts, page)
 }
 
 /// Why a PDF was not made.
@@ -177,6 +219,36 @@ pub trait PdfEngine: Send + Sync {
         max_pages: u32,
         cancel: &AtomicBool,
     ) -> Result<Vec<u8>, PdfError>;
+
+    /// Whether [`PdfEngine::page`] draws pages: the export dialog shows a
+    /// preview only then.
+    fn draws_pages(&self) -> bool {
+        false
+    }
+
+    /// Page `page` (from 0) of `pdf` drawn to fit `max_width` ×
+    /// `max_height` pixels, for previews. Engines without a raster say so.
+    fn page(
+        &self,
+        pdf: &[u8],
+        page: u32,
+        max_width: u32,
+        max_height: u32,
+        cancel: &AtomicBool,
+    ) -> Result<PageRaster, PdfError> {
+        let _ = (pdf, page, max_width, max_height, cancel);
+        Err(PdfError::Failed("previews are not available".to_owned()))
+    }
+}
+
+/// A drawn PDF page: straight-alpha RGBA rows, top first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRaster {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    /// The number of pages of the PDF.
+    pub pages: u32,
 }
 
 /// A PDF and the images it left out.
@@ -206,6 +278,46 @@ pub fn export_pdf(
         notes: doc.notes,
         title: doc.title,
     })
+}
+
+/// Exports `text` (the document at `path`) as a PDF through `engine` with
+/// the dialog's `choices` (the page and the table of contents).
+#[allow(clippy::too_many_arguments)]
+pub fn export_pdf_with(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    choices: &ExportChoices,
+    engine: &dyn PdfEngine,
+    cancel: &AtomicBool,
+) -> Result<Pdf, PdfError> {
+    let doc = pdf_document_with(text, path, root, profile, index, &choices.page, choices.toc);
+    let bytes = engine.render(&doc, choices.page.max_pages, cancel)?;
+    Ok(Pdf {
+        bytes,
+        notes: doc.notes,
+        title: doc.title,
+    })
+}
+
+/// The first page of the PDF of `text` with `choices`, drawn to fit
+/// `max_width` × `max_height` pixels, for the export dialog's preview.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_pdf(
+    text: &str,
+    path: Option<&Path>,
+    root: Option<&Path>,
+    profile: &CompiledProfile,
+    index: Option<&PathIndex>,
+    choices: &ExportChoices,
+    (max_width, max_height): (u32, u32),
+    engine: &dyn PdfEngine,
+    cancel: &AtomicBool,
+) -> Result<PageRaster, PdfError> {
+    let pdf = export_pdf_with(text, path, root, profile, index, choices, engine, cancel)?;
+    engine.page(&pdf.bytes, 0, max_width, max_height, cancel)
 }
 
 /// The engine [`set_pdf_engine`] installed.

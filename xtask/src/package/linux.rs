@@ -10,6 +10,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::archive::Tree;
+use super::fonts::add_pdf_fonts;
 use super::{APP_ID, Arch, Ctx, HELPER_BIN, MAIN_BIN, require_tool, run_checked, sha256_file};
 use crate::cargo;
 
@@ -97,6 +98,7 @@ pub(super) fn tarball(ctx: &Ctx) -> Result<PathBuf> {
         &format!("{APP_ID}.metainfo.xml"),
     );
     add_emoji_font(ctx, &mut tree, &format!("{top}/share"));
+    add_pdf_fonts(ctx, &mut tree, &format!("{top}/share/glyphvane/fonts"));
     let out = ctx.out.join(format!("{top}.tar.gz"));
     tree.write_tar_gz(&out, ctx.epoch)?;
     Ok(out)
@@ -346,6 +348,7 @@ pub(super) fn appimage(ctx: &Ctx) -> Result<PathBuf> {
         &format!("{APP_ID}.appdata.xml"),
     );
     add_emoji_font(ctx, &mut tree, "usr/share");
+    add_pdf_fonts(ctx, &mut tree, "usr/share/glyphvane/fonts");
     tree.file(
         "usr/share/licenses/glyphvane/LICENSE",
         &ctx.root.join("LICENSE"),

@@ -15,6 +15,30 @@ licences can be read in the source of each crate on https://crates.io.
 Bundled fonts
 -------------
 
+Inter (with the PDF export helper)
+  Files:     share/glyphvane/fonts/InterVariable.ttf,
+             share/glyphvane/fonts/InterVariable-Italic.ttf
+             (macOS: Contents/Resources/fonts/; the licence:
+             Inter-OFL.txt in the same folder)
+  Version:   4.1, variable
+  Source:    https://github.com/rsms/inter (tag v4.1)
+  Copyright: Copyright (c) 2016 The Inter Project Authors
+             (https://github.com/rsms/inter)
+  Licence:   SIL Open Font License, Version 1.1 (OFL-1.1); the licence
+             text is the one reproduced below for Noto Color Emoji.
+
+JetBrains Mono (with the PDF export helper)
+  Files:     share/glyphvane/fonts/JetBrainsMono-Variable.ttf,
+             share/glyphvane/fonts/JetBrainsMono-Variable-Italic.ttf
+             (macOS: Contents/Resources/fonts/; the licence:
+             JetBrainsMono-OFL.txt in the same folder)
+  Version:   2.304, variable
+  Source:    https://github.com/JetBrains/JetBrainsMono (tag v2.304)
+  Copyright: Copyright 2020 The JetBrains Mono Project Authors
+             (https://github.com/JetBrains/JetBrainsMono)
+  Licence:   SIL Open Font License, Version 1.1 (OFL-1.1); the licence
+             text is the one reproduced below for Noto Color Emoji.
+
 Noto Color Emoji (Linux packages only)
   Files:     share/glyphvane/fonts/NotoColorEmoji.ttf
              (the licence: share/glyphvane/fonts/NotoColorEmoji-OFL.txt)

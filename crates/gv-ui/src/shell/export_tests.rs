@@ -241,6 +241,35 @@ impl Fixture {
     fn dispatch(&mut self, action: impl gpui::Action) {
         self.vcx.dispatch_action(action);
         draw(&mut self.vcx);
+        // The export dialog asks for the options first: take them as they
+        // are.
+        if self.export_dialog_open() {
+            self.vcx.simulate_keystrokes("enter");
+            draw(&mut self.vcx);
+        }
+    }
+
+    /// Dispatches `action` and leaves its export dialog open.
+    fn dispatch_to_dialog(&mut self, action: impl gpui::Action) {
+        self.vcx.dispatch_action(action);
+        draw(&mut self.vcx);
+        assert!(self.export_dialog_open(), "the export dialog asks first");
+    }
+
+    fn export_dialog_open(&mut self) -> bool {
+        self.vcx.update(|window, cx| {
+            crate::export::dialog_of(window, cx).is_some_and(|d| d.read(cx).is_open())
+        })
+    }
+
+    fn click(&mut self, selector: &'static str) {
+        let at = self
+            .vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+            .center();
+        self.vcx.simulate_click(at, gpui::Modifiers::none());
+        draw(&mut self.vcx);
     }
 
     fn notice(&self) -> Option<String> {
@@ -557,4 +586,94 @@ fn without_a_print_dialog_the_pdf_opens_in_the_viewer(cx: &mut TestAppContext) {
     assert_eq!(std::fs::read(pdf).expect("written"), FAKE_PDF);
     assert_eq!(f.notice().as_deref(), Some("Opened in the PDF viewer."));
     std::fs::remove_dir_all(pdf.parent().expect("folder")).expect("clean up");
+}
+
+#[gpui::test]
+fn the_export_dialog_options_reach_the_export(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    // HTML: a table of contents.
+    f.dialog
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Some(f.dir.path().join("toc.html"))));
+    f.dispatch_to_dialog(file_commands::ExportHtml);
+    assert!(f.dialog.asked.borrow().is_empty(), "the options come first");
+    f.click("export-toc-switch");
+    f.click("export-confirm");
+    let html = std::fs::read_to_string(f.dir.path().join("toc.html")).expect("written");
+    assert!(html.contains("gv-toc"), "{html}");
+
+    // PDF: landscape Letter with a table of contents and no page numbers.
+    f.dialog
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Some(f.dir.path().join("out.pdf"))));
+    f.dispatch_to_dialog(file_commands::ExportPdf);
+    f.click("export-paper-letter");
+    f.click("export-landscape");
+    f.click("export-toc-switch");
+    f.click("export-page-numbers-switch");
+    f.click("export-confirm");
+    let made = sources(&f);
+    assert_eq!(
+        made.len(),
+        1,
+        "no preview with an engine that draws no pages"
+    );
+    assert!(made[0].contains("paper: \"us-letter\", flipped: true"));
+    assert!(made[0].contains("#outline()"));
+    assert!(made[0].contains("footer: none"));
+
+    // The choices are remembered for the next PDF.
+    f.dialog
+        .answers
+        .borrow_mut()
+        .push_back(Ok(Some(f.dir.path().join("again.pdf"))));
+    f.dispatch(file_commands::ExportPdf);
+    assert!(sources(&f)[1].contains("paper: \"us-letter\", flipped: true"));
+}
+
+#[gpui::test]
+fn cancelling_the_export_dialog_exports_nothing(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    f.dispatch_to_dialog(file_commands::ExportPdf);
+    f.vcx.simulate_keystrokes("escape");
+    draw(&mut f.vcx);
+    assert!(f.dialog.asked.borrow().is_empty());
+    assert!(sources(&f).is_empty());
+
+    let printer = FakePrinter::answering(Some(None));
+    f.vcx
+        .update(|_, cx| crate::print::set_printer(cx, printer.clone()));
+    f.dispatch_to_dialog(file_commands::Print);
+    f.click("export-cancel");
+    assert!(printer.asked.borrow().is_empty(), "no print dialog");
+}
+
+#[gpui::test]
+fn print_options_reach_the_pdf(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let a4 = PageSetup {
+        width_mm: 210.0,
+        height_mm: 297.0,
+        landscape: false,
+        margin_mm: None,
+    };
+    let printer = FakePrinter::answering(Some(Some(a4)));
+    f.vcx
+        .update(|_, cx| crate::print::set_printer(cx, printer.clone()));
+    f.dispatch_to_dialog(file_commands::Print);
+    f.click("export-header-switch");
+    f.click("export-page-breaks-switch");
+    f.click("export-confirm");
+    let sources = sources(&f);
+    assert_eq!(sources.len(), 1);
+    assert!(
+        sources[0].contains("width: 210mm, height: 297mm"),
+        "{}",
+        sources[0]
+    );
+    assert!(sources[0].contains("header: none"));
+    assert!(sources[0].contains("pagebreak(weak: true)"));
+    assert_eq!(printer.printed.borrow().len(), 1);
 }

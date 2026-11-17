@@ -80,7 +80,10 @@ workspace = true
 # cargo-generate-rpm. The `with-helper` variants add `glyphvane-helper` in
 # /usr/libexec/glyphvane/; xtask selects them when that binary is built.
 # The colour emoji font in /usr/share/glyphvane/fonts/ is added by the app
-# only when the installed one cannot be drawn (src/emoji_font.rs).
+# only when the installed one cannot be drawn (src/emoji_font.rs). The
+# `with-helper` variants also install the PDF export's fonts there (Inter and
+# JetBrains Mono; the helper finds them from /usr/libexec/glyphvane/); keep
+# them in step with xtask/src/package/fonts.rs.
 [package.metadata.deb]
 name = "glyphvane"
 maintainer = "sorrelfox <348316453+sorrelfox@users.noreply.github.com>"
@@ -113,6 +116,12 @@ assets = [
 name = "glyphvane"
 merge-assets.append = [
   ["target/release/glyphvane-helper", "usr/libexec/glyphvane/", "755"],
+  ["../../third_party/inter/InterVariable.ttf", "usr/share/glyphvane/fonts/", "644"],
+  ["../../third_party/inter/InterVariable-Italic.ttf", "usr/share/glyphvane/fonts/", "644"],
+  ["../../third_party/inter/LICENSE", "usr/share/glyphvane/fonts/Inter-OFL.txt", "644"],
+  ["../../third_party/jetbrains-mono/JetBrainsMono-Variable.ttf", "usr/share/glyphvane/fonts/", "644"],
+  ["../../third_party/jetbrains-mono/JetBrainsMono-Variable-Italic.ttf", "usr/share/glyphvane/fonts/", "644"],
+  ["../../third_party/jetbrains-mono/LICENSE", "usr/share/glyphvane/fonts/JetBrainsMono-OFL.txt", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -160,4 +169,10 @@ assets = [
   { source = "packaging/THIRD-PARTY-NOTICES.txt", dest = "/usr/share/doc/glyphvane/THIRD-PARTY-NOTICES.txt", mode = "644", doc = true },
   { source = "third_party/noto-emoji/NotoColorEmoji.ttf", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji.ttf", mode = "644" },
   { source = "third_party/noto-emoji/LICENSE", dest = "/usr/share/glyphvane/fonts/NotoColorEmoji-OFL.txt", mode = "644" },
+  { source = "third_party/inter/InterVariable.ttf", dest = "/usr/share/glyphvane/fonts/InterVariable.ttf", mode = "644" },
+  { source = "third_party/inter/InterVariable-Italic.ttf", dest = "/usr/share/glyphvane/fonts/InterVariable-Italic.ttf", mode = "644" },
+  { source = "third_party/inter/LICENSE", dest = "/usr/share/glyphvane/fonts/Inter-OFL.txt", mode = "644" },
+  { source = "third_party/jetbrains-mono/JetBrainsMono-Variable.ttf", dest = "/usr/share/glyphvane/fonts/JetBrainsMono-Variable.ttf", mode = "644" },
+  { source = "third_party/jetbrains-mono/JetBrainsMono-Variable-Italic.ttf", dest = "/usr/share/glyphvane/fonts/JetBrainsMono-Variable-Italic.ttf", mode = "644" },
+  { source = "third_party/jetbrains-mono/LICENSE", dest = "/usr/share/glyphvane/fonts/JetBrainsMono-OFL.txt", mode = "644" },
 ]

@@ -15,10 +15,13 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// The protocol's version. Bump it whenever a type of this module changes.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// The largest frame, in bytes, in either direction.
 pub const MAX_FRAME: u32 = 256 << 20;
+
+/// The largest side of a drawn page ([`Job::Page`]), in pixels.
+pub const MAX_PAGE_SIDE: u32 = 4096;
 
 /// The version both sides announce.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -70,6 +73,8 @@ pub enum Response {
 pub enum Job {
     /// Compile a generated Typst document to PDF.
     Pdf(PdfJob),
+    /// Draw a page of a PDF.
+    Page(PageJob),
     /// Misbehave on purpose, for the tests of the parent's limits.
     Fault(Fault),
 }
@@ -94,8 +99,8 @@ pub struct PdfJob {
     /// Virtual paths (`/assets/N.ext`) and their bytes; no other file can
     /// be read.
     pub assets: Vec<(String, Vec<u8>)>,
-    /// Font families the document names; the helper loads the installed
-    /// faces of these families.
+    /// Font families the document names; the helper loads the bundled
+    /// faces of these families, else the installed ones.
     pub fonts: Vec<String>,
     /// More pages than this fail the job.
     pub max_pages: u32,
@@ -107,6 +112,7 @@ pub struct PdfJob {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Output {
     Pdf(PdfOutput),
+    Page(PageImage),
     /// The answer of a [`Job::Fault`] that returned.
     Done,
 }
@@ -118,6 +124,27 @@ pub struct PdfOutput {
     pub pages: u32,
     /// Typst's warnings, as text.
     pub warnings: Vec<String>,
+}
+
+/// A page of a PDF to draw, scaled to fit a box.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageJob {
+    pub pdf: Vec<u8>,
+    /// The page, from 0.
+    pub page: u32,
+    /// The box the image fits in, in pixels.
+    pub max_width: u32,
+    pub max_height: u32,
+}
+
+/// A drawn page: straight-alpha RGBA rows, top first, on white.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    /// The number of pages of the PDF.
+    pub pages: u32,
 }
 
 /// Writes one frame.

@@ -167,3 +167,46 @@ fn a_missing_helper_says_so() {
     assert!(matches!(err, HelperError::NotFound), "{err}");
     assert!(err.to_string().contains("not installed"));
 }
+
+#[test]
+fn the_helper_draws_a_page_of_a_pdf() {
+    let helper = Helper::new(config());
+    let pdf = helper
+        .pdf(pdf_job(), 30 * SECOND, 1 << 20, &never())
+        .expect("a PDF")
+        .pdf;
+    let job = gv_helper::PageJob {
+        pdf: pdf.clone(),
+        page: 0,
+        max_width: 50,
+        max_height: 80,
+    };
+    let image = helper.page(job, 30 * SECOND, &never()).expect("drawn");
+    // A 100 × 100 pt page in a 50 × 80 box.
+    assert_eq!((image.width, image.height), (50, 50));
+    assert_eq!(image.pages, 1);
+    // The red box (Typst's `red`, #ff4136), on white.
+    let red = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[0] > 200 && p[1] < 100 && p[2] < 100)
+        .count();
+    assert!(red > 0, "the box is drawn");
+    assert_eq!(&image.rgba[..4], &[255, 255, 255, 255]);
+
+    // Not a PDF: an engine error, and the helper stays.
+    let pid = helper.pid();
+    let bad = gv_helper::PageJob {
+        pdf: b"%PDF-1.7 nothing".to_vec(),
+        page: 0,
+        max_width: 50,
+        max_height: 50,
+    };
+    let err = helper
+        .page(bad, 30 * SECOND, &never())
+        .expect_err("not drawn");
+    assert!(matches!(err, HelperError::Failed(_)), "{err}");
+    assert_eq!(helper.pid(), pid);
+}

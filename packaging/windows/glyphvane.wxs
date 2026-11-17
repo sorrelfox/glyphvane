@@ -8,6 +8,8 @@
     Version       x.y.z (MSI versions are numeric)
     BinDir        directory with glyphvane.exe (and glyphvane-helper.exe)
     IncludeHelper defined when glyphvane-helper.exe is packaged
+    ThirdPartyDir the repository's third_party folder (with IncludeHelper:
+                  the PDF fonts, installed in share\glyphvane\fonts)
     LicenseFile   the plain-text licence
     LicenseRtf    the licence as RTF, for the installer's licence page
     NoticesFile   the third-party notices
@@ -33,7 +35,13 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsDir" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="Glyphvane" />
+        <Directory Id="INSTALLFOLDER" Name="Glyphvane">
+          <Directory Id="ShareDir" Name="share">
+            <Directory Id="ShareAppDir" Name="glyphvane">
+              <Directory Id="FontsDir" Name="fonts" />
+            </Directory>
+          </Directory>
+        </Directory>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
@@ -52,6 +60,19 @@
       <Component Id="HelperExe">
         <File Id="HelperExe" Source="$(var.BinDir)\glyphvane-helper.exe" />
         <RegistryValue Root="HKCU" Key="Software\Glyphvane\Components" Name="HelperExe" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- The PDF export's fonts; the helper finds them in share\glyphvane\fonts. -->
+      <Component Id="PdfFonts" Directory="FontsDir">
+        <File Id="InterFont" Source="$(var.ThirdPartyDir)\inter\InterVariable.ttf" />
+        <File Id="InterItalicFont" Source="$(var.ThirdPartyDir)\inter\InterVariable-Italic.ttf" />
+        <File Id="InterLicence" Source="$(var.ThirdPartyDir)\inter\LICENSE" Name="Inter-OFL.txt" />
+        <File Id="MonoFont" Source="$(var.ThirdPartyDir)\jetbrains-mono\JetBrainsMono-Variable.ttf" />
+        <File Id="MonoItalicFont" Source="$(var.ThirdPartyDir)\jetbrains-mono\JetBrainsMono-Variable-Italic.ttf" />
+        <File Id="MonoLicence" Source="$(var.ThirdPartyDir)\jetbrains-mono\LICENSE" Name="JetBrainsMono-OFL.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Glyphvane\Components" Name="PdfFonts" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveFontsDir" Directory="FontsDir" On="uninstall" />
+        <RemoveFolder Id="RemoveShareAppDir" Directory="ShareAppDir" On="uninstall" />
+        <RemoveFolder Id="RemoveShareDir" Directory="ShareDir" On="uninstall" />
       </Component>
 <?endif?>
       <Component Id="Documents">

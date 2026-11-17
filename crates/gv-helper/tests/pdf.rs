@@ -4,7 +4,8 @@
 //! PDF export end to end, in process: Markdown → render tree → generated
 //! Typst (gv-export) → PDF (the helper's engine), read back with lopdf.
 //!
-//! The PDFs depend on the installed fonts, so the checks are on structure
+//! Text is set in the bundled fonts, with installed ones only for what
+//! they lack (the fixture's CJK and emoji), so the checks are on structure
 //! (pages, outline, links, images, page size, determinism) and on the
 //! extracted text, not on bytes.
 

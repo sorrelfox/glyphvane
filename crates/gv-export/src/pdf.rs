@@ -21,6 +21,10 @@
 //! The PDF gets an outline (bookmarks) from the headings, link annotations
 //! for links that resolve inside the document or to the web, and no date,
 //! so the same document gives the same PDF.
+//!
+//! Text is set in the faces the application bundles (Inter and JetBrains
+//! Mono, first in [`SANS_FONTS`] and [`MONO_FONTS`]); the families after
+//! them only cover what those lack (CJK, symbols, emoji).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -139,9 +143,10 @@ pub struct TypstDocument {
     pub notes: Vec<ImageNote>,
 }
 
-/// Body text, in order of preference; the last ones cover symbols, CJK
-/// and emoji.
+/// Body text, in order of preference: the bundled Inter first; the last
+/// ones cover symbols, CJK and emoji.
 pub const SANS_FONTS: &[&str] = &[
+    "Inter Variable",
     "Inter",
     "Noto Sans",
     "DejaVu Sans",
@@ -156,7 +161,7 @@ pub const SANS_FONTS: &[&str] = &[
     "Segoe UI Emoji",
 ];
 
-/// Code.
+/// Code: the bundled JetBrains Mono first.
 pub const MONO_FONTS: &[&str] = &[
     "JetBrains Mono",
     "DejaVu Sans Mono",

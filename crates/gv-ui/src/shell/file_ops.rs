@@ -558,12 +558,16 @@ impl Workspace {
                 this.open_with_default_app_command(window, cx);
             }),
         )
-        .on_action(cx.listener(|this, _: &file_commands::ExportHtml, _, cx| {
-            this.export_html_command(cx);
-        }))
-        .on_action(cx.listener(|this, _: &file_commands::ExportPdf, _, cx| {
-            this.export_pdf_command(cx);
-        }))
+        .on_action(
+            cx.listener(|this, _: &file_commands::ExportHtml, window, cx| {
+                this.export_html_command(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &file_commands::ExportPdf, window, cx| {
+                this.export_pdf_command(window, cx);
+            }),
+        )
         .on_action(cx.listener(|this, _: &file_commands::Print, window, cx| {
             this.print_command(window, cx);
         }))

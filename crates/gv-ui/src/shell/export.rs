@@ -5,15 +5,20 @@
 //! *Copy as rich text* (FR-EXPORT-01 to -04, -06; see [`crate::export`]
 //! and [`crate::print`]).
 //!
-//! - **Export as HTML…** asks where to save (the platform's save dialog,
-//!   in the document's folder with its name and `.html`), then exports
-//!   the tab's text off the UI thread: the editor's text when the tab has
-//!   one (saved or not), else the file's. The file is written whole.
-//! - **Export as PDF…** asks where to save (`name.pdf`), then generates
+//! - **Export as HTML…** asks for the options first (the export dialog:
+//!   table of contents, where images go), then where to save (the
+//!   platform's save dialog, in the document's folder with its name and
+//!   `.html`), then exports the tab's text off the UI thread: the editor's
+//!   text when the tab has one (saved or not), else the file's. The file is
+//!   written whole.
+//! - **Export as PDF…** asks for the options (paper, orientation, margins,
+//!   header, page numbers, page breaks, table of contents, with a preview
+//!   of the first page), then where to save (`name.pdf`), then generates
 //!   the document and has the PDF engine (the helper process) compile it,
 //!   off the UI thread. A neutral infobar shows meanwhile; its Cancel
 //!   stops the engine.
-//! - **Print…** asks the platform's print dialog first (where it asks
+//! - **Print…** asks for the options (header, page numbers, page breaks,
+//!   table of contents), then the platform's print dialog (where it asks
 //!   before the PDF exists), makes the PDF for the paper chosen, then
 //!   hands it over. Without a native print path the PDF opens in the
 //!   system's viewer.
@@ -30,13 +35,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::{AppContext as _, ClipboardItem, Context, EntityId, Focusable as _, Global, Window};
+use std::rc::Rc;
+
+use gpui::{
+    App, AppContext as _, ClipboardItem, Context, EntityId, Focusable as _, Global, WeakEntity,
+    Window,
+};
 use gv_export::PageOptions;
 use gv_profile::CompiledProfile;
 use gv_vault::PathIndex;
 
 use super::{ViewMode, Workspace};
-use crate::export::{self, PdfError};
+use crate::export::{self, ExportChoices, ExportKind, ExportRequest, PdfError, PreviewFn};
 use crate::files::notice::{Notice, NoticeAction, NoticeButton, NoticeKind, Topic};
 use crate::files::save_as::{self, SavePrompt};
 use crate::platform;
@@ -121,12 +131,52 @@ fn print_page(setup: Option<PageSetup>) -> PageOptions {
 }
 
 /// What an export works from.
+#[derive(Clone)]
 struct Source {
     text: String,
     path: Option<PathBuf>,
     profile: Arc<CompiledProfile>,
     index: Option<PathIndex>,
     root: Option<PathBuf>,
+}
+
+/// Asks `kind`'s options in the window's export dialog, then calls
+/// `then` on the workspace with them; without a dialog (a window without
+/// the root layer) the remembered choices are used at once.
+fn ask_options(
+    kind: ExportKind,
+    preview: Option<PreviewFn>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+    then: impl Fn(&mut Workspace, ExportChoices, &mut Window, &mut Context<'_, Workspace>) + 'static,
+) {
+    let choices = export::dialog::remembered(kind, cx);
+    let this: WeakEntity<Workspace> = cx.weak_entity();
+    let then = Rc::new(then);
+    let on_done = {
+        let then = then.clone();
+        let this = this.clone();
+        Rc::new(
+            move |choices: Option<ExportChoices>, window: &mut Window, cx: &mut App| {
+                if let Some(choices) = choices {
+                    let then = then.clone();
+                    this.update(cx, |ws, cx| then(ws, choices, window, cx)).ok();
+                }
+            },
+        )
+    };
+    let request = ExportRequest {
+        kind,
+        choices: choices.clone(),
+        preview,
+        on_done,
+    };
+    // The dialog is opened once this command's update has finished.
+    window.defer(cx, move |window, cx| {
+        if !export::dialog::open(request, window, cx) {
+            this.update(cx, |ws, cx| then(ws, choices, window, cx)).ok();
+        }
+    });
 }
 
 impl Workspace {
@@ -167,12 +217,30 @@ impl Workspace {
     }
 
     /// `file.export_html`.
-    pub(super) fn export_html_command(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn export_html_command(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let tab = self.command_tab(cx);
         let source = match self.export_source(tab, cx) {
             Ok(source) => source,
             Err(reason) => return self.ask(Notice::export_failed(&reason), cx),
         };
+        ask_options(
+            ExportKind::Html,
+            None,
+            window,
+            cx,
+            move |ws, choices, _, cx| {
+                ws.export_html_with(source.clone(), choices, cx);
+            },
+        );
+    }
+
+    /// Asks where to save, then exports `source` as HTML with `choices`.
+    fn export_html_with(
+        &mut self,
+        source: Source,
+        choices: ExportChoices,
+        cx: &mut Context<'_, Self>,
+    ) {
         let directory = source
             .path
             .as_deref()
@@ -198,12 +266,13 @@ impl Workspace {
             };
             let written = cx
                 .background_spawn(async move {
-                    let export = export::export_text(
+                    let export = export::export_text_with(
                         &source.text,
                         source.path.as_deref(),
                         source.root.as_deref(),
                         &source.profile,
                         source.index.as_ref(),
+                        &choices,
                     );
                     export::write_export(&target, &export)
                         .map(|()| export.notes.len())
@@ -269,7 +338,7 @@ impl Workspace {
     }
 
     /// `file.export_pdf`.
-    pub(super) fn export_pdf_command(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn export_pdf_command(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let tab = self.command_tab(cx);
         let source = match self.export_source(tab, cx) {
             Ok(source) => source,
@@ -278,6 +347,42 @@ impl Workspace {
         let Some(engine) = export::pdf_engine(cx) else {
             return self.ask(pdf_failed(NO_ENGINE), cx);
         };
+        let preview = engine.draws_pages().then(|| {
+            let (source, engine) = (source.clone(), engine.clone());
+            let preview: PreviewFn = Arc::new(move |choices, size, cancel| {
+                export::preview_pdf(
+                    &source.text,
+                    source.path.as_deref(),
+                    source.root.as_deref(),
+                    &source.profile,
+                    source.index.as_ref(),
+                    choices,
+                    size,
+                    &*engine,
+                    cancel,
+                )
+            });
+            preview
+        });
+        ask_options(
+            ExportKind::Pdf,
+            preview,
+            window,
+            cx,
+            move |ws, choices, _, cx| {
+                ws.export_pdf_with(source.clone(), engine.clone(), choices, cx);
+            },
+        );
+    }
+
+    /// Asks where to save, then exports `source` as a PDF with `choices`.
+    fn export_pdf_with(
+        &mut self,
+        source: Source,
+        engine: Arc<dyn export::PdfEngine>,
+        choices: ExportChoices,
+        cx: &mut Context<'_, Self>,
+    ) {
         let directory = source
             .path
             .as_deref()
@@ -308,13 +413,13 @@ impl Workspace {
             let flag = cancel.clone();
             let written = cx
                 .background_spawn(async move {
-                    let pdf = export::export_pdf(
+                    let pdf = export::export_pdf_with(
                         &source.text,
                         source.path.as_deref(),
                         source.root.as_deref(),
                         &source.profile,
                         source.index.as_ref(),
-                        &PageOptions::default(),
+                        &choices,
                         &*engine,
                         &flag,
                     )?;
@@ -340,7 +445,7 @@ impl Workspace {
     }
 
     /// `file.print`.
-    pub(super) fn print_command(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn print_command(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let tab = self.command_tab(cx);
         let source = match self.export_source(tab, cx) {
             Ok(source) => source,
@@ -349,6 +454,26 @@ impl Workspace {
         let Some(engine) = export::pdf_engine(cx) else {
             return self.ask(print_failed(NO_ENGINE), cx);
         };
+        ask_options(
+            ExportKind::Print,
+            None,
+            window,
+            cx,
+            move |ws, choices, window, cx| {
+                ws.print_with(source.clone(), engine.clone(), choices, window, cx);
+            },
+        );
+    }
+
+    /// Asks the print dialog, then prints `source` with `choices`.
+    fn print_with(
+        &mut self,
+        source: Source,
+        engine: Arc<dyn export::PdfEngine>,
+        choices: ExportChoices,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let title = source
             .path
             .as_deref()
@@ -369,7 +494,8 @@ impl Workspace {
                     return;
                 }
             };
-            let page = print_page(setup.page);
+            let mut choices = choices;
+            choices.page = choices.print_page(print_page(setup.page));
             let Ok(Some(cancel)) =
                 this.update(cx, |ws, cx| ws.start_pdf_job("Preparing to print…", cx))
             else {
@@ -378,13 +504,13 @@ impl Workspace {
             let flag = cancel.clone();
             let made = cx
                 .background_spawn(async move {
-                    export::export_pdf(
+                    export::export_pdf_with(
                         &source.text,
                         source.path.as_deref(),
                         source.root.as_deref(),
                         &source.profile,
                         source.index.as_ref(),
-                        &page,
+                        &choices,
                         &*engine,
                         &flag,
                     )

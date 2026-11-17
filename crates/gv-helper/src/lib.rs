@@ -5,7 +5,7 @@
 //!
 //! `glyphvane-helper` is a separate executable (no GUI framework) that
 //! runs the engines that may hang, crash or use too much memory: Typst
-//! PDF export. The app talks to it through [`client::Helper`], which
+//! PDF export and PDF page raster (hayro). The app talks to it through [`client::Helper`], which
 //! starts it on demand, enforces a deadline per job, kills it on timeout
 //! or cancellation, and starts a new one for the next job.
 //!
@@ -19,7 +19,11 @@ pub mod protocol;
 #[cfg(feature = "engine")]
 pub mod engine;
 #[cfg(feature = "engine")]
+pub mod fonts;
+#[cfg(feature = "engine")]
+pub mod raster;
+#[cfg(feature = "engine")]
 pub mod serve;
 
 pub use client::{Helper, HelperConfig, HelperError, locate};
-pub use protocol::{PdfJob, PdfOutput};
+pub use protocol::{PageImage, PageJob, PdfJob, PdfOutput};
