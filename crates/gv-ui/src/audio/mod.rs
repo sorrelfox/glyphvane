@@ -12,9 +12,14 @@
 //! use; the output device opens on the first play), so starting one embed
 //! pauses the one that was playing.
 //!
-//! Keys while the player has the focus (a click on it focuses it): Space
-//! plays or pauses, Left and Right seek 5 seconds, Home goes to the start,
-//! End to the end.
+//! Keys while the player has the focus (a click on it focuses it, and it
+//! is one Tab stop): Space plays or pauses, Left and Right seek 5
+//! seconds, Home goes to the start, End to the end.
+//!
+//! For assistive technology the player is a group named by the file; the
+//! play and mute buttons are buttons (mute says whether it is on), the
+//! seek bar a slider with the time as its value (Increment and Decrement
+//! seek), and an error an assertive alert.
 //!
 //! Embedding (the media card): create the view once per embed and keep it
 //! with the card, then place it as a child.
@@ -46,6 +51,7 @@ use gpui::{
 use gv_media::audio::Player;
 pub use gv_media::audio::{AudioEngine, AudioError, PlayerState};
 
+use crate::a11y::{AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::metrics::size::icon_button;
@@ -190,7 +196,7 @@ impl AudioPlayerView {
             drag: None,
             bar: Rc::new(Cell::new(None)),
             unmuted: None,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_index(0).tab_stop(true),
             loaded: false,
             ticking: false,
             ticker: None,
@@ -435,6 +441,8 @@ impl Render for AudioPlayerView {
 
         let play_button = div()
             .id("audio-play")
+            .role(Role::Button)
+            .aria_label(if playing { "Pause" } else { "Play" })
             .debug_selector(|| "audio-play".into())
             .flex()
             .flex_none()
@@ -456,13 +464,38 @@ impl Render for AudioPlayerView {
                         this.toggle(cx);
                     }))
             })
-            .child((if playing { Icon::Pause } else { Icon::Play }).sized(icon::ROW));
+            .child((if playing { Icon::Pause } else { Icon::Play }).sized(icon::ROW))
+            .accessible()
+            .disabled(!ready);
 
         let bar_cell = Rc::clone(&self.bar);
         let weak = cx.entity().downgrade();
         let dragging = self.drag.is_some();
+        let step = SEEK_STEP.as_secs_f64();
         let seek_bar = div()
             .id("audio-seek")
+            .role(Role::Slider)
+            .aria_label("Position")
+            .aria_value(self.time_label())
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(self.duration.map_or(0.0, |d| d.as_secs_f64()))
+            .aria_numeric_value(match (self.drag, self.duration) {
+                (Some(f), Some(d)) => d.as_secs_f64() * f64::from(f),
+                _ => self.position.as_secs_f64(),
+            })
+            .aria_numeric_value_step(step)
+            .when(can_seek, |b| {
+                let (up, down) = (cx.entity().downgrade(), cx.entity().downgrade());
+                b.on_a11y_action(gpui::accesskit::Action::Increment, move |_, _, cx| {
+                    let _ = up.update(cx, |this, cx| this.seek_by(step, cx));
+                })
+                .on_a11y_action(
+                    gpui::accesskit::Action::Decrement,
+                    move |_, _, cx| {
+                        let _ = down.update(cx, |this, cx| this.seek_by(-step, cx));
+                    },
+                )
+            })
             .debug_selector(|| "audio-seek".into())
             .relative()
             .flex_1()
@@ -551,6 +584,13 @@ impl Render for AudioPlayerView {
 
         let mute_button = div()
             .id("audio-mute")
+            .role(Role::Button)
+            .aria_label("Mute")
+            .aria_toggled(if self.is_muted() {
+                Toggled::True
+            } else {
+                Toggled::False
+            })
             .debug_selector(|| "audio-mute".into())
             .flex()
             .flex_none()
@@ -570,7 +610,8 @@ impl Render for AudioPlayerView {
                     Icon::Volume
                 })
                 .sized(icon::ROW),
-            );
+            )
+            .accessible();
 
         let status: Option<(SharedString, gpui::Hsla)> = match &self.state {
             PlayerState::Error(e) => Some((e.message().into(), theme.status.error.into())),
@@ -578,8 +619,16 @@ impl Render for AudioPlayerView {
             _ => None,
         };
 
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         div()
             .id("audio-player")
+            .role(Role::Group)
+            .aria_label(format!("Audio: {name}"))
+            .aria_description("Space plays or pauses; Left and Right seek")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| this.on_key(e, cx)))
@@ -612,7 +661,7 @@ impl Render for AudioPlayerView {
                     .items_center()
                     .gap(px(GAP))
                     .child(play_button)
-                    .child(seek_bar)
+                    .child(seek_bar.accessible().disabled(!can_seek))
                     .child(
                         div()
                             .flex_none()
@@ -625,13 +674,19 @@ impl Render for AudioPlayerView {
             .when_some(status, |el, (message, color)| {
                 el.child(
                     div()
+                        .id("audio-status")
+                        .role(Role::Alert)
+                        .aria_label(message.clone())
                         .debug_selector(|| "audio-status".into())
                         .pl(px(icon_button::SQUARE + GAP))
                         .text_size(px(text::UI_SMALL.size))
                         .line_height(px(text::UI_SMALL.line))
                         .text_color(color)
-                        .child(message),
+                        .child(message)
+                        .accessible()
+                        .live(Live::Assertive),
                 )
             })
+            .accessible()
     }
 }

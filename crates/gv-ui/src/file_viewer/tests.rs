@@ -204,3 +204,110 @@ fn an_image_that_does_not_decode_says_why(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// Presses and releases `key` (GPUI clicks a focused control on the
+/// release of Enter or Space).
+fn press(vcx: &mut VisualTestContext, key: &'static str) {
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(key).expect("a key"),
+    });
+    draw(vcx);
+}
+
+/// The image viewer for assistive technology: a named group with a
+/// toolbar of named buttons (Fit and 100 % say whether they are on), the
+/// zoom as a polite status, the picture as an image named by the file;
+/// Tab reaches every button and Space presses the focused one.
+#[gpui::test]
+fn the_image_viewer_names_its_controls_and_the_keyboard_reaches_them(cx: &mut TestAppContext) {
+    use crate::a11y::testing::{focused, named, with_role};
+    use crate::a11y::{Live, Role, Toggled};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("photo.png");
+    image::RgbaImage::from_pixel(1600, 1200, image::Rgba([10, 20, 30, 255]))
+        .save(&file)
+        .expect("png");
+    let (window, viewer) = open(cx, &file);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+
+    assert_eq!(
+        named(&mut vcx, "Image viewer: photo.png").role,
+        Some(Role::Group)
+    );
+    assert_eq!(named(&mut vcx, "Image").role, Some(Role::Toolbar));
+    let picture = named(&mut vcx, "photo.png");
+    assert_eq!(picture.role, Some(Role::Image));
+    assert_eq!(
+        picture.description.as_deref(),
+        Some("PNG, 1600 by 1200 pixels")
+    );
+    let zoom = named(&mut vcx, "Zoom");
+    assert_eq!(zoom.role, Some(Role::Status));
+    assert_eq!(zoom.live, Some(Live::Polite));
+    assert!(zoom.value.as_deref().is_some_and(|v| v.ends_with(" %")));
+    assert_eq!(named(&mut vcx, "Fit").toggled, Some(Toggled::True));
+    assert_eq!(named(&mut vcx, "Actual size").toggled, Some(Toggled::False));
+    let buttons: Vec<String> = with_role(&mut vcx, Role::Button)
+        .into_iter()
+        .inspect(|b| assert!(b.focusable && b.clickable, "{b:?}"))
+        .filter_map(|b| b.label)
+        .collect();
+    assert_eq!(buttons, ["Fit", "Actual size", "Zoom out", "Zoom in"]);
+
+    // From the viewer (as a click on it leaves it), Tab reaches the
+    // buttons in order; Space presses 100 %.
+    vcx.update(|window, cx| {
+        viewer.update(cx, |v, cx| v.focus.focus(window, cx));
+    });
+    draw(&mut vcx);
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+        if let Some(Some(name)) = focused(&mut vcx) {
+            if seen.contains(&name) {
+                break;
+            }
+            seen.push(name);
+        }
+    }
+    assert_eq!(seen, buttons);
+    while focused(&mut vcx).flatten().as_deref() != Some("Actual size") {
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+    }
+    press(&mut vcx, "space");
+    viewer.read_with(&vcx, |v, _| assert_eq!(v.zoom(), ImageZoom::Scale(1.0)));
+    assert_eq!(named(&mut vcx, "Actual size").toggled, Some(Toggled::True));
+}
+
+/// A file the viewer does not show says why in a status, with a named
+/// button the keyboard reaches.
+#[gpui::test]
+fn a_file_not_shown_is_announced(cx: &mut TestAppContext) {
+    use crate::a11y::testing::{named, with_role};
+    use crate::a11y::{Live, Role};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("data.bin");
+    std::fs::write(&file, [0u8, 159, 146, 150]).expect("write");
+    let (window, _viewer) = open(cx, &file);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    assert_eq!(named(&mut vcx, "data.bin").role, Some(Role::Group));
+    let status = with_role(&mut vcx, Role::Status);
+    assert_eq!(status.len(), 1);
+    assert!(
+        status[0]
+            .label
+            .as_deref()
+            .is_some_and(|l| l.contains("does not show"))
+    );
+    assert_eq!(status[0].live, Some(Live::Polite));
+    let open = named(&mut vcx, "Open with default app");
+    assert_eq!(open.role, Some(Role::Button));
+    assert!(open.focusable);
+}

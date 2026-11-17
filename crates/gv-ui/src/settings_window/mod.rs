@@ -81,7 +81,7 @@ use toml::Value;
 use self::controls::{OnClick, Segment};
 use self::metrics::{content, field, head, row as row_metrics, select, sidebar, window as win};
 use self::model::{Control, SectionId};
-use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Axis, Role, RovingTabs};
 use crate::appearance::Appearance;
 use crate::chrome::WindowChrome;
 use crate::keymap::actions;
@@ -300,6 +300,8 @@ pub struct SettingsWindow {
     transfer_status: Option<String>,
     /// The keymap editor, made when the Keymap section is first shown.
     keymap_editor: Option<Entity<keymap_editor::KeymapEditor>>,
+    /// The sections' focus handles, for the arrow keys of the tab list.
+    section_keys: RovingTabs,
     focus: FocusHandle,
     subscriptions: Vec<Subscription>,
 }
@@ -358,6 +360,7 @@ impl SettingsWindow {
             import: None,
             transfer_status: None,
             keymap_editor: None,
+            section_keys: RovingTabs::new(Axis::Vertical),
             focus,
             subscriptions: vec![search_events, settings_changed],
         }
@@ -608,6 +611,7 @@ impl SettingsWindow {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
+        self.section_keys.sync(self.listed_sections().len(), cx);
         div()
             .id("settings-window")
             .key_context(KEY_CONTEXT)
@@ -653,6 +657,13 @@ impl SettingsWindow {
         let count = listed.len();
         let searching = !self.query.trim().is_empty();
         let hover = theme.state.hover;
+        // One Tab stop; Up, Down, Home and End move between the sections
+        // and show each (automatic activation). While searching nothing
+        // is shown: the keys only move, and Enter shows the section.
+        let shown = listed.iter().position(|s| !searching && *s == self.section);
+        let stop = self.section_keys.stop(window, cx, shown);
+        let settings = cx.entity().downgrade();
+        let moves: std::rc::Rc<[SectionId]> = listed.clone().into();
         div()
             .w(px(SETTINGS_SIDEBAR_WIDTH))
             .flex_none()
@@ -707,7 +718,18 @@ impl SettingsWindow {
                         div()
                             .id(section.slug())
                             .a11y_tab(section.label(), current, index, count)
-                            .keyboard_control(theme)
+                            .roving_tab(theme, &self.section_keys, index, index == stop, {
+                                let settings = settings.clone();
+                                let moves = moves.clone();
+                                move |to, _, cx| {
+                                    let Some(&section) = moves.get(to).filter(|_| !searching)
+                                    else {
+                                        return;
+                                    };
+                                    let _ = settings
+                                        .update(cx, |this, cx| this.select_section(section, cx));
+                                }
+                            })
                             .debug_selector(move || format!("settings-section-{}", section.slug()))
                             .h(px(LIST_ROW))
                             .flex_none()

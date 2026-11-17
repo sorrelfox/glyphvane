@@ -182,6 +182,9 @@ pub(crate) struct Prepaint {
     under: Vec<Op>,
     children: Vec<Child>,
     over: Vec<Op>,
+    /// The link nodes described for assistive technology this frame,
+    /// whose click actions [`ReaderElement::paint`] registers.
+    a11y_links: Vec<(gpui::accesskit::NodeId, crate::a11y::document::LinkRef)>,
 }
 
 /// Highlights code blocks on the background executor; as each lands, the
@@ -511,7 +514,7 @@ impl Element for ReaderElement {
     /// ([`crate::a11y::document`]).
     fn a11y_synthetic_children(
         &mut self,
-        _prepaint: &mut Prepaint,
+        prepaint: &mut Prepaint,
         builder: &mut gpui::A11ySubtreeBuilder<'_>,
     ) {
         let st = self.state.borrow();
@@ -525,7 +528,7 @@ impl Element for ReaderElement {
         };
         let items = crate::a11y::document::window_of(shown, doc.tree.items().len());
         let nodes = crate::a11y::document::describe(&doc.tree, items);
-        crate::a11y::document::push(&nodes, builder);
+        prepaint.a11y_links = crate::a11y::document::push(&nodes, builder);
     }
 
     fn request_layout(
@@ -558,6 +561,7 @@ impl Element for ReaderElement {
             under: Vec::new(),
             children: Vec::new(),
             over: Vec::new(),
+            a11y_links: Vec::new(),
         };
         let mut guard = self.state.borrow_mut();
         let st = &mut *guard;
@@ -1979,6 +1983,21 @@ impl Element for ReaderElement {
             }
         });
 
+        // A screen reader's activation of a link node follows the link as
+        // a click does.
+        for (node, link) in std::mem::take(&mut pre.a11y_links) {
+            let reader = self.reader.clone();
+            window.on_a11y_action(
+                node,
+                gpui::accesskit::Action::Click,
+                move |_, window, cx| {
+                    let _ = reader.update(cx, |r, cx| {
+                        r.activate_link(link.item, link.link, window, cx);
+                    });
+                },
+            );
+        }
+
         // The pointer: what it is over decides the cursor.
         {
             let mut st = self.state.borrow_mut();
@@ -2467,6 +2486,27 @@ fn resolve_sync(engine: &mut Engine, items: &mut DocItems<'_>, request: SyncRequ
 
 fn same_link(a: &LinkHit, b: &LinkHit) -> bool {
     a.item == b.item && a.link == b.link && a.image == b.image
+}
+
+/// What activating a link does.
+pub(super) enum LinkAction {
+    /// A tag: the vault search for it (left in [`State::tag_search`]).
+    SearchTag,
+    /// Follow it in place.
+    Follow(LinkRequest),
+}
+
+/// What activating link `link` of item `item` does, as a left click on
+/// it does: a tag asks for its search, any other link is followed in
+/// place. Clears the selection, as the click does.
+pub(super) fn link_action(st: &mut State, item: usize, link: u32) -> Option<LinkAction> {
+    let hit = st.link_hit(item, link)?;
+    st.selection = None;
+    if hit.kind == gv_model::LinkKind::Tag {
+        st.tag_search = Some(format!("tag:#{}", hit.destination).into());
+        return Some(LinkAction::SearchTag);
+    }
+    Some(LinkAction::Follow(request(&hit, Disposition::InPlace)))
 }
 
 fn request(link: &LinkHit, disposition: Disposition) -> LinkRequest {

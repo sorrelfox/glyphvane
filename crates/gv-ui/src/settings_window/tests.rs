@@ -634,8 +634,9 @@ impl Fixture {
     }
 }
 
-/// The sections are a tab list, and Tab reaches every section and the
-/// controls of the one shown, then comes back round: no trap.
+/// The sections are a tab list, and Tab reaches the section shown (one
+/// stop for the list) and the controls of the section, then comes back
+/// round: no trap.
 #[gpui::test]
 fn tab_walks_the_settings_window(cx: &mut TestAppContext) {
     use crate::a11y::Role;
@@ -672,8 +673,65 @@ fn tab_walks_the_settings_window(cx: &mut TestAppContext) {
             names.push(name);
         }
     }
-    assert!(stops.len() > sections.len(), "controls are Tab stops too");
-    for section in &sections {
-        assert!(names.contains(section), "Tab never reached {section:?}");
+    assert!(stops.len() > 2, "controls are Tab stops too");
+    let shown = selected[0].label.clone().expect("a name");
+    assert!(names.contains(&shown), "Tab never reached {shown:?}");
+    for section in sections.iter().filter(|s| **s != shown) {
+        assert!(
+            !names.contains(section),
+            "{section:?} is reached by the arrow keys, not Tab"
+        );
     }
+}
+
+/// Up and Down move along the sections and show each (automatic
+/// activation), wrapping round; Home and End go to the ends; the
+/// keyboard stays on the sections.
+#[gpui::test]
+fn arrow_keys_move_along_the_sections(cx: &mut TestAppContext) {
+    use crate::a11y::Role;
+    use crate::a11y::testing::{focused, with_role};
+
+    let mut f = fixture(cx, GLOBAL_TEXT);
+    let vcx = &mut f.vcx;
+    let sections: Vec<String> = with_role(vcx, Role::Tab)
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    let shown = |vcx: &mut VisualTestContext| {
+        with_role(vcx, Role::Tab)
+            .into_iter()
+            .find(|n| n.selected == Some(true))
+            .and_then(|n| n.label)
+    };
+    let first = shown(vcx).expect("a section is shown");
+    let at = sections.iter().position(|s| *s == first).expect("listed");
+    for _ in 0..40 {
+        if focused(vcx).flatten().as_deref() == Some(first.as_str()) {
+            break;
+        }
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+    }
+    assert_eq!(focused(vcx).flatten().as_deref(), Some(first.as_str()));
+    let next = &sections[(at + 1) % sections.len()];
+    vcx.simulate_keystrokes("down");
+    draw(vcx);
+    assert_eq!(shown(vcx).as_ref(), Some(next));
+    assert_eq!(focused(vcx).flatten().as_ref(), Some(next));
+    let first = sections[0].clone();
+    vcx.simulate_keystrokes("end");
+    draw(vcx);
+    let last = sections.last().expect("sections");
+    assert_eq!(shown(vcx).as_ref(), Some(last));
+    assert_eq!(focused(vcx).flatten().as_ref(), Some(last));
+    vcx.simulate_keystrokes("down");
+    draw(vcx);
+    assert_eq!(shown(vcx).as_deref(), Some(first.as_str()), "wraps round");
+    vcx.simulate_keystrokes("up");
+    draw(vcx);
+    assert_eq!(shown(vcx).as_ref(), Some(last));
+    vcx.simulate_keystrokes("home");
+    draw(vcx);
+    assert_eq!(focused(vcx).flatten().as_deref(), Some(first.as_str()));
 }

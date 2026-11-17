@@ -31,7 +31,7 @@ use gpui::{
 use gv_vault::files::history::{HistoryStore, Version};
 
 use super::VersionHistory;
-use crate::a11y::A11yExt as _;
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::metrics::spacing::{list, list_row, panel_head};
 use crate::metrics::{DISABLED_OPACITY, font, radius, size, text};
@@ -420,6 +420,17 @@ fn sentence(message: &str) -> String {
     text
 }
 
+/// `element` as a polite status saying `text`.
+fn announced(element: Div, id: &'static str, text: impl Into<SharedString>) -> AnyElement {
+    element
+        .id(id)
+        .role(Role::Status)
+        .aria_label(text)
+        .accessible()
+        .live(Live::Polite)
+        .into_any_element()
+}
+
 fn message(note: impl Into<SharedString>, theme: &Theme) -> Div {
     div()
         .debug_selector(|| "history-message".into())
@@ -524,7 +535,8 @@ impl HistoryPanel {
                                         .text_size(px(text::UI_SMALL.size))
                                         .text_color(theme.text.secondary)
                                         .child(human_size(v.size)),
-                                ),
+                                )
+                                .accessible(),
                         )
                         .into_any_element(),
                 )
@@ -544,6 +556,7 @@ impl HistoryPanel {
         let (hover, press) = (theme.state.hover, theme.state.press);
         let button = div()
             .id(ElementId::Name(id.into()))
+            .a11y_button(label)
             .debug_selector(move || id.into())
             .flex_none()
             .px(px(list_row::GAP))
@@ -554,12 +567,18 @@ impl HistoryPanel {
             .child(label);
         if enabled {
             button
+                .keyboard_control(theme)
                 .hover(move |s| s.bg(hover))
                 .active(move |s| s.bg(press))
                 .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+                .accessible()
                 .into_any_element()
         } else {
-            button.opacity(DISABLED_OPACITY).into_any_element()
+            button
+                .opacity(DISABLED_OPACITY)
+                .accessible()
+                .disabled(true)
+                .into_any_element()
         }
     }
 
@@ -598,20 +617,28 @@ impl HistoryPanel {
                 cx,
             ));
         let body = match &self.preview {
-            None => message("Reading…", theme).into_any_element(),
+            None => announced(message("Reading…", theme), "history-reading", "Reading…"),
             Some(Preview { text: Err(why), .. }) => div()
+                .id("history-error")
+                .role(Role::Alert)
+                .aria_label(why.clone())
                 .debug_selector(|| "history-error".into())
                 .mx(px(size::LIST_ROW_INSET))
                 .pl(px(list_row::PAD_LEFT))
                 .text_color(theme.status.error)
                 .text_size(px(text::UI_SMALL.size))
                 .child(why.clone())
+                .accessible()
+                .live(Live::Assertive)
                 .into_any_element(),
             Some(Preview { lines, .. }) => {
                 let lines = lines.clone();
                 let color = theme.text.primary;
                 div()
                     .id("history-preview")
+                    .role(Role::Document)
+                    .aria_label("Version preview")
+                    .aria_description(format!("{} lines", lines.len()))
                     .debug_selector(|| "history-preview".into())
                     .flex_1()
                     .min_h_0()
@@ -634,6 +661,7 @@ impl HistoryPanel {
                         })
                         .size_full(),
                     )
+                    .accessible()
                     .into_any_element()
             }
         };
@@ -644,7 +672,12 @@ impl HistoryPanel {
             .flex_col()
             .border_t(px(crate::metrics::HAIRLINE))
             .border_color(theme.border.default)
-            .child(buttons)
+            .child(
+                buttons
+                    .id("history-actions")
+                    .a11y_group(Role::Toolbar, "Version")
+                    .accessible(),
+            )
             .child(body)
             .into_any_element()
     }
@@ -689,21 +722,33 @@ impl Render for HistoryPanel {
             .flex_col()
             .child(head)
             .map(|panel| match note {
-                Some(note) => panel.child(message(note, theme)),
+                Some(note) => panel.child(announced(
+                    message(note.clone(), theme),
+                    "history-note",
+                    note,
+                )),
                 None => panel.child(
-                    div().flex_1().min_h_0().py(px(list::PAD_Y)).child(
-                        uniform_list(
-                            "history-versions",
-                            count,
-                            cx.processor(|this, range: Range<usize>, _, cx| {
-                                this.render_rows(range, cx)
-                            }),
+                    div()
+                        .id("history-versions-list")
+                        .a11y_group(Role::List, "Versions")
+                        .flex_1()
+                        .min_h_0()
+                        .py(px(list::PAD_Y))
+                        .child(
+                            uniform_list(
+                                "history-versions",
+                                count,
+                                cx.processor(|this, range: Range<usize>, _, cx| {
+                                    this.render_rows(range, cx)
+                                }),
+                            )
+                            .size_full()
+                            .track_scroll(&self.scroll),
                         )
-                        .size_full()
-                        .track_scroll(&self.scroll),
-                    ),
+                        .accessible(),
                 ),
             })
             .children(preview)
+            .accessible()
     }
 }

@@ -496,8 +496,16 @@ impl State {
         let doc = self.doc.as_ref()?;
         let content = doc.tree.item_inline(g.ix)?;
         let link = content.spans.get(piece)?.link?;
+        self.link_hit(g.ix, link)
+    }
+
+    /// Link `link` of item `item`, as a click on it finds it (what
+    /// assistive technology follows: [`crate::a11y::document`]).
+    pub fn link_hit(&self, item: usize, link: u32) -> Option<LinkHit> {
+        let doc = self.doc.as_ref()?;
+        let content = doc.tree.item_inline(item)?;
         let info = content.links.get(link as usize)?;
-        let start = doc.tree.node_of(g.ix).map(|n| n.source.start);
+        let start = doc.tree.node_of(item).map(|n| n.source.start);
         let range = start
             .map(|s| s + info.source.start..s + info.source.end)
             .filter(|r| {
@@ -507,7 +515,7 @@ impl State {
                     .is_some_and(|t| t.starts_with(['[', '!', '<']) || t.contains("://"))
             });
         Some(LinkHit {
-            item: g.ix,
+            item,
             link,
             destination: info.destination.clone(),
             kind: info.kind,

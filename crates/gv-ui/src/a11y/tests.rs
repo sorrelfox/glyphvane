@@ -315,3 +315,123 @@ fn the_files_tree_gives_levels_and_the_chip_its_reason(cx: &mut TestAppContext) 
         assert_eq!(row.expanded, None, "a file has nothing to expand");
     }
 }
+
+#[test]
+fn tab_list_keys_move_wrap_and_jump() {
+    use super::{Axis, tab_list_step};
+    let h = Axis::Horizontal;
+    assert_eq!(tab_list_step("right", h, 0, 3), Some(1));
+    assert_eq!(tab_list_step("right", h, 2, 3), Some(0), "wraps");
+    assert_eq!(tab_list_step("left", h, 0, 3), Some(2), "wraps back");
+    assert_eq!(tab_list_step("home", h, 2, 3), Some(0));
+    assert_eq!(tab_list_step("end", h, 0, 3), Some(2));
+    assert_eq!(tab_list_step("down", h, 0, 3), None, "not this axis");
+    assert_eq!(tab_list_step("down", Axis::Vertical, 0, 3), Some(1));
+    assert_eq!(tab_list_step("up", Axis::Vertical, 0, 3), Some(2));
+    assert_eq!(tab_list_step("right", Axis::Vertical, 0, 3), None);
+    assert_eq!(tab_list_step("right", h, 0, 0), None);
+    assert_eq!(tab_list_step("a", h, 0, 3), None);
+}
+
+/// Tabs until the control named `name` has the keyboard.
+fn tab_to(vcx: &mut VisualTestContext, name: &str) {
+    for _ in 0..60 {
+        if focused(vcx).flatten().as_deref() == Some(name) {
+            return;
+        }
+        key(vcx, "tab");
+    }
+    panic!("Tab never reached {name:?}");
+}
+
+/// The open tabs are one Tab stop; Left, Right, Home and End move the
+/// keyboard between them without opening them (manual activation), and
+/// Enter shows the focused one.
+#[gpui::test]
+fn arrow_keys_move_between_the_open_tabs(cx: &mut TestAppContext) {
+    let (dir, workspace, mut vcx) = open(cx);
+    for name in ["b.md", "c.md"] {
+        let file = dir.path().join(name);
+        std::fs::write(&file, "# Note\n").expect("write");
+        vcx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.open_tab(OpenTarget::new(&file), window, cx));
+        });
+        draw(&mut vcx);
+    }
+    let active = |vcx: &mut VisualTestContext| {
+        with_role(vcx, Role::Tab)
+            .into_iter()
+            .find(|t| t.selected == Some(true))
+            .and_then(|t| t.label)
+    };
+    assert_eq!(active(&mut vcx).as_deref(), Some("c.md"));
+
+    // Tab reaches the active tab and its close button, never the others.
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..40 {
+        key(&mut vcx, "tab");
+        let Some(Some(label)) = focused(&mut vcx) else {
+            continue;
+        };
+        if seen.first() == Some(&label) {
+            break;
+        }
+        seen.push(label);
+    }
+    assert!(seen.iter().any(|s| s == "c.md"), "{seen:?}");
+    assert!(seen.iter().any(|s| s == "Close c.md"), "{seen:?}");
+    for other in ["a.md", "b.md", "Close a.md", "Close b.md"] {
+        assert!(!seen.iter().any(|s| s == other), "Tab reached {other}");
+    }
+
+    tab_to(&mut vcx, "c.md");
+    key(&mut vcx, "left");
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("b.md"));
+    assert_eq!(active(&mut vcx).as_deref(), Some("c.md"), "not opened yet");
+    key(&mut vcx, "home");
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("a.md"));
+    key(&mut vcx, "left");
+    assert_eq!(
+        focused(&mut vcx).flatten().as_deref(),
+        Some("c.md"),
+        "wraps"
+    );
+    key(&mut vcx, "right");
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("a.md"));
+    // The focused tab is now the Tab stop, with its close button.
+    key(&mut vcx, "tab");
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("Close a.md"));
+    key(&mut vcx, "shift-tab");
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("a.md"));
+    press(&mut vcx, "enter");
+    assert_eq!(active(&mut vcx).as_deref(), Some("a.md"));
+}
+
+/// The sidebar switcher is one Tab stop; Left, Right, Home and End move
+/// along it and show each panel (automatic activation), the keyboard
+/// staying on the switcher.
+#[gpui::test]
+fn arrow_keys_switch_the_sidebar_panels(cx: &mut TestAppContext) {
+    let (_dir, _workspace, mut vcx) = open(cx);
+    let at = named(&mut vcx, "Sidebar").bounds.center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    draw(&mut vcx);
+    let shown = |vcx: &mut VisualTestContext| {
+        with_role(vcx, Role::Tab)
+            .into_iter()
+            .find(|t| t.selected == Some(true) && t.label.as_deref() != Some("a.md"))
+            .and_then(|t| t.label)
+    };
+    assert_eq!(shown(&mut vcx).as_deref(), Some("Files"));
+    tab_to(&mut vcx, "Files");
+    key(&mut vcx, "right");
+    assert_eq!(shown(&mut vcx).as_deref(), Some("Search"));
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("Search"));
+    key(&mut vcx, "end");
+    assert_eq!(shown(&mut vcx).as_deref(), Some("Bookmarks"));
+    key(&mut vcx, "right");
+    assert_eq!(shown(&mut vcx).as_deref(), Some("Files"), "wraps");
+    key(&mut vcx, "left");
+    assert_eq!(shown(&mut vcx).as_deref(), Some("Bookmarks"));
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("Bookmarks"));
+}

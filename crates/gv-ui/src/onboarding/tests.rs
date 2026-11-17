@@ -190,3 +190,101 @@ fn safe_mode_never_shows_it(cx: &mut TestAppContext) {
         assert!(!should_show(cx));
     });
 }
+
+/// Presses and releases `key` (GPUI clicks a focused control on the
+/// release of Enter or Space).
+fn press(vcx: &mut VisualTestContext, key: &'static str) {
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(key).expect("a key"),
+    });
+    draw(vcx);
+}
+
+/// The window for assistive technology: a dialog with its title as the
+/// first heading, a heading per group, every row a named group, the
+/// switches and the choices named by their rows; Tab reaches every
+/// control and Space works the focused one.
+#[gpui::test]
+fn the_onboarding_names_its_parts_and_the_keyboard_reaches_them(cx: &mut TestAppContext) {
+    use crate::a11y::testing::{focused, named, nodes, with_role};
+    use crate::a11y::{Role, Toggled};
+
+    let _f = setup(cx);
+    let mut vcx = opened(cx);
+    let vcx = &mut vcx;
+    let headings: Vec<_> = with_role(vcx, Role::Heading)
+        .into_iter()
+        .map(|n| (n.label.unwrap_or_default(), n.level))
+        .collect();
+    assert_eq!(headings[0], ("Welcome to Glyphvane".to_owned(), Some(1)));
+    assert!(
+        headings.contains(&("Look".to_owned(), Some(2))),
+        "{headings:?}"
+    );
+    assert_eq!(headings.len(), 6, "{headings:?}");
+    // The window and its title share a name.
+    let dialog: Vec<_> = nodes(vcx)
+        .into_iter()
+        .filter(|n| n.role == Some(Role::Dialog))
+        .collect();
+    assert_eq!(dialog.len(), 1);
+    assert_eq!(dialog[0].label.as_deref(), Some("Welcome to Glyphvane"));
+
+    let theme = with_role(vcx, Role::RadioGroup)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Theme"))
+        .expect("the theme choice");
+    assert!(theme.label.is_some());
+    let updates = with_role(vcx, Role::Switch)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Check for updates"))
+        .expect("the update switch");
+    assert_eq!(updates.toggled, Some(Toggled::False));
+    assert!(updates.focusable);
+    let rows: Vec<_> = with_role(vcx, Role::Group)
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(rows.iter().any(|r| r == "Save crash reports"), "{rows:?}");
+    for label in ["Open folder…", "Get started"] {
+        let b = named(vcx, label);
+        assert_eq!(b.role, Some(Role::Button), "{label}");
+        assert!(b.focusable && b.clickable, "{label}");
+    }
+
+    // Tab reaches every control and comes back round.
+    let stops = nodes(vcx)
+        .into_iter()
+        .filter(|n| n.focusable && !n.disabled)
+        .count();
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..stops * 2 + 4 {
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+        let Some(Some(label)) = focused(vcx) else {
+            continue;
+        };
+        if seen.first() == Some(&label) {
+            break;
+        }
+        seen.push(label);
+    }
+    // A choice's segments are reached inside its group.
+    for label in ["Open folder…", "Theme", "Check for updates", "Get started"] {
+        assert!(
+            seen.iter().any(|s| s == label),
+            "Tab missed {label}: {seen:?}"
+        );
+    }
+    while focused(vcx).flatten().as_deref() != Some("Check for updates") {
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+    }
+    press(vcx, "space");
+    let updates = with_role(vcx, Role::Switch)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Check for updates"))
+        .expect("the update switch");
+    assert_eq!(updates.toggled, Some(Toggled::True));
+}

@@ -48,6 +48,7 @@ use gpui::{
 };
 use gv_media::{CancelFlag, DecodeRequest, Probe};
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
 use crate::icons::Icon;
 use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset};
@@ -719,11 +720,15 @@ impl FileViewer {
 
     // ----- drawing --------------------------------------------------------------------
 
+    /// A toolbar button showing `label`, named `name` for assistive
+    /// technology; `pressed` is `Some` for a toggle (Fit, 100 %).
+    #[allow(clippy::too_many_arguments)]
     fn button(
         &self,
         id: &'static str,
         label: SharedString,
-        pressed: bool,
+        name: &'static str,
+        pressed: Option<bool>,
         theme: &Theme,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<'_, Self>) + 'static,
         cx: &mut Context<'_, Self>,
@@ -731,6 +736,11 @@ impl FileViewer {
         let (hover, press) = (theme.state.hover, theme.state.press);
         div()
             .id(id)
+            .a11y_button(name)
+            .when_some(pressed, |b, on| {
+                b.aria_toggled(if on { Toggled::True } else { Toggled::False })
+            })
+            .keyboard_control(theme)
             .debug_selector(move || id.to_owned())
             .flex_none()
             .h(px(size::BUTTON_HEIGHT))
@@ -740,7 +750,7 @@ impl FileViewer {
             .rounded(px(radius::CONTROL))
             .border_1()
             .border_color(theme.border.strong)
-            .bg(if pressed {
+            .bg(if pressed == Some(true) {
                 theme.accent.tint
             } else {
                 theme.surface.raised
@@ -751,6 +761,7 @@ impl FileViewer {
             .active(move |style| style.bg(press))
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .accessible()
             .into_any_element()
     }
 
@@ -774,9 +785,16 @@ impl FileViewer {
             "{format} · {} × {} px",
             shown.probe.width, shown.probe.height
         );
+        let facts_for_reader = format!(
+            "{format}, {} by {} pixels",
+            shown.probe.width, shown.probe.height
+        );
         let fit = self.zoom == ImageZoom::Fit;
         let actual = self.zoom == ImageZoom::Scale(1.0);
+        let name = self.file_name();
         let bar = div()
+            .id("image-viewer-toolbar")
+            .a11y_group(Role::Toolbar, "Image")
             .flex_none()
             .min_h(px(sizes::INFOBAR))
             .flex()
@@ -809,7 +827,8 @@ impl FileViewer {
             .child(self.button(
                 "image-viewer-fit",
                 "Fit".into(),
-                fit,
+                "Fit",
+                Some(fit),
                 theme,
                 |this, _, cx| this.set_zoom(ImageZoom::Fit, cx),
                 cx,
@@ -817,7 +836,8 @@ impl FileViewer {
             .child(self.button(
                 "image-viewer-actual",
                 "100 %".into(),
-                actual,
+                "Actual size",
+                Some(actual),
                 theme,
                 |this, _, cx| this.set_zoom(ImageZoom::Scale(1.0), cx),
                 cx,
@@ -825,25 +845,33 @@ impl FileViewer {
             .child(self.button(
                 "image-viewer-zoom-out",
                 "−".into(),
-                false,
+                "Zoom out",
+                None,
                 theme,
                 |this, window, cx| this.zoom_by_step(false, window, cx),
                 cx,
             ))
             .child(
                 div()
+                    .id("image-viewer-zoom")
+                    .role(Role::Status)
+                    .aria_label("Zoom")
+                    .aria_value(percent.clone())
                     .debug_selector(|| "image-viewer-zoom".into())
                     .flex_none()
                     .min_w(px(sizes::INFOBAR * 2.0))
                     .flex()
                     .justify_center()
                     .text_color(theme.text.primary)
-                    .child(percent),
+                    .child(percent)
+                    .accessible()
+                    .live(Live::Polite),
             )
             .child(self.button(
                 "image-viewer-zoom-in",
                 "+".into(),
-                false,
+                "Zoom in",
+                None,
                 theme,
                 |this, window, cx| this.zoom_by_step(true, window, cx),
                 cx,
@@ -856,6 +884,9 @@ impl FileViewer {
             .object_fit(ObjectFit::Fill);
         let body = div()
             .id("image-viewer-body")
+            .role(Role::Image)
+            .aria_label(name)
+            .aria_description(facts_for_reader)
             .debug_selector(|| "image-viewer-body".into())
             .flex_1()
             .min_h_0()
@@ -907,9 +938,18 @@ impl FileViewer {
             .size_full()
             .flex()
             .flex_col()
-            .child(bar)
-            .child(body)
+            .child(bar.accessible())
+            .child(body.accessible())
             .into_any_element()
+    }
+
+    /// The file's name, as the viewer is named.
+    fn file_name(&self) -> SharedString {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into()
     }
 
     fn render_message(
@@ -918,12 +958,7 @@ impl FileViewer {
         theme: &Theme,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let name: SharedString = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
+        let name = self.file_name();
         let path = self.path.clone();
         div()
             .size_full()
@@ -948,14 +983,20 @@ impl FileViewer {
             )
             .child(
                 div()
+                    .id("file-viewer-message")
+                    .role(Role::Status)
+                    .aria_label(message.clone())
                     .debug_selector(|| "file-viewer-message".into())
                     .text_color(theme.text.secondary)
-                    .child(message),
+                    .child(message)
+                    .accessible()
+                    .live(Live::Polite),
             )
             .child(self.button(
                 "file-viewer-open-externally",
                 "Open with default app".into(),
-                false,
+                "Open with default app",
+                None,
                 theme,
                 move |_, _, cx| cx.emit(FileViewerEvent::OpenExternally(path.clone())),
                 cx,
@@ -1060,8 +1101,17 @@ impl Render for FileViewer {
             ViewerStatus::NotShown(why) => self.render_message(why.clone(), theme, cx),
         };
         let image = matches!(status, ViewerStatus::Image(_));
+        // The text viewer is a Reading view (a document of its own); the
+        // others are a named group the keyboard reaches with F6.
+        let group = !matches!(status, ViewerStatus::Text { .. });
+        let label: SharedString = if image {
+            format!("Image viewer: {}", self.file_name()).into()
+        } else {
+            self.file_name()
+        };
         div()
             .id("file-viewer")
+            .when(group, |d| d.a11y_group(Role::Group, label))
             .debug_selector(|| "file-viewer".into())
             .track_focus(&self.focus)
             .size_full()
@@ -1096,5 +1146,6 @@ impl Render for FileViewer {
                     .on_action(cx.listener(|this, _: &PanDown, _, cx| this.pan(0.0, -PAN_STEP, cx)))
             })
             .child(content)
+            .accessible()
     }
 }

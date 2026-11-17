@@ -10,6 +10,11 @@
 //! The view is virtual, so it describes the items around the ones on
 //! screen ([`window_of`]); the nodes keep the same ids while their items
 //! stay, so moving through the document does not announce it again.
+//!
+//! A link node's click action (what a screen reader's "activate" sends)
+//! follows the link as a click on it does: [`push`] returns each link
+//! node with the link it stands for, and the Reading view registers the
+//! action for it ([`crate::reader`]).
 
 use std::ops::Range;
 
@@ -38,7 +43,18 @@ pub(crate) struct DocNode {
     pub index: Option<usize>,
     /// A table's row count.
     pub count: Option<usize>,
+    /// A link's item index and its index among the item's links (what
+    /// activating the node follows).
+    pub link: Option<LinkRef>,
     pub children: Vec<DocNode>,
+}
+
+/// A link of the Reading view: the item it is in and its index among
+/// that item's links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LinkRef {
+    pub item: usize,
+    pub link: u32,
 }
 
 impl DocNode {
@@ -53,6 +69,7 @@ impl DocNode {
             url: None,
             index: None,
             count: None,
+            link: None,
             children: Vec::new(),
         }
     }
@@ -178,7 +195,7 @@ fn text_node(tree: &RenderTree, ix: usize, key: (u64, u32, u32), role: Role) -> 
         node.label = Some(text.text.trim().to_owned());
     }
     let item = &tree.items()[ix];
-    let block = tree.node_of(item.node);
+    let block = tree.node_of(ix);
     let content = block.and_then(|b| b.item_inline(&item.kind));
     // (start, end, node) of each link and image, in text offsets.
     let mut marks: Vec<(usize, usize, DocNode)> = Vec::new();
@@ -200,6 +217,10 @@ fn text_node(tree: &RenderTree, ix: usize, key: (u64, u32, u32), role: Role) -> 
             );
             n.url = Some(link.destination.to_string());
             n.description = status_words(link.status).map(str::to_owned);
+            n.link = Some(LinkRef {
+                item: ix,
+                link: k as u32,
+            });
             marks.push((s, e, n));
         }
         for (k, image) in content.images.iter().enumerate() {
@@ -288,24 +309,35 @@ fn status_words(status: LinkStatus) -> Option<&'static str> {
 }
 
 /// Adds `nodes` as synthetic children of the element being described.
-pub(crate) fn push(nodes: &[DocNode], builder: &mut A11ySubtreeBuilder<'_>) {
+/// Returns the link nodes pushed, with the links they stand for, for
+/// their click actions.
+pub(crate) fn push(
+    nodes: &[DocNode],
+    builder: &mut A11ySubtreeBuilder<'_>,
+) -> Vec<(accesskit::NodeId, LinkRef)> {
     let existing: Vec<accesskit::NodeId> = builder.parent_node().children().to_vec();
     let mut top = Vec::with_capacity(nodes.len());
+    let mut links = Vec::new();
     for node in nodes {
-        top.push(push_node(node, builder));
+        top.push(push_node(node, builder, &mut links));
     }
     // `push_child` hangs every node on the element; only the top level
     // belongs there.
     let mut children = existing;
     children.extend(top);
     builder.parent_node().set_children(children);
+    links
 }
 
-fn push_node(node: &DocNode, builder: &mut A11ySubtreeBuilder<'_>) -> accesskit::NodeId {
+fn push_node(
+    node: &DocNode,
+    builder: &mut A11ySubtreeBuilder<'_>,
+    links: &mut Vec<(accesskit::NodeId, LinkRef)>,
+) -> accesskit::NodeId {
     let children: Vec<accesskit::NodeId> = node
         .children
         .iter()
-        .map(|c| push_node(c, builder))
+        .map(|c| push_node(c, builder, links))
         .collect();
     let id = builder.synthetic_node_id(node.key);
     let mut n = accesskit::Node::new(node.role);
@@ -323,7 +355,10 @@ fn push_node(node: &DocNode, builder: &mut A11ySubtreeBuilder<'_>) -> accesskit:
     }
     if let Some(url) = &node.url {
         n.set_url(url.clone());
-        n.add_action(accesskit::Action::Click);
+        if let Some(link) = node.link {
+            n.add_action(accesskit::Action::Click);
+            links.push((id, link));
+        }
     }
     match node.role {
         Role::Row => {
@@ -403,6 +438,7 @@ mod tests {
         let link = &p.children[1];
         assert_eq!(link.label.as_deref(), Some("the docs"));
         assert_eq!(link.url.as_deref(), Some("https://example.org/a"));
+        assert_eq!(link.link, Some(LinkRef { item: 0, link: 0 }));
         assert_eq!(p.children[3].label.as_deref(), Some("a cat"));
         assert_eq!(p.children[0].value.as_deref(), Some("See"));
     }
@@ -477,6 +513,35 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), keys.len(), "{keys:?}");
+    }
+
+    /// Every link node knows the link it follows, in the item it is in,
+    /// also past the first block (the node is looked up by item).
+    #[test]
+    fn link_nodes_point_at_their_links() {
+        let t = tree("# Head\n\nOne [a](a.md) and [b](b.md).\n\n- [c](c.md)\n");
+        let mut found = Vec::new();
+        fn walk(n: &DocNode, found: &mut Vec<(String, LinkRef)>) {
+            if let Some(link) = n.link {
+                found.push((n.label.clone().unwrap_or_default(), link));
+            }
+            for c in &n.children {
+                walk(c, found);
+            }
+        }
+        for n in &all(&t) {
+            walk(n, &mut found);
+        }
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(found[0].1, LinkRef { item: 1, link: 0 });
+        assert_eq!(found[1].1, LinkRef { item: 1, link: 1 });
+        assert_eq!(found[2].1.item, 2);
+        for (name, link) in &found {
+            let content = t.item_inline(link.item).expect("inline content");
+            let info = &content.links[link.link as usize];
+            assert_eq!(&*info.destination, format!("{name}.md"));
+        }
     }
 
     #[test]

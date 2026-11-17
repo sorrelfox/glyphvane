@@ -1097,3 +1097,70 @@ mod timing {
         run("generated 10 MB", &generated(10 << 20));
     }
 }
+
+/// A screen reader's activation of a link node in the document
+/// description follows the link exactly as a left click on it does: the
+/// same link, in place, with its history entry.
+#[gpui::test]
+fn activating_a_described_link_follows_it_as_a_click_does(cx: &mut TestAppContext) {
+    let dir = temp(&[
+        (
+            "a.md",
+            "# A\n\nFirst [the b note](b.md), then [c](c.md) now.\n",
+        ),
+        ("b.md", "# B\n"),
+        ("c.md", "# C\n"),
+    ]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let st = state(&reader, &mut vcx);
+    // The node assistive technology is given for the second link.
+    let link = {
+        let s = st.borrow();
+        let tree = &s.doc.as_ref().expect("loaded").tree;
+        let nodes = crate::a11y::document::describe(tree, 0..tree.items().len());
+        let node = nodes
+            .iter()
+            .flat_map(|n| n.children.iter())
+            .find(|n| n.label.as_deref() == Some("the b note"))
+            .expect("the link's node")
+            .clone();
+        assert_eq!(node.role, gpui::Role::Link);
+        node.link.expect("the node knows its link")
+    };
+    // It is the link a click there finds.
+    {
+        let s = st.borrow();
+        let clicked = s
+            .link_at(link_point(&s, "the b note"))
+            .expect("a link under the point");
+        let described = s.link_hit(link.item, link.link).expect("the link");
+        assert_eq!(
+            (
+                clicked.item,
+                clicked.link,
+                &clicked.destination,
+                &clicked.range
+            ),
+            (
+                described.item,
+                described.link,
+                &described.destination,
+                &described.range
+            )
+        );
+    }
+    vcx.update(|window, cx| {
+        reader.update(cx, |r, cx| {
+            r.activate_link(link.item, link.link, window, cx)
+        });
+    });
+    draw(&mut vcx);
+    draw(&mut vcx);
+    assert_eq!(workspace.read_with(&vcx, |ws, _| ws.tabs().len()), 1);
+    assert_eq!(file_of(&workspace, &mut vcx), "b.md");
+    let history = workspace.read_with(&vcx, |ws, _| ws.active_tab().history().to_vec());
+    assert_eq!(history.len(), 1, "Back returns to a.md");
+    assert!(history[0].path.ends_with("a.md"));
+}

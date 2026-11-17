@@ -322,3 +322,63 @@ fn time_format() {
     assert_eq!(format_time(Duration::from_millis(65_900)), "1:05");
     assert_eq!(format_time(Duration::from_secs(3_600 + 62)), "1:01:02");
 }
+
+/// The player for assistive technology: a group named by the file and
+/// one Tab stop; Play (Pause while playing), the seek bar as a slider
+/// with the time as its value, and Mute with its state.
+#[gpui::test]
+fn the_player_names_its_controls_and_is_one_tab_stop(cx: &mut TestAppContext) {
+    use crate::a11y::testing::{focused, named};
+    use crate::a11y::{Role, Toggled};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = wav(dir.path(), "song.wav", 96_000);
+    let mut f = player(cx, path, true);
+    f.wait("loaded", |v| *v.state() == PlayerState::Stopped);
+    let vcx = &mut f.vcx;
+
+    let group = named(vcx, "Audio: song.wav");
+    assert_eq!(group.role, Some(Role::Group));
+    assert!(group.description.is_some(), "the keys");
+    let play = named(vcx, "Play");
+    assert_eq!(play.role, Some(Role::Button));
+    assert!(play.clickable && !play.disabled);
+    let seek = named(vcx, "Position");
+    assert_eq!(seek.role, Some(Role::Slider));
+    assert_eq!(seek.value.as_deref(), Some("0:00 / 0:02"));
+    assert!(!seek.disabled);
+    assert_eq!(named(vcx, "Mute").toggled, Some(Toggled::False));
+
+    // Tab (from a window where nothing has the keyboard yet) reaches the
+    // player; Space plays it, and the button says Pause.
+    vcx.update(|window, cx| window.focus_next(cx));
+    draw(vcx);
+    assert_eq!(focused(vcx).flatten().as_deref(), Some("Audio: song.wav"));
+    vcx.simulate_keystrokes("space");
+    draw(vcx);
+    assert_eq!(f.state(), PlayerState::Playing);
+    assert_eq!(named(&mut f.vcx, "Pause").role, Some(Role::Button));
+
+    let mute = f.center_of("audio-mute");
+    f.vcx.simulate_click(mute, Modifiers::none());
+    draw(&mut f.vcx);
+    assert_eq!(named(&mut f.vcx, "Mute").toggled, Some(Toggled::True));
+}
+
+/// A file that cannot be played says so in an assertive alert.
+#[gpui::test]
+fn an_unplayable_file_is_an_alert(cx: &mut TestAppContext) {
+    use crate::a11y::testing::with_role;
+    use crate::a11y::{Live, Role};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("x.mp3");
+    std::fs::write(&path, vec![0x5a; 2048]).expect("writes the test file");
+    let mut f = player(cx, path, true);
+    f.wait("error", |v| v.error().is_some());
+    let alerts = with_role(&mut f.vcx, Role::Alert);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].live, Some(Live::Assertive));
+    assert!(alerts[0].label.as_deref().is_some_and(|l| !l.is_empty()));
+    assert!(with_role(&mut f.vcx, Role::Slider)[0].disabled);
+}

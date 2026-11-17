@@ -310,3 +310,83 @@ fn safe_mode_applies_without_saving(cx: &mut TestAppContext) {
     assert_eq!(labels, vec!["F7".to_owned()]);
     assert!(!locations.keymap_file().exists());
 }
+
+/// The keymap editor for assistive technology: a group of named rows,
+/// each key a button named by the key and its command, Add, Remove and
+/// Reset named by their command; the keyboard reaches Add, Enter starts
+/// recording into a named key field, and a conflict is announced.
+#[gpui::test]
+fn the_keymap_editor_names_its_controls_and_the_keyboard_works_it(cx: &mut TestAppContext) {
+    use crate::a11y::testing::{focused, named, with_role};
+    use crate::a11y::{Live, Role};
+
+    let mut f = fixture(cx);
+    f.update(|e, window, cx| e.set_query("save as", window, cx));
+    let title = f
+        .editor
+        .read_with(&f.vcx, |e, cx| e.rows(cx)[0].title.clone());
+    let label = keys("secondary-shift-s").label(Platform::current());
+    let vcx = &mut f.vcx;
+    assert!(
+        with_role(vcx, Role::Group)
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Keymap")),
+        "the editor is a named group"
+    );
+    let row = with_role(vcx, Role::Group)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(title.as_str()))
+        .expect("the command's row");
+    assert_eq!(row.description.as_deref(), Some("file.save_as"));
+    let key = named(vcx, &format!("{label}: change this key of {title}"));
+    assert_eq!(key.role, Some(Role::Button));
+    assert!(key.focusable && key.clickable);
+    let remove = named(vcx, &format!("Remove {label} from {title}"));
+    assert_eq!(remove.role, Some(Role::Button));
+    let add_name = format!("Add a key for {title}");
+    assert!(named(vcx, &add_name).focusable);
+    assert!(
+        with_role(vcx, Role::Heading)
+            .iter()
+            .any(|h| h.level == Some(2)),
+        "the category heading"
+    );
+
+    // Tab to Add; Enter starts recording into the key field.
+    for _ in 0..80 {
+        if focused(vcx).flatten().as_deref() == Some(add_name.as_str()) {
+            break;
+        }
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+    }
+    assert_eq!(focused(vcx).flatten(), Some(add_name.clone()));
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").expect("a key"),
+    });
+    draw(vcx);
+    assert_eq!(
+        f.editor.read_with(&f.vcx, |e, _| e.recording().cloned()),
+        Some(id("file.save_as"))
+    );
+    let vcx = &mut f.vcx;
+    let field = named(vcx, &format!("New keys for {title}"));
+    assert_eq!(field.role, Some(Role::TextInput));
+    assert_eq!(field.value.as_deref(), Some("Press the keys…"));
+    assert_eq!(field.live, Some(Live::Polite));
+    assert_eq!(named(vcx, "Applies to").role, Some(Role::RadioGroup));
+    f.press("secondary-s");
+    let conflict = with_role(&mut f.vcx, Role::Status)
+        .into_iter()
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.starts_with("Also used by: "))
+        })
+        .expect("the conflict is announced");
+    assert_eq!(conflict.live, Some(Live::Polite));
+    for name in ["Replace", "Keep both", "Cancel"] {
+        assert_eq!(named(&mut f.vcx, name).role, Some(Role::Button), "{name}");
+    }
+}

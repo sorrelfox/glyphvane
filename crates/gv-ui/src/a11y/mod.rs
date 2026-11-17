@@ -17,6 +17,12 @@
 //!   (`accent.default` border, `accent.tint` fill) while focused from the
 //!   keyboard. Tab and Shift+Tab are GPUI Base's root keys; F6 cycles the
 //!   panes ([`crate::shell`]);
+//! - [`A11yExt::roving_tab`] and [`RovingTabs`]: the tab-list pattern.
+//!   One tab of a list is a Tab stop (the focused one, else the selected
+//!   one); Left and Right (Up and Down in a vertical list) move between
+//!   the tabs, wrapping round, and Home and End go to the first and the
+//!   last. Each list says whether moving also shows the tab (automatic
+//!   activation) or waits for Enter or Space (manual);
 //! - [`Accessible`]: a thin wrapper for the states the `aria_*` builders do
 //!   not cover (live regions, disabled, modal); in tests it also records
 //!   each wrapped element's role, name and states for headless queries
@@ -29,10 +35,10 @@
 pub(crate) mod document;
 
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, Element, ElementId, GlobalElementId, InspectorElementId,
-    InteractiveElement, Interactivity, IntoElement, LayoutId, MouseButton, ParentElement, Pixels,
-    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, accesskit, point,
-    px,
+    AnyElement, App, Bounds, BoxShadow, Element, ElementId, FocusHandle, GlobalElementId,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, KeyDownEvent, LayoutId,
+    MouseButton, ParentElement, Pixels, SharedString, StatefulInteractiveElement, StyleRefinement,
+    Styled, Window, accesskit, point, px,
 };
 
 pub use gpui::accesskit::Live;
@@ -140,9 +146,126 @@ pub trait A11yExt: StatefulInteractiveElement + Sized {
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .focus_visible(move |style| style.bg(fill).shadow(ring))
     }
+
+    /// Tab `index` of the list whose focus handles are `tabs`, keyed as a
+    /// tab list ([`tab_list_step`]): a Tab stop only when `stop` (see
+    /// [`RovingTabs::stop`]), Enter and Space click it, the arrow keys,
+    /// Home and End move the keyboard to another tab after calling
+    /// `on_move` with its index (which shows that tab for automatic
+    /// activation, or does nothing for manual). A mouse press leaves the
+    /// keyboard where it was; keyboard focus shows the focus ring. Give
+    /// the tab its role with [`A11yExt::a11y_tab`].
+    fn roving_tab(
+        self,
+        theme: &Theme,
+        tabs: &RovingTabs,
+        index: usize,
+        stop: bool,
+        on_move: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        let ring = focus_ring(theme);
+        let fill = theme.accent.tint;
+        let handles = tabs.handles.clone();
+        let axis = tabs.axis;
+        let el = match handles.get(index) {
+            Some(handle) => self.track_focus(&handle.clone().tab_index(0).tab_stop(stop)),
+            None => self.tab_index(0),
+        };
+        el.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .focus_visible(move |style| style.bg(fill).shadow(ring))
+            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                let m = &event.keystroke.modifiers;
+                if m.control || m.alt || m.platform || m.shift || m.function {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                let Some(to) = tab_list_step(key, axis, index, handles.len()) else {
+                    return;
+                };
+                cx.stop_propagation();
+                on_move(to, window, cx);
+                if let Some(handle) = handles.get(to) {
+                    handle.focus(window, cx);
+                }
+            })
+    }
 }
 
 impl<E: StatefulInteractiveElement> A11yExt for E {}
+
+/// Which arrow keys move along a tab list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Axis {
+    /// Left and Right (a row of tabs).
+    #[default]
+    Horizontal,
+    /// Up and Down (a column of tabs).
+    Vertical,
+}
+
+/// The tab that `key` moves the keyboard to from tab `index` of `count`
+/// (ARIA tab-list pattern): the next or previous one along `axis`,
+/// wrapping round, or the first (Home) or the last (End). `None` for any
+/// other key or an empty list.
+pub fn tab_list_step(key: &str, axis: Axis, index: usize, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let (back, forth) = match axis {
+        Axis::Horizontal => ("left", "right"),
+        Axis::Vertical => ("up", "down"),
+    };
+    let index = index.min(count - 1);
+    match key {
+        k if k == back => Some((index + count - 1) % count),
+        k if k == forth => Some((index + 1) % count),
+        "home" => Some(0),
+        "end" => Some(count - 1),
+        _ => None,
+    }
+}
+
+/// The focus handles of a tab list's tabs, kept by the view that draws
+/// the list so the arrow keys can move the keyboard from tab to tab
+/// ([`A11yExt::roving_tab`]).
+#[derive(Debug, Clone, Default)]
+pub struct RovingTabs {
+    handles: Vec<FocusHandle>,
+    axis: Axis,
+}
+
+impl RovingTabs {
+    pub fn new(axis: Axis) -> Self {
+        Self {
+            handles: Vec::new(),
+            axis,
+        }
+    }
+
+    /// Makes one handle per tab (call before drawing the list).
+    pub fn sync(&mut self, count: usize, cx: &mut App) {
+        self.handles.truncate(count);
+        while self.handles.len() < count {
+            self.handles.push(cx.focus_handle());
+        }
+    }
+
+    /// The tab that has the keyboard, itself or in a control inside it
+    /// (a tab's close button).
+    pub fn focused(&self, window: &Window, cx: &App) -> Option<usize> {
+        self.handles
+            .iter()
+            .position(|h| h.contains_focused(window, cx))
+    }
+
+    /// The one tab that is a Tab stop: the focused one, else `selected`,
+    /// else the first.
+    pub fn stop(&self, window: &Window, cx: &App, selected: Option<usize>) -> usize {
+        self.focused(window, cx)
+            .or(selected.filter(|&s| s < self.handles.len()))
+            .unwrap_or(0)
+    }
+}
 
 /// The focus ring of a control focused from the keyboard, as text fields
 /// draw it: a 1 px `accent.default` line around the control and a 2 px

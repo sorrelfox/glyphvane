@@ -16,6 +16,11 @@
 //!   which settings differ from the defaults (names only, never values,
 //!   paths or document contents).
 //!
+//! For assistive technology the window is a dialog named by its page,
+//! the name a level-1 heading, the buttons named Tab stops, and the
+//! notices a read-only document that the keyboard scrolls (a Tab stop:
+//! Up, Down, Page Up, Page Down, Home, End).
+//!
 //! Not designed (built from the settings window's look and the infobar's
 //! buttons, NFR-UI-01): the whole window, its size, the Licenses page and
 //! the window's chrome. It keeps the system title bar on every platform;
@@ -35,6 +40,7 @@ use gpui::{
     div, px, size, uniform_list,
 };
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
 use crate::keymap::actions::app::{About, CopyDebugInfo, Licenses};
 use crate::metrics::font;
@@ -200,6 +206,13 @@ impl AboutWindow {
         self.page
     }
 
+    /// Shows `page` from one of its buttons: the button goes with its
+    /// page, so the window keeps the keyboard and Tab goes on from the top.
+    fn turn_to(&mut self, page: Page, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.focus.focus(window, cx);
+        self.set_page(page, cx);
+    }
+
     fn set_page(&mut self, page: Page, cx: &mut Context<'_, Self>) {
         self.page = page;
         self.copied = false;
@@ -224,11 +237,16 @@ impl AboutWindow {
             .gap(px(GAP))
             .child(
                 div()
+                    .id("about-name")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label("Glyphvane")
                     .debug_selector(|| "about-name".into())
                     .text_size(px(text::PREVIEW_H2.size))
                     .line_height(px(text::PREVIEW_H2.line))
                     .font_weight(FontWeight(text::weight::STRONG))
-                    .child("Glyphvane"),
+                    .child("Glyphvane")
+                    .accessible(),
             )
             .child(
                 div()
@@ -257,21 +275,26 @@ impl AboutWindow {
                     .flex_wrap()
                     .gap(px(GAP))
                     .child(
-                        button("about-licenses", "Third-party licenses", theme).on_click(
-                            cx.listener(|this, _, _, cx| this.set_page(Page::Licenses, cx)),
-                        ),
+                        button("about-licenses", "Third-party licenses", theme)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.turn_to(Page::Licenses, window, cx)
+                            }))
+                            .accessible(),
                     )
-                    .child(button("about-copy-debug-info", copy_label, theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            copy_debug_info(cx);
-                            this.copied = true;
-                            cx.notify();
-                        }),
-                    ))
+                    .child(
+                        button("about-copy-debug-info", copy_label, theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                copy_debug_info(cx);
+                                this.copied = true;
+                                cx.notify();
+                            }))
+                            .accessible(),
+                    )
                     .child(div().flex_1())
                     .child(
                         button("about-close", "Close", theme)
-                            .on_click(|_, window, _| window.remove_window()),
+                            .on_click(|_, window, _| window.remove_window())
+                            .accessible(),
                     ),
             )
     }
@@ -291,16 +314,36 @@ impl AboutWindow {
                     .gap(px(GAP))
                     .child(
                         button("about-back", "About", theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_page(Page::About, cx))),
+                            .aria_label("Back to About")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.turn_to(Page::About, window, cx)
+                            }))
+                            .accessible(),
                     )
                     .child(
                         div()
+                            .id("about-licenses-title")
+                            .role(Role::Heading)
+                            .aria_level(1)
+                            .aria_label("Third-party licenses")
                             .font_weight(FontWeight(text::weight::STRONG))
-                            .child("Third-party licenses"),
+                            .child("Third-party licenses")
+                            .accessible(),
                     ),
             )
             .child(
                 div()
+                    .id("about-notices-box")
+                    .role(Role::Document)
+                    .aria_label("Third-party notices")
+                    .aria_description(format!("{count} lines"))
+                    .keyboard_control(theme)
+                    .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                        if this.scroll_notices(&e.keystroke) {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .flex_1()
                     .min_h_0()
                     .border_1()
@@ -329,8 +372,36 @@ impl AboutWindow {
                         .debug_selector(|| "about-notices".into())
                         .size_full()
                         .track_scroll(&self.scroll),
-                    ),
+                    )
+                    .accessible(),
             )
+    }
+
+    /// Scrolls the notices for an arrow, page or Home/End key; `false`
+    /// for any other key.
+    fn scroll_notices(&self, key: &gpui::Keystroke) -> bool {
+        let m = &key.modifiers;
+        if m.control || m.alt || m.platform || m.shift {
+            return false;
+        }
+        let state = self.scroll.0.borrow();
+        let handle = &state.base_handle;
+        let line = notice_line();
+        let page = (f32::from(handle.bounds().size.height) - line).max(line);
+        let y = -f32::from(handle.offset().y);
+        let max = f32::from(handle.max_offset().y);
+        let to = match key.key.as_str() {
+            "up" => y - line,
+            "down" => y + line,
+            "pageup" => y - page,
+            "pagedown" => y + page,
+            "home" => 0.0,
+            "end" => max,
+            _ => return false,
+        };
+        let x = handle.offset().x;
+        handle.set_offset(gpui::point(x, -px(to.clamp(0.0, max))));
+        true
     }
 }
 
@@ -340,6 +411,8 @@ fn button(id: &'static str, label: &'static str, theme: &Theme) -> Stateful<Div>
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(infobar::BUTTON_HEIGHT))
@@ -359,8 +432,13 @@ fn button(id: &'static str, label: &'static str, theme: &Theme) -> Stateful<Div>
 impl Render for AboutWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
+        let title = match self.page {
+            Page::About => "About Glyphvane",
+            Page::Licenses => "Third-party licenses",
+        };
         div()
             .id("about-window")
+            .a11y_group(Role::Dialog, title)
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::dismiss))
@@ -377,6 +455,7 @@ impl Render for AboutWindow {
                 Page::About => root.child(self.about_page(theme, cx)),
                 Page::Licenses => root.child(self.licenses_page(theme, cx)),
             })
+            .accessible()
     }
 }
 

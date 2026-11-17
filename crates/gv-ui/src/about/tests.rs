@@ -158,3 +158,83 @@ fn the_settings_summary_names_only_changed_keys() {
         ["appearance.zoom_percent", "general.viewer_mode"]
     );
 }
+
+/// Presses and releases `key` (GPUI clicks a focused control on the
+/// release of Enter or Space).
+fn press(vcx: &mut VisualTestContext, key: &'static str) {
+    vcx.simulate_keystrokes(key);
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse(key).expect("a key"),
+    });
+    draw(vcx);
+}
+
+fn tab_to(vcx: &mut VisualTestContext, name: &str) {
+    use crate::a11y::testing::focused;
+    for _ in 0..12 {
+        if focused(vcx).flatten().as_deref() == Some(name) {
+            return;
+        }
+        vcx.simulate_keystrokes("tab");
+        draw(vcx);
+    }
+    panic!("Tab never reached {name}");
+}
+
+/// The About window for assistive technology: a dialog named by its
+/// page, the name as a heading, named buttons the keyboard works, and the
+/// notices as a document the keyboard scrolls.
+#[gpui::test]
+fn about_is_a_dialog_the_keyboard_works(cx: &mut TestAppContext) {
+    use crate::a11y::Role;
+    use crate::a11y::testing::{named, with_role};
+
+    let mut vcx = opened(cx, &About);
+    assert_eq!(named(&mut vcx, "About Glyphvane").role, Some(Role::Dialog));
+    let heading = named(&mut vcx, "Glyphvane");
+    assert_eq!(
+        (heading.role, heading.level),
+        (Some(Role::Heading), Some(1))
+    );
+    let buttons: Vec<String> = with_role(&mut vcx, Role::Button)
+        .into_iter()
+        .inspect(|b| assert!(b.focusable && b.clickable, "{b:?}"))
+        .filter_map(|b| b.label)
+        .collect();
+    assert_eq!(
+        buttons,
+        ["Third-party licenses", "Copy debug info", "Close"]
+    );
+
+    // Enter on Third-party licenses shows the notices.
+    tab_to(&mut vcx, "Third-party licenses");
+    press(&mut vcx, "enter");
+    assert_eq!(page(&mut vcx), Some(Page::Licenses));
+    let dialog = with_role(&mut vcx, Role::Dialog);
+    assert_eq!(dialog[0].label.as_deref(), Some("Third-party licenses"));
+    let notices = named(&mut vcx, "Third-party notices");
+    assert_eq!(notices.role, Some(Role::Document));
+    assert!(notices.focusable);
+
+    // The notices scroll from the keyboard.
+    tab_to(&mut vcx, "Third-party notices");
+    let top = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| {
+            let view = about_window(cx).expect("open").1;
+            let y = view.read(cx).scroll.0.borrow().base_handle.offset().y;
+            f32::from(y)
+        })
+    };
+    assert_eq!(top(&mut vcx), 0.0);
+    vcx.simulate_keystrokes("pagedown");
+    draw(&mut vcx);
+    assert!(top(&mut vcx) < 0.0, "Page Down scrolled");
+    vcx.simulate_keystrokes("home");
+    draw(&mut vcx);
+    assert_eq!(top(&mut vcx), 0.0);
+
+    // Back to About.
+    tab_to(&mut vcx, "Back to About");
+    press(&mut vcx, "space");
+    assert_eq!(page(&mut vcx), Some(Page::About));
+}

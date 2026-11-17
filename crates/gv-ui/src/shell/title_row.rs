@@ -76,7 +76,7 @@ impl Workspace {
             )
             .child(self.history_button(Icon::Back, theme, cx))
             .child(self.history_button(Icon::Forward, theme, cx))
-            .child(self.tab_strip(theme, cx).accessible())
+            .child(self.tab_strip(theme, window, cx).accessible())
             .child(
                 icon_button("new-tab", "New tab", Icon::NewTab, icon::ROW, square, theme)
                     .debug_selector(|| "new-tab".into())
@@ -272,8 +272,19 @@ impl Workspace {
     /// unsaved changes shows a 7 px dot in its title's colour instead of
     /// the close icon; the dot still closes the tab (the text is saved or
     /// kept in the crash journal).
-    fn tab_strip(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+    ///
+    /// From the keyboard the strip is one Tab stop (the focused tab, else
+    /// the active one, and its close button); Left, Right, Home and End
+    /// move between the tabs, Enter or Space shows the focused one (manual
+    /// activation: a tab's document may take a while to open).
+    fn tab_strip(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Stateful<Div> {
         let count = self.tabs.len();
+        let stop = self.tab_keys.stop(window, cx, Some(self.active));
         div()
             .id("tab-strip")
             .a11y_group(Role::TabList, "Open tabs")
@@ -329,6 +340,7 @@ impl Workspace {
                     .debug_selector(move || format!("close-tab-{index}"))
                 }
                 .rounded(px(radius::SMALL_CONTROL))
+                .tab_stop(index == stop)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.close_tab(index, window, cx);
@@ -337,7 +349,7 @@ impl Workspace {
                     .id(("tab", index))
                     .a11y_tab(tab.label.name.clone(), active, index, count)
                     .when(unsaved, |el| el.aria_description("Unsaved changes"))
-                    .keyboard_control(theme)
+                    .roving_tab(theme, &self.tab_keys, index, index == stop, |_, _, _| {})
                     .h(px(tab::HEIGHT))
                     .min_w_0()
                     .flex()

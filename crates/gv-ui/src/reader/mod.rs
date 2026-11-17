@@ -759,6 +759,33 @@ impl Reader {
         Some(tree.plain_text(0..tree.len(), opts))
     }
 
+    /// Follows link `link` of item `item` as a click on it does (a tag
+    /// runs its search): what a screen reader's activation of the link's
+    /// node in the document description does ([`crate::a11y::document`]).
+    pub(crate) fn activate_link(
+        &mut self,
+        item: usize,
+        link: u32,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let action = element::link_action(&mut self.state.borrow_mut(), item, link);
+        match action {
+            Some(element::LinkAction::SearchTag) => {
+                window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);
+            }
+            Some(element::LinkAction::Follow(request)) => {
+                follow::begin(follow::Cause::Link {
+                    destination: request.destination.clone(),
+                    background: false,
+                });
+                cx.emit(ReaderEvent::FollowLink(request));
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
     /// The search a click on a tag asked for (`tag:#name`), taken by the
     /// vault search's `search.vault` handler.
     pub fn take_tag_search(&self) -> Option<std::sync::Arc<str>> {

@@ -91,3 +91,99 @@ fn two_way_keeps_the_left_side_until_told() {
     assert_eq!(same.hunk_count(), 0);
     assert_eq!(same.result(), mine);
 }
+
+/// The compare view for assistive technology, in a headless window: a
+/// region named by its title, the summary as a polite status, each change
+/// a named group whose choices say which is pressed, each side's text
+/// whether it is in the result; Tab reaches the buttons and Space picks.
+#[gpui::test]
+fn the_compare_view_names_its_changes_and_choices(cx: &mut gpui::TestAppContext) {
+    use gpui::{
+        AppContext as _, Bounds, VisualTestContext, WeakEntity, WindowBounds, WindowOptions, point,
+        px, size,
+    };
+
+    use crate::a11y::testing::{focused, named, with_role};
+    use crate::a11y::{Live, Role, Toggled};
+    use crate::{AppSettings, ThemeChoice};
+
+    fn draw(vcx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    let comparison = Comparison::three_way(
+        "t\nbody\nend\n",
+        "t\nmine\nend\n",
+        "t\ntheirs\nend\n",
+        sides(),
+        LineEnding::Lf,
+    );
+    let (window, view) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(600.0)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        let (window, view) = gpui::open_window(options, cx, |_, cx| {
+            cx.new(|_| {
+                super::CompareView::new(comparison, "a.md".into(), WeakEntity::new_invalid())
+            })
+        })
+        .expect("test window opens");
+        (window, view)
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+
+    assert_eq!(named(&mut vcx, "Compare: a.md").role, Some(Role::Region));
+    assert_eq!(named(&mut vcx, "Compare").role, Some(Role::Toolbar));
+    let summary = with_role(&mut vcx, Role::Status);
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].live, Some(Live::Polite));
+    assert_eq!(
+        summary[0].label.as_deref(),
+        Some("1 change · 1 conflict to choose")
+    );
+    let change = named(&mut vcx, "Change 1 of 1: Changed on both sides");
+    assert_eq!(change.role, Some(Role::Group));
+    assert_eq!(change.description.as_deref(), Some("No side chosen yet"));
+    let mine = with_role(&mut vcx, Role::Group)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("mine"))
+        .expect("the left side's text");
+    assert_eq!(mine.description.as_deref(), Some("Not in the result"));
+    for label in ["Use all left", "Use all right", "Cancel", "Apply"] {
+        let b = named(&mut vcx, label);
+        assert_eq!(b.role, Some(Role::Button), "{label}");
+        assert!(b.focusable && b.clickable, "{label}");
+    }
+    assert_eq!(named(&mut vcx, "Use left").toggled, Some(Toggled::False));
+
+    // Tab to Use left; Space picks it.
+    vcx.update(|window, cx| window.focus_next(cx));
+    draw(&mut vcx);
+    for _ in 0..12 {
+        if focused(&mut vcx).flatten().as_deref() == Some("Use left") {
+            break;
+        }
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+    }
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("Use left"));
+    vcx.simulate_keystrokes("space");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("space").expect("a key"),
+    });
+    draw(&mut vcx);
+    assert_eq!(named(&mut vcx, "Use left").toggled, Some(Toggled::True));
+    let mine = with_role(&mut vcx, Role::Group)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("mine"))
+        .expect("the left side's text");
+    assert_eq!(mine.description.as_deref(), Some("In the result"));
+    assert_eq!(view.read_with(&vcx, |v, _| v.comparison().unresolved()), 0);
+}

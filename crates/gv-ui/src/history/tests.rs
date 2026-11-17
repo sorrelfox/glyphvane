@@ -356,3 +356,50 @@ fn sizes_and_times_read_well() {
     let two_days = now - Duration::from_secs(3 * 86_400);
     assert!(!super::panel::when(two_days, now).starts_with("Today"));
 }
+
+/// The panel for assistive technology: a named group with the versions
+/// as a list, the preview as a document, and its actions as a toolbar of
+/// named buttons the keyboard reaches.
+#[gpui::test]
+fn the_panel_names_its_parts_and_the_keyboard_reaches_the_actions(cx: &mut TestAppContext) {
+    use crate::a11y::Role;
+    use crate::a11y::testing::{focused, named, with_role};
+
+    let (_dir, _note, view, events, mut vcx) = panel(cx);
+    assert_eq!(named(&mut vcx, "File history").role, Some(Role::Group));
+    assert_eq!(named(&mut vcx, "Versions").role, Some(Role::List));
+    let rows = with_role(&mut vcx, Role::ListItem);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].position, Some((1, 3)));
+
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |p, _| p.selected()), Some(0));
+    assert_eq!(named(&mut vcx, "Version").role, Some(Role::Toolbar));
+    assert_eq!(
+        named(&mut vcx, "Version preview").role,
+        Some(Role::Document)
+    );
+    for label in ["Compare with current", "Restore", "Copy"] {
+        let b = named(&mut vcx, label);
+        assert_eq!(b.role, Some(Role::Button), "{label}");
+        assert!(b.focusable && !b.disabled, "{label}");
+    }
+    for _ in 0..8 {
+        if focused(&mut vcx).flatten().as_deref() == Some("Restore") {
+            break;
+        }
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+    }
+    assert_eq!(focused(&mut vcx).flatten().as_deref(), Some("Restore"));
+    vcx.simulate_keystrokes("space");
+    vcx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("space").expect("a key"),
+    });
+    draw(&mut vcx);
+    assert!(matches!(
+        events.borrow().last(),
+        Some(super::HistoryEvent::Restore { .. })
+    ));
+}

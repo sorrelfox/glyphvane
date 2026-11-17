@@ -2,6 +2,13 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The compare view's element tree (not designed; see the module docs).
+//!
+//! For assistive technology the view is a region named by its title; the
+//! header is a toolbar with the summary as a polite status; each change
+//! is a group named by its place and what changed, with its three
+//! choices as toggle buttons (pressed when chosen) and each side's text
+//! named by its side and whether it is in the result. Every button is a
+//! Tab stop that Enter and Space press.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -11,6 +18,7 @@ use gpui::{
 };
 
 use super::{Comparison, HunkKind, Pick, Region};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
 use crate::editor::EditorView;
 use crate::metrics::size::infobar as button_size;
@@ -116,6 +124,8 @@ fn button(
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || selector.clone())
         .flex_none()
         .h(px(button_size::BUTTON_HEIGHT))
@@ -162,7 +172,7 @@ fn text_lines(lines: &[&str], color: Color) -> Div {
 }
 
 impl CompareView {
-    fn header(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Div {
+    fn header(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> gpui::Stateful<Div> {
         let changes = self.comparison.hunk_count();
         let unresolved = self.comparison.unresolved();
         let mut summary = match changes {
@@ -176,6 +186,8 @@ impl CompareView {
             n => summary.push_str(&format!(" · {n} conflicts to choose")),
         }
         div()
+            .id("compare-header")
+            .a11y_group(Role::Toolbar, "Compare")
             .flex_none()
             .min_h(px(size::INFOBAR))
             .flex()
@@ -201,29 +213,38 @@ impl CompareView {
                     )
                     .child(
                         div()
+                            .id("compare-summary")
+                            .role(Role::Status)
+                            .aria_label(summary.clone())
                             .debug_selector(|| "compare-summary".into())
                             .text_color(theme.text.secondary)
-                            .child(summary),
+                            .child(summary)
+                            .accessible()
+                            .live(Live::Polite),
                     ),
             )
             .child(
                 button("compare-all-left", "Use all left", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Left, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Left, cx)))
+                    .accessible(),
             )
             .child(
                 button("compare-all-right", "Use all right", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Right, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Right, cx)))
+                    .accessible(),
             )
             .child(
                 button("compare-cancel", "Cancel", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
+                    .accessible(),
             )
             .child(
                 button("compare-apply", "Apply", false, theme)
                     .bg(theme.accent.default)
                     .border_color(theme.accent.default)
                     .text_color(theme.accent.on)
-                    .on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.apply(cx)))
+                    .accessible(),
             )
     }
 
@@ -271,7 +292,7 @@ impl CompareView {
         hunk: &super::Hunk,
         theme: &Theme,
         cx: &mut Context<'_, Self>,
-    ) -> Div {
+    ) -> crate::a11y::Accessible<gpui::Stateful<Div>> {
         let what = match hunk.kind {
             HunkKind::Left => format!("Changed in {}", self.comparison.sides().left),
             HunkKind::Right => format!("Changed in {}", self.comparison.sides().right),
@@ -281,7 +302,9 @@ impl CompareView {
         let pick = hunk.pick;
         let left_on = matches!(pick, Some(Pick::Left | Pick::Both));
         let right_on = matches!(pick, Some(Pick::Right | Pick::Both));
-        let side = |text: &str, on: bool| {
+        let sides = self.comparison.sides();
+        let count = self.comparison.hunk_count();
+        let side = |text: &str, on: bool, which: &'static str, name: &SharedString| {
             let all = lines(text);
             let body = if all.is_empty() {
                 div()
@@ -299,6 +322,16 @@ impl CompareView {
                 )
             };
             div()
+                .id(SharedString::from(format!(
+                    "compare-hunk-{index}-{which}-text"
+                )))
+                .role(Role::Group)
+                .aria_label(name.clone())
+                .aria_description(if on {
+                    "In the result"
+                } else {
+                    "Not in the result"
+                })
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
@@ -307,6 +340,7 @@ impl CompareView {
                 .rounded(px(radius::CONTROL))
                 .when(on, |d| d.bg(theme.accent.tint))
                 .child(body)
+                .accessible()
         };
         let choose = |which: Pick, label: &'static str, on: bool| {
             let id = format!(
@@ -317,16 +351,24 @@ impl CompareView {
                     Pick::Both => "both",
                 }
             );
-            button(id, label, on, theme).on_click(cx.listener(move |this, _, _, cx| {
-                this.pick(index, which, cx);
-            }))
+            button(id, label, on, theme)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.pick(index, which, cx);
+                }))
+                .accessible()
         };
         let border = if pick.is_none() {
             theme.status.error
         } else {
             theme.border.strong
         };
+        let name = format!("Change {} of {count}: {what}", index + 1);
         div()
+            .id(SharedString::from(format!("compare-hunk-{index}")))
+            .role(Role::Group)
+            .aria_label(name)
+            .when(pick.is_none(), |d| d.aria_description("No side chosen yet"))
             .debug_selector(move || format!("compare-hunk-{index}"))
             .mx(px(spacing::PAD_LEFT))
             .my(px(spacing::PAD_TOP))
@@ -357,9 +399,10 @@ impl CompareView {
                 div()
                     .flex()
                     .gap(px(spacing::GAP))
-                    .child(side(&hunk.left, left_on))
-                    .child(side(&hunk.right, right_on)),
+                    .child(side(&hunk.left, left_on, "left", &sides.left))
+                    .child(side(&hunk.right, right_on, "right", &sides.right)),
             )
+            .accessible()
     }
 }
 
@@ -382,6 +425,8 @@ impl Render for CompareView {
             })
             .collect();
         div()
+            .id("compare-view")
+            .a11y_group(Role::Region, format!("Compare: {}", self.title))
             .debug_selector(|| "compare-view".into())
             .size_full()
             .flex()
@@ -390,7 +435,7 @@ impl Render for CompareView {
             .text_color(theme.text.primary)
             .text_size(px(text::UI.size))
             .line_height(px(text::UI.line))
-            .child(self.header(theme, cx))
+            .child(self.header(theme, cx).accessible())
             .child(self.side_names(theme))
             .child(
                 div()
@@ -401,5 +446,6 @@ impl Render for CompareView {
                     .pb(px(spacing::GAP))
                     .children(regions),
             )
+            .accessible()
     }
 }

@@ -45,6 +45,7 @@ use gv_settings::{Severity, atomic_write};
 
 use super::controls::{self, OnClick, Segment};
 use super::metrics::{field, row as row_metrics};
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role};
 use crate::appearance::Appearance;
 use crate::keymap::Keybindings;
 use crate::metrics::{HAIRLINE, font, radius, text};
@@ -482,20 +483,30 @@ impl KeymapEditor {
             .when_some(note, |d, note| {
                 d.child(
                     div()
+                        .id("keymap-note")
+                        .role(Role::Status)
+                        .aria_label(note.clone())
                         .text_size(px(text::UI_SMALL.size))
                         .line_height(px(text::UI_SMALL.line))
                         .text_color(theme.status.warning)
-                        .child(note),
+                        .child(note)
+                        .accessible()
+                        .live(Live::Polite),
                 )
             })
             .when_some(self.error.clone(), |d, error| {
                 d.child(
                     div()
+                        .id("keymap-error")
+                        .role(Role::Alert)
+                        .aria_label(error.clone())
                         .debug_selector(|| "keymap-error".into())
                         .text_size(px(text::UI_SMALL.size))
                         .line_height(px(text::UI_SMALL.line))
                         .text_color(theme.status.error)
-                        .child(error),
+                        .child(error)
+                        .accessible()
+                        .live(Live::Assertive),
                 )
             })
             .into_any_element()
@@ -517,9 +528,10 @@ impl KeymapEditor {
             .is_some();
         let id = row.id.clone();
         let slug = row.id.to_string();
+        let title = row.title.clone();
         let mut controls: Vec<AnyElement> = Vec::new();
         if recording {
-            controls.push(self.recorder_controls(theme, cx));
+            controls.push(self.recorder_controls(&title, theme, cx));
         } else {
             for keys in &row.keys {
                 let label = keys.label(platform);
@@ -533,6 +545,8 @@ impl KeymapEditor {
                         .child(
                             key_caps(label.clone(), theme)
                                 .id(SharedString::from(format!("keymap-key:{slug}:{keys}")))
+                                .a11y_button(format!("{label}: change this key of {title}"))
+                                .keyboard_control(theme)
                                 .debug_selector({
                                     let s = format!("keymap-key:{slug}:{label}");
                                     move || s.clone()
@@ -546,7 +560,8 @@ impl KeymapEditor {
                                         window,
                                         cx,
                                     );
-                                })),
+                                }))
+                                .accessible(),
                         )
                         .child(
                             controls::quiet_button(
@@ -557,10 +572,12 @@ impl KeymapEditor {
                                 }),
                                 theme,
                             )
+                            .aria_label(format!("Remove {label} from {title}"))
                             .debug_selector({
                                 let s = format!("keymap-remove:{slug}:{label}");
                                 move || s.clone()
-                            }),
+                            })
+                            .accessible(),
                         )
                         .into_any_element(),
                 );
@@ -575,10 +592,12 @@ impl KeymapEditor {
                     }),
                     theme,
                 )
+                .aria_label(format!("Add a key for {title}"))
                 .debug_selector({
                     let s = format!("keymap-add:{slug}");
                     move || s.clone()
                 })
+                .accessible()
                 .into_any_element(),
             );
             if row.customized {
@@ -590,10 +609,12 @@ impl KeymapEditor {
                         self.on_click(cx, move |this, _, cx| this.reset(reset_id.clone(), cx)),
                         theme,
                     )
+                    .aria_label(format!("Reset the keys of {title}"))
                     .debug_selector({
                         let s = format!("keymap-reset:{slug}");
                         move || s.clone()
                     })
+                    .accessible()
                     .into_any_element(),
                 );
             }
@@ -606,6 +627,7 @@ impl KeymapEditor {
             controls,
             theme,
         )
+        .accessible()
         .into_any_element()
     }
 
@@ -629,7 +651,12 @@ impl KeymapEditor {
 
     /// The controls of the row being recorded: the keys pressed so far,
     /// the scope, conflicts, and the buttons.
-    fn recorder_controls(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn recorder_controls(
+        &self,
+        title: &str,
+        theme: &Theme,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let platform = Platform::current();
         let recorded = self.recorded();
         let scope = self
@@ -700,6 +727,10 @@ impl KeymapEditor {
                     .child(
                         div()
                             .id("keymap-recorder")
+                            .role(Role::TextInput)
+                            .aria_label(format!("New keys for {title}"))
+                            .aria_value(prompt.clone())
+                            .aria_description("Press the keys; Escape cancels")
                             .debug_selector(|| "keymap-recorder".into())
                             .track_focus(&self.recorder)
                             .min_w(px(row_metrics::KEY_SEARCH_WIDTH / 2.0))
@@ -714,9 +745,16 @@ impl KeymapEditor {
                             .font_family(font::EDITOR)
                             .text_size(px(text::menu_shortcut_size()))
                             .when(recorded.is_none(), |d| d.text_color(theme.text.secondary))
-                            .child(prompt),
+                            .child(prompt)
+                            .accessible()
+                            .live(Live::Polite),
                     )
-                    .child(controls::segmented(segments, true, theme)),
+                    .child(
+                        controls::segmented(segments, true, theme)
+                            .id("keymap-scope")
+                            .a11y_group(Role::RadioGroup, "Applies to")
+                            .accessible(),
+                    ),
             )
             .when(!conflicts.is_empty(), |d| {
                 let text_: String = conflicts
@@ -724,13 +762,19 @@ impl KeymapEditor {
                     .map(|(title, keys)| format!("{title} ({keys})"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let said = format!("Also used by: {text_}");
                 d.child(
                     div()
+                        .id("keymap-conflict")
+                        .role(Role::Status)
+                        .aria_label(said.clone())
                         .debug_selector(|| "keymap-conflict".into())
                         .text_size(px(text::UI_SMALL.size))
                         .line_height(px(text::UI_SMALL.line))
                         .text_color(theme.status.warning)
-                        .child(format!("Also used by: {text_}")),
+                        .child(said)
+                        .accessible()
+                        .live(Live::Polite),
                 )
             })
             .child(div().flex().gap(px(row_metrics::GAP_X)).children(buttons))
@@ -743,6 +787,8 @@ fn button(id: &'static str, label: &'static str, on_click: OnClick, theme: &Them
     let (hover, press) = (theme.state.hover, theme.state.press);
     div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(crate::metrics::size::CONTROL))
@@ -758,6 +804,7 @@ fn button(id: &'static str, label: &'static str, on_click: OnClick, theme: &Them
         .active(move |s| s.bg(press))
         .on_click(on_click)
         .child(label)
+        .accessible()
         .into_any_element()
 }
 
@@ -770,8 +817,16 @@ impl Render for KeymapEditor {
         let count = rows.len();
         for row in rows {
             if category != Some(row.category) {
-                children
-                    .push(controls::heading(row.category.title(), false, theme).into_any_element());
+                let title = row.category.title();
+                children.push(
+                    controls::heading(title, false, theme)
+                        .id(SharedString::from(format!("keymap-category:{title}")))
+                        .role(Role::Heading)
+                        .aria_level(2)
+                        .aria_label(title)
+                        .accessible()
+                        .into_any_element(),
+                );
                 category = Some(row.category);
             }
             children.push(self.command_row(row, theme, cx));
@@ -779,18 +834,25 @@ impl Render for KeymapEditor {
         if count == 0 {
             children.push(
                 div()
+                    .id("keymap-no-match")
+                    .role(Role::Status)
+                    .aria_label("No command matches.")
                     .pt(px(row_metrics::HEADING_GAP))
                     .text_color(theme.text.secondary)
                     .child("No command matches.")
+                    .accessible()
+                    .live(Live::Polite)
                     .into_any_element(),
             );
         }
         div()
             .id("keymap-editor")
+            .a11y_group(Role::Group, "Keymap")
             .border_t(px(HAIRLINE))
             .border_color(theme.border.default)
             .flex()
             .flex_col()
             .children(children)
+            .accessible()
     }
 }

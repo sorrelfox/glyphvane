@@ -147,6 +147,15 @@ pub(super) struct Panels {
     /// The Bookmarks panel, once shown ([`super::bookmarks`]).
     pub bookmarks: Option<Entity<super::bookmarks_panel::BookmarksPanel>>,
     pub _bookmarks_events: Option<Subscription>,
+    /// The switcher's focus handles, for the arrow keys of its tab list.
+    pub switcher_keys: crate::a11y::RovingTabs,
+}
+
+impl Panels {
+    /// One focus handle per switcher tab (before drawing).
+    pub fn sync_switcher_keys(&mut self, cx: &mut gpui::App) {
+        self.switcher_keys.sync(SidebarPanel::SWITCHER.len(), cx);
+    }
 }
 
 impl Workspace {
@@ -183,7 +192,7 @@ impl Workspace {
                     .px(px(sidebar_head::PAD_X))
                     .children(self.row_start(RowStart::SidebarHead, theme, window, cx))
                     .child(self.drag_region("sidebar-drag", window, cx).flex_1())
-                    .child(self.panel_switcher(theme, cx).accessible()),
+                    .child(self.panel_switcher(theme, window, cx).accessible()),
             )
             .map(|sidebar| match (panel, self.files.clone()) {
                 (SidebarPanel::Files, Some(files)) => sidebar.child(files),
@@ -217,9 +226,23 @@ impl Workspace {
 
     /// Files, Search, Tags and Bookmarks; the active one has an
     /// `accent.tint` fill and `text.primary`.
-    fn panel_switcher(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+    ///
+    /// From the keyboard the switcher is one Tab stop; Left, Right, Home
+    /// and End move between its tabs and show each panel as they go
+    /// (automatic activation: the keyboard stays on the switcher).
+    fn panel_switcher(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Stateful<Div> {
         let size = (button::WIDTH, button::HEIGHT);
         let count = SidebarPanel::SWITCHER.len();
+        let shown = SidebarPanel::SWITCHER
+            .iter()
+            .position(|p| *p == self.panels.sidebar);
+        let stop = self.panels.switcher_keys.stop(window, cx, shown);
+        let workspace = cx.entity().downgrade();
         div()
             .id("panel-switcher")
             .a11y_group(Role::TabList, "Sidebar panels")
@@ -242,6 +265,17 @@ impl Workspace {
                             theme,
                         )
                         .a11y_tab(panel.title(), selected, index, count)
+                        .roving_tab(theme, &self.panels.switcher_keys, index, index == stop, {
+                            let workspace = workspace.clone();
+                            move |to, window, cx| {
+                                let Some(&panel) = SidebarPanel::SWITCHER.get(to) else {
+                                    return;
+                                };
+                                let _ = workspace.update(cx, |this, cx| {
+                                    this.show_sidebar_panel(panel, false, window, cx);
+                                });
+                            }
+                        })
                         .debug_selector(move || format!("panel-switch:{id}"))
                         .on_click(cx.listener(
                             move |this, _, window, cx| {

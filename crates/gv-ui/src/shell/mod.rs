@@ -723,6 +723,8 @@ pub struct Workspace {
     previews: link_preview::HoverPreviews,
     /// The last rename or move, for Undo.
     vault_ops: vault_ops::VaultOps,
+    /// The open tabs' focus handles, for the arrow keys of the tab list.
+    tab_keys: crate::a11y::RovingTabs,
 }
 
 impl fmt::Debug for Workspace {
@@ -868,6 +870,7 @@ impl Workspace {
             expanded: None,
             previews: link_preview::HoverPreviews::default(),
             vault_ops: vault_ops::VaultOps::default(),
+            tab_keys: crate::a11y::RovingTabs::new(crate::a11y::Axis::Horizontal),
         };
         // The document takes the keyboard from the start (copy, scrolling).
         if let Some(reader) = this.ensure_reader(0, window, cx) {
@@ -2014,6 +2017,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.settle_focus(window, cx);
         self.prune_previews();
+        self.tab_keys.sync(self.tabs.len(), cx);
+        self.panels.sync_switcher_keys(cx);
         let theme = Appearance::theme(cx);
         let radii = window_corner_radii(window, cx);
         let editor_facts = self.editor_facts(cx);

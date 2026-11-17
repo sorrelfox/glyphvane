@@ -37,6 +37,7 @@ use gpui::{
 };
 use toml::Value;
 
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::app_state;
 use crate::appearance::Appearance;
 use crate::files::open_dialog::{self, OpenPrompt};
@@ -287,6 +288,7 @@ impl OnboardingWindow {
 
     fn switch(
         &self,
+        label: &'static str,
         key: &'static str,
         on: bool,
         theme: &Theme,
@@ -301,13 +303,22 @@ impl OnboardingWindow {
             }),
             theme,
         )
+        .aria_label(label)
         .debug_selector(move || format!("onboarding-switch-{key}"))
+        .accessible()
         .into_any_element()
     }
 
     fn group(title: &'static str, first: bool, rows: Vec<AnyElement>, theme: &Theme) -> AnyElement {
         div()
-            .child(controls::heading(title, first, theme))
+            .child(
+                controls::heading(title, first, theme)
+                    .id(SharedString::from(format!("onboarding-heading-{title}")))
+                    .role(Role::Heading)
+                    .aria_level(2)
+                    .aria_label(title)
+                    .accessible(),
+            )
             .child(
                 div()
                     .border_b(px(HAIRLINE))
@@ -337,6 +348,8 @@ fn button(
     let (hover, press) = (theme.state.hover, theme.state.press);
     let base = div()
         .id(id)
+        .a11y_button(label)
+        .keyboard_control(theme)
         .debug_selector(move || id.into())
         .flex_none()
         .h(px(crate::metrics::size::CONTROL))
@@ -352,6 +365,7 @@ fn button(
             .text_color(theme.accent.on)
             .hover(|s| s.opacity(0.9))
             .active(|s| s.opacity(0.8))
+            .accessible()
             .into_any_element()
     } else {
         base.border_1()
@@ -359,8 +373,30 @@ fn button(
             .bg(theme.surface.raised)
             .hover(move |s| s.bg(hover))
             .active(move |s| s.bg(press))
+            .accessible()
             .into_any_element()
     }
+}
+
+/// A settings row (a named group), recorded for assistive technology.
+fn row(
+    id: &'static str,
+    label: &'static str,
+    description: Option<SharedString>,
+    error: Option<SharedString>,
+    controls: Vec<AnyElement>,
+    theme: &Theme,
+) -> crate::a11y::Accessible<gpui::Stateful<gpui::Div>> {
+    controls::row(id, label, description, error, controls, theme).accessible()
+}
+
+/// Segments as a radio group named `label` (the row's label).
+fn radio_group(label: &'static str, segments: Vec<Segment>, theme: &Theme) -> AnyElement {
+    controls::segmented(segments, true, theme)
+        .id(SharedString::from(format!("onboarding-choice-{label}")))
+        .a11y_group(Role::RadioGroup, label)
+        .accessible()
+        .into_any_element()
 }
 
 impl Render for OnboardingWindow {
@@ -368,7 +404,7 @@ impl Render for OnboardingWindow {
         let theme = Appearance::theme(cx);
         let settings = cx.global::<AppSettings>().settings().clone();
 
-        let start = vec![controls::row(
+        let start = vec![row(
             "onboarding-open-folder-row",
             "Open a folder of notes",
             Some(
@@ -400,12 +436,12 @@ impl Render for OnboardingWindow {
             cx,
         );
         let look = vec![
-            controls::row(
+            row(
                 "onboarding-theme-row",
                 "Theme",
                 Some("System follows your computer's light or dark appearance.".into()),
                 None,
-                vec![controls::segmented(theme_segments, true, theme).into_any_element()],
+                vec![radio_group("Theme", theme_segments, theme)],
                 theme,
             )
             .into_any_element(),
@@ -426,7 +462,7 @@ impl Render for OnboardingWindow {
             cx,
         );
         let flavor = vec![
-            controls::row(
+            row(
                 "onboarding-profile-row",
                 "Default profile",
                 Some(
@@ -438,7 +474,7 @@ impl Render for OnboardingWindow {
                     .into(),
                 ),
                 None,
-                vec![controls::segmented(profile_segments, true, theme).into_any_element()],
+                vec![radio_group("Default profile", profile_segments, theme)],
                 theme,
             )
             .into_any_element(),
@@ -452,7 +488,7 @@ impl Render for OnboardingWindow {
             cx,
         );
         let privacy_rows = vec![
-            controls::row(
+            row(
                 "onboarding-updates-row",
                 "Check for updates",
                 Some(
@@ -462,6 +498,7 @@ impl Render for OnboardingWindow {
                 ),
                 None,
                 vec![self.switch(
+                    "Check for updates",
                     "general.check_for_updates",
                     settings.general.check_for_updates,
                     theme,
@@ -470,7 +507,7 @@ impl Render for OnboardingWindow {
                 theme,
             )
             .into_any_element(),
-            controls::row(
+            row(
                 "onboarding-crash-row",
                 "Save crash reports",
                 Some(
@@ -480,6 +517,7 @@ impl Render for OnboardingWindow {
                 ),
                 None,
                 vec![self.switch(
+                    "Save crash reports",
                     "privacy_and_security.crash_reports",
                     privacy.crash_reports,
                     theme,
@@ -488,7 +526,7 @@ impl Render for OnboardingWindow {
                 theme,
             )
             .into_any_element(),
-            controls::row(
+            row(
                 "onboarding-remote-row",
                 "Images from the web",
                 Some(
@@ -497,7 +535,7 @@ impl Render for OnboardingWindow {
                         .into(),
                 ),
                 None,
-                vec![controls::segmented(remote_segments, true, theme).into_any_element()],
+                vec![radio_group("Images from the web", remote_segments, theme)],
                 theme,
             )
             .into_any_element(),
@@ -509,7 +547,7 @@ impl Render for OnboardingWindow {
             Offer::Explain => None,
         };
         let default_rows = vec![
-            controls::row(
+            row(
                 "onboarding-default-app-row",
                 "Open Markdown files with Glyphvane",
                 Some(
@@ -538,6 +576,7 @@ impl Render for OnboardingWindow {
 
         div()
             .id("onboarding-window")
+            .a11y_group(Role::Dialog, "Welcome to Glyphvane")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::dismiss))
@@ -558,11 +597,16 @@ impl Render for OnboardingWindow {
                     .p(px(PAD))
                     .child(
                         div()
+                            .id("onboarding-title")
+                            .role(Role::Heading)
+                            .aria_level(1)
+                            .aria_label("Welcome to Glyphvane")
                             .debug_selector(|| "onboarding-title".into())
                             .text_size(px(text::UI_TITLE.size))
                             .line_height(px(text::UI_TITLE.line))
                             .font_weight(FontWeight(text::weight::STRONG))
-                            .child("Welcome to Glyphvane"),
+                            .child("Welcome to Glyphvane")
+                            .accessible(),
                     )
                     .child(
                         div()
@@ -605,5 +649,6 @@ impl Render for OnboardingWindow {
                         theme,
                     )),
             )
+            .accessible()
     }
 }
