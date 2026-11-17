@@ -428,7 +428,7 @@ impl FindBar {
             .items_center()
             .justify_center()
             .font_family(font::EDITOR)
-            .text_size(px(text::FIELD_TOGGLE_SIZE))
+            .text_size(px(text::field_toggle_size()))
             .when(t == FindToggle::WholeWord, |d| d.underline())
             .map(|d| {
                 if on {

@@ -532,7 +532,7 @@ pub(super) fn item_row(
                 .flex_none()
                 .ml(px(spacing::SHORTCUT_GAP))
                 .font_family(font::EDITOR)
-                .text_size(px(text::MENU_SHORTCUT_SIZE))
+                .text_size(px(text::menu_shortcut_size()))
                 .text_color(theme.text.secondary)
                 .child(shortcut)
         }))

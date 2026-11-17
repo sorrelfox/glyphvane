@@ -296,7 +296,7 @@ impl Render for Tooltip {
             .rounded(px(radius::CONTROL))
             .bg(theme.text.primary)
             .text_color(theme.surface.page)
-            .text_size(px(text::TOOLTIP_SIZE))
+            .text_size(px(text::tooltip_size()))
             .child(self.0.clone())
     }
 }

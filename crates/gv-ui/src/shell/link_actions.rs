@@ -1083,7 +1083,7 @@ impl Workspace {
                 .children(lines.iter().map(|l| {
                     div()
                         .font_family(font::EDITOR)
-                        .text_size(px(text::MENU_SHORTCUT_SIZE))
+                        .text_size(px(text::menu_shortcut_size()))
                         .whitespace_nowrap()
                         .child(l.clone())
                 })),
@@ -1114,7 +1114,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .text_size(px(12.0))
+                            .text_size(px(text::UI.size))
                             .font_weight(FontWeight(text::weight::STRONG))
                             .child(
                                 gpui::component::Icon::empty()

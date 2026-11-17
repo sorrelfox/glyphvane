@@ -607,7 +607,7 @@ impl SearchPanel {
                 .items_center()
                 .justify_center()
                 .font_family(font::EDITOR)
-                .text_size(px(text::FIELD_TOGGLE_SIZE))
+                .text_size(px(text::field_toggle_size()))
                 .map(|d| {
                     if on {
                         d.bg(theme.accent.tint).text_color(theme.text.primary)
@@ -931,7 +931,7 @@ impl Render for Tooltip {
             .rounded(px(radius::CONTROL))
             .bg(theme.text.primary)
             .text_color(theme.surface.page)
-            .text_size(px(text::TOOLTIP_SIZE))
+            .text_size(px(text::tooltip_size()))
             .child(self.0.clone())
     }
 }

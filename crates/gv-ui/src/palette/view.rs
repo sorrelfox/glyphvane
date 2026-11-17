@@ -338,7 +338,7 @@ impl CommandPalette {
                 .debug_selector(move || selector.clone())
                 .flex_none()
                 .font_family(font::EDITOR)
-                .text_size(px(text::MENU_SHORTCUT_SIZE))
+                .text_size(px(text::menu_shortcut_size()))
                 .text_color(theme.text.secondary)
                 .child(shortcut)
         });
