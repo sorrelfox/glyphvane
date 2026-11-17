@@ -9,9 +9,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The local time zone's offset for the Bases view's dates (MIT OR
+# Apache-2.0; 0.4.45 is already in the graph through GPUI, checked
+# 2026-11-17).
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 fontdb = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
+gv-bases = { workspace = true }
 gv-canvas = { workspace = true }
 gv-diagram = { workspace = true }
 gv-editor = { workspace = true }

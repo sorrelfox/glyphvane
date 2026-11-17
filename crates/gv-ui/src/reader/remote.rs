@@ -222,6 +222,40 @@ pub(crate) fn fetched(url: &str) -> Option<CachedImage> {
     }
 }
 
+/// The app's fetcher, for views other than the Reading view (Bases card
+/// covers) that fetch what the policy allows without asking.
+pub(crate) fn shared_fetcher(cx: &mut App) -> Arc<RemoteFetcher> {
+    RemoteSession::fetcher(cx)
+}
+
+/// Fetches `url` as the Reading view does (blocking: the background
+/// executor only): redirects may not reach a blocked site, nor a private
+/// host unless `private_ok`. The image is remembered for this run (see
+/// [`fetched`]). Returns the cached file.
+pub(crate) fn fetch_image(
+    fetcher: &RemoteFetcher,
+    url: &str,
+    private_ok: bool,
+    policy: &Policy,
+    cancel: &CancelFlag,
+) -> Result<PathBuf, FetchError> {
+    let options = FetchOptions {
+        allow_private: private_ok,
+        ..FetchOptions::default()
+    };
+    let hop = |u: &gv_media::remote::Url| {
+        let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+        !policy.is_blocked_site(&host) && (private_ok || !gv_media::remote::is_private_host(&host))
+    };
+    let fetched = fetcher.fetch(url, &options, &hop, cancel)?;
+    let probe = super::media::remote_engine().probe_path(&fetched.path);
+    registry()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(url.to_owned(), (fetched.path.clone(), probe));
+    Ok(fetched.path)
+}
+
 /// The app's remote-content state: the fetcher and this session's
 /// approvals (never written anywhere).
 #[derive(Default)]

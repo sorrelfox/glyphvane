@@ -5,6 +5,7 @@
 
 pub mod about;
 pub mod appearance;
+pub mod bases_view;
 pub mod canvas_view;
 pub mod chrome;
 pub mod compare;
@@ -78,6 +79,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(shell::file_tree_key_bindings());
     cx.bind_keys(reader::key_bindings());
     cx.bind_keys(canvas_view::key_bindings());
+    cx.bind_keys(bases_view::key_bindings());
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     cx.bind_keys(search_panel::key_bindings());
