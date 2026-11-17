@@ -36,18 +36,18 @@ pub(super) struct CurrentNote {
 }
 
 /// The vault as autocomplete sees it from this document.
-struct Vault {
-    root: Option<PathBuf>,
-    content: Option<ContentSnapshot>,
-    index: Option<PathIndex>,
-    source: Option<VaultPath>,
-    params: ProfileParams,
+pub(super) struct Vault {
+    pub(super) root: Option<PathBuf>,
+    pub(super) content: Option<ContentSnapshot>,
+    pub(super) index: Option<PathIndex>,
+    pub(super) source: Option<VaultPath>,
+    pub(super) params: ProfileParams,
 }
 
 impl EditorView {
     /// The document's place in its vault: the content index of the vault
     /// that holds it, else the window's path index.
-    fn vault(&self) -> Vault {
+    pub(super) fn vault(&self) -> Vault {
         let profile = self.links.profile();
         let found = self
             .path

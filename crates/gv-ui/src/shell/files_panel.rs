@@ -34,6 +34,7 @@ use gpui::{
 use gv_vault::VaultPath;
 
 use super::controls::icon_button;
+use super::drag_drop::{DragPreview, DraggedFile};
 use super::tree::{RowKind, SortOrder, TreeModel};
 use super::vault::{VaultStatus, WindowVault};
 use crate::appearance::Appearance;
@@ -104,6 +105,9 @@ pub(crate) enum FilesPanelEvent {
     SwitchVault,
     /// The Sort button was clicked: show the sort orders.
     Sort,
+    /// An entry was dragged onto a folder (the vault folder for the
+    /// panel below the rows): move it there.
+    MoveInto { from: VaultPath, folder: VaultPath },
 }
 
 /// The Files panel of a window's sidebar.
@@ -517,6 +521,13 @@ impl FilesPanel {
                 .flex_1()
                 .min_h_0()
                 .py(px(list::PAD_Y))
+                // Below the rows is the vault folder.
+                .on_drop(cx.listener(|_, file: &DraggedFile, _, cx| {
+                    cx.emit(FilesPanelEvent::MoveInto {
+                        from: file.vault_path.clone(),
+                        folder: VaultPath::root(),
+                    });
+                }))
                 .child(
                     uniform_list(
                         "file-tree",
@@ -558,9 +569,36 @@ impl FilesPanel {
                             chevron
                         })
                     });
+                let entry = tree.index().get(row.id);
+                let dragged = entry.map(|e| DraggedFile {
+                    path: e.path.to_fs_path(tree.index().root()),
+                    vault_path: e.path.clone(),
+                    is_dir: e.kind.is_dir(),
+                });
+                let folder = entry.filter(|e| e.kind.is_dir()).map(|e| e.path.clone());
+                let drop_tint = theme.accent.tint;
+                let label = row.name.clone();
                 let row_frame =
                     list_row_frame(("file-row", ix), row.depth, selected == Some(ix), theme)
                         .debug_selector(move || format!("file-row-{ix}"))
+                        .when_some(dragged, |frame, dragged| {
+                            frame.on_drag(dragged, move |_, _, _, cx| {
+                                DragPreview::view(label.clone(), cx)
+                            })
+                        })
+                        .when_some(folder, |frame, folder| {
+                            // A folder takes the entries dropped on it
+                            // (not designed: the row's tint while over it).
+                            frame
+                                .drag_over::<DraggedFile>(move |style, _, _, _| style.bg(drop_tint))
+                                .on_drop(cx.listener(move |_, file: &DraggedFile, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(FilesPanelEvent::MoveInto {
+                                        from: file.vault_path.clone(),
+                                        folder: folder.clone(),
+                                    });
+                                }))
+                        })
                         .child(chevron)
                         .child(
                             div()

@@ -36,10 +36,11 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Styled as _, canvas, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, canvas, div, px,
 };
 
+use super::drag_drop::{DraggedFile, DraggedHeading};
 use super::{TextPosition, ViewMode, Workspace};
 use crate::editor::{EditorLayout, EditorView, Top};
 use crate::metrics::size::document;
@@ -56,7 +57,18 @@ impl Workspace {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .bg(theme.surface.page);
+            .bg(theme.surface.page)
+            // Drops: links into the Source view, or files to open
+            // ([`super::drag_drop`]).
+            .on_drop(cx.listener(|this, file: &DraggedFile, window, cx| {
+                this.drop_dragged_file(file, window, cx);
+            }))
+            .on_drop(cx.listener(|this, heading: &DraggedHeading, window, cx| {
+                this.drop_heading(heading, window, cx);
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_external(paths, window, cx);
+            }));
         let tab = self.active_tab();
         // A compare view takes the document's place while it is open (not
         // designed; see `crate::compare`).
@@ -66,6 +78,10 @@ impl Workspace {
         // A canvas file shows in its Canvas view, whatever the mode.
         if let Some(canvas) = self.shown_canvas() {
             return area.child(canvas.clone()).into_any_element();
+        }
+        // So does a base file, in its Bases view.
+        if let Some(base) = self.shown_base() {
+            return area.child(base.clone()).into_any_element();
         }
         match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
             (ViewMode::Preview, Some(reader), _, _) => {
@@ -122,6 +138,12 @@ impl Workspace {
     pub(super) fn shown_canvas(&self) -> Option<&Entity<crate::canvas_view::CanvasView>> {
         let tab = self.active_tab();
         tab.canvas.as_ref().filter(|_| tab.is_canvas())
+    }
+
+    /// The Bases view on screen: the active tab's, when it shows a base.
+    pub(super) fn shown_base(&self) -> Option<&Entity<crate::bases_view::BasesView>> {
+        let tab = self.active_tab();
+        tab.bases.as_ref().filter(|_| tab.is_base())
     }
 
     /// The Source view on screen: the active tab's, in Edit and Split

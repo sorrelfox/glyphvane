@@ -475,3 +475,59 @@ fn a_moved_canvas_keeps_its_vault_paths_and_a_broken_one_is_reported() {
 fn plan_for_rename(root: &Path) -> RefactorPlan {
     plan(root, ProfileId::Obsidian, &[mv("notes/a.md", "notes/c.md")]).expect("plan")
 }
+
+const BASE: &str = r#"filters:
+  and:
+    - 'file.hasLink(link("notes/a"))'
+    - "file == file(\"notes/a.md\")"
+    - file.inFolder("notes")
+formulas:
+  same: 'link( "notes/a.md#Top" )'
+  other: 'link("other")'
+  doubled: 'link(''notes/a'')'
+views:
+  - type: table
+    name: All
+"#;
+
+#[test]
+fn renaming_a_note_rewrites_base_literals_by_byte_range() {
+    let dir = vault(&[
+        ("notes/a.md", "# A"),
+        ("other.md", ""),
+        ("books.base", BASE),
+    ]);
+    let root = dir.path();
+    let plan = plan(root, ProfileId::Obsidian, &[mv("notes/a.md", "notes/b.md")]).expect("plan");
+    let edit = plan
+        .edits
+        .iter()
+        .find(|e| e.path == p("books.base"))
+        .expect("base edit");
+    let olds: Vec<_> = edit.changes.iter().map(|c| c.old.as_str()).collect();
+    assert_eq!(olds, ["notes/a", "notes/a.md#Top"]);
+    assert_eq!(edit.changes[0].new, "notes/b");
+    assert_eq!(edit.changes[1].new, "notes/b.md#Top");
+    // An escaped literal and a YAML-doubled one are left, with a reason.
+    let skipped: Vec<_> = plan
+        .skipped
+        .iter()
+        .filter(|s| s.source == p("books.base"))
+        .map(|s| s.link.as_str())
+        .collect();
+    assert_eq!(skipped, ["notes/a.md", "notes/a"]);
+    apply(&plan, None).expect("apply");
+    let expected = BASE
+        .replace("link(\"notes/a\")", "link(\"notes/b\")")
+        .replace("\"notes/a.md#Top\"", "\"notes/b.md#Top\"");
+    assert_eq!(read(root, "books.base"), expected);
+}
+
+#[test]
+fn base_refs_finds_link_and_file_literals_only() {
+    let text = r#"a: 'link("x") + file('y') + mylink("z") + f.file("w") + link(other)'"#;
+    let refs = plan::base_refs(text);
+    let values: Vec<_> = refs.iter().map(|r| &text[r.range.clone()]).collect();
+    assert_eq!(values, ["x", "y"]);
+    assert!(refs.iter().all(|r| r.unsafe_reason.is_none()));
+}

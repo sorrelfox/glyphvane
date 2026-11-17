@@ -375,7 +375,12 @@ impl Workspace {
     }
 
     /// Plans `moves` off the UI thread, then previews or applies them.
-    fn start_moves(&mut self, moves: Vec<Move>, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn start_moves(
+        &mut self,
+        moves: Vec<Move>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(input) = self.plan_input(cx) else {
             return;
         };

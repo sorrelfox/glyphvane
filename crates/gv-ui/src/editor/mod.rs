@@ -122,6 +122,7 @@ mod fold;
 mod go;
 mod highlight;
 mod input;
+mod insert;
 mod layout;
 mod links;
 mod markdown;
@@ -169,6 +170,7 @@ use file::{DocState, Loaded};
 pub use find::DEBUG_REPLACE_ENV;
 pub use fold::DEBUG_FOLD_ENV;
 use highlight::{HighlightCache, LinkStatuses};
+pub(crate) use insert::LinkTarget;
 use markdown::Availabilities;
 use metrics::EditorMetrics;
 pub use paste::{ClipboardHtml, HtmlClipboard, set_html_clipboard};
@@ -1158,6 +1160,12 @@ impl EditorView {
             return;
         }
         let item = cx.read_from_clipboard();
+        // An image (a screenshot, an image copied in a browser) is saved
+        // as an attachment and embedded ([`insert`]).
+        if !plain && let Some(image) = item.as_ref().and_then(insert::clipboard_image) {
+            self.paste_image(image, window, cx);
+            return;
+        }
         let text = item.as_ref().and_then(ClipboardItem::text);
         let lengths = match item.as_ref().and_then(|i| i.entries().first()) {
             Some(ClipboardEntry::String(s)) => s.metadata_json::<Vec<usize>>(),

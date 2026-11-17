@@ -4,8 +4,13 @@
 //! The Outline section of the right panel: the active document's headings
 //! as a tree, the section being read highlighted. A click on a heading asks
 //! the window to scroll there. Rows are drawn lazily.
+//!
+//! A heading dragged into the Source view becomes a link to it
+//! ([`super::drag_drop`]). Reordering sections by dragging headings is
+//! after 1.0 (10 § Panels).
 
 use std::ops::Range;
+use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -15,6 +20,7 @@ use gpui::{
 };
 use gv_model::DocModel;
 
+use super::drag_drop::{DragPreview, DraggedHeading};
 use super::panels::section_head;
 use crate::appearance::Appearance;
 use crate::metrics::spacing::outline_row;
@@ -38,6 +44,8 @@ pub(super) struct OutlinePanel {
     current: Option<usize>,
     /// The section is expanded.
     open: bool,
+    /// The document's file, for the links its dragged headings make.
+    file: Option<PathBuf>,
     scroll: UniformListScrollHandle,
 }
 
@@ -49,6 +57,7 @@ impl OutlinePanel {
             model: None,
             current: None,
             open: true,
+            file: None,
             scroll: UniformListScrollHandle::new(),
         }
     }
@@ -64,6 +73,11 @@ impl OutlinePanel {
         self.current = None;
         self.set_current(current, cx);
         cx.notify();
+    }
+
+    /// The file of the document shown, which dragged headings link to.
+    pub fn set_file(&mut self, file: Option<PathBuf>) {
+        self.file = file;
     }
 
     /// Moves the highlight to `current` and keeps its row in view.
@@ -162,6 +176,15 @@ impl OutlinePanel {
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(OutlinePanelEvent::Jump(ix));
                     }))
+                    .when_some(self.file.clone(), |row, file| {
+                        let dragged = DraggedHeading {
+                            file,
+                            text: label.clone(),
+                        };
+                        row.on_drag(dragged, |heading, _, _, cx| {
+                            DragPreview::view(heading.text.clone(), cx)
+                        })
+                    })
                     .child(div().min_w_0().truncate().child(label));
                 // The list sizes its items to their content: a full-width
                 // slot holds the row and its side margins.

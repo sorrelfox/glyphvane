@@ -78,7 +78,10 @@ pub(crate) use context::{Block, Features, Kind, Scope, Trigger, detect};
 pub(crate) use items::{
     AcceptEnv, Item, Leaves, Sources, complete, items, new_block_id, paragraphs,
 };
-pub(crate) use link::{LinkStyle, Linker};
+pub(crate) use link::{
+    LinkStyle, Linker, encode as encode_segment, heading_fragment, is_note, json_string,
+    wiki_heading,
+};
 #[cfg(test)]
 pub(crate) use view::LABEL_INSET;
 pub(crate) use view::{RowClick, panel, panel_size, place};

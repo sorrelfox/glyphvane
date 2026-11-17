@@ -110,6 +110,29 @@ pub fn plan_moves(
         plan_canvas(root, &moved, &entry.path, &mut edits, &mut skipped);
     }
 
+    // Bases name files in `link("…")` and `file("…")` literals: those
+    // follow the moves too, by byte ranges.
+    for entry in paths.iter() {
+        if entry.kind.is_dir()
+            || !entry
+                .path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("base"))
+        {
+            continue;
+        }
+        plan_base(
+            root,
+            paths,
+            &post,
+            params,
+            &moved,
+            &entry.path,
+            &mut edits,
+            &mut skipped,
+        );
+    }
+
     // A moved file whose name another file already has: bare links may
     // become ambiguous.
     for (from, to) in &moved {
@@ -363,6 +386,212 @@ fn plan_canvas(
     edits.push(FileEdit {
         path: source.clone(),
         moved_to: moved.get(source).unwrap_or(source).clone(),
+        before_hash: ContentHash::of(text.as_bytes()),
+        before: text,
+        after,
+        changes,
+    });
+}
+
+/// A file named by a Bases function in a `.base` file: the literal of
+/// `link("…")` or `file("…")`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaseRef {
+    /// The bytes of the literal's text, between its quotes.
+    pub range: std::ops::Range<usize>,
+    /// The quote it is written in.
+    pub quote: char,
+    /// Why it cannot be rewritten in place (escapes, YAML-doubled quotes).
+    pub unsafe_reason: Option<&'static str>,
+}
+
+/// The `link("…")` and `file("…")` literals of a `.base` file's text.
+///
+/// The file is YAML whose scalars hold expressions, so a literal may sit
+/// inside a quoted YAML scalar. Only literals whose bytes are exactly the
+/// path (no backslash escapes, no YAML-doubled quotes) can be patched by
+/// byte range; the others are listed with a reason.
+pub(crate) fn base_refs(text: &str) -> Vec<BaseRef> {
+    let bytes = text.as_bytes();
+    let mut refs = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(rel) = text[at..].find(['l', 'f']) else {
+            break;
+        };
+        let start = at + rel;
+        at = start + 1;
+        if !(text[start..].starts_with("link(") || text[start..].starts_with("file(")) {
+            continue;
+        }
+        // A function, not the end of a longer name or a method.
+        if start > 0 {
+            let prev = bytes[start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' {
+                continue;
+            }
+        }
+        let mut i = start + "link(".len();
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        // `\"` (in a double-quoted YAML scalar) or `''` (in a
+        // single-quoted one) open a literal that YAML escapes.
+        let mut escaped = false;
+        if bytes.get(i) == Some(&b'\\') {
+            escaped = true;
+            i += 1;
+        }
+        let Some(&q) = bytes.get(i).filter(|&&b| b == b'"' || b == b'\'') else {
+            continue;
+        };
+        if bytes.get(i + 1) == Some(&q) {
+            escaped = true;
+            i += 1;
+        }
+        let open = i;
+        let Some(len) = text[open + 1..].find([q as char, '\n']) else {
+            break;
+        };
+        let mut close = open + 1 + len;
+        if bytes[close] != q {
+            at = close;
+            continue;
+        }
+        if bytes[close - 1] == b'\\' {
+            escaped = true;
+            close -= 1;
+        }
+        let value = &text[open + 1..close];
+        if bytes.get(close + 1) == Some(&q) {
+            escaped = true;
+        }
+        let unsafe_reason = if escaped || value.contains('\\') {
+            Some("its quotes are escaped in the YAML: update it by hand")
+        } else if value.is_empty() {
+            continue;
+        } else {
+            None
+        };
+        refs.push(BaseRef {
+            range: open + 1..close,
+            quote: q as char,
+            unsafe_reason,
+        });
+        at = close + 1;
+    }
+    refs
+}
+
+/// Whether `value` can stand in a base literal written in `quote`
+/// without changing what the YAML around it means.
+fn fits_base_literal(value: &str, quote: char) -> bool {
+    !value.is_empty()
+        && !value.contains(['"', '\'', '\\', '\n', '\r'])
+        && !value.contains(" #")
+        && !value.contains(": ")
+        && !value.contains(quote)
+}
+
+/// Plans the edits of the base file `source`: every `link("…")` or
+/// `file("…")` literal that resolves (as a wikilink of the base) to a
+/// moved file gets the moved file's new path, touching only the bytes of
+/// the literal.
+#[allow(clippy::too_many_arguments)]
+fn plan_base(
+    root: &Path,
+    pre: &PathIndex,
+    post: &PathIndex,
+    params: &ProfileParams,
+    moved: &BTreeMap<VaultPath, VaultPath>,
+    source: &VaultPath,
+    edits: &mut Vec<FileEdit>,
+    skipped: &mut Vec<Skipped>,
+) {
+    let Ok(bytes) = std::fs::read(source.to_fs_path(root)) else {
+        // An unreadable base is reported only when it names a moved file,
+        // which cannot be known: it is left alone like an unindexed note.
+        return;
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    if !text.contains("link(") && !text.contains("file(") {
+        return;
+    }
+    let new_source = moved.get(source).unwrap_or(source);
+    let target_of = |index: &PathIndex, raw: &str, from: &VaultPath| {
+        let lref = LinkRef::new(LinkKind::Wikilink, raw, from.clone(), params.profile);
+        let r = resolve(index, &lref, params);
+        let ok = matches!(r.status, Status::Exact | Status::CaseFold | Status::Loose);
+        r.target
+            .filter(|_| ok)
+            .and_then(|id| index.get(id))
+            .map(|e| e.path.clone())
+    };
+    let mut changes = Vec::new();
+    for r in base_refs(&text) {
+        let value = &text[r.range.clone()];
+        let (path_text, fragment) = match value.find('#') {
+            Some(i) => (&value[..i], &value[i..]),
+            None => (value, ""),
+        };
+        let Some(target) = target_of(pre, path_text, source) else {
+            continue;
+        };
+        let Some(new_target) = moved.get(&target) else {
+            continue;
+        };
+        if target_of(post, path_text, new_source).as_ref() == Some(new_target) {
+            continue;
+        }
+        let skip = |reason: &str, skipped: &mut Vec<Skipped>| {
+            skipped.push(Skipped {
+                source: source.clone(),
+                line: line_of(&text, r.range.start),
+                link: value.to_owned(),
+                reason: reason.to_owned(),
+            });
+        };
+        if let Some(reason) = r.unsafe_reason {
+            skip(reason, skipped);
+            continue;
+        }
+        let Some(path) = generate(
+            LinkKind::Wikilink,
+            path_text,
+            new_source,
+            new_target,
+            post,
+            params,
+        ) else {
+            skip("no link to the new place could be written", skipped);
+            continue;
+        };
+        let new = format!("{path}{fragment}");
+        if !fits_base_literal(&new, r.quote) {
+            skip(
+                "the new path needs quoting in the base: update it by hand",
+                skipped,
+            );
+            continue;
+        }
+        if new != value {
+            changes.push(LinkChange {
+                span: Span::of(r.range.clone()),
+                line: line_of(&text, r.range.start),
+                old: value.to_owned(),
+                new,
+            });
+        }
+    }
+    if changes.is_empty() {
+        return;
+    }
+    let after = apply_changes(&text, &changes);
+    edits.push(FileEdit {
+        path: source.clone(),
+        moved_to: new_source.clone(),
         before_hash: ContentHash::of(text.as_bytes()),
         before: text,
         after,

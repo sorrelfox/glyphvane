@@ -5,6 +5,7 @@
 
 pub mod about;
 pub mod appearance;
+pub(crate) mod attachments;
 pub(crate) mod autocomplete;
 pub mod bases_view;
 pub mod canvas_view;

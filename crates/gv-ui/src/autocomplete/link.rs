@@ -97,7 +97,7 @@ fn json_bool(text: &str, key: &str) -> Option<bool> {
 
 /// The string value of `"key"` in a flat JSON object (`\"` and `\\`
 /// unescaped).
-fn json_string(text: &str, key: &str) -> Option<String> {
+pub(crate) fn json_string(text: &str, key: &str) -> Option<String> {
     let rest = json_raw(text, key)?.strip_prefix('"')?;
     let mut out = String::new();
     let mut chars = rest.chars();

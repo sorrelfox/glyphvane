@@ -335,7 +335,9 @@ impl Workspace {
                 self.ask(Notice::confirm_url(&url, &why), cx);
                 return;
             }
-            Navigation::OpenFile(path) if super::canvas_tabs::is_canvas(&path) => {
+            Navigation::OpenFile(path)
+                if super::canvas_tabs::is_canvas(&path) || super::bases_tabs::is_base(&path) =>
+            {
                 self.open_link_target(index, path, None, disposition, window, cx);
                 return;
             }

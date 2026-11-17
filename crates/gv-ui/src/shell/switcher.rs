@@ -71,6 +71,8 @@ impl Workspace {
                 cx.defer(move |cx| quick::refresh(handle, cx));
                 // So does the Search panel.
                 this.sync_search(cx);
+                // Bases list the vault's files.
+                this.push_bases_content(cx);
             }));
     }
 
