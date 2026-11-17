@@ -73,6 +73,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "settings.import",
     "settings.export",
     "app.open_menu",
+    "app.keymap_cheatsheet",
     "workspace.command_palette",
     "view.cycle_theme",
     "view.preview",
@@ -157,6 +158,8 @@ pub fn key_bindings(specs: &[BindingSpec], cx: &App) -> Vec<KeyBinding> {
 pub struct Keybindings {
     registry: CommandRegistry,
     keymap: Keymap,
+    /// The user's `keymap.toml` as last read, for the keymap editor.
+    user: UserKeymap,
 }
 
 impl Global for Keybindings {}
@@ -168,6 +171,11 @@ impl Keybindings {
 
     pub fn keymap(&self) -> &Keymap {
         &self.keymap
+    }
+
+    /// The user's `keymap.toml` the bindings were built from.
+    pub fn user(&self) -> &UserKeymap {
+        &self.user
     }
 
     /// The label of a command's primary keys on this platform (`Ctrl+W`,
@@ -281,7 +289,11 @@ pub fn apply(cx: &mut App, user: &UserKeymap) {
     }
     let bindings = key_bindings(&binding_specs(&keymap), cx);
     replace_command_bindings(cx, bindings);
-    cx.set_global(Keybindings { registry, keymap });
+    cx.set_global(Keybindings {
+        registry,
+        keymap,
+        user: user.clone(),
+    });
     crate::menu::refresh_native(cx);
 }
 

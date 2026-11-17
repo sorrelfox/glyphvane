@@ -213,6 +213,9 @@ fn main() -> ExitCode {
             // The crash journal and file watching; safe mode keeps both:
             // they protect the user's text.
             gv_ui::files::install(cx, locations.as_ref());
+            // Version history: a snapshot of a note on each save (not in
+            // safe mode, which writes nothing it does not need).
+            gv_ui::history::install(cx, locations.as_ref());
             ui_session::install(cx, session_store);
             // Onboarding, update check and crash-report bookkeeping.
             gv_ui::app_state::install(cx);

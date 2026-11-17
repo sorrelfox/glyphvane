@@ -79,6 +79,7 @@ mod disk;
 mod document;
 mod fskind;
 mod hash;
+pub mod history;
 pub mod journal;
 mod merge;
 mod write;

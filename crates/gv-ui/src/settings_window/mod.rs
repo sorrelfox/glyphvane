@@ -20,8 +20,8 @@
 //!   the key. Also not designed: search results (matching rows of every
 //!   section under section headings), the inline errors, the Reset button
 //!   of a value the scope sets, the select's list, the Keymap section (a
-//!   button that opens `keymap.toml`; the keymap editor is a Should for a
-//!   later milestone), the About section, the window's chrome on Windows
+//!   button that opens `keymap.toml`, and the keymap editor,
+//!   [`keymap_editor`]), the About section, the window's chrome on Windows
 //!   (the system title bar) and Linux (a round close button in the
 //!   sidebar's top row of a client-decorated window).
 //!
@@ -49,6 +49,9 @@
 
 mod appearance;
 pub(crate) mod controls;
+pub mod keymap_editor;
+#[cfg(test)]
+mod keymap_tests;
 pub(crate) mod metrics;
 pub mod model;
 #[cfg(test)]
@@ -285,6 +288,8 @@ pub struct SettingsWindow {
     import: Option<PendingImport>,
     /// The last export or import message.
     transfer_status: Option<String>,
+    /// The keymap editor, made when the Keymap section is first shown.
+    keymap_editor: Option<Entity<keymap_editor::KeymapEditor>>,
     focus: FocusHandle,
     subscriptions: Vec<Subscription>,
 }
@@ -342,6 +347,7 @@ impl SettingsWindow {
             fonts,
             import: None,
             transfer_status: None,
+            keymap_editor: None,
             focus,
             subscriptions: vec![search_events, settings_changed],
         }
@@ -855,7 +861,7 @@ impl SettingsWindow {
         }
         match self.section {
             SectionId::Appearance => self.appearance(theme, window, cx),
-            SectionId::Keymap => self.keymap_section(theme, cx),
+            SectionId::Keymap => self.keymap_section(theme, window, cx),
             SectionId::About => self.about_section(theme, cx),
             section => {
                 let specs = section.specs();
@@ -1146,16 +1152,33 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// The Keymap section (not designed): where the keymap file is, and a
-    /// button that opens it. The keymap editor is a Should (FR-SET-02).
-    fn keymap_section(&self, theme: &Theme, cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
+    /// The keymap editor of the Keymap section, made on first use.
+    pub fn keymap_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<keymap_editor::KeymapEditor> {
+        self.keymap_editor
+            .get_or_insert_with(|| cx.new(|cx| keymap_editor::KeymapEditor::new(window, cx)))
+            .clone()
+    }
+
+    /// The Keymap section (not designed): where the keymap file is, a
+    /// button that opens it, and the keymap editor (FR-SET-02).
+    fn keymap_section(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<AnyElement> {
+        let editor = self.keymap_editor(window, cx);
         let path = cx
             .global::<AppSettings>()
             .locations()
             .map(|l| l.keymap_file());
         let description: SharedString = match &path {
             Some(path) => format!(
-                "Keys are changed in {}. Changes apply when the file is saved.",
+                "Keys are kept in {}. Changes made below or in the file apply at once.",
                 path.display()
             )
             .into(),
@@ -1183,6 +1206,7 @@ impl SettingsWindow {
                     theme,
                 ))
                 .into_any_element(),
+            editor.into_any_element(),
         ]
     }
 

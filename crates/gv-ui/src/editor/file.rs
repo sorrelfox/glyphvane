@@ -322,6 +322,11 @@ pub(crate) enum ComparePurpose {
     Recovered,
     /// A sync-conflict copy of the file.
     Copy(PathBuf),
+    /// A version from the file's history, named `label`.
+    Version {
+        label: SharedString,
+        text: std::sync::Arc<str>,
+    },
 }
 
 /// A compare view on screen.
@@ -892,6 +897,7 @@ impl EditorView {
         self.links = super::LinkStatuses::new(Some(&path), None, self.links.profile());
         self.path = Some(path);
         self.untitled = None;
+        self.keep_version(cx);
         cx.emit(DocEvent::Saved);
         cx.emit(DocEvent::SavedAs);
         self.notice_changed(cx);
@@ -937,6 +943,7 @@ impl EditorView {
                 doc.state.deleted = false;
                 doc.state.last_error = None;
                 doc.state.clear_notice(&[Topic::SaveFailed, Topic::Deleted]);
+                self.keep_version(cx);
                 cx.emit(DocEvent::Saved);
                 // Saved as UTF-8, a file that was not valid in its
                 // encoding may be edited now.
@@ -1475,6 +1482,59 @@ impl EditorView {
         }));
     }
 
+    /// The File history panel's *Compare with current*: the buffer (left)
+    /// against `text`, a kept version of the file named `label` (right), a
+    /// 2-way compare. Its result replaces the text as one undoable edit.
+    pub fn compare_with_version(
+        &mut self,
+        label: SharedString,
+        text: std::sync::Arc<str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let mine = doc.editor.snapshot();
+        let ending = line_ending_of(doc.state.file.as_ref());
+        let sides = Sides {
+            left: "Current".into(),
+            right: label.clone(),
+        };
+        let purpose = ComparePurpose::Version {
+            label,
+            text: text.clone(),
+        };
+        self.open_compare(purpose, cx, move || {
+            Comparison::two_way(&text_of(&mine), &text, sides, ending)
+        });
+    }
+
+    /// The File history panel's *Restore*: replaces the text with `text`
+    /// as one undoable, journaled edit (the minimal diff, so anchors and
+    /// folds outside the changes stay). Nothing is written until the
+    /// document is saved. Does nothing in viewer mode.
+    pub fn restore_version(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        if self.read_only {
+            return;
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let current = text_of(&doc.editor.snapshot());
+        let transaction = reload_transaction(&current, text);
+        self.apply_edit(&transaction, cx);
+        self.notice_changed(cx);
+        self.after_edit(cx);
+    }
+
+    /// Keeps the text just saved as a version in the file's history.
+    fn keep_version(&self, cx: &mut Context<'_, Self>) {
+        let (Some(path), Some(doc)) = (self.path.clone(), self.doc.as_ref()) else {
+            return;
+        };
+        crate::history::record_saved(path, doc.state.base.clone(), cx);
+    }
+
     /// Makes the comparison off the UI thread, then shows it.
     fn open_compare(
         &mut self,
@@ -1511,6 +1571,7 @@ impl EditorView {
             ComparePurpose::Conflict => "Compare with the file on disk".to_owned(),
             ComparePurpose::Recovered => "Compare the recovered text with the file".to_owned(),
             ComparePurpose::Copy(copy) => format!("Compare with “{}”", file_name(copy)),
+            ComparePurpose::Version { label, .. } => format!("Compare with the {label}"),
         };
         let view = cx.new(|_| CompareView::new(comparison, title.into(), this));
         doc.state.compare = Some(OpenCompare {
@@ -1541,6 +1602,9 @@ impl EditorView {
             // drop that change.
             match open.purpose {
                 ComparePurpose::Copy(copy) => self.compare_with_copy(copy, cx),
+                ComparePurpose::Version { label, text } => {
+                    self.compare_with_version(label, text, cx);
+                }
                 ComparePurpose::Conflict | ComparePurpose::Recovered => {
                     self.compare_with_disk(cx);
                 }
@@ -1553,7 +1617,7 @@ impl EditorView {
         match open.purpose {
             ComparePurpose::Conflict => self.keep_mine(cx),
             ComparePurpose::Recovered => self.keep_recovered(cx),
-            ComparePurpose::Copy(_) => {}
+            ComparePurpose::Copy(_) | ComparePurpose::Version { .. } => {}
         }
         self.notice_changed(cx);
         self.after_edit(cx);

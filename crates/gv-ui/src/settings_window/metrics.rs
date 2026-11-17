@@ -69,6 +69,11 @@ pub mod row {
     pub const SEGMENT_PAD_X: f32 = 10.0;
     /// The sentence under the theme cards: 8 above and below.
     pub const NOTE_MARGIN_Y: f32 = 8.0;
+    /// The keymap editor's key labels (not designed): 20 high, padding 0 6.
+    pub const KEY_CAP: f32 = 20.0;
+    pub const KEY_CAP_PAD_X: f32 = 6.0;
+    /// The keymap editor's search field (not designed).
+    pub const KEY_SEARCH_WIDTH: f32 = 280.0;
 }
 
 /// Selects: at least 168 wide, padding 0 6 0 9, gap 8, 11 chevrons. The

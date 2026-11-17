@@ -89,6 +89,7 @@ mod bindings;
 mod command;
 mod defaults;
 mod diagnostic;
+mod edit;
 mod file;
 mod keystroke;
 
@@ -100,6 +101,7 @@ pub use command::{
 pub use context::{CONTEXTS, ContextExpr, ContextInfo, ContextParseError, ContextSet};
 pub use defaults::builtin_commands;
 pub use diagnostic::{BindingOrigin, KeymapDiagnostic, KeymapIssue};
+pub use edit::{EntryScope, KeymapChange, apply_change, conflicts, is_customized, portable_keys};
 pub use file::{
     EntryAction, EntryContext, KEYMAP_VERSION, UserEntry, UserKeymap, keymap_migrations,
 };

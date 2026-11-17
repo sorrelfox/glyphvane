@@ -4033,6 +4033,7 @@ dependencies = [
  "gv-syntax",
  "gv-text",
  "ignore",
+ "miniz_oxide 0.9.1",
  "notify-debouncer-full",
  "proptest",
  "rustix",
