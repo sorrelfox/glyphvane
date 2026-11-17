@@ -121,7 +121,7 @@ pub fn undo(applied: &AppliedRefactor, journal_dir: Option<&Path>) -> Result<(),
             restore: after,
         });
     }
-    let moves = applied
+    let moves: Vec<Move> = applied
         .moves
         .iter()
         .rev()

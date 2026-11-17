@@ -458,6 +458,7 @@ pub fn write_temporary(export: &Export, name: &str) -> io::Result<PathBuf> {
 /// browser).
 pub fn write_temporary_bytes(bytes: &[u8], name: &str) -> io::Result<PathBuf> {
     let base = std::env::temp_dir();
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

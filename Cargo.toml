@@ -297,6 +297,53 @@ ashpd = { version = "0.13.13", default-features = false, features = [
   "raw_handle",
   "wayland",
 ] }
+# Print (gv-app, macOS): PDFKit's print operation, shown by AppKit as a
+# sheet on the window. The objc2 lines GPUI already uses (objc2 MIT, the
+# framework crates Zlib OR Apache-2.0 OR MIT; checked 2026-11-17).
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSPrintInfo",
+  "NSPrintOperation",
+  "NSResponder",
+  "NSView",
+  "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSData",
+  "NSObject",
+  "NSString",
+] }
+objc2-pdf-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "PDFDocument",
+  "objc2-app-kit",
+] }
+# Print (gv-app, Windows): the common print dialog, Windows.Data.Pdf and a
+# Direct2D print control; the windows line GPUI already uses (MIT OR
+# Apache-2.0; checked 2026-11-17).
+windows = { version = "0.62.2", features = [
+  "Data_Pdf",
+  "Foundation",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Win32_Graphics_Imaging_D2D",
+  "Win32_Graphics_Printing_PrintTicket",
+  "Win32_Storage_Xps_Printing",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Memory",
+  "Win32_System_WinRT_Pdf",
+  "Win32_UI_Controls_Dialogs",
+] }
 # Spell check (gv-spell): spellbook, a pure-Rust Hunspell-compatible
 # checker (MPL-2.0; one maintainer, alpha). Exact pin: bump only after the
 # spell-check accuracy harness passes on the new version.

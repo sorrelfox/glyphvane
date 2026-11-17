@@ -17,8 +17,12 @@ mod no_gpu_dialog;
 mod pdf;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod present;
+#[cfg(target_os = "macos")]
+mod print_macos;
 #[cfg(target_os = "linux")]
 mod print_portal;
+#[cfg(windows)]
+mod print_windows;
 mod render;
 mod safe_mode;
 mod session;
@@ -209,6 +213,10 @@ fn main() -> ExitCode {
             );
             #[cfg(target_os = "linux")]
             gv_ui::print::set_printer(cx, print_portal::PortalPrinter);
+            #[cfg(target_os = "macos")]
+            gv_ui::print::set_printer(cx, print_macos::MacPrinter);
+            #[cfg(windows)]
+            gv_ui::print::set_printer(cx, print_windows::WindowsPrinter);
             gv_ui::keymap::install(cx, locations.as_ref());
             // The crash journal and file watching; safe mode keeps both:
             // they protect the user's text.

@@ -60,8 +60,19 @@ fontdb = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 skrifa = { workspace = true }
 
+# Print: the common print dialog and a Direct2D print job (Windows), the
+# PDFKit print sheet (macOS); both find the window through its raw handle.
 [target.'cfg(windows)'.dependencies]
 interprocess = { workspace = true }
+raw-window-handle = { workspace = true }
+windows = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-pdf-kit = { workspace = true }
+raw-window-handle = { workspace = true }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rfd = { workspace = true }
