@@ -8,7 +8,8 @@ documents (relative links, wikilinks, headings and block references across a
 folder of notes) and renders each document according to a selectable flavor
 profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
-**Status:** Early development (milestone M0: foundations). Nothing is usable yet.
+**Status:** Pre-release (0.0.x). Most of the features planned for 1.0 are in
+place and being tested; there are no published builds yet.
 
 ## Building from source
 
