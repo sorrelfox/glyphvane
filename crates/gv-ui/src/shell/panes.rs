@@ -5,8 +5,8 @@
 //!
 //! - **F6 / Shift+F6** (`workspace.focus_next_pane`,
 //!   `workspace.focus_previous_pane`, NFR-A11Y-01) give the keyboard to the
-//!   next or previous pane, left to right and around: the Files panel when
-//!   the sidebar shows it, then the document (in Split mode the Source
+//!   next or previous pane, left to right and around: the Files or Tags
+//!   panel when the sidebar shows it, then the document (in Split mode the Source
 //!   pane, then the preview). Panes that take no keyboard (the right panel,
 //!   the sidebar's placeholder panels) are passed over. With nothing
 //!   focused, F6 starts at the first pane and Shift+F6 at the last.
@@ -57,6 +57,12 @@ impl Workspace {
             && let Some(files) = &self.files
         {
             panes.push(files.read(cx).focus_handle(cx));
+        }
+        if self.sidebar_open
+            && self.panels.sidebar == SidebarPanel::Tags
+            && let Some(tags) = &self.panels.tags
+        {
+            panes.push(tags.read(cx).focus_handle(cx));
         }
         if let Some(reader) = self.shown_reader() {
             panes.push(reader.read(cx).focus_handle(cx));

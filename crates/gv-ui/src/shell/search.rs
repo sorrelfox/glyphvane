@@ -7,7 +7,8 @@
 //!
 //! `search.vault` (Mod+Shift+F) shows the panel with the keyboard in its
 //! field, filled with the selection of the document on screen when that is
-//! one line, or with the tag a click in the Reading view asked for.
+//! one line, or with the tag a click in the Reading view asked for. A
+//! tag of the Tags panel shows it with that tag's search too.
 
 use gpui::{AppContext as _, Context, Div, Entity, InteractiveElement as _, Stateful, Window};
 
@@ -123,6 +124,17 @@ impl Workspace {
     /// `search.vault`: the Search panel with the keyboard in its field.
     pub(super) fn search_vault(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let seed = self.search_seed(cx);
+        self.search_with(seed, window, cx);
+    }
+
+    /// The Search panel with the keyboard in its field, running `seed`
+    /// when given (a tag's `tag:#name`).
+    pub(super) fn search_with(
+        &mut self,
+        seed: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.show_sidebar_panel(SidebarPanel::Search, true, window, cx);
         let search = self.ensure_search_panel(window, cx);
         search.update(cx, |s, cx| {

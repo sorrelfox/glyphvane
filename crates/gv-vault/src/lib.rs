@@ -33,6 +33,8 @@
 //!   switcher's entries as queries.
 //! - [`refactor`]: file operations. Rename and move with link rewriting,
 //!   journaled and undoable; new folders, duplicates and the trash.
+//! - [`trust`]: what a folder holds that workspace trust decides about
+//!   (CSS snippets, Obsidian plugins and themes, shared settings).
 //! - [`watch`]: the vault watcher. Keeps a [`SharedPathIndex`] in step with
 //!   the disk (OS notifications, polling on network file systems, rescans
 //!   when events were lost) and reports external changes to open documents
@@ -57,6 +59,7 @@ pub mod refactor;
 pub mod repo;
 pub mod resolve;
 pub mod root;
+pub mod trust;
 pub mod url;
 pub mod watch;
 

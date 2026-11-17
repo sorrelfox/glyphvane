@@ -420,3 +420,103 @@ fn profiles_without_note_embeds_show_code(cx: &mut TestAppContext) {
     );
     assert_eq!(st.cache.live.len(), 0);
 }
+
+#[gpui::test]
+fn media_embeds_are_cards_that_open_outside(cx: &mut TestAppContext) {
+    let audio = "x".repeat(3_400);
+    let doc = "![[Talk.mp3]]\n\n![[Paper.pdf#page=3]]\n\n\
+               <iframe src=\"https://www.youtube.com/embed/abc\" title=\"A talk\"></iframe>\n\n\
+               ![[Gone.mp4]]\n\nAfter.\n";
+    let dir = vault(&[
+        ("Doc.md", doc),
+        ("Talk.mp3", audio.as_str()),
+        ("Paper.pdf", "%PDF-1.7\n"),
+    ]);
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    let card = |shown: &Shown| match shown {
+        Shown::Media(m) => (*m).clone(),
+        other => panic!("not a card: {other:?}"),
+    };
+    let (shown, (top, bottom), _) = v.live("![[Talk.mp3]]");
+    let talk = card(&shown);
+    assert_eq!(talk.title, "Talk.mp3");
+    assert_eq!(talk.detail, "MP3 audio \u{b7} 3.4 KB");
+    assert_eq!(talk.action, "Open externally");
+    assert!(bottom - top < LIVE_EMBED_HEIGHT / 2.0, "{top} {bottom}");
+    let (shown, _, _) = v.live("![[Paper.pdf");
+    let paper = card(&shown);
+    assert_eq!(paper.detail, "PDF \u{b7} page 3 \u{b7} 9 bytes");
+    assert_eq!(paper.action, "Open in PDF viewer");
+    let (shown, (f_top, f_bottom), _) = v.live("<iframe");
+    let frame = card(&shown);
+    assert_eq!(frame.title, "A talk");
+    assert_eq!(frame.detail, "YouTube video, not loaded.");
+    let (shown, (g_top, g_bottom), _) = v.live("![[Gone.mp4]]");
+    let Shown::Notice(why) = shown else {
+        panic!("{shown:?}");
+    };
+    assert!(why.contains("not found"), "{why}");
+
+    // A click on a card follows its action; a notice follows nothing.
+    for (y0, y1) in [(top, bottom), (f_top, f_bottom), (g_top, g_bottom)] {
+        v.vcx
+            .simulate_click(point(px(450.0), px((y0 + y1) / 2.0)), Modifiers::none());
+        v.settle();
+    }
+    let followed = v.followed();
+    assert_eq!(followed.len(), 2, "{followed:?}");
+    assert_eq!(&*followed[0].destination, "Talk.mp3");
+    assert_eq!(followed[0].kind, gv_model::LinkKind::Wikilink);
+    assert_eq!(
+        &*followed[1].destination,
+        "https://www.youtube.com/watch?v=abc"
+    );
+    assert_eq!(followed[1].kind, gv_model::LinkKind::Inline);
+    // Copy sees the embed line and the HTML.
+    let text = v
+        .reader
+        .read_with(&v.vcx, |r, _| r.plain_text())
+        .expect("text");
+    assert!(text.contains("Talk.mp3"), "{text:?}");
+    assert!(text.contains("<iframe"), "{text:?}");
+}
+
+#[gpui::test]
+fn html_audio_resolves_next_to_the_note_and_network_paths_are_blocked(cx: &mut TestAppContext) {
+    // Audio and video are HTML blocks when the start tag ends its line.
+    let doc = "<audio controls src=\"rec/memo.ogg\">\n</audio>\n\n\
+               <video src=\"//cdn.example.com/v/clip.mp4\" controls>\n</video>\n\n\
+               <audio src=\"\\\\server\\share\\a.mp3\">\n</audio>\n";
+    let dir = vault(&[("Doc.md", doc), ("rec/memo.ogg", "ogg")]);
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    let (shown, _, _) = v.live("<audio controls");
+    let Shown::Media(memo) = shown else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(memo.title, "memo.ogg");
+    assert_eq!(memo.detail, "OGG audio \u{b7} 3 bytes");
+    assert_eq!(
+        memo.open,
+        Some(("rec/memo.ogg".into(), gv_model::LinkKind::Inline))
+    );
+    let (shown, _, _) = v.live("<video");
+    let Shown::Media(clip) = shown else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(clip.title, "clip.mp4");
+    assert_eq!(clip.detail, "Video from cdn.example.com, not loaded.");
+    assert_eq!(clip.action, "Open in browser");
+    let (shown, _, _) = v.live("<audio src");
+    let Shown::Notice(why) = shown else {
+        panic!("{shown:?}");
+    };
+    assert!(why.contains("network share"), "{why}");
+}

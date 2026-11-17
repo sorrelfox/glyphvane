@@ -347,6 +347,21 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 if let Some(mut p) = html::picture(&code.text) {
                     self.size_picture(&mut p, leaf.id, range.clone());
                     (NodeKind::Picture(Arc::new(p)), range.start, None)
+                } else if let Some(m) = html::media(&code.text) {
+                    let live = crate::live::LiveBlock::new(
+                        m.kind,
+                        Some(m.src.into()),
+                        None,
+                        Some(code),
+                        None,
+                        None,
+                        0,
+                    )
+                    .with_html(crate::live::HtmlMedia {
+                        title: m.title.map(Into::into),
+                        poster: m.poster.map(Into::into),
+                    });
+                    (NodeKind::Live(Arc::new(live)), range.start, None)
                 } else if let Some(DetailsPart::Open { open, summary }) = html::details(&code.text)
                 {
                     let summary = self.summary(&code, range.start, summary);

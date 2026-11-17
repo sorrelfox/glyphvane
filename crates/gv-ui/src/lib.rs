@@ -11,6 +11,7 @@ pub mod bases_view;
 pub mod canvas_view;
 pub mod chrome;
 pub mod compare;
+pub mod conflicts;
 pub mod editor;
 pub mod export;
 pub mod file_prompt;
@@ -35,7 +36,9 @@ pub mod shell;
 pub mod spell;
 pub mod split;
 pub mod switcher;
+pub mod tags_panel;
 pub mod theme;
+pub mod trust;
 pub mod zoom;
 
 use std::path::Path;
@@ -85,6 +88,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     cx.bind_keys(search_panel::key_bindings());
+    cx.bind_keys(conflicts::key_bindings());
     menu::init(cx);
     palette::init(cx);
     goto::init(cx);

@@ -503,7 +503,12 @@ impl Emitter<'_> {
             // not drawn in exports: the embed's line as a paragraph (its
             // link), or the fence as a code block.
             NodeKind::Live(live) => {
-                if let Some(c) = &live.label {
+                if let (Some(_), Some(c)) = (&live.html, &live.code) {
+                    // An `<audio>`, `<video>` or `<iframe>` block: raw
+                    // HTML, as written; the sanitizer decides what stays.
+                    self.raw_html(&c.text);
+                    self.out.push('\n');
+                } else if let Some(c) = &live.label {
                     self.out.push_str("<p>");
                     self.inline(ix, node, c, 0..c.spans.len(), 0);
                     self.out.push_str("</p>\n");

@@ -258,8 +258,18 @@ impl Fixture {
         popover.read_with(&self.vcx, |p, _| p.kind())
     }
 
+    /// Closes the hover previews: the last link's covers the lines below
+    /// it.
+    fn close_previews(&mut self) {
+        self.workspace.update_in(&mut self.vcx, |ws, window, cx| {
+            ws.close_previews(window, cx)
+        });
+        self.draw();
+    }
+
     /// Rests the pointer on `at` until the tooltip is due.
     fn hover(&mut self, at: Point<Pixels>) {
+        self.close_previews();
         self.vcx.simulate_mouse_move(at, None, Modifiers::none());
         self.draw();
         self.vcx.executor().advance_clock(TOOLTIP_DELAY);
@@ -379,13 +389,15 @@ fn every_status_is_styled_and_explained_in_the_reading_view(cx: &mut TestAppCont
         ),
         ("Script", LinkStatus::Blocked, vec!["Blocked"]),
     ] {
+        f.close_previews();
         let at = f.link_point(needle);
         f.vcx.simulate_mouse_move(at, None, Modifiers::none());
         f.draw();
-        assert!(!f.has("link-tooltip"), "{needle}: not at once");
         f.vcx.executor().advance_clock(TOOLTIP_DELAY);
         f.draw();
-        assert!(f.has("link-tooltip"), "{needle}: the tooltip shows");
+        // The hover preview explains it; the window shows no tooltip too.
+        assert!(f.has("hover-preview-0"), "{needle}: the preview shows");
+        assert!(!f.has("link-tooltip"), "{needle}: no tooltip over it");
         let (shown, text) = f.reader_tooltip().expect("a tooltip");
         assert_eq!(shown, status);
         for w in words {

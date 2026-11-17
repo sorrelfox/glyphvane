@@ -23,7 +23,7 @@ use crate::theme::{Color, Theme};
 
 /// An icon button: `text.secondary`, no fill at rest, the hover overlay on
 /// hover and the press overlay while pressed.
-pub(super) fn icon_button(
+pub(crate) fn icon_button(
     id: impl Into<ElementId>,
     icon: Icon,
     icon_size: f32,

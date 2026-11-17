@@ -357,9 +357,14 @@ impl Workspace {
     pub(super) fn adopt_editor(&mut self, editor: &Entity<EditorView>, cx: &mut Context<'_, Self>) {
         let watch = self.ensure_watch(cx);
         editor.update(cx, |e, _| e.set_watch(watch));
-        let subscription = cx.subscribe(editor, |this, editor, event: &DocEvent, cx| {
+        let events = cx.subscribe(editor, |this, editor, event: &DocEvent, cx| {
             this.editor_event(&editor, *event, cx);
         });
+        // Mod+hover on a link previews it.
+        let hover = cx.observe(editor, |this, editor, cx| {
+            this.check_editor_preview(&editor, cx);
+        });
+        let subscription = gpui::Subscription::join(events, hover);
         self.editor_events.insert(editor.entity_id(), subscription);
     }
 

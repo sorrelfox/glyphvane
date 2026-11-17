@@ -437,7 +437,8 @@ fn works_without_a_vault(cx: &mut TestAppContext) {
     f.type_text("one");
     assert_eq!(f.listed(), ["One"]);
     f.keys("enter");
-    assert_eq!(f.tab_paths(), [Some(one)]);
+    // The tab shows the file once the window has heard the choice.
+    f.until(|f| f.tab_paths() == [Some(one.clone())]);
 
     f.toggle();
     f.type_text("nothing like it");

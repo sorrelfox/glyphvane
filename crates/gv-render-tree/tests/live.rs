@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use common::{Doc, build_with, check};
 use gv_render_tree::{
-    CopyOptions, EmbedFetch, FindOptions, ItemKind, LIVE_EMBED_HEIGHT, LIVE_QUERY_HEIGHT,
-    LinkStatus, LinkStatusSource, LinkTarget, LiveBlock, LiveKind, NodeKind, RenderOptions,
-    RenderTree, Sources,
+    CopyOptions, EmbedFetch, FindOptions, ItemKind, LIVE_EMBED_HEIGHT, LIVE_MEDIA_HEIGHT,
+    LIVE_QUERY_HEIGHT, LinkStatus, LinkStatusSource, LinkTarget, LiveBlock, LiveKind, NodeKind,
+    RenderOptions, RenderTree, Sources,
 };
 use gv_syntax::{ParseOptions, ProfileId};
 
@@ -276,4 +276,57 @@ fn inside_note_embeds_live_blocks_carry_their_host_and_the_depth_limit() {
     let all = texts(&d.render);
     assert!(all.contains("Embed cycle"), "{all:?}");
     assert_eq!(lives(&d.render).len(), 1);
+}
+
+#[test]
+fn media_embeds_and_html_media_are_cards() {
+    let text = "![[Talk.mp3]]\n\n![[Paper.pdf#page=3]]\n\n![[clip.MOV|300]]\n\n\
+                <iframe src=\"https://www.youtube.com/embed/abc\" title=\"A talk\"></iframe>\n\n\
+                <video poster=\"p.png\" controls>\n<source src=\"v.mp4\">\n</video>\n\n\
+                Inline ![[Talk.mp3]] stays a link.\n";
+    let d = ob(text);
+    let l = lives(&d.render);
+    let kinds: Vec<_> = l.iter().map(|b| b.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            LiveKind::Audio,
+            LiveKind::Pdf,
+            LiveKind::Video,
+            LiveKind::Frame,
+            LiveKind::Video
+        ],
+        "{}",
+        d.render.dump()
+    );
+    assert_eq!(l[1].target.as_deref(), Some("Paper.pdf"));
+    assert_eq!(l[1].anchor.as_deref(), Some("page=3"));
+    assert!(l[..3].iter().all(|b| b.html.is_none() && b.label.is_some()));
+    assert_eq!(
+        l[3].target.as_deref(),
+        Some("https://www.youtube.com/embed/abc")
+    );
+    let html = l[3].html.as_deref().expect("html");
+    assert_eq!(html.title.as_deref(), Some("A talk"));
+    assert_eq!(l[4].target.as_deref(), Some("v.mp4"));
+    assert_eq!(
+        l[4].html.as_deref().and_then(|h| h.poster.as_deref()),
+        Some("p.png")
+    );
+    // HTML blocks keep their source: what copy, find and exports see.
+    assert!(l[3].fallback_text().starts_with("<iframe"));
+    assert!(texts(&d.render).contains("<video poster"));
+    // Cards are estimated at the media height.
+    let it = d
+        .render
+        .items()
+        .iter()
+        .find(|it| {
+            it.kind
+                == ItemKind::Live {
+                    kind: LiveKind::Audio,
+                }
+        })
+        .expect("audio");
+    assert_eq!(it.estimate.height(600.0), LIVE_MEDIA_HEIGHT);
 }

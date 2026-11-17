@@ -26,7 +26,11 @@ gpui::assets::icon_assets!(
         Columns2,
         Contrast,
         CornerUpRight,
+        FileDiff,
+        FileMusic,
         FilePlus,
+        FileType,
+        FileVideoCamera,
         FolderPlus,
         GitBranch,
         Hash,
@@ -42,6 +46,7 @@ gpui::assets::icon_assets!(
         Maximize2,
         PencilLine,
         Quote,
+        Shield,
         SlidersHorizontal,
         SpellCheck,
         Table2,
@@ -79,6 +84,18 @@ pub enum Icon {
     Base,
     ImageFile,
     OtherFile,
+    /// An audio embed's card.
+    AudioFile,
+    /// A video embed's card.
+    VideoFile,
+    /// A PDF embed's card.
+    PdfFile,
+    /// An embedded web page's card (`<iframe>`).
+    WebPage,
+    /// The workspace-trust prompt.
+    Trust,
+    /// A sync-conflict copy.
+    SyncConflict,
     ChevronRight,
     ChevronDown,
     /// A fold marker in the editor's gutter, and a folded one.
@@ -160,6 +177,15 @@ impl Icon {
             Self::ImageFile => IconName::Image,
             // Not in the design's inventory: Lucide's plain `file`.
             Self::OtherFile => IconName::File,
+            // Not in the design's inventory: Lucide's `file-music`,
+            // `file-video-camera`, `file-type`, `globe`, `shield` and
+            // `file-diff`.
+            Self::AudioFile => IconName::FileMusic,
+            Self::VideoFile => IconName::FileVideoCamera,
+            Self::PdfFile => IconName::FileType,
+            Self::WebPage => IconName::Globe,
+            Self::Trust => IconName::Shield,
+            Self::SyncConflict => IconName::FileDiff,
             Self::ChevronRight => IconName::ChevronRight,
             Self::ChevronDown => IconName::ChevronDown,
             Self::FoldMarker => IconName::ChevronDown,
@@ -325,7 +351,7 @@ fn restroke(svg: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 52] = [
+    const ALL: [Icon; 58] = [
         Icon::SidebarToggle,
         Icon::PanelToggle,
         Icon::Back,
@@ -351,6 +377,12 @@ mod tests {
         Icon::Base,
         Icon::ImageFile,
         Icon::OtherFile,
+        Icon::AudioFile,
+        Icon::VideoFile,
+        Icon::PdfFile,
+        Icon::WebPage,
+        Icon::Trust,
+        Icon::SyncConflict,
         Icon::ChevronRight,
         Icon::ChevronDown,
         Icon::FoldMarker,

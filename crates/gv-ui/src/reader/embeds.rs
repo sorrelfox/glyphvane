@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! Live blocks in the Reading view ([`gv_render_tree::LiveBlock`]): canvas
-//! embeds, bases (embeds and ` ```base ` fences) and search embeds
-//! (` ```query ` fences).
+//! embeds, bases (embeds and ` ```base ` fences), search embeds
+//! (` ```query ` fences) and media cards (audio, video, PDF, iframes;
+//! [`super::media_card`]).
 //!
 //! # Filling in
 //!
@@ -42,6 +43,9 @@
 //! - **Query**: a note per row (a click opens it) with up to
 //!   [`QUERY_SNIPPETS`] context lines under it, at most [`QUERY_FILES`]
 //!   notes and a line saying how many more there are.
+//! - **Media**: a line saying what the file or page is, and the action
+//!   (*Open externally*, *Open in PDF viewer*, *Open in browser*) on the
+//!   header's right; a click anywhere on the card follows it.
 //! - Pending blocks say *Loading…*; blocks that cannot be shown say why.
 //!
 //! Selection and copy see the embed's line or the fence (the render
@@ -81,6 +85,8 @@ pub(crate) enum Shown {
     Canvas(Arc<CanvasDoc>),
     Base(Entity<BasesView>),
     Query(Arc<QueryShown>),
+    /// A media card.
+    Media(Arc<super::media_card::MediaCard>),
     /// It cannot be shown; why.
     Notice(Arc<str>),
 }
@@ -92,6 +98,7 @@ impl std::fmt::Debug for Shown {
             Self::Canvas(_) => f.write_str("Canvas(..)"),
             Self::Base(_) => f.write_str("Base(..)"),
             Self::Query(q) => write!(f, "Query({} files)", q.files.len()),
+            Self::Media(m) => write!(f, "Media({:?})", m.title),
             Self::Notice(n) => write!(f, "Notice({n:?})"),
         }
     }
@@ -170,7 +177,7 @@ pub(crate) fn box_height(shown: &Shown, reserve: f32, line: f32, zoom: f32) -> f
             let rows = q.rows.len() as f32;
             head + rows * line + PAD * zoom
         }
-        Shown::Notice(_) => head + line + PAD * zoom,
+        Shown::Notice(_) | Shown::Media(_) => head + line + PAD * zoom,
     }
 }
 
@@ -336,7 +343,7 @@ fn vault_path_of(path: &Path, root: &Path) -> Option<VaultPath> {
 }
 
 /// Why an embed's target cannot be shown.
-fn target_notice(target: &str, status: Status) -> Arc<str> {
+pub(super) fn target_notice(target: &str, status: Status) -> Arc<str> {
     match status {
         Status::OutsideRoot => format!("\u{201c}{target}\u{201d} is outside the vault.").into(),
         Status::Blocked => format!("\u{201c}{target}\u{201d} is blocked.").into(),
@@ -438,7 +445,10 @@ impl Reader {
         let Some(path) = self.path.clone() else {
             return;
         };
-        if blocks.iter().any(|b| b.kind != LiveKind::Canvas) {
+        if blocks
+            .iter()
+            .any(|b| b.kind != LiveKind::Canvas && !b.kind.is_media())
+        {
             self.watch_content(cx);
         }
         let resolver = Resolver::for_click(&path, self.index.as_ref(), self.profile.id);
@@ -449,6 +459,10 @@ impl Reader {
             .unwrap_or_else(|| resolver.root().to_path_buf());
         let doc_key: Arc<str> = resolver.source().as_str().into();
         for block in blocks {
+            if block.kind.is_media() {
+                self.fetch_media(&block, &resolver, cx);
+                continue;
+            }
             let this = Some(block.host.clone().unwrap_or_else(|| Arc::clone(&doc_key)));
             match (&block.target, block.fence_text()) {
                 (None, Some(text)) if block.kind == LiveKind::Base => {
@@ -483,7 +497,7 @@ impl Reader {
     }
 
     /// Shows `shown` for block `key`.
-    fn land(&mut self, key: LiveKey, shown: Shown, cx: &mut Context<'_, Self>) {
+    pub(super) fn land(&mut self, key: LiveKey, shown: Shown, cx: &mut Context<'_, Self>) {
         let mut st = self.state.borrow_mut();
         let items = st.cache.live.landed(key, shown);
         st.stale.extend(items);
@@ -654,8 +668,20 @@ impl Reader {
     }
 }
 
+#[cfg(test)]
+impl Reader {
+    /// The generation of the content snapshot live blocks use, and
+    /// whether the window gave it (tests).
+    pub(crate) fn content_for_tests(&self) -> (Option<u64>, bool) {
+        (
+            self.content.as_ref().map(ContentSnapshot::generation),
+            self.content_given,
+        )
+    }
+}
+
 /// How often the view checks the vault's content index for a new
-/// snapshot while the window gives none.
+/// snapshot while the window gives none (a window without a vault).
 pub(crate) const CONTENT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The link a click on a live block (or on its result `row`) follows.
@@ -665,6 +691,12 @@ pub(crate) fn open_request(
     row: Option<usize>,
     disposition: Disposition,
 ) -> Option<LinkRequest> {
+    if block.kind.is_media() {
+        return match (row, shown) {
+            (None, Some(Shown::Media(card))) => card.request(disposition),
+            _ => None,
+        };
+    }
     let destination: Arc<str> = match (row, shown) {
         (Some(i), Some(Shown::Query(q))) => q.files.get(i)?.path.as_str().into(),
         (None, _) => block.target.clone()?,

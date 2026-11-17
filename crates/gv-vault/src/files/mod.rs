@@ -28,7 +28,7 @@
 //! | [`Autosave`] | When to save, over a [`Clock`] |
 //! | [`check_external_change`], [`DiskState`] | Whether the file changed on disk since it was loaded or saved |
 //! | [`merge3`], [`merge3_regions`], [`reload_transaction`] | The 3-way merge for conflicts, its regions for a compare view, and the minimal reload diff |
-//! | [`sync_conflict_copies`] | Conflict copies left by sync clients |
+//! | [`sync_conflict_copies`], [`resolve_sync_conflict`] | Conflict copies left by sync clients, and settling one |
 //!
 //! # A document's life
 //!
@@ -85,7 +85,9 @@ mod write;
 
 pub use autosave::{Autosave, AutosaveSettings, QuitDecision, SaveReason, SaveRequest, Suppressed};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use conflicts::{SyncConflictCopy, sync_conflict_copies};
+pub use conflicts::{
+    SyncChoice, SyncConflictCopy, SyncResolveError, resolve_sync_conflict, sync_conflict_copies,
+};
 pub use disk::{CheckMode, DiskState, ExternalChange, FileIdentity, check_external_change};
 pub use document::{
     DocumentFile, LARGE_FILE_BYTES, LoadError, MAX_FILE_BYTES, OnExternalChange, READ_ONLY_BYTES,

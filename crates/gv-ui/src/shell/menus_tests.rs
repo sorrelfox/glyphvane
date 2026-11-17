@@ -505,7 +505,7 @@ fn a_menu_stays_inside_a_short_window(cx: &mut TestAppContext) {
 
 // --- Side panels ----------------------------------------------------------------
 
-/// The switcher's buttons pick the panel; panels not built yet show their
+/// The switcher's buttons pick the panel; a panel not built yet shows its
 /// head and an empty state.
 #[gpui::test]
 fn the_sidebar_switcher_switches_panels(cx: &mut TestAppContext) {
@@ -523,8 +523,11 @@ fn the_sidebar_switcher_switches_panels(cx: &mut TestAppContext) {
         assert_eq!(shown, panel);
         assert!(!f.has("files-panel"));
         assert!(f.has(&format!("sidebar-panel:{id}")));
-        // The Search panel is built (WP-24); the others are not yet.
-        assert_eq!(f.has(&format!("empty-{id}")), panel != SidebarPanel::Search);
+        // The Search and Tags panels are built; Bookmarks is not yet.
+        assert_eq!(
+            f.has(&format!("empty-{id}")),
+            panel == SidebarPanel::Bookmarks
+        );
     }
     f.click("panel-switch:files");
     assert!(f.has("files-panel"));

@@ -721,7 +721,14 @@ impl Emitter<'_> {
             // A live block (canvas or base embed, base or query fence) is
             // not drawn in exports: the embed's line, or the fence as code.
             NodeKind::Live(live) => {
-                if let Some(c) = &live.label {
+                if let (Some(_), Some(c)) = (&live.html, &live.code) {
+                    // An HTML media block: its text, as for raw HTML.
+                    let t = html_text(&c.text);
+                    if !t.is_empty() {
+                        text(&mut self.out, &t);
+                        self.out.push_str("\n\n");
+                    }
+                } else if let Some(c) = &live.label {
                     self.inline(c, 0..c.spans.len(), ix, 0);
                     self.out.push_str("\n\n");
                 } else if let Some(c) = &live.code {

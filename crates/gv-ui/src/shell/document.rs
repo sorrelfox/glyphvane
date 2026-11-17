@@ -186,7 +186,19 @@ impl Workspace {
         // A link followed in the preview pane goes where it goes from
         // Preview.
         let reader = split.read(cx).reader().clone();
-        reader.update(cx, |r, cx| r.set_profile(profile, cx));
+        let delay = super::link_preview::hover_delay(cx);
+        reader.update(cx, |r, cx| {
+            r.set_profile(profile, cx);
+            r.set_hover_previews(Some(delay));
+        });
+        cx.observe(&reader, |ws, reader, cx| {
+            ws.check_reader_preview(&reader, cx)
+        })
+        .detach();
+        if let Some(vault) = &self.vault {
+            let content = vault.read(cx).content();
+            reader.update(cx, |r, cx| r.set_content(content, cx));
+        }
         cx.subscribe(&reader, |ws, reader, event: &ReaderEvent, cx| {
             ws.follow_split_link(&reader, event.clone(), cx);
         })

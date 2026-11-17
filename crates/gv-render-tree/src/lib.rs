@@ -75,7 +75,10 @@ pub use find::{FindError, FindIndex, Finder, Matches};
 pub use footnote::FootnoteIndex;
 pub use inline::MATH_DISPLAY_SCALE;
 pub use item::{Estimate, Item, ItemId, ItemKind, indent, right_indent};
-pub use live::{LIVE_EMBED_HEIGHT, LIVE_QUERY_HEIGHT, LiveBlock, LiveKey, LiveKind};
+pub use live::{
+    AUDIO_EXTENSIONS, HtmlMedia, LIVE_EMBED_HEIGHT, LIVE_MEDIA_HEIGHT, LIVE_QUERY_HEIGHT,
+    LiveBlock, LiveKey, LiveKind, VIDEO_EXTENSIONS,
+};
 pub use metrics::{Metrics, Spacing};
 pub use node::{
     BlockNode, BoxRef, CalloutType, CodeBlock, CodeLine, Context, FootnoteRefInfo, Frame,

@@ -13,6 +13,9 @@
 //!   ([`EditorView::link_at_caret`]) when not run from the link menu.
 //! - **Tooltip:** resting the pointer on a link whose status needs
 //!   explaining shows what it means, after [`TOOLTIP_DELAY`].
+//! - **Mod+hover:** the window opens the link's hover preview when the
+//!   pointer rests on it with Mod held ([`EditorView::take_hover_preview`]);
+//!   the tooltip stays away while Mod is held.
 
 use std::sync::Arc;
 
@@ -29,6 +32,12 @@ use crate::reader::link_info::{
 #[derive(Default)]
 pub(super) struct LinkHover {
     link: Option<SourceLink>,
+    /// Where the pointer came to rest on it.
+    at: Option<Point<Pixels>>,
+    /// Mod was held at the pointer's last move.
+    modded: bool,
+    /// The window took the preview of this rest.
+    taken: bool,
     shown: bool,
     _timer: Option<Task<()>>,
 }
@@ -142,7 +151,14 @@ impl EditorView {
         cx: &mut Context<'_, Self>,
     ) {
         let link = position.and_then(|p| self.link_at_point(p, window, cx));
+        let modded = window.modifiers().secondary(cx);
         if link == self.link_hover.link {
+            if modded != self.link_hover.modded {
+                self.link_hover.modded = modded;
+                // Mod pressed again: another preview.
+                self.link_hover.taken &= !modded;
+                cx.notify();
+            }
             return;
         }
         self.link_hover = LinkHover {
@@ -155,10 +171,32 @@ impl EditorView {
                     });
                 })
             }),
+            at: link.as_ref().and(position),
+            modded,
+            taken: false,
             link,
             shown: false,
         };
         cx.notify();
+    }
+
+    /// The link the pointer rests on (for the tooltip delay) with Mod
+    /// held, and where it came to rest: Mod+hover previews it, once per
+    /// rest.
+    pub(crate) fn take_hover_preview(&mut self) -> Option<(LinkAt, Point<Pixels>)> {
+        let hover = &self.link_hover;
+        if !hover.shown || !hover.modded || hover.taken {
+            return None;
+        }
+        let link = self.link_of(hover.link.clone()?)?;
+        let at = hover.at?;
+        self.link_hover.taken = true;
+        Some((link, at))
+    }
+
+    /// The link under the pointer, as the window's commands take it.
+    pub(crate) fn hovered_link(&self) -> Option<LinkAt> {
+        self.link_of(self.link_hover.link.clone()?)
     }
 
     /// The status of the link under the pointer and its tooltip text, if
@@ -185,7 +223,8 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
-        if !self.link_hover.shown {
+        // Mod+hover shows the hover preview instead.
+        if !self.link_hover.shown || window.modifiers().secondary(cx) {
             return None;
         }
         let (_, text) = self.hovered_link_tooltip()?;

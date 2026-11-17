@@ -71,8 +71,12 @@ impl Workspace {
                 cx.defer(move |cx| quick::refresh(handle, cx));
                 // So does the Search panel.
                 this.sync_search(cx);
+                // The Tags panel lists the new tags.
+                this.sync_tags(cx);
                 // Bases list the vault's files.
                 this.push_bases_content(cx);
+                // Live blocks in the Reading views refresh.
+                this.push_reader_content(cx);
             }));
     }
 

@@ -67,10 +67,10 @@ gpui::actions!(
 );
 
 /// The key context of the filter field.
-const FILTER_CONTEXT: &str = "FileTreeFilter";
+pub(crate) const FILTER_CONTEXT: &str = "FileTreeFilter";
 
 /// The key context of the tree.
-pub(super) const KEY_CONTEXT: &str = "FileTree";
+pub(crate) const KEY_CONTEXT: &str = "FileTree";
 
 /// The tree's keys. They apply while the Files panel has the focus.
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
@@ -734,7 +734,7 @@ impl Render for FilesPanel {
 /// A list row's frame, filling a slot inset 6 from the panel's sides:
 /// indented 14 per level; `accent.tint` and weight 500 when selected, the
 /// hover overlay otherwise.
-pub(super) fn list_row_frame(
+pub(crate) fn list_row_frame(
     id: impl Into<gpui::ElementId>,
     depth: usize,
     selected: bool,
@@ -763,7 +763,7 @@ pub(super) fn list_row_frame(
 
 /// A quiet one-line state where the rows would be: indexing, empty, not
 /// indexed.
-pub(super) fn message(note: impl Into<SharedString>, theme: &Theme) -> Div {
+pub(crate) fn message(note: impl Into<SharedString>, theme: &Theme) -> Div {
     div()
         .debug_selector(|| "files-message".into())
         .h(px(size::LIST_ROW))

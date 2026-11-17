@@ -32,10 +32,16 @@ mod link_actions_tests;
 mod link_checker;
 #[cfg(test)]
 mod link_checker_tests;
+mod link_list;
+mod link_preview;
+#[cfg(test)]
+mod link_preview_tests;
 mod links_data;
 mod links_panel;
 #[cfg(test)]
 mod links_panel_tests;
+#[cfg(test)]
+mod live_content_tests;
 mod menus;
 #[cfg(test)]
 mod menus_tests;
@@ -59,6 +65,9 @@ mod status_bar;
 mod switcher;
 #[cfg(test)]
 mod switcher_tests;
+mod tags;
+#[cfg(test)]
+mod tags_tests;
 #[cfg(test)]
 mod tests;
 mod title_row;
@@ -73,7 +82,17 @@ pub(crate) use vault::VaultStatus;
 
 #[cfg(test)]
 pub(crate) use controls::ClientDecorationsForTests;
+pub(crate) use controls::icon_button;
 pub(crate) use files_panel::key_bindings as file_tree_key_bindings;
+pub(crate) use files_panel::{list_row_frame, message as panel_message};
+
+/// The file tree's keys and key contexts, shared by the sidebar's lists.
+pub(crate) mod tree_keys {
+    pub(crate) use super::files_panel::{
+        ClearFilter, CollapseOrParent, ExpandOrChild, FILTER_CONTEXT, Filter, FocusRows,
+        KEY_CONTEXT, OpenSelected, SelectNext, SelectPrevious,
+    };
+}
 use saving::same_file;
 pub(crate) use saving::{ask_before_quit, discard_for_quit, prepare_quit};
 pub(crate) use status_bar::count_words;
@@ -631,6 +650,8 @@ pub struct Workspace {
     link_ux: link_actions::LinkUx,
     /// The expanded table over the content area, while it is open.
     expanded: Option<expanded_table::Expanded>,
+    /// The hover previews of links, while open.
+    previews: link_preview::HoverPreviews,
     /// The last rename or move, for Undo.
     vault_ops: vault_ops::VaultOps,
 }
@@ -726,6 +747,7 @@ impl Workspace {
         let settings = cx.observe_global::<AppSettings>(|ws, cx| {
             ws.apply_viewer_mode(cx);
             ws.refresh_profiles(cx);
+            ws.sync_hover_delay(cx);
         });
         let profiles = cx.observe_global::<crate::profile::ProfileOverrides>(|ws, cx| {
             ws.refresh_profiles(cx);
@@ -773,6 +795,7 @@ impl Workspace {
             _profiles: profiles,
             link_ux: link_actions::LinkUx::new(cx),
             expanded: None,
+            previews: link_preview::HoverPreviews::default(),
             vault_ops: vault_ops::VaultOps::default(),
         };
         // The document takes the keyboard from the start (copy, scrolling).
@@ -1124,7 +1147,45 @@ impl Workspace {
         self.sync_canvas_roots(cx);
         self.sync_base_roots(cx);
         self.sync_search(cx);
+        self.sync_tags(cx);
         self.sync_links(cx);
+        self.push_reader_content(cx);
+    }
+
+    /// Live blocks (canvas, base and query embeds) use the vault's content
+    /// index: every Reading view of the window, the Split views' preview
+    /// panes included, gets each new snapshot. A window without a vault
+    /// gives none; its views look for the vault that holds their file
+    /// themselves.
+    /// The Reading views follow the hover preview delay setting.
+    fn sync_hover_delay(&self, cx: &mut Context<'_, Self>) {
+        let delay = link_preview::hover_delay(cx);
+        let readers: Vec<Entity<Reader>> = self
+            .tabs
+            .iter()
+            .flat_map(|t| [t.reader.clone(), t.split_reader(cx)])
+            .flatten()
+            .collect();
+        for reader in readers {
+            reader.update(cx, |r, _| r.set_hover_previews(Some(delay)));
+        }
+    }
+
+    pub(super) fn push_reader_content(&self, cx: &mut Context<'_, Self>) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        let content = vault.read(cx).content();
+        let readers: Vec<Entity<Reader>> = self
+            .tabs
+            .iter()
+            .flat_map(|t| [t.reader.clone(), t.split_reader(cx)])
+            .flatten()
+            .collect();
+        for reader in readers {
+            let content = content.clone();
+            reader.update(cx, |r, cx| r.set_content(content, cx));
+        }
     }
 
     /// The Reading view of tab `index`, made and loading on first use.
@@ -1170,10 +1231,17 @@ impl Workspace {
         self.tabs[index].canvas = None;
         self.tabs[index].bases = None;
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
+        let content = self.vault.as_ref().map(|v| v.read(cx).content());
         let profile = self.tab_profile(index, cx).compiled;
+        let delay = link_preview::hover_delay(cx);
         let reader = cx.new(|cx| {
             let mut reader = Reader::new(cx);
+            reader.set_hover_previews(Some(delay));
             reader.set_index(snapshot, cx);
+            // With a vault the window hands its content snapshots.
+            if let Some(content) = content {
+                reader.set_content(content, cx);
+            }
             reader.set_profile(profile, cx);
             reader.open(path, scroll, cx);
             reader
@@ -1207,6 +1275,7 @@ impl Workspace {
     /// A Reading view changed: a document started or finished loading, or
     /// the view moved.
     fn reader_changed(&mut self, reader: &Entity<Reader>, cx: &mut Context<'_, Self>) {
+        self.check_reader_preview(reader, cx);
         let id = reader.entity_id();
         let (loaded, model, text) = {
             let r = reader.read(cx);
@@ -1833,6 +1902,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.settle_focus(window, cx);
+        self.prune_previews();
         let theme = Appearance::theme(cx);
         let radii = window_corner_radii(window, cx);
         let editor_facts = self.editor_facts(cx);
@@ -1893,6 +1963,8 @@ impl Render for Workspace {
             .map(|root| self.switcher_actions(root, cx))
             .map(|root| self.search_actions(root, cx))
             .map(|root| self.link_actions(root, window, cx))
+            .map(|root| self.preview_actions(root, window, cx))
+            .map(|root| self.link_list_actions(root, cx))
             .map(|root| self.vault_op_actions(root, window, cx))
             // The mouse's back and forward buttons.
             .on_mouse_down(
@@ -1978,6 +2050,7 @@ impl Render for Workspace {
             .children(profile_menu)
             .child(self.menus.popover.clone())
             .children(self.render_link_popover(cx))
+            .children(self.render_previews(cx))
             .children(self.heading_probe(cx))
             .children(self.anchor_probe())
     }

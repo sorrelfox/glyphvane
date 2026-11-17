@@ -5,12 +5,19 @@
 //! [`TOOLTIP_DELAY`] on a link whose status needs explaining (unresolved,
 //! ambiguous with its candidates, case-only or loose matches, pending,
 //! outside the root, blocked). A table's Expand button gets one too.
+//!
+//! In a window that shows hover previews ([`Reader::set_hover_previews`])
+//! a link gets no tooltip: after the preview delay the view notifies, and
+//! the window takes [`Reader::take_hover_preview`] and opens the preview,
+//! which explains the status itself.
 
-use gpui::{AnyElement, Context, Task, Window};
+use std::time::Duration;
+
+use gpui::{AnyElement, Context, Pixels, Point, Task, Window};
 use gv_render_tree::LinkStatus;
 
 use super::Reader;
-use super::link_info::{TOOLTIP_DELAY, link_name, status_tooltip, tooltip};
+use super::link_info::{LinkAt, TOOLTIP_DELAY, link_name, status_tooltip, tooltip};
 use super::links::{Resolver, resolver_kind};
 use super::state::{ButtonKind, Hover};
 
@@ -31,6 +38,12 @@ enum TipKey {
 pub(super) struct LinkTip {
     key: Option<TipKey>,
     shown: bool,
+    /// Where the pointer was when it came to rest on the link.
+    at: Option<Point<Pixels>>,
+    /// Links get a hover preview after this delay instead of a tooltip.
+    previews: Option<Duration>,
+    /// The window took the due preview.
+    taken: bool,
     _timer: Option<Task<()>>,
 }
 
@@ -66,6 +79,51 @@ impl Reader {
         Some((status, text))
     }
 
+    /// Links get a hover preview after `delay` instead of a tooltip
+    /// (`None`: tooltips, the default).
+    pub(crate) fn set_hover_previews(&mut self, delay: Option<Duration>) {
+        self.link_tip.previews = delay;
+    }
+
+    /// The link under the pointer, as the window's commands take it.
+    pub(crate) fn hovered_link(&self) -> Option<LinkAt> {
+        let st = self.state.borrow();
+        let Hover::Link(link) = &st.hover else {
+            return None;
+        };
+        let construct = link.range.as_ref().and_then(|r| {
+            st.doc
+                .as_ref()
+                .and_then(|d| d.text.get(r.clone()).map(std::sync::Arc::<str>::from))
+        });
+        Some(LinkAt {
+            file: self.path.clone()?,
+            kind: link.kind,
+            image: link.image,
+            destination: link.destination.clone(),
+            range: link.range.clone(),
+            construct,
+            profile: self.profile(),
+        })
+    }
+
+    /// The link whose hover preview is due (the pointer rested on it for
+    /// the preview delay), and where the pointer came to rest; once per
+    /// rest on a link.
+    pub(crate) fn take_hover_preview(&mut self) -> Option<(LinkAt, Point<Pixels>)> {
+        let tip = &self.link_tip;
+        if tip.previews.is_none()
+            || !tip.shown
+            || tip.taken
+            || !matches!(tip.key, Some(TipKey::Link(..)))
+        {
+            return None;
+        }
+        let due = (self.hovered_link()?, tip.at?);
+        self.link_tip.taken = true;
+        Some(due)
+    }
+
     /// The tooltip to draw: started on a new link, shown once the delay
     /// has passed.
     pub(super) fn link_tooltip(
@@ -79,12 +137,20 @@ impl Reader {
             _ => None,
         };
         if key != self.link_tip.key {
+            let previews = self.link_tip.previews;
+            let delay = match (key, previews) {
+                (Some(TipKey::Link(..)), Some(delay)) => delay,
+                _ => TOOLTIP_DELAY,
+            };
             self.link_tip = LinkTip {
                 key,
                 shown: false,
+                at: key.map(|_| window.mouse_position()),
+                previews,
+                taken: false,
                 _timer: key.map(|_| {
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(TOOLTIP_DELAY).await;
+                        cx.background_executor().timer(delay).await;
                         let _ = this.update(cx, |r, cx| {
                             r.link_tip.shown = true;
                             cx.notify();
@@ -98,6 +164,8 @@ impl Reader {
             return None;
         }
         let text = match key? {
+            // The hover preview explains the link.
+            TipKey::Link(..) if self.link_tip.previews.is_some() => return None,
             TipKey::Link(..) => self.hovered_link_tooltip()?.1,
             TipKey::Expand(_) => EXPAND_TIP.to_owned(),
         };

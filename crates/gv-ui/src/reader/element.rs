@@ -2602,6 +2602,12 @@ struct LiveStyle<'a> {
 fn live_title(live: &gv_render_tree::LiveBlock) -> String {
     use gv_render_tree::LiveKind;
     match (&live.target, live.kind) {
+        (Some(t), kind) if kind.is_media() => live
+            .html
+            .as_ref()
+            .and_then(|h| h.title.as_deref())
+            .unwrap_or_else(|| t.rsplit('/').next().unwrap_or(t))
+            .to_owned(),
         (Some(t), _) => {
             let name = t.rsplit('/').next().unwrap_or(t);
             match &live.anchor {
@@ -2662,6 +2668,10 @@ fn paint_live(
         LiveKind::Canvas => Icon::Canvas,
         LiveKind::Base => Icon::Base,
         LiveKind::Query => Icon::Search,
+        LiveKind::Audio => Icon::AudioFile,
+        LiveKind::Video => Icon::VideoFile,
+        LiveKind::Pdf => Icon::PdfFile,
+        LiveKind::Frame => Icon::WebPage,
     };
     let icon_size = icon::INLINE * s.zoom;
     o.out.over.push(Op::Icon {
@@ -2674,9 +2684,11 @@ fn paint_live(
         path: icon_name.name().path(),
         color: color(Token::TextSecondary),
     });
-    let count = match &shown {
-        Some(Shown::Query(q)) => Some(q.count()),
-        _ => None,
+    // A query's count, or a media card's action, on the right.
+    let (count, count_color) = match &shown {
+        Some(Shown::Query(q)) => (Some(q.count()), Token::TextTertiary),
+        Some(Shown::Media(m)) => (Some(m.action.to_owned()), Token::AccentDefault),
+        _ => (None, Token::TextTertiary),
     };
     let count_w = count.as_ref().map_or(0.0, |c| {
         let line_c = shape(
@@ -2684,7 +2696,7 @@ fn paint_live(
             c,
             s.label_font.clone(),
             s.label.size,
-            color(Token::TextTertiary),
+            color(count_color),
         );
         let cw = f32::from(line_c.width());
         o.out.over.push(Op::Text {
@@ -2698,11 +2710,11 @@ fn paint_live(
         cw + pad
     });
     let title_x = x + pad + icon_size + CALLOUT_ICON_GAP * s.zoom;
-    let title = fit_text(
-        &live_title(live),
-        x + w - pad - count_w - title_x,
-        s.body.size,
-    );
+    let title_text = match &shown {
+        Some(Shown::Media(m)) => m.title.clone(),
+        _ => live_title(live),
+    };
+    let title = fit_text(&title_text, x + w - pad - count_w - title_x, s.body.size);
     let title_line = shape(
         window,
         &title,
@@ -2736,7 +2748,12 @@ fn paint_live(
         }
         o.geometry.controls.push(c);
     };
-    if live.target.is_some() {
+    if live.kind.is_media() {
+        // The whole card follows its action.
+        if matches!(shown, Some(Shown::Media(_))) {
+            control(o, area, None);
+        }
+    } else if live.target.is_some() {
         control(o, bounds_of(x, y, w, head), None);
     }
     let body = bounds_of(
@@ -2769,6 +2786,15 @@ fn paint_live(
                 (x + pad, y + head),
                 s.body_font,
                 Token::TextTertiary,
+            );
+        }
+        Shown::Media(card) => {
+            text_line(
+                o,
+                &card.detail,
+                (x + pad, y + head),
+                s.body_font,
+                Token::TextSecondary,
             );
         }
         Shown::Notice(why) => {

@@ -875,10 +875,10 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     assert!(f.sidebar_open());
     assert!(f.reader_focused());
 
-    // Edit ▸ Select all (after Copy, Copy as Markdown and Copy as rich
-    // text), then Edit ▸ Copy, run in the document.
+    // Edit ▸ Select all (after Copy, Copy as Markdown, Copy as rich text
+    // and Copy link to heading), then Edit ▸ Copy, run in the document.
     f.click("app-menu");
-    f.keys("down right down down down enter");
+    f.keys("down right down down down down enter");
     f.click("app-menu");
     f.keys("down right enter");
     let copied = f

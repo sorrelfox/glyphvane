@@ -10,6 +10,16 @@
 //! | `![[x.base]]`, `![[x.base#View]]` | [`LiveKind::Base`] |
 //! | a ` ```base ` fence | [`LiveKind::Base`] |
 //! | a ` ```query ` fence (a search embed) | [`LiveKind::Query`] |
+//! | `![[x.mp3]]` and the other audio formats, `<audio src>` | [`LiveKind::Audio`] |
+//! | `![[x.mp4]]` and the other video formats, `<video src>` | [`LiveKind::Video`] |
+//! | `![[x.pdf]]`, `![[x.pdf#page=3]]` | [`LiveKind::Pdf`] |
+//! | `<iframe src>` (never loaded) | [`LiveKind::Frame`] |
+//!
+//! The media kinds ([`LiveKind::is_media`]) are cards: the view says what
+//! the file or page is and offers to open it outside the app. An HTML
+//! block counts when it is one `<audio>`, `<video>` or `<iframe>` element
+//! with a source ([`LiveBlock::html`] keeps its title and poster); its
+//! source stays the block's code, which exports treat as raw HTML.
 //!
 //! The render tree never reads the target nor runs anything: a live block
 //! is one virtual item ([`ItemKind::Live`](crate::ItemKind::Live)) that
@@ -41,6 +51,17 @@ pub const LIVE_EMBED_HEIGHT: f32 = 400.0;
 /// A query block's reserved height, in px at zoom 1 (the header and a few
 /// result rows; it grows or shrinks to its results).
 pub const LIVE_QUERY_HEIGHT: f32 = 160.0;
+/// A media card's reserved height, in px at zoom 1: its header row and
+/// one line.
+pub const LIVE_MEDIA_HEIGHT: f32 = 72.0;
+
+/// File extensions Obsidian embeds as audio (any case). `.webm` is
+/// audio: Obsidian's recorder writes Opus in WebM.
+pub const AUDIO_EXTENSIONS: [&str; 9] = [
+    "flac", "m4a", "mp3", "ogg", "oga", "opus", "wav", "webm", "3gp",
+];
+/// File extensions embedded as video (any case).
+pub const VIDEO_EXTENSIONS: [&str; 6] = ["mp4", "m4v", "mov", "mkv", "ogv", "avi"];
 
 /// What a live block shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +72,14 @@ pub enum LiveKind {
     Base,
     /// The results of a search query (a ` ```query ` fence), read-only.
     Query,
+    /// An audio file or `<audio>` element: a card.
+    Audio,
+    /// A video file or `<video>` element: a card (never played in 1.0).
+    Video,
+    /// A PDF file at a page (`#page=N`, `#height=N`): a card.
+    Pdf,
+    /// An `<iframe>`: a card naming the page; it is never loaded.
+    Frame,
 }
 
 impl LiveKind {
@@ -60,7 +89,13 @@ impl LiveKind {
         match self {
             Self::Canvas | Self::Base => LIVE_EMBED_HEIGHT,
             Self::Query => LIVE_QUERY_HEIGHT,
+            Self::Audio | Self::Video | Self::Pdf | Self::Frame => LIVE_MEDIA_HEIGHT,
         }
+    }
+
+    /// Whether the block is a media card (audio, video, PDF, iframe).
+    pub fn is_media(self) -> bool {
+        matches!(self, Self::Audio | Self::Video | Self::Pdf | Self::Frame)
     }
 
     /// A short name, for dumps.
@@ -69,18 +104,30 @@ impl LiveKind {
             Self::Canvas => "canvas",
             Self::Base => "base",
             Self::Query => "query",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Pdf => "pdf",
+            Self::Frame => "frame",
         }
     }
 
     /// The kind of an embed of `path` (what is between the brackets
-    /// before `#` and `|`): `.canvas` and `.base` files, any case.
+    /// before `#` and `|`): `.canvas`, `.base`, `.pdf`, audio and video
+    /// files, any case.
     pub fn of_embed(path: &str) -> Option<Self> {
         let path = path.trim();
         let ext = path.rsplit_once('.')?.1;
+        let any = |list: &[&str]| list.iter().any(|e| ext.eq_ignore_ascii_case(e));
         if ext.eq_ignore_ascii_case("canvas") {
             Some(Self::Canvas)
         } else if ext.eq_ignore_ascii_case("base") {
             Some(Self::Base)
+        } else if ext.eq_ignore_ascii_case("pdf") {
+            Some(Self::Pdf)
+        } else if any(&AUDIO_EXTENSIONS) {
+            Some(Self::Audio)
+        } else if any(&VIDEO_EXTENSIONS) {
+            Some(Self::Video)
         } else {
             None
         }
@@ -102,6 +149,15 @@ impl LiveKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LiveKey(pub u64);
 
+/// What an HTML media element says about itself besides its source.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct HtmlMedia {
+    /// `title` (an iframe's or a video's).
+    pub title: Option<Arc<str>>,
+    /// A video's `poster`.
+    pub poster: Option<Arc<str>>,
+}
+
 /// A live block.
 #[derive(Debug, Clone)]
 pub struct LiveBlock {
@@ -121,6 +177,10 @@ pub struct LiveBlock {
     pub host: Option<Arc<str>>,
     /// Number of note embeds around it.
     pub depth: u16,
+    /// An HTML media element's title and poster: set when the block is
+    /// an `<audio>`, `<video>` or `<iframe>` HTML block (its `target` is
+    /// the `src`, its `code` the block).
+    pub html: Option<Arc<HtmlMedia>>,
     pub key: LiveKey,
 }
 
@@ -149,8 +209,19 @@ impl LiveBlock {
             label,
             host,
             depth,
+            html: None,
             key: LiveKey(h.finish()),
         }
+    }
+
+    /// The block as an HTML media element with `html`'s title and poster.
+    pub(crate) fn with_html(mut self, html: HtmlMedia) -> Self {
+        let mut h = DefaultHasher::new();
+        self.key.hash(&mut h);
+        html.hash(&mut h);
+        self.key = LiveKey(h.finish());
+        self.html = Some(Arc::new(html));
+        self
     }
 
     /// The fence's text (the base's YAML, the query), if it is a fence.
@@ -161,6 +232,9 @@ impl LiveBlock {
     /// The text that stands for the block where it cannot be shown: the
     /// embed as written (`![[x.canvas]]`), or the fence's text.
     pub fn fallback_text(&self) -> String {
+        if let (Some(_), Some(c)) = (&self.html, &self.code) {
+            return c.text.clone();
+        }
         match (&self.target, &self.code) {
             (Some(t), _) => match &self.anchor {
                 Some(a) => format!("![[{t}#{a}]]"),
@@ -193,6 +267,12 @@ mod tests {
         assert_eq!(LiveKind::of_embed("Books.base"), Some(LiveKind::Base));
         assert_eq!(LiveKind::of_embed("Note"), None);
         assert_eq!(LiveKind::of_embed("note.md"), None);
+        assert_eq!(LiveKind::of_embed("a/Talk.MP3"), Some(LiveKind::Audio));
+        assert_eq!(LiveKind::of_embed("Memo.webm"), Some(LiveKind::Audio));
+        assert_eq!(LiveKind::of_embed("clip.mov"), Some(LiveKind::Video));
+        assert_eq!(LiveKind::of_embed("Paper.pdf"), Some(LiveKind::Pdf));
+        assert!(LiveKind::Pdf.is_media() && !LiveKind::Base.is_media());
+        assert_eq!(LiveKind::Audio.reserved_height(), LIVE_MEDIA_HEIGHT);
         assert_eq!(LiveKind::of_fence("base"), Some(LiveKind::Base));
         assert_eq!(LiveKind::of_fence("query"), Some(LiveKind::Query));
         assert_eq!(LiveKind::of_fence("rust"), None);

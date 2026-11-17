@@ -25,9 +25,10 @@
 //!   written, its resolved path or its URL, reveal its target in the file
 //!   tree or the file manager, the resolution trace (a popover), *Fix link*
 //!   (the Link checker's rewrites for this link; several candidates open a
-//!   picker) and *Create note*. `links.open_in_split` (no pane splits
-//!   yet), `links.preview` (hover previews) and `links.copy_link_to_heading`
-//!   (no link generator yet) have no handler.
+//!   picker) and *Create note*. `links.preview` is the hover preview's
+//!   ([`super::link_preview`]); `links.list` and
+//!   `links.copy_link_to_heading` are [`super::link_list`]'s.
+//!   `links.open_in_split` has no handler (no pane splits yet).
 //!
 //! The popovers (trace, create, candidates) are not designed beyond the
 //! Create note row of SPEC § Popovers; they share the menu panel's look.
@@ -608,7 +609,7 @@ impl Workspace {
 
     /// Replaces the path part of `link`'s destination with `path` in its
     /// document's buffer (one undoable edit).
-    fn rewrite_link_text(
+    pub(super) fn rewrite_link_text(
         &mut self,
         link: &LinkAt,
         path: String,

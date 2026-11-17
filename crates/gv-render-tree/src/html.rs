@@ -3,7 +3,9 @@
 
 //! The raw HTML blocks the Reading view renders natively before the HTML
 //! pipeline exists: `<details>` (a summary row that folds the blocks up
-//! to `</details>`) and `<picture>` (a source picked by the app theme).
+//! to `</details>`), `<picture>` (a source picked by the app theme) and
+//! one `<audio>`, `<video>` or `<iframe>` element (a media card,
+//! [`crate::live`]).
 //!
 //! A small tag scanner reads the tags of one HTML block: names and
 //! attributes, nothing else. Blocks it does not recognise stay raw HTML.
@@ -226,6 +228,68 @@ pub(crate) fn picture(s: &str) -> Option<Picture> {
     })
 }
 
+/// An `<audio>`, `<video>` or `<iframe>` HTML block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaTag {
+    pub kind: crate::live::LiveKind,
+    /// The element's `src`, else its first `<source src>`.
+    pub src: String,
+    pub title: Option<String>,
+    pub poster: Option<String>,
+}
+
+/// The media element of an HTML block that is only one `<audio>`,
+/// `<video>` or `<iframe>` with a source (text inside it, such as a
+/// fallback message, is allowed), else `None`.
+pub(crate) fn media(s: &str) -> Option<MediaTag> {
+    use crate::live::LiveKind;
+    let t = tags(s);
+    let first = t.first()?;
+    let kind = match first.name.as_str() {
+        "audio" => LiveKind::Audio,
+        "video" => LiveKind::Video,
+        "iframe" => LiveKind::Frame,
+        _ => return None,
+    };
+    if first.end || !s[..first.range.start].trim().is_empty() {
+        return None;
+    }
+    // Nothing after the element's end tag; without one, nothing but
+    // `<source>` and `<track>` tags after the start tag.
+    let close = t.iter().position(|x| x.end && x.name == first.name);
+    let inside = &t[1..close.unwrap_or(t.len())];
+    match close {
+        Some(i) if !s[t[i].range.end..].trim().is_empty() => return None,
+        None if inside
+            .iter()
+            .any(|x| x.name != "source" && x.name != "track") =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+    let non_empty = |v: &str| {
+        let v = decode_basic(v.trim());
+        (!v.is_empty()).then_some(v)
+    };
+    let src = first.attr("src").and_then(non_empty).or_else(|| {
+        inside
+            .iter()
+            .find(|x| x.name == "source" && !x.end)
+            .and_then(|x| x.attr("src"))
+            .and_then(non_empty)
+    })?;
+    Some(MediaTag {
+        kind,
+        src,
+        title: first.attr("title").and_then(non_empty),
+        poster: first
+            .attr("poster")
+            .filter(|_| kind == LiveKind::Video)
+            .and_then(non_empty),
+    })
+}
+
 /// The first URL of a `srcset`.
 fn first_url(srcset: &str) -> Option<&str> {
     srcset
@@ -254,6 +318,28 @@ fn collapse(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_elements_are_found_with_their_source() {
+        use crate::live::LiveKind;
+        let m = media("<audio controls src=\"a b.mp3\"></audio>\n").expect("audio");
+        assert_eq!((m.kind, m.src.as_str()), (LiveKind::Audio, "a b.mp3"));
+        let m = media("<video poster=p.png controls>\n<source src=\"v.mp4\" type=video/mp4>\nNo video.\n</video>")
+            .expect("video");
+        assert_eq!(m.kind, LiveKind::Video);
+        assert_eq!(m.src, "v.mp4");
+        assert_eq!(m.poster.as_deref(), Some("p.png"));
+        let m = media("<iframe width=560 src=\"https://www.youtube.com/embed/abc?x=1&amp;y=2\" title=\"A talk\"></iframe>")
+            .expect("iframe");
+        assert_eq!(m.kind, LiveKind::Frame);
+        assert_eq!(m.src, "https://www.youtube.com/embed/abc?x=1&y=2");
+        assert_eq!(m.title.as_deref(), Some("A talk"));
+        // No source, other content around it, other elements: raw HTML.
+        assert_eq!(media("<audio controls></audio>"), None);
+        assert_eq!(media("<p>x</p><audio src=a.mp3></audio>"), None);
+        assert_eq!(media("<audio src=a.mp3></audio><p>after</p>"), None);
+        assert_eq!(media("<div><iframe src=x></iframe></div>"), None);
+    }
 
     #[test]
     fn scans_tags_and_attributes() {

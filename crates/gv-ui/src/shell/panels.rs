@@ -7,9 +7,9 @@
 //!   Bookmarks (SPEC § Sidebar); Recent and Sync conflicts open from the
 //!   View menu (`workspace.show_*`) and have no switcher button; File ▸
 //!   Open recent… shows Recent too. The Files, Search
-//!   ([`crate::search_panel`]) and Recent panels are built; the others show
-//!   their panel head and a one-line empty state (empty states are not
-//!   designed).
+//!   ([`crate::search_panel`]), Tags ([`crate::tags_panel`]) and Recent
+//!   panels are built; the others show their panel head and a one-line
+//!   empty state (empty states are not designed).
 //! - **Right panel:** collapsible sections, the Outline first, then
 //!   Backlinks and *Links in this note* ([`super::links_panel`]). The Link
 //!   checker ([`super::link_checker`]) joins it once asked for.
@@ -102,6 +102,9 @@ pub(super) struct Panels {
     /// The Search panel, once shown ([`super::search`]).
     pub search: Option<Entity<crate::search_panel::SearchPanel>>,
     pub _search_events: Option<Subscription>,
+    /// The Tags panel, once shown ([`super::tags`]).
+    pub tags: Option<Entity<crate::tags_panel::TagsPanel>>,
+    pub _tags_events: Option<Subscription>,
 }
 
 impl Workspace {
@@ -148,6 +151,10 @@ impl Workspace {
                 },
                 (SidebarPanel::Search, _) => match self.panels.search.clone() {
                     Some(search) => sidebar.child(search),
+                    None => sidebar,
+                },
+                (SidebarPanel::Tags, _) => match self.panels.tags.clone() {
+                    Some(tags) => sidebar.child(tags),
                     None => sidebar,
                 },
                 (other, _) => sidebar.child(empty_panel(other, theme)),
@@ -216,12 +223,18 @@ impl Workspace {
                     .search
                     .as_ref()
                     .is_some_and(|s| s.read(cx).contains_focus(window, cx)),
+                SidebarPanel::Tags => focused(
+                    self.panels
+                        .tags
+                        .as_ref()
+                        .map(|t| t.read(cx).focus_handle(cx)),
+                ),
                 _ => false,
             };
         self.panels.sidebar = panel;
         let takes_keyboard = matches!(
             panel,
-            SidebarPanel::Files | SidebarPanel::Recent | SidebarPanel::Search
+            SidebarPanel::Files | SidebarPanel::Recent | SidebarPanel::Search | SidebarPanel::Tags
         );
         if had_keyboard && !(focus && takes_keyboard) {
             self.focus_document(window, cx);
@@ -237,6 +250,12 @@ impl Workspace {
         }
         if focus && panel == SidebarPanel::Files {
             self.focus_files(window, cx);
+        }
+        if panel == SidebarPanel::Tags {
+            let tags = self.ensure_tags_panel(window, cx);
+            if focus {
+                tags.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
         if panel == SidebarPanel::Search {
             let search = self.ensure_search_panel(window, cx);
