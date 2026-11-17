@@ -1,0 +1,42 @@
+filters:
+  or:
+    - file.hasTag("project")
+    - and:
+        - file.hasTag("book")
+        - file.hasLink("Reading list")
+    - not:
+        - file.hasTag("archive")
+        - file.inFolder("Templates")
+formulas:
+  price_label: 'if(price, price.toFixed(2) + " EUR")'
+  per_page: "(price / pages).toFixed(2)"
+properties:
+  status:
+    displayName: Status
+  formula.price_label:
+    displayName: "Price"
+  file.ext:
+    displayName: Extension
+summaries:
+  mean3: 'values.mean().round(3)'
+views:
+  - type: table
+    name: "Reading"
+    limit: 10
+    groupBy:
+      property: note.pages
+      direction: DESC
+    filters:
+      and:
+        - 'status != "done"'
+        - or:
+            - "formula.per_page > 5"
+            - "price > 2.1"
+    order:
+      - file.name
+      - file.ext
+      - note.pages
+      - formula.per_page
+      - formula.price_label
+    summaries:
+      formula.per_page: Average

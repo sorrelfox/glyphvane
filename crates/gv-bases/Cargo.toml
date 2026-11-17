@@ -9,6 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The content index the bases evaluate over (read-only use).
+gv-vault.workspace = true
+# YAML 1.2 for `.base` files and `base` blocks: ordered mappings, so unknown
+# keys keep their order (MIT OR Apache-2.0; 0.3.4 checked 2026-11-17). The
+# `encoding` feature (byte-stream decoding) is not needed: input is `&str`.
+saphyr = { version = "=0.3.4", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
