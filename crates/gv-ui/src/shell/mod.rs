@@ -922,9 +922,12 @@ impl Workspace {
             vault_ops: vault_ops::VaultOps::default(),
             tab_keys: crate::a11y::RovingTabs::new(crate::a11y::Axis::Horizontal),
         };
-        // The document takes the keyboard from the start (copy, scrolling).
-        if let Some(reader) = this.ensure_reader(0, window, cx) {
-            reader.read(cx).focus_handle(cx).focus(window, cx);
+        // The document takes the keyboard from the start (copy, scrolling):
+        // a note's Reading view, or the canvas, base or viewer of another
+        // file.
+        this.ensure_reader(0, window, cx);
+        if this.tabs[0].path.is_some() {
+            this.focus_document(window, cx);
         }
         this
     }
@@ -1428,6 +1431,8 @@ impl Workspace {
                     this.follow_link(reader.clone(), request.clone(), window, cx);
                 }
                 ReaderEvent::ToggleTask(toggle) => this.toggle_task(reader, *toggle, cx),
+                // The session keeps the tab's Reading-view folds.
+                ReaderEvent::FoldToggled => this.session_changed(cx),
                 ReaderEvent::ExpandTable(request) => {
                     this.expand_table(reader.clone(), request, window, cx);
                 }

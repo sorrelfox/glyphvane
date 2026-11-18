@@ -243,6 +243,8 @@ impl Workspace {
                 self.toggle_split_task(reader, toggle, cx);
                 return;
             }
+            // The session keeps only the Preview reader's folds.
+            ReaderEvent::FoldToggled => return,
             ReaderEvent::ExpandTable(request) => {
                 let (window, reader) = (self.window_handle, reader.clone());
                 cx.spawn(async move |this, cx| {

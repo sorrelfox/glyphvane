@@ -209,6 +209,9 @@ pub enum ReaderEvent {
     /// A table's Expand button was clicked: the window shows the table in
     /// the expanded view ([`expanded::ExpandedTable`]).
     ExpandTable(ExpandRequest),
+    /// A callout or `<details>` was opened or closed: the session keeps
+    /// the Reading view's folds ([`Reader::reading_folds`]).
+    FoldToggled,
 }
 
 /// A table to show in the expanded view.
@@ -885,6 +888,18 @@ impl Reader {
     pub(crate) fn frame_geometry(&self) -> (gpui::Bounds<gpui::Pixels>, (f32, f32)) {
         let st = self.state.borrow();
         (st.geometry.bounds, st.geometry.column)
+    }
+
+    /// The centres of the fold toggles (callout titles, `<details>`
+    /// summaries) the last frame painted.
+    pub(crate) fn fold_controls(&self) -> Vec<gpui::Point<gpui::Pixels>> {
+        let st = self.state.borrow();
+        st.geometry
+            .controls
+            .iter()
+            .filter(|c| matches!(c.kind, state::ControlKind::Details { .. }))
+            .map(|c| c.bounds.center())
+            .collect()
     }
 
     /// The type of the document shown.

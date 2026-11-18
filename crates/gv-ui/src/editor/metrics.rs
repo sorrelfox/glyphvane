@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use gpui::{App, Context, SharedString};
+use gpui::{App, Context, SharedString, px};
 
 use super::EditorView;
 use super::rows::Fonts;
@@ -59,6 +59,9 @@ pub(crate) struct EditorMetrics {
     pub column_max: f32,
     /// The editor font family as set.
     pub family: SharedString,
+    /// Code in plain-text mode: a monospace family even when the family
+    /// set is proportional.
+    pub code: bool,
 }
 
 impl Default for EditorMetrics {
@@ -108,6 +111,7 @@ impl EditorMetrics {
             chip_inset: editor_size::FOLD_CHIP_INSET_X * scale,
             column_max,
             family: appearance.editor_font.clone().into(),
+            code: false,
         }
     }
 
@@ -124,11 +128,42 @@ impl EditorMetrics {
         families
     }
 
+    /// The families in effect: [`Self::families`] of the installed fonts,
+    /// with a monospace fallback for code when the family set is not
+    /// monospace.
+    pub fn editor_families(&self, cx: &App) -> FontFamilies {
+        let installed = cx.text_system().all_font_names();
+        let mut families = self.families(&installed);
+        if self.code && !is_monospace(cx, &families.mono) {
+            families.mono = FontFamilies::detect(&installed).mono;
+        }
+        families
+    }
+
     /// Whether the text is measured differently in `other` (the wraps
     /// change).
     pub fn measure_differs(&self, other: &Self) -> bool {
-        self.text_size != other.text_size || self.family != other.family
+        self.text_size != other.text_size || self.font_differs(other)
     }
+
+    /// Whether the editor family may differ in `other`.
+    fn font_differs(&self, other: &Self) -> bool {
+        self.family != other.family || self.code != other.code
+    }
+}
+
+/// Whether `family` draws a narrow and a wide letter equally wide.
+fn is_monospace(cx: &App, family: &SharedString) -> bool {
+    let text = cx.text_system();
+    let id = text.resolve_font(&crate::inline::font_of(
+        family.clone(),
+        text::weight::REGULAR,
+        false,
+    ));
+    let size = px(text::EDITOR.size);
+    let narrow = f32::from(text.layout_width(id, size, 'i'));
+    let wide = f32::from(text.layout_width(id, size, 'M'));
+    (narrow - wide).abs() < 0.01
 }
 
 impl EditorView {
@@ -141,7 +176,8 @@ impl EditorView {
     /// Follows the Appearance settings and the zoom: see the module
     /// documentation.
     pub(crate) fn sync_metrics(&mut self, cx: &mut Context<'_, Self>) {
-        let new = EditorMetrics::from_app(cx);
+        let mut new = EditorMetrics::from_app(cx);
+        new.code = self.metrics.code;
         self.set_metrics(new, cx);
     }
 
@@ -152,8 +188,8 @@ impl EditorView {
         }
         let old = std::mem::replace(&mut self.metrics, new);
         let remeasure = old.measure_differs(&self.metrics);
-        if old.family != self.metrics.family {
-            let families = self.metrics.families(&cx.text_system().all_font_names());
+        if old.font_differs(&self.metrics) {
+            let families = self.metrics.editor_families(cx);
             self.fonts = Fonts::new(&families, self.metrics.text_size);
         } else {
             self.fonts.set_size(self.metrics.text_size);

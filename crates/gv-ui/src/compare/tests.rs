@@ -187,3 +187,59 @@ fn the_compare_view_names_its_changes_and_choices(cx: &mut gpui::TestAppContext)
     assert_eq!(mine.description.as_deref(), Some("In the result"));
     assert_eq!(view.read_with(&vcx, |v, _| v.comparison().unresolved()), 0);
 }
+
+/// In a narrow window the header's title wraps in its own column and the
+/// buttons stay inside the window, clear of the title and the summary.
+#[gpui::test]
+fn the_header_wraps_clear_of_the_buttons(cx: &mut gpui::TestAppContext) {
+    use gpui::{
+        AppContext as _, Bounds, VisualTestContext, WeakEntity, WindowBounds, WindowOptions, point,
+        px, size,
+    };
+
+    use crate::{AppSettings, ThemeChoice};
+
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let title = "notes/projects/a rather long folder name/another long folder name/\
+                 yet another folder with a long name/meeting notes from the long week.md";
+    let controls = [
+        "compare-all-left",
+        "compare-all-right",
+        "compare-cancel",
+        "compare-apply",
+    ];
+    for width in [1200.0, 800.0, 500.0, 320.0] {
+        let comparison = Comparison::three_way(
+            "t\nbody\nend\n",
+            "t\nmine\nend\n",
+            "t\ntheirs\nend\n",
+            sides(),
+            LineEnding::Lf,
+        );
+        let (window, _) = cx.update(|cx| {
+            let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(600.0)));
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..WindowOptions::default()
+            };
+            gpui::open_window(options, cx, |_, cx| {
+                cx.new(|_| {
+                    super::CompareView::new(comparison, title.into(), WeakEntity::new_invalid())
+                })
+            })
+            .expect("test window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        crate::files::notice::assert_clear_of_buttons(&mut vcx, width, "compare-title", &controls);
+        let summary = vcx.debug_bounds("compare-summary").expect("summary drawn");
+        assert!(summary.right() <= px(width), "{width}: summary {summary:?}");
+        for id in controls {
+            let control = vcx.debug_bounds(id).expect("drawn");
+            assert!(!summary.intersects(&control), "{width}: summary under {id}");
+        }
+    }
+}

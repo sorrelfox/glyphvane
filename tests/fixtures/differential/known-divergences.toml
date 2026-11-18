@@ -193,6 +193,23 @@ spec = "4.8 Paragraphs (examples 222, 224); 4.7 Link reference definitions; 5.1 
 gv_html = "<blockquote>\n<p>b</p>\n</blockquote>\n"
 
 [[divergence]]
+id = "declaration-without-whitespace"
+profile = "commonmark"
+input = "a <!A>\n"
+comrak_html = "<p>a &lt;!A&gt;</p>\n"
+other = "spec 0.31.2: <p>a <!A></p>"
+reason = """
+CommonMark 0.31.2 defines a declaration as `<!`, an ASCII letter, zero or
+more characters other than `>`, and `>`. comrak keeps the 0.29 rule (a name,
+then whitespace) and writes `<!A>` as text. The nightly differential found it
+as `>[f]:"\n    <!A>` (a lazy line after a reference definition), which also
+shows `lazy-first-line-keeps-leading-whitespace`.
+"""
+decision = "match-spec"
+spec = "6.6 Raw HTML (declaration); 4.6 HTML blocks, start condition 4"
+gv_html = "<p>a <!A></p>\n"
+
+[[divergence]]
 id = "reference-expansion-cap"
 profile = "commonmark"
 reproduce = "more than 100 KB (or the document size, if smaller) of text produced by expanding reference links"

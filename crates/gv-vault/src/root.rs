@@ -119,15 +119,47 @@ impl fmt::Display for RefusedRoot {
 }
 
 /// Whether `root` is never indexed automatically: a filesystem root, or
-/// `home` (compared exactly; pass an absolute path).
+/// `home` (pass absolute paths). The comparison ignores letter case where
+/// the platform's file names usually do (Windows, macOS) and is exact on
+/// other systems.
 pub fn is_refused_root(root: &Path, home: Option<&Path>) -> Option<RefusedRoot> {
     if root.parent().is_none() {
         return Some(RefusedRoot::FilesystemRoot);
     }
-    if home == Some(root) {
+    if home.is_some_and(|home| same_path(root, home, PATHS_IGNORE_CASE)) {
         return Some(RefusedRoot::Home);
     }
     None
+}
+
+/// Whether file names on this platform usually ignore letter case: NTFS on
+/// Windows and the default APFS volume on macOS.
+const PATHS_IGNORE_CASE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Whether `a` and `b` name the same path, component by component (so a
+/// trailing separator does not matter), ignoring letter case when
+/// `ignore_case` is set.
+fn same_path(a: &Path, b: &Path, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return a == b;
+    }
+    let mut a = a.components();
+    let mut b = b.components();
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => {
+                let (x, y) = (
+                    x.as_os_str().to_string_lossy(),
+                    y.as_os_str().to_string_lossy(),
+                );
+                if x != y && x.to_lowercase() != y.to_lowercase() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// The current user's home folder, made absolute.
@@ -220,6 +252,22 @@ mod tests {
         assert_eq!(is_refused_root(&home.join("notes"), None), None);
         assert_eq!(RefusedRoot::Home.to_string(), "home folder");
         assert_eq!(RefusedRoot::FilesystemRoot.to_string(), "filesystem root");
+    }
+
+    #[test]
+    fn path_comparison_ignores_case_only_when_asked() {
+        let home = Path::new("/Users/Ann");
+        assert!(same_path(Path::new("/users/ann"), home, true));
+        assert!(same_path(Path::new("/USERS/ANN/"), home, true));
+        assert!(!same_path(Path::new("/users/ann"), home, false));
+        assert!(same_path(Path::new("/Users/Ann/"), home, false));
+        assert!(!same_path(Path::new("/users/anna"), home, true));
+        assert!(!same_path(Path::new("/users/ann/notes"), home, true));
+        assert!(same_path(
+            Path::new("/Users/Änne"),
+            Path::new("/users/änne"),
+            true
+        ));
     }
 
     #[test]

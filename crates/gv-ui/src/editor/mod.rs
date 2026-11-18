@@ -505,7 +505,7 @@ impl EditorView {
     /// A view with nothing loaded.
     pub fn new(options: ParseOptions, cx: &mut Context<'_, Self>) -> Self {
         let metrics = EditorMetrics::from_app(cx);
-        let families = metrics.families(&cx.text_system().all_font_names());
+        let families = metrics.editor_families(cx);
         let fonts = Fonts::new(&families, metrics.text_size);
         Self {
             focus: cx.focus_handle(),
@@ -644,7 +644,7 @@ impl EditorView {
         self.links = LinkStatuses::new(Some(&path), index.as_ref(), self.links.profile());
         self.autocomplete.index = index;
         self.path = Some(path.clone());
-        self.plain_for_path();
+        self.plain_for_path(cx);
         self.untitled = None;
         self.status = EditorStatus::Loading;
         self.doc = None;

@@ -2237,6 +2237,7 @@ impl ReaderElement {
                 let mut open_file = None;
                 let mut tag_search = false;
                 let mut expand = None;
+                let mut folded = false;
                 match (press, e.button) {
                     (Press::None, _) => return,
                     (Press::Control(control), MouseButton::Left) => {
@@ -2248,6 +2249,7 @@ impl ReaderElement {
                                 ControlKind::Details { block } => {
                                     let ts = window.text_system().clone();
                                     st.toggle_details(block, &ts);
+                                    folded = true;
                                 }
                                 ControlKind::RenderAnyway { block } => {
                                     let ts = window.text_system().clone();
@@ -2348,6 +2350,9 @@ impl ReaderElement {
                 }
                 if let Some(node) = expand {
                     let _ = reader.update(cx, |r, cx| r.expand_table(node, cx));
+                }
+                if folded {
+                    let _ = reader.update(cx, |_, cx| cx.emit(ReaderEvent::FoldToggled));
                 }
                 if tag_search {
                     window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);

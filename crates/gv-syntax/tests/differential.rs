@@ -290,6 +290,10 @@ const INLINE_CLASSES: &[(&str, InlineClass)] = &[
     ),
     ("code-span-crlf-keeps-cr", code_span_crlf),
     (
+        "declaration-without-whitespace",
+        declaration_without_whitespace,
+    ),
+    (
         "escaped-ampersand-before-entity-in-title-or-info",
         escaped_ampersand,
     ),
@@ -310,14 +314,7 @@ fn agrees_after(md: &str, ours: &str, rewrite: impl Fn(&str) -> Option<String>) 
 /// continued with a block quote marker; or when comrak's output is ours with
 /// spaces and tabs at the start of paragraphs.
 fn lazy_first_line_whitespace(md: &str, ours: &str, comrak: &str) -> bool {
-    let mut stripped = String::with_capacity(comrak.len());
-    let mut rest = comrak;
-    while let Some(i) = rest.find("<p>") {
-        stripped.push_str(&rest[..i + 3]);
-        rest = rest[i + 3..].trim_start_matches([' ', '\t']);
-    }
-    stripped.push_str(rest);
-    if stripped == ours {
+    if strip_paragraph_indent(comrak) == ours {
         return true;
     }
     let lines: Vec<&str> = md.split_inclusive('\n').collect();
@@ -338,6 +335,67 @@ fn lazy_first_line_whitespace(md: &str, ours: &str, comrak: &str) -> bool {
                 })
             })
     })
+}
+
+/// `html` without spaces and tabs at the start of paragraphs.
+fn strip_paragraph_indent(html: &str) -> String {
+    let mut stripped = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("<p>") {
+        stripped.push_str(&rest[..i + 3]);
+        rest = rest[i + 3..].trim_start_matches([' ', '\t']);
+    }
+    stripped.push_str(rest);
+    stripped
+}
+
+/// comrak follows CommonMark 0.29 for declarations and needs whitespace
+/// after the name, so `<!A>` is text to it; 0.31.2 takes any characters
+/// up to `>`. Recognized when comrak's output is ours with each such
+/// declaration escaped, ignoring the whitespace comrak keeps at the start
+/// of a paragraph (`lazy-first-line-keeps-leading-whitespace`).
+fn declaration_without_whitespace(md: &str, ours: &str, comrak: &str) -> bool {
+    if !md.contains("<!") {
+        return false;
+    }
+    let escaped = escape_bare_declarations(ours);
+    escaped != ours && (escaped == comrak || escaped == strip_paragraph_indent(comrak))
+}
+
+/// `html` with each declaration whose name is not followed by whitespace
+/// (`<!A>`, `<!A"x>`) written as escaped text, as comrak writes it.
+fn escape_bare_declarations(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("<!") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 2..];
+        let name = tail.len()
+            - tail
+                .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                .len();
+        let after = tail[name..].chars().next();
+        let bare = name > 0 && !matches!(after, Some(' ' | '\t' | '\n' | '\r') | None);
+        match tail.find('>').filter(|_| bare) {
+            Some(end) => {
+                let decl = &rest[i..i + 2 + end + 1];
+                out.push_str(
+                    &decl
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;"),
+                );
+                rest = &rest[i + 2 + end + 1..];
+            }
+            None => {
+                out.push_str("<!");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// comrak keeps a CR inside a code span, and normalizing CRLF to LF makes
@@ -432,6 +490,20 @@ fn inline_classes_recognize_their_entries() {
             );
         }
     }
+}
+
+/// The nightly run's case: a bare declaration on a lazy line after a
+/// reference definition, both comrak divergences at once.
+#[test]
+fn a_bare_declaration_on_a_lazy_line_is_decided() {
+    assert!(decided_inline_divergence(
+        ">[f]:\"\n    <!A>",
+        &["declaration-without-whitespace"]
+    ));
+    assert!(!decided_inline_divergence(
+        ">[f]:\"\n    <!A>",
+        &["lazy-first-line-keeps-leading-whitespace"]
+    ));
 }
 
 /// Whether a minimized divergence is one of the decided block-level ones

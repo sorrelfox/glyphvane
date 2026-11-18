@@ -1112,6 +1112,13 @@ impl Render for FileViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
         let status = self.status.clone();
+        // The keyboard the viewer had while loading goes to the text's
+        // Reading view once it shows.
+        if let (ViewerStatus::Text { .. }, Some(reader)) = (&status, &self.reader)
+            && self.focus.is_focused(window)
+        {
+            reader.read(cx).focus_handle(cx).focus(window, cx);
+        }
         let content = match &status {
             ViewerStatus::Loading => div().size_full().bg(theme.surface.page).into_any_element(),
             ViewerStatus::Text { .. } => match &self.reader {

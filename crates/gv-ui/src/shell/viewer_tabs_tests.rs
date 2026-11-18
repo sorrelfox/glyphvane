@@ -319,3 +319,42 @@ fn edit_switches_a_text_file_to_the_editor_and_back(cx: &mut TestAppContext) {
         ViewMode::Preview
     );
 }
+
+/// A viewer tab takes the keyboard as a note's tab does: in a new window
+/// and when opened from a note that has it.
+#[gpui::test]
+fn a_viewer_tab_takes_the_keyboard(cx: &mut TestAppContext) {
+    let dir = temp(&[("a.md", b"# A\n"), ("config.json", b"{}\n")]);
+    let (window, workspace) = open(cx, &dir.path().join("config.json"));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let focused = |workspace: &Entity<Workspace>, vcx: &mut VisualTestContext| {
+        let viewer = viewer(workspace, vcx);
+        vcx.update(|window, cx| {
+            viewer
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    };
+    let shown = |workspace: &Entity<Workspace>, vcx: &mut VisualTestContext| {
+        let viewer = viewer(workspace, vcx);
+        until(vcx, "the text", |vcx| {
+            viewer.read_with(vcx, |v, cx| v.text_ready(cx))
+        });
+    };
+    shown(&workspace, &mut vcx);
+    assert!(focused(&workspace, &mut vcx), "a new window's viewer");
+
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let json = dir.path().join("config.json");
+    workspace.update_in(&mut vcx, |ws, window, cx| {
+        ws.open_tab(OpenTarget::new(json), window, cx)
+    });
+    draw(&mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "config.json");
+    shown(&workspace, &mut vcx);
+    assert!(focused(&workspace, &mut vcx), "a viewer opened from a note");
+}

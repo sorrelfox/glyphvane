@@ -813,6 +813,19 @@ fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
     }
     vcx.update(|_, cx| save_now(cx));
     assert_eq!(memory.last().windows[0].tabs[0].reading_folds, folds);
+
+    // Closing the callout schedules a save that keeps it closed.
+    let reader = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().reader().cloned())
+        .expect("a Reading view");
+    let at = reader.read_with(&vcx, |r, _| r.fold_controls())[0];
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    vcx.executor().advance_clock(SAVE_DELAY * 2);
+    vcx.run_until_parked();
+    let saved = &memory.last().windows[0].tabs[0].reading_folds;
+    assert_eq!(saved.len(), 1);
+    assert!(!saved[0].open, "{saved:?}");
 }
 
 #[gpui::test]

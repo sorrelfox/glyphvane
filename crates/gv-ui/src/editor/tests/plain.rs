@@ -221,7 +221,7 @@ fn a_code_file_is_highlighted_as_its_language(cx: &mut TestAppContext) {
 fn prose_files_keep_spell_check() {
     use std::path::Path;
     let txt = Plain::for_path(Some(Path::new("/n/notes.txt")));
-    assert_eq!((txt.language, txt.spell), (None, true));
+    assert_eq!((txt.language.as_deref(), txt.spell), (None, true));
     let license = Plain::for_path(Some(Path::new("/n/LICENSE")));
     assert!(license.spell);
     let json = Plain::for_path(Some(Path::new("/n/data.json")));
@@ -229,4 +229,45 @@ fn prose_files_keep_spell_check() {
         (json.language.as_deref(), json.spell),
         (Some("json"), false)
     );
+    assert!(json.mono, "code is monospace");
+    for prose in [txt, license, Plain::for_path(Some(Path::new("/n/a.rst")))] {
+        assert!(!prose.mono, "prose keeps the editor font");
+    }
+    assert!(!Plain::for_path(None).mono);
+}
+
+/// Code keeps a monospace family when the editor font set is
+/// proportional; prose uses the font set.
+#[gpui::test]
+fn code_is_shown_in_a_monospace_family(cx: &mut TestAppContext) {
+    let (view, mut vcx) = plain(cx, "fn main() {}\n");
+    let installed = vcx.update(|_, cx| cx.text_system().all_font_names());
+    let Some(proportional) = [
+        "Inter",
+        "DejaVu Sans",
+        "Noto Sans",
+        "Liberation Sans",
+        "Arial",
+    ]
+    .into_iter()
+    .find(|name| installed.iter().any(|n| n == name)) else {
+        return;
+    };
+    let family = |vcx: &mut VisualTestContext| {
+        view.read_with(vcx, |v, _| v.fonts.regular().family.to_string())
+    };
+    for code in [false, true] {
+        view.update(&mut vcx, |v, cx| {
+            let mut metrics = v.metrics().clone();
+            metrics.family = proportional.into();
+            metrics.code = code;
+            v.set_metrics(metrics, cx);
+        });
+        draw(&mut vcx);
+        if code {
+            assert_ne!(family(&mut vcx), proportional, "code: a monospace family");
+        } else {
+            assert_eq!(family(&mut vcx), proportional, "prose: the font set");
+        }
+    }
 }

@@ -200,52 +200,46 @@ impl CompareView {
             .bg(theme.surface.panel)
             .border_b_1()
             .border_color(theme.border.default)
-            .child(
+            // Title and summary wrap in their own column; the buttons move
+            // under them when they do not fit beside.
+            .child(crate::shell::wrapping_row(
                 div()
-                    .flex_1()
                     .min_w_0()
-                    .flex()
-                    .gap(px(spacing::GAP))
-                    .child(
-                        div()
-                            .font_weight(FontWeight(text::weight::STRONG))
-                            .child(self.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("compare-summary")
-                            .role(Role::Status)
-                            .aria_label(summary.clone())
-                            .debug_selector(|| "compare-summary".into())
-                            .text_color(theme.text.secondary)
-                            .child(summary)
-                            .accessible()
-                            .live(Live::Polite),
-                    ),
-            )
-            .child(
-                button("compare-all-left", "Use all left", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Left, cx)))
-                    .accessible(),
-            )
-            .child(
-                button("compare-all-right", "Use all right", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Right, cx)))
-                    .accessible(),
-            )
-            .child(
-                button("compare-cancel", "Cancel", false, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
-                    .accessible(),
-            )
-            .child(
-                button("compare-apply", "Apply", false, theme)
-                    .bg(theme.accent.default)
-                    .border_color(theme.accent.default)
-                    .text_color(theme.accent.on)
-                    .on_click(cx.listener(|this, _, _, cx| this.apply(cx)))
-                    .accessible(),
-            )
+                    .debug_selector(|| "compare-title".into())
+                    .font_weight(FontWeight(text::weight::STRONG))
+                    .child(self.title.clone()),
+                div()
+                    .id("compare-summary")
+                    .min_w_0()
+                    .role(Role::Status)
+                    .aria_label(summary.clone())
+                    .debug_selector(|| "compare-summary".into())
+                    .text_color(theme.text.secondary)
+                    .child(summary)
+                    .accessible()
+                    .live(Live::Polite),
+                [
+                    button("compare-all-left", "Use all left", false, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Left, cx)))
+                        .accessible()
+                        .into_any_element(),
+                    button("compare-all-right", "Use all right", false, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.pick_all(Pick::Right, cx)))
+                        .accessible()
+                        .into_any_element(),
+                    button("compare-cancel", "Cancel", false, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
+                        .accessible()
+                        .into_any_element(),
+                    button("compare-apply", "Apply", false, theme)
+                        .bg(theme.accent.default)
+                        .border_color(theme.accent.default)
+                        .text_color(theme.accent.on)
+                        .on_click(cx.listener(|this, _, _, cx| this.apply(cx)))
+                        .accessible()
+                        .into_any_element(),
+                ],
+            ))
     }
 
     fn side_names(&self, theme: &Theme) -> Div {

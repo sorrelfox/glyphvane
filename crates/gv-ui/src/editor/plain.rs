@@ -23,6 +23,9 @@
 //!   to heading and footnote, expand selection by syntax, rename heading,
 //!   the hanging indent of list items, the conflict-marker check, and
 //!   spell check for code (prose files such as `.txt` keep it).
+//! - **Font:** code is shown in a monospace family even when the editor
+//!   font set is proportional ([`super::metrics`]); prose files keep the
+//!   editor font.
 
 use std::path::Path;
 
@@ -40,6 +43,8 @@ pub(crate) struct Plain {
     pub language: Option<String>,
     /// Whether misspellings are looked for (prose, not code).
     pub spell: bool,
+    /// Whether the text is code, shown in a monospace family.
+    pub mono: bool,
 }
 
 /// Spaces Shift+Tab takes away when the indent unit is a tab and a line
@@ -57,12 +62,15 @@ impl Plain {
             .and_then(Path::extension)
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase);
-        let spell = language.is_none()
-            && match ext.as_deref() {
-                None => true,
-                Some(ext) => PROSE.contains(&ext),
-            };
-        Self { language, spell }
+        let prose = match ext.as_deref() {
+            None => true,
+            Some(ext) => PROSE.contains(&ext),
+        };
+        Self {
+            spell: language.is_none() && prose,
+            language,
+            mono: !prose,
+        }
     }
 }
 
@@ -94,6 +102,7 @@ impl EditorView {
             doc.highlights.set_plain(language);
             doc.editor.set_wrap_indent(super::wrap_indent(plain));
         }
+        self.sync_code_font(cx);
         self.schedule_spell(cx);
         cx.notify();
     }
@@ -104,9 +113,20 @@ impl EditorView {
     }
 
     /// The plain-text mode follows the file opened.
-    pub(super) fn plain_for_path(&mut self) {
+    pub(super) fn plain_for_path(&mut self, cx: &mut Context<'_, Self>) {
         if self.plain.is_some() {
             self.plain = Some(Plain::for_path(self.path.as_deref()));
+            self.sync_code_font(cx);
+        }
+    }
+
+    /// Code in plain-text mode is shown in a monospace family.
+    fn sync_code_font(&mut self, cx: &mut Context<'_, Self>) {
+        let code = self.plain.as_ref().is_some_and(|p| p.mono);
+        if self.metrics.code != code {
+            let mut metrics = self.metrics.clone();
+            metrics.code = code;
+            self.set_metrics(metrics, cx);
         }
     }
 
