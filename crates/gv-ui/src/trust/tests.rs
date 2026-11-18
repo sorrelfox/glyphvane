@@ -237,3 +237,67 @@ fn restricted_mode_and_decide_later(cx: &mut TestAppContext) {
         assert_eq!(vault_trust(cx), Some(WorkspaceTrust::Restricted));
     });
 }
+
+/// The prompt in a document column `width` wide, as the window places it.
+struct Column(Entity<TrustPrompt>);
+
+impl gpui::Render for Column {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<'_, Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(self.0.clone())
+    }
+}
+
+/// The detail wraps in its own column: it never runs under a button or
+/// past the window's edge, and the buttons stay inside the window.
+#[gpui::test]
+fn the_detail_wraps_clear_of_the_buttons(cx: &mut TestAppContext) {
+    init(cx, light());
+    let dir = vault_with_snippets();
+    let root = dir.path().to_path_buf();
+    cx.update(|cx| AppSettings::open_vault(cx, &root));
+    for width in [1200.0, 800.0, 500.0] {
+        let (window, _) = cx.update(|cx| {
+            let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(400.0)));
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..WindowOptions::default()
+            };
+            gpui::open_window(options, cx, |_, cx| {
+                let prompt = cx.new(|cx| TrustPrompt::new(root.clone(), cx));
+                cx.new(|_| Column(prompt))
+            })
+            .expect("test window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let controls = [
+            "trust-mode-allow",
+            "trust-mode-ask",
+            "trust-mode-block",
+            "trust-accept",
+            "trust-restricted",
+            "trust-dismiss",
+        ];
+        crate::files::notice::assert_clear_of_buttons(&mut vcx, width, "trust-detail", &controls);
+        // The message needs more than one line here, so the controls sit
+        // under it, not beside it.
+        let detail = vcx.debug_bounds("trust-detail").expect("drawn");
+        let accept = vcx.debug_bounds("trust-accept").expect("drawn");
+        assert!(
+            accept.top() >= detail.bottom(),
+            "{width}: Trust {accept:?} is not under the detail {detail:?}"
+        );
+    }
+}

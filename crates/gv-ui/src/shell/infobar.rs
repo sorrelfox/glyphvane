@@ -153,7 +153,7 @@ impl Workspace {
             ),
         };
         let message = div()
-            .flex_1()
+            .flex_auto()
             .min_w_0()
             .text_color(theme.text.primary)
             .child(
@@ -166,7 +166,14 @@ impl Workspace {
                             .font_weight(FontWeight(text::weight::STRONG))
                             .child(notice.title.clone()),
                     )
-                    .when_some(notice.detail.clone(), |row, detail| row.child(detail)),
+                    .when_some(notice.detail.clone(), |row, detail| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "infobar-detail".into())
+                                .min_w_0()
+                                .child(detail),
+                        )
+                    }),
             );
         let buttons: Vec<AnyElement> = notice
             .buttons
@@ -236,7 +243,7 @@ impl Workspace {
                 .flex_none()
                 .min_h(px(sizes::INFOBAR))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(spacing::GAP))
                 .pt(px(spacing::PAD_TOP))
                 .pr(px(spacing::PAD_RIGHT))
@@ -247,14 +254,14 @@ impl Workspace {
                 .border_color(theme.border.default)
                 .text_size(px(text::UI.size))
                 .line_height(px(text::UI.line))
-                .child(
+                .child(wrapping_row(
                     div()
                         .flex_none()
                         .text_color(tint)
                         .child(kind_icon.sized(icon::ROW)),
-                )
-                .child(message)
-                .children(buttons)
+                    message,
+                    buttons,
+                ))
                 .child(
                     div()
                         .id("infobar-dismiss")
@@ -360,6 +367,50 @@ impl Workspace {
         }
         cx.notify();
     }
+}
+
+/// The body of an infobar, left of its dismiss button: the icon and
+/// `message`, then `controls`. They share one line while the message fits
+/// on one line beside the controls; else the controls move under it,
+/// right-aligned, and wrap among themselves. The message wraps within its
+/// own column and never runs under a control.
+pub(crate) fn wrapping_row(
+    icon: impl IntoElement,
+    message: impl IntoElement,
+    controls: impl IntoIterator<Item = AnyElement>,
+) -> Div {
+    let controls: Vec<AnyElement> = controls.into_iter().collect();
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(spacing::GAP))
+        .child(
+            div()
+                .flex_auto()
+                .min_w_0()
+                .min_h(px(size::BUTTON_HEIGHT))
+                .flex()
+                .items_center()
+                .gap(px(spacing::GAP))
+                .child(icon)
+                .child(message),
+        )
+        .when(!controls.is_empty(), |row| {
+            row.child(
+                div()
+                    .ml_auto()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(spacing::GAP))
+                    .children(controls),
+            )
+        })
 }
 
 /// A tooltip (SPEC § Popovers): inverted colours, 22 high.

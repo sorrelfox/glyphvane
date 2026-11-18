@@ -120,6 +120,7 @@ pub(crate) mod tree_keys {
         KEY_CONTEXT, OpenSelected, SelectNext, SelectPrevious,
     };
 }
+pub(crate) use infobar::wrapping_row;
 use saving::same_file;
 pub(crate) use saving::{ask_before_quit, discard_for_quit, prepare_quit};
 pub(crate) use status_bar::count_words;

@@ -207,7 +207,7 @@ pub fn render(theme: &Theme, cx: &App) -> Option<AnyElement> {
             .flex_none()
             .min_h(px(sizes::INFOBAR))
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(spacing::GAP))
             .pt(px(spacing::PAD_TOP))
             .pr(px(spacing::PAD_RIGHT))
@@ -218,15 +218,13 @@ pub fn render(theme: &Theme, cx: &App) -> Option<AnyElement> {
             .border_color(theme.border.default)
             .text_size(px(text::UI.size))
             .line_height(px(text::UI.line))
-            .child(
+            .child(crate::shell::wrapping_row(
                 div()
                     .flex_none()
                     .text_color(tint)
                     .child(kind_icon.sized(icon::ROW)),
-            )
-            .child(
                 div()
-                    .flex_1()
+                    .flex_auto()
                     .min_w_0()
                     .text_color(theme.text.primary)
                     .child(
@@ -239,10 +237,15 @@ pub fn render(theme: &Theme, cx: &App) -> Option<AnyElement> {
                                     .font_weight(FontWeight(text::weight::STRONG))
                                     .child(notice.title.clone()),
                             )
-                            .children(notice.detail.clone()),
+                            .children(notice.detail.clone().map(|detail| {
+                                div()
+                                    .debug_selector(|| "app-notice-detail".into())
+                                    .min_w_0()
+                                    .child(detail)
+                            })),
                     ),
-            )
-            .children(buttons)
+                buttons,
+            ))
             .child(
                 div()
                     .id("app-notice-dismiss")

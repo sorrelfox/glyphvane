@@ -335,7 +335,7 @@ impl Render for TrustPrompt {
             .flex_none()
             .min_h(px(sizes::INFOBAR))
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(spacing::GAP))
             .pt(px(spacing::PAD_TOP))
             .pr(px(spacing::PAD_RIGHT))
@@ -346,15 +346,13 @@ impl Render for TrustPrompt {
             .border_color(theme.border.default)
             .text_size(px(text::UI.size))
             .line_height(px(text::UI.line))
-            .child(
+            .child(crate::shell::wrapping_row(
                 div()
                     .flex_none()
                     .text_color(theme.status.info)
                     .child(Icon::Trust.sized(icon::ROW)),
-            )
-            .child(
                 div()
-                    .flex_1()
+                    .flex_auto()
                     .min_w_0()
                     .text_color(theme.text.primary)
                     .flex()
@@ -365,23 +363,34 @@ impl Render for TrustPrompt {
                             .font_weight(FontWeight(text::weight::STRONG))
                             .child("Trust the files in this folder?"),
                     )
-                    .child(div().debug_selector(|| "trust-detail".into()).child(detail)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(theme.text.secondary)
-                    .child("Remote content:"),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .gap(px(spacing::GAP / 2.0))
-                    .children(mode_buttons),
-            )
-            .child(trust)
-            .child(restricted)
+                    .child(
+                        div()
+                            .debug_selector(|| "trust-detail".into())
+                            .min_w_0()
+                            .child(detail),
+                    ),
+                [
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(spacing::GAP))
+                        .child(
+                            div()
+                                .text_color(theme.text.secondary)
+                                .child("Remote content:"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(spacing::GAP / 2.0))
+                                .children(mode_buttons),
+                        )
+                        .into_any_element(),
+                    trust,
+                    restricted,
+                ],
+            ))
             .child(
                 div()
                     .id("trust-dismiss")

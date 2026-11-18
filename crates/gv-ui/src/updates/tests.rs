@@ -258,3 +258,55 @@ fn long_notes_are_cut_for_the_dialog() {
 fn the_build_allows_the_check_by_default() {
     assert!(enabled_by_build());
 }
+
+/// A long detail wraps in its own column, clear of the buttons and inside
+/// the window, at every width.
+#[gpui::test]
+fn a_long_detail_wraps_clear_of_the_buttons(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Bounds, WindowBounds, WindowOptions, point, px, size};
+    let fake = Fake::new(NEWER);
+    let (_dir, _, _) = setup(cx, false, &fake);
+    let noop: notices::Handler = std::rc::Rc::new(|_, _| {});
+    let button = |label: &'static str| notices::AppButton {
+        label: label.into(),
+        run: noop.clone(),
+        dismisses: false,
+    };
+    let notice = notices::AppNotice {
+        topic: notices::AppTopic::Update,
+        kind: NoticeKind::Information,
+        title: "Glyphvane 99.0.0 is available.".into(),
+        detail: Some(
+            "This release changes how notes load remote images and media, how links that \
+             leave the application are confirmed, and how CSS snippets are applied to the \
+             notes of every vault."
+                .into(),
+        ),
+        buttons: vec![
+            button("What's new"),
+            button("Skip this version"),
+            button("Remind me later"),
+        ],
+        on_dismiss: None,
+    };
+    cx.update(|cx| notices::show(cx, notice));
+    for width in [1200.0, 800.0, 500.0] {
+        let (window, _) = cx.update(|cx| {
+            let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(400.0)));
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..WindowOptions::default()
+            };
+            gpui::open_window(options, cx, |_, cx| cx.new(|_| Host)).expect("test window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        draw(&mut vcx);
+        let ids = [
+            "app-notice-action-0",
+            "app-notice-action-1",
+            "app-notice-action-2",
+            "app-notice-dismiss",
+        ];
+        crate::files::notice::assert_clear_of_buttons(&mut vcx, width, "app-notice-detail", &ids);
+    }
+}

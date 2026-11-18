@@ -879,6 +879,45 @@ fn sentence(reason: &str) -> String {
     out
 }
 
+/// Checks an infobar drawn in a window `width` wide: its detail
+/// (`detail`) and every control in `controls` stay inside the window, the
+/// detail never runs under a control, and it wraps once the window is 800
+/// wide or less.
+#[cfg(test)]
+pub(crate) fn assert_clear_of_buttons(
+    vcx: &mut gpui::VisualTestContext,
+    width: f32,
+    detail: &'static str,
+    controls: &[&'static str],
+) {
+    use gpui::px;
+    let edge = px(width);
+    let text = vcx
+        .debug_bounds(detail)
+        .unwrap_or_else(|| panic!("{detail} drawn"));
+    assert!(
+        text.left() >= px(0.0) && text.right() <= edge,
+        "{width}: {detail} {text:?} leaves the window"
+    );
+    for &id in controls {
+        let control = vcx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"));
+        assert!(
+            !text.intersects(&control),
+            "{width}: {detail} {text:?} runs under {id} {control:?}"
+        );
+        assert!(
+            control.left() >= px(0.0) && control.right() <= edge,
+            "{width}: {id} {control:?} leaves the window"
+        );
+    }
+    if width <= 800.0 {
+        assert!(
+            text.size.height > px(crate::metrics::text::UI.line * 1.5),
+            "{width}: {detail} {text:?} does not wrap"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shown_tests {
     use super::shown_url;

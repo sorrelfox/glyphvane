@@ -348,3 +348,49 @@ fn each_window_has_its_own_vault_and_tabs(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(cx.update(super::main_windows).len(), 2);
 }
+
+/// A long detail in the infobar wraps in its own column, clear of the
+/// buttons and inside the window, at every width.
+#[gpui::test]
+fn a_long_infobar_detail_wraps_clear_of_the_buttons(cx: &mut TestAppContext) {
+    use gpui::{WindowBounds, point, px, size};
+    use gv_vault::files::journal::DiskComparison;
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let mut notice = crate::files::notice::Notice::recovered(DiskComparison::Changed);
+    notice.detail = Some(
+        "Edits from the last session were restored from the crash journal. The file also \
+         changed on disk since then, so compare both versions before you keep either of them."
+            .into(),
+    );
+    for width in [1200.0, 800.0, 500.0] {
+        let (window, workspace) = cx.update(|cx| {
+            let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(400.0)));
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..WindowOptions::default()
+            };
+            gpui::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Workspace::with_chrome(None, WindowChrome::Linux, window, cx))
+            })
+            .expect("test window opens")
+        });
+        workspace.update(cx, |ws, cx| {
+            let active = ws.active;
+            ws.tabs[active].notice = Some(notice.clone());
+            cx.notify();
+        });
+        let mut vcx = drawn(window, cx);
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            workspace.read_with(&vcx, |ws, cx| ws.infobar_notice(cx)),
+            Some(notice.clone())
+        );
+        let controls = [
+            "infobar-action-0",
+            "infobar-action-1",
+            "infobar-action-2",
+            "infobar-dismiss",
+        ];
+        crate::files::notice::assert_clear_of_buttons(&mut vcx, width, "infobar-detail", &controls);
+    }
+}
