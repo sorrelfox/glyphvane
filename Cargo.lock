@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "gv-app"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4643,7 +4643,7 @@ dependencies = [
 
 [[package]]
 name = "gv-bases"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "gv-vault",
  "saphyr",
@@ -4652,7 +4652,7 @@ dependencies = [
 
 [[package]]
 name = "gv-canvas"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4660,7 +4660,7 @@ dependencies = [
 
 [[package]]
 name = "gv-diagram"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "log",
  "merman",
@@ -4672,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "gv-editor"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "gpui-pre-sum-tree",
@@ -4689,7 +4689,7 @@ dependencies = [
 
 [[package]]
 name = "gv-export"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "ammonia",
  "gv-highlight",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "gv-helper"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "fontdb",
  "gv-export",
@@ -4727,7 +4727,7 @@ dependencies = [
 
 [[package]]
 name = "gv-highlight"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "giallo",
  "log",
@@ -4738,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "gv-html"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "gv-syntax",
  "html5ever 0.40.1",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "gv-inline"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -4757,7 +4757,7 @@ dependencies = [
 
 [[package]]
 name = "gv-math"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "ratex-katex-fonts",
  "ratex-layout",
@@ -4769,7 +4769,7 @@ dependencies = [
 
 [[package]]
 name = "gv-media"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "cpal",
  "crc32fast",
@@ -4791,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "gv-model"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "comrak",
  "gv-syntax",
@@ -4805,7 +4805,7 @@ dependencies = [
 
 [[package]]
 name = "gv-profile"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "tempfile",
  "toml_edit 0.25.19+spec-1.1.0",
@@ -4813,7 +4813,7 @@ dependencies = [
 
 [[package]]
 name = "gv-render-tree"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "gv-inline",
  "gv-math",
@@ -4828,7 +4828,7 @@ dependencies = [
 
 [[package]]
 name = "gv-search"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "aho-corasick",
  "gv-profile",
@@ -4840,7 +4840,7 @@ dependencies = [
 
 [[package]]
 name = "gv-settings"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "directories",
  "proptest",
@@ -4855,7 +4855,7 @@ dependencies = [
 
 [[package]]
 name = "gv-spell"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "encoding_rs",
  "gv-syntax",
@@ -4867,7 +4867,7 @@ dependencies = [
 
 [[package]]
 name = "gv-syntax"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "comrak",
  "criterion",
@@ -4883,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "gv-text"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "chardetng",
  "criterion",
@@ -4897,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "gv-ui"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "emojis",
@@ -4942,7 +4942,7 @@ dependencies = [
 
 [[package]]
 name = "gv-vault"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "caseless",
@@ -13188,7 +13188,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.0.56"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "flate2",

@@ -8,8 +8,12 @@ documents (relative links, wikilinks, headings and block references across a
 folder of notes) and renders each document according to a selectable flavor
 profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
-**Status:** Pre-release (0.0.x). Most of the features planned for 1.0 are in
-place and being tested; there are no published builds yet.
+**Status:** 1.0 released. Download it from
+[GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
+`.rpm`, AppImage and `.tar.gz` for Linux (x86_64 and arm64), `.dmg` and `.zip`
+for macOS (Apple silicon and Intel), and `.msi` and `.zip` for Windows (x64
+and arm64). The macOS builds are not notarized; see "First launch.txt" in the
+disk image. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building from source
 
@@ -30,8 +34,10 @@ checks as CI:
 cargo xtask ci
 ```
 
-`glyphvane render notes.md -o notes.html` renders a file to HTML without
-opening a window (CommonMark only, for now).
+Without opening a window, `glyphvane render notes.md -o notes.html` renders a
+file to HTML (`--profile` picks the flavor), `glyphvane export --pdf notes.md`
+writes a PDF, and `glyphvane check-links` checks the links of a note or a folder. Run
+`glyphvane --help` for the full list.
 
 ## Contributing
 

@@ -23,6 +23,15 @@
   <content_rating type="oars-1.1"/>
   <!-- Add an entry for every release, newest first. -->
   <releases>
+    <release version="1.0.0" date="2026-11-18">
+      <description>
+        <p>The first stable release. Glyphvane reads and edits Markdown files
+          and folders of notes, with a Reading view, a Source view and a Split
+          view, link navigation and link checking across the folder, vault
+          search, HTML and PDF export, printing, and read-only Canvas and Bases
+          views. Builds for Linux, macOS and Windows are on GitHub Releases.</p>
+      </description>
+    </release>
     <release version="0.0.56" date="2026-11-17"/>
     <release version="0.0.55" date="2026-11-16"/>
     <release version="0.0.54" date="2026-11-16"/>
