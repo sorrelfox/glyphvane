@@ -385,6 +385,23 @@ fn inline_math_is_drawn_and_shows_its_source_when_touched(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn inline_math_uses_the_macros_the_note_defines_before_it(cx: &mut TestAppContext) {
+    // `\RR` is unknown before its definition, defined after it (by a
+    // display formula), as in the Reading view.
+    let text = "a $\\RR$ b\n\n$$\n\\newcommand{\\RR}{\\mathbb{R}}\n$$\n\nc $\\RR^2$ d\n\nend\n";
+    let (view, mut vcx) = live_obsidian(cx, text);
+    caret_at(&view, &mut vcx, text.len());
+    assert_eq!(widget_kinds(&view, &mut vcx), ["text", "math"]);
+    // Editing the definition away (`\xnewcommand`): the formula after
+    // it shows its source.
+    let def = text.find("\\newcommand").expect("definition") + 1;
+    caret_at(&view, &mut vcx, def);
+    vcx.simulate_input("x");
+    draw(&mut vcx);
+    assert_eq!(widget_kinds(&view, &mut vcx), ["text", "text"]);
+}
+
+#[gpui::test]
 fn tags_are_chips_that_search(cx: &mut TestAppContext) {
     let (view, mut vcx) = live_obsidian(cx, "see #idea now\nnext\n");
     caret_at(&view, &mut vcx, 16);

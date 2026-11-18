@@ -534,6 +534,9 @@ struct BlocksKey {
     selections: u64,
     span: Range<usize>,
     full: bool,
+    /// Bumped by each whole-document pass (a later one of the same text
+    /// brings the note's context).
+    pass: u64,
 }
 
 /// The block widgets of a view.
@@ -548,6 +551,8 @@ pub(crate) struct LiveBlocks {
     landed: Vec<(BlockId, f32)>,
     /// The whole document's blocks, for the text revision.
     pub(super) full: Option<(Revision, Arc<Vec<BlockSpec>>)>,
+    /// Counts the whole-document passes given ([`Self::set_full`]).
+    pass: u64,
     /// The note's context, for the text revision it was worked out for
     /// (an older one is used until the background pass gives the new one).
     pub(super) context: Option<(Revision, Arc<NoteContext>)>,
@@ -595,6 +600,12 @@ impl LiveBlocks {
             .get(&id)
             .and_then(|s| s.context.as_ref())
             .map_or(0, |c| c.prefix.len())
+    }
+
+    /// The whole document's blocks for text `revision`.
+    pub fn set_full(&mut self, revision: Revision, blocks: Vec<BlockSpec>) {
+        self.full = Some((revision, Arc::new(blocks)));
+        self.pass += 1;
     }
 
     /// Drops the block views (they read their source anew).
@@ -659,6 +670,11 @@ impl EditorView {
             self.live.blocks.fits.clear();
         }
         self.apply_block_heights(cx);
+        // Where the view's top is among the rows: blocks inserted or
+        // removed above it (a whole-document pass landing) leave it there.
+        let pad = f64::from(self.layout.pad_top());
+        let anchor = (self.pending_top.is_none() && self.scroll_y > pad)
+            .then(|| self.geo().fractional_row(self.scroll_y - pad));
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
@@ -689,6 +705,7 @@ impl EditorView {
                 window.clone()
             },
             full: full.is_some(),
+            pass: blocks.pass,
         };
         // Blocks the editor removed (revealed, their text deleted).
         blocks.shown.retain(|id, _| doc.editor.block(*id).is_some());
@@ -816,6 +833,7 @@ impl EditorView {
                 below,
             });
         }
+        let changed = !remove.is_empty() || !inserts.is_empty();
         if !remove.is_empty() {
             for id in &remove {
                 blocks.shown.remove(id);
@@ -832,6 +850,9 @@ impl EditorView {
             blocks.shown.retain(|id, _| doc.editor.block(*id).is_some());
         }
         blocks.last = Some(key);
+        if changed && let Some(row) = anchor {
+            self.scroll_y = (pad + self.geo().y_of_fractional_row(row)).max(0.0);
+        }
         cx.notify();
     }
 

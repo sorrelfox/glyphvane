@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use gv_math::{MacroLimits, MacroPass, MacroSet};
 use gv_render_tree::FootnoteIndex;
 use gv_syntax::inline::{RefLookup as _, normalize_label};
 use gv_syntax::{Container, ContainerKind, Leaf, LeafKind, RefMap, SyntaxTree, Visitor, walk};
@@ -81,6 +82,9 @@ pub(crate) struct NoteContext {
     /// The formulas that define macros, in document order: where each
     /// starts and its TeX.
     macros: Vec<(usize, String)>,
+    /// For each of `macros`: the macros it is rendered with (those before
+    /// it), and those in force after it.
+    macro_sets: Vec<(MacroSet, MacroSet)>,
 }
 
 /// Collects footnote definitions and macro formulas.
@@ -218,9 +222,34 @@ impl NoteContext {
         } else {
             NoteContext::default()
         };
+        if !out.macros.is_empty() {
+            let mut pass = MacroPass::new(MacroLimits::default());
+            out.macro_sets = out
+                .macros
+                .iter()
+                .map(|(_, tex)| {
+                    let before = pass.next(tex);
+                    (before, pass.next(""))
+                })
+                .collect();
+        }
         out.firsts = numbers.then(|| FootnoteIndex::first_references(tree, text, &refs));
         out.refs = (!refs.is_empty() || footnotes).then_some(refs);
         out
+    }
+
+    /// The math macros an inline formula at `range` is rendered with: the
+    /// definitions of the formulas before it (MathJax's document-wide
+    /// scope, as the Reading view renders the note). `None` without any.
+    pub fn macros_at(&self, range: &Range<usize>) -> Option<&MacroSet> {
+        let i = self.macros.partition_point(|(at, _)| *at < range.start);
+        // The formula itself defines macros: the set worked out for it
+        // (a `\newcommand` of a defined name is its own definition).
+        if self.macros.get(i).is_some_and(|(at, _)| *at < range.end) {
+            return self.macro_sets.get(i).map(|(before, _)| before);
+        }
+        let (_, after) = self.macro_sets.get(i.checked_sub(1)?)?;
+        (!after.is_empty()).then_some(after)
     }
 
     /// The context of a block of kind `kind` at `range` whose source is
@@ -459,6 +488,27 @@ mod tests {
         assert!(cx.suffix.is_empty());
         // Code has none.
         assert_eq!(context(&text, math, BlockWidget::Code), None);
+    }
+
+    #[test]
+    fn inline_formulas_get_the_macros_defined_before_them() {
+        let text = "$a$ then $\\newcommand{\\R}{\\mathbb{R}}\\R$ and $\\R^2$\n\n$$\n\\def\\Z{\\mathbb{Z}}\n$$\n\n$\\Z$\n";
+        let snapshot = TextSnapshot::new(text);
+        let tree = SyntaxTree::parse_with(&snapshot, obsidian());
+        let note = NoteContext::compute(&tree, &snapshot, false);
+        let at = |f: &str| {
+            let start = text.find(f).expect("formula");
+            note.macros_at(&(start..start + f.len()))
+        };
+        assert_eq!(at("$a$"), None);
+        let names = |set: Option<&MacroSet>| -> Vec<String> {
+            set.map(|s| s.iter().map(|(n, _)| n.to_owned()).collect())
+                .unwrap_or_default()
+        };
+        // The defining formula itself: nothing before it.
+        assert!(names(at("$\\newcommand")).is_empty());
+        assert_eq!(names(at("$\\R^2$")), ["\\R"]);
+        assert_eq!(names(at("$\\Z$")), ["\\R", "\\Z"]);
     }
 
     #[test]

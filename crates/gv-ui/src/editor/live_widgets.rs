@@ -12,8 +12,9 @@
 //!   missing and undecodable images, and images still loading, show their
 //!   alt text (or file name) on a chip.
 //! - **Inline math** `$…$`: typeset by the reader's math engine and drawn
-//!   as paths, scaled down to fit the row. A formula that does not
-//!   typeset shows its source in the error colour.
+//!   as paths, scaled down to fit the row, with the math macros the
+//!   note's formulas define before it (as the Reading view). A formula
+//!   that does not typeset shows its source in the error colour.
 //! - **Task checkboxes** `[ ]` / `[x]`: a box as wide as the source, which
 //!   a click toggles (one undoable edit).
 //! - **Emoji shortcodes** `:smile:` (profiles with emoji): the emoji.
@@ -293,13 +294,15 @@ impl Widgets {
 
     /// The widget `spec` shows now, measured for `sizes`; an image not
     /// known yet starts a job when `load` (with `resolver`; without one
-    /// it fails), else shows its placeholder.
+    /// it fails), else shows its placeholder. Inline math is typeset with
+    /// `macros` (the note's, defined before it), part of the widget's id.
     pub fn widget(
         &mut self,
         spec: &WidgetSpec,
         sizes: &Sizes,
         resolver: Option<&Resolver>,
         load: bool,
+        macros: Option<&MacroSet>,
     ) -> Widget {
         let (widget, paint, click) = match spec {
             WidgetSpec::Task { checked } => {
@@ -327,7 +330,10 @@ impl Widgets {
                 )
             }
             WidgetSpec::Math { tex, source } => {
-                match crate::reader::math_engine().render(tex, false, &MacroSet::empty()) {
+                let empty = MacroSet::empty();
+                let macros = macros.unwrap_or(&empty);
+                let salt = macros.hash_value();
+                match crate::reader::math_engine().render(tex, false, macros) {
                     Ok(layout) => {
                         let ink = (layout.height + layout.depth).max(f32::EPSILON);
                         let em = sizes.font.min(sizes.line * 0.9 / ink);
@@ -338,7 +344,7 @@ impl Widgets {
                             .max(layout.height * em)
                             .min(sizes.line - layout.depth * em);
                         let width = (layout.width * em).max(1.0);
-                        let id = id_of(spec, u64::from(width.to_bits()));
+                        let id = id_of(spec, u64::from(width.to_bits()) ^ salt.rotate_left(32));
                         (
                             Widget::boxed(id, width, None),
                             WidgetPaint::Math {
@@ -350,7 +356,7 @@ impl Widgets {
                         )
                     }
                     Err(_) => {
-                        let id = id_of(spec, 1);
+                        let id = id_of(spec, 1 ^ salt.rotate_left(32));
                         (
                             Widget::text(id, source, Some(MATH_ERROR_STYLE)),
                             WidgetPaint::Text,
@@ -511,7 +517,13 @@ mod tests {
     #[test]
     fn task_boxes_are_as_wide_as_their_source() {
         let mut widgets = Widgets::default();
-        let widget = widgets.widget(&WidgetSpec::Task { checked: true }, &sizes(), None, true);
+        let widget = widgets.widget(
+            &WidgetSpec::Task { checked: true },
+            &sizes(),
+            None,
+            true,
+            None,
+        );
         assert_eq!(
             widget.content,
             gv_editor::display_map::WidgetContent::Box { width: 24.0 }
@@ -529,7 +541,7 @@ mod tests {
             tex: "\\frac{a}{b}".into(),
             source: "$\\frac{a}{b}$".into(),
         };
-        let widget = widgets.widget(&spec, &sizes(), None, true);
+        let widget = widgets.widget(&spec, &sizes(), None, true, None);
         let Some((WidgetPaint::Math { layout, em, .. }, _)) = widgets.paint(widget.id) else {
             panic!("no formula");
         };
@@ -538,9 +550,31 @@ mod tests {
             tex: "\\frac{".into(),
             source: "$\\frac{$".into(),
         };
-        let widget = widgets.widget(&bad, &sizes(), None, true);
+        let widget = widgets.widget(&bad, &sizes(), None, true, None);
         assert_eq!(widget.display_text(), "$\\frac{$");
         assert_eq!(widget.style, Some(MATH_ERROR_STYLE));
+    }
+
+    #[test]
+    fn math_uses_the_notes_macros_and_they_are_part_of_its_id() {
+        let mut widgets = Widgets::default();
+        let spec = WidgetSpec::Math {
+            tex: "\\RR^2".into(),
+            source: "$\\RR^2$".into(),
+        };
+        // Unknown without the note's macros: the source, as an error.
+        let without = widgets.widget(&spec, &sizes(), None, true, None);
+        assert_eq!(without.style, Some(MATH_ERROR_STYLE));
+        let macros = MacroSet::from_pairs([("\\RR", "\\mathbb{R}")]);
+        let with = widgets.widget(&spec, &sizes(), None, true, Some(&macros));
+        assert!(matches!(
+            widgets.paint(with.id),
+            Some((WidgetPaint::Math { .. }, _))
+        ));
+        assert_ne!(with.id, without.id);
+        let other = MacroSet::from_pairs([("\\RR", "\\mathbf{R}")]);
+        let changed = widgets.widget(&spec, &sizes(), None, true, Some(&other));
+        assert_ne!(changed.id, with.id);
     }
 
     #[test]
@@ -552,10 +586,10 @@ mod tests {
             alt: alt.into(),
             width: None,
         };
-        let widget = widgets.widget(&spec("A cat"), &sizes(), None, true);
+        let widget = widgets.widget(&spec("A cat"), &sizes(), None, true, None);
         assert_eq!(widget.display_text(), "A cat");
         assert_eq!(widget.style, Some(PLACEHOLDER_STYLE));
-        let widget = widgets.widget(&spec(""), &sizes(), None, true);
+        let widget = widgets.widget(&spec(""), &sizes(), None, true, None);
         assert_eq!(widget.display_text(), "cat.png");
     }
 
@@ -574,12 +608,12 @@ mod tests {
             width: None,
         };
         // Away from the screen: its placeholder, no job.
-        let widget = widgets.widget(&spec, &sizes(), Some(&resolver), false);
+        let widget = widgets.widget(&spec, &sizes(), Some(&resolver), false, None);
         assert_eq!(widget.display_text(), "A cat");
         assert!(widgets.take_jobs().is_empty());
         assert_eq!(widgets.loading_count(), 0);
         // Near it: a job.
-        widgets.widget(&spec, &sizes(), Some(&resolver), true);
+        widgets.widget(&spec, &sizes(), Some(&resolver), true, None);
         let jobs = widgets.take_jobs();
         assert_eq!(jobs.len(), 1);
         assert_eq!(widgets.loading_count(), 1);
@@ -591,7 +625,7 @@ mod tests {
         widgets.landed(&jobs[0].key, ImageResult { image: None });
         assert_eq!(widgets.generation(), generation);
         // Back near the screen: a new job.
-        widgets.widget(&spec, &sizes(), Some(&resolver), true);
+        widgets.widget(&spec, &sizes(), Some(&resolver), true, None);
         assert_eq!(widgets.take_jobs().len(), 1);
         // Kept while it stays near.
         let keys = std::iter::once((Arc::<str>::from("cat.png"), false)).collect();

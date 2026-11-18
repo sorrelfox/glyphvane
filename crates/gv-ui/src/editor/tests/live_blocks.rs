@@ -402,7 +402,19 @@ fn blocks_on_a_large_note(cx: &mut TestAppContext) {
         i += 1;
     }
     let blocks_expected = i;
-    let (view, mut vcx) = live(cx, &text);
+    let (view, mut vcx) = editor_with(cx, &text, obsidian());
+    view.update(&mut vcx, |v, cx| v.set_profile("obsidian", cx));
+    draw(&mut vcx);
+    // The first Live Preview frame: the whole note's blocks go in.
+    view.update(&mut vcx, |v, cx| v.set_live_preview(true, cx));
+    vcx.run_until_parked();
+    let started = Instant::now();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let first = started.elapsed();
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.live_block_ids().len()),
+        blocks_expected
+    );
     let frame = |vcx: &mut VisualTestContext| {
         vcx.run_until_parked();
         let started = Instant::now();
@@ -413,7 +425,9 @@ fn blocks_on_a_large_note(cx: &mut TestAppContext) {
     for _ in 0..4 {
         window_frames.push(frame(&mut vcx));
     }
+    // Every block from the first frame (the block pass runs before it).
     let in_window = view.read_with(&vcx, |v, _| v.live_block_ids().len());
+    assert_eq!(in_window, blocks_expected);
     vcx.executor()
         .advance_clock(super::super::live_preview::FULL_DELAY * 2);
     vcx.run_until_parked();
@@ -433,10 +447,11 @@ fn blocks_on_a_large_note(cx: &mut TestAppContext) {
     let mut sorted: Vec<f64> = moves.iter().map(ms).collect();
     sorted.sort_by(f64::total_cmp);
     println!(
-        "note {} bytes, {blocks_expected} blocks; window: {in_window} blocks, frames max {:.2} ms; \
+        "note {} bytes, {blocks_expected} blocks; first Live Preview frame {:.2} ms, then max {:.2} ms; \
          whole document: {all} blocks, first frame {:.2} ms, max {:.2} ms; \
          caret moves: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
         text.len(),
+        ms(&first),
         max(&window_frames),
         ms(&full_frames[0]),
         max(&full_frames),
@@ -723,4 +738,95 @@ fn first_frame_of_a_short_note(cx: &mut TestAppContext) {
             .map(|f| (f * 100.0).round() / 100.0)
             .collect::<Vec<_>>()
     );
+}
+
+/// The first line drawn and the y of its start.
+fn top_line(view: &Entity<EditorView>, vcx: &mut VisualTestContext, text: &str) -> (usize, Pixels) {
+    let probe = probe_of(view, vcx);
+    let line = probe.row_texts.first().map(|(l, _)| *l).expect("drawn");
+    let at = text
+        .match_indices('\n')
+        .nth(line.saturating_sub(1))
+        .map_or(0, |(i, _)| i + 1);
+    let y = view.update_in(vcx, |v, window, cx| {
+        v.range_bounds(at..at, None, window, cx)
+            .expect("on screen")
+            .top()
+    });
+    (line, y)
+}
+
+#[gpui::test]
+fn a_long_note_has_its_blocks_from_the_first_frame_and_keeps_its_top_line(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    let mut n = 0;
+    while text.len() <= super::super::live_preview::SMALL_NOTE_BYTES + 1000 {
+        text.push_str(&format!(
+            "para {n} with some words in it\n\n```\none\ntwo\nthree\n```\n\n"
+        ));
+        n += 1;
+    }
+    let (view, mut vcx) = editor_with(cx, &text, obsidian());
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.live_block_ids().len()), n);
+    // The blocks at the top are measured (not as tall as their source).
+    settle(&mut vcx);
+    let heights = view.read_with(&vcx, |v, _| v.live_block_heights());
+    assert!((heights[0] - 5.0 * LINE).abs() > 1.0, "{heights:?}");
+    // Back in Source, scrolled to the middle: turning Live Preview on puts
+    // every block above the view in at its estimated height, and the line
+    // at the top stays where it is.
+    view.update(&mut vcx, |v, cx| v.set_live_preview(false, cx));
+    settle(&mut vcx);
+    view.update(&mut vcx, |v, cx| v.scroll_to_line(n * 3, cx));
+    settle(&mut vcx);
+    let before = top_line(&view, &mut vcx, &text);
+    assert!(before.0 >= n * 3 - 1, "{before:?}");
+    view.update(&mut vcx, |v, cx| v.set_live_preview(true, cx));
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.live_block_ids().len()), n);
+    assert_eq!(top_line(&view, &mut vcx, &text).0, before.0);
+    // The background pass landing changes nothing on screen.
+    vcx.executor()
+        .advance_clock(super::super::live_preview::FULL_DELAY * 2);
+    vcx.run_until_parked();
+    settle(&mut vcx);
+    assert_eq!(top_line(&view, &mut vcx, &text).0, before.0);
+    assert_eq!(view.read_with(&vcx, |v, _| v.live_block_ids().len()), n);
+}
+
+#[gpui::test]
+fn mod_click_on_an_embeds_link_follows_the_embedded_note(cx: &mut TestAppContext) {
+    // The embedded note's text is plain in the Reading view (and so in
+    // the block); the embed's own link goes to the note.
+    let vault = super::autocomplete::vault(&[
+        ("Host.md", "intro\n\n![[Other]]\n\nend\n"),
+        ("Sub/Other.md", "See [near](Near.md) here.\n"),
+    ]);
+    let (view, mut vcx) =
+        super::autocomplete::editor_in(cx, &vault, "Host.md", gv_profile::ProfileId::Obsidian);
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    settle(&mut vcx);
+    vcx.run_until_parked();
+    settle(&mut vcx);
+    assert_eq!(kinds(&view, &mut vcx), ["embed"]);
+    let (bounds, embed) = block_reader(&view, &mut vcx, 0);
+    let at = link_point(&embed, bounds, &mut vcx);
+    let secondary = vcx.update(|_, cx| Modifiers::secondary_key(cx));
+    press(&mut vcx, at, 1, secondary);
+    settle(&mut vcx);
+    let followed = view
+        .update(&mut vcx, |v, _| v.take_clicked_link())
+        .expect("followed");
+    assert_eq!(followed.file, vault.root.join("Host.md"));
+    assert_eq!(&*followed.destination, "Other");
+    // The caret stayed out of the block.
+    assert_eq!(kinds(&view, &mut vcx), ["embed"]);
 }

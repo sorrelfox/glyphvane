@@ -809,6 +809,8 @@ pub(super) struct WidgetEnv<'a> {
     /// Lines that are images on their own (block widgets): no inline
     /// widget there.
     pub lone_images: &'a [Range<usize>],
+    /// The note's context: math macros for inline formulas.
+    pub context: Option<&'a super::live_context::NoteContext>,
 }
 
 /// The splices that bring the layer to what `leaves` put in `span` with
@@ -842,7 +844,14 @@ fn splices_for(
             None => Replacement::hide(range),
             Some(spec) => {
                 let load = range.start < env.load.end && range.end > env.load.start;
-                Replacement::widget(range, widgets.widget(&spec, env.sizes, env.resolver, load))
+                let macros = match &*spec {
+                    WidgetSpec::Math { .. } => env.context.and_then(|c| c.macros_at(&range)),
+                    _ => None,
+                };
+                Replacement::widget(
+                    range,
+                    widgets.widget(&spec, env.sizes, env.resolver, load, macros),
+                )
             }
         })
         .collect();
@@ -1013,12 +1022,21 @@ impl EditorView {
         let mut hasher = DefaultHasher::new();
         selections.hash(&mut hasher);
         let selection_key = hasher.finish();
+        let context = self
+            .live
+            .blocks
+            .context
+            .as_ref()
+            .map(|(_, c)| Arc::clone(c));
+        let context_revision = self.live.blocks.context.as_ref().map(|(r, _)| *r);
         let widgets_generation = {
             // Images on their own line have no inline widget: a change of
             // those lines is a change of the widgets.
             let mut hasher = DefaultHasher::new();
             self.live.widgets.generation().hash(&mut hasher);
             self.live.blocks.lone_images.hash(&mut hasher);
+            // A new note context: inline formulas may get other macros.
+            context_revision.hash(&mut hasher);
             hasher.finish()
         };
 
@@ -1084,6 +1102,7 @@ impl EditorView {
                 resolver,
                 load: window.clone(),
                 lone_images: &self.live.blocks.lone_images,
+                context: context.as_deref(),
             };
             let splices = splices_for(
                 &doc.editor,
@@ -1110,6 +1129,7 @@ impl EditorView {
                     resolver,
                     load: window.clone(),
                     lone_images: &self.live.blocks.lone_images,
+                    context: context.as_deref(),
                 };
                 full.pending = splices_for(
                     &doc.editor,
@@ -1156,8 +1176,9 @@ impl EditorView {
     /// A short note's first whole-document pass, before its first frame
     /// in Live Preview: every block is in the block layer from the start
     /// (at estimated heights), so the content height does not grow while
-    /// scrolling into text the window pass has not seen. Longer notes wait
-    /// for the background pass.
+    /// scrolling into text the window pass has not seen. Longer notes get
+    /// their blocks the same way (without the note's context, which the
+    /// background pass brings with the rest).
     pub(super) fn live_first_pass(&mut self) {
         if self.live.full.is_some() || self.live.blocks.full.is_some() {
             return;
@@ -1166,19 +1187,21 @@ impl EditorView {
             return;
         };
         let text = doc.editor.snapshot();
-        if text.len() > SMALL_NOTE_BYTES {
-            return;
-        }
         let revision = text.revision();
         let (tree, parsed) = doc.syntax.shown();
         if parsed.revision() != revision || tree.is_interim() {
             return;
         }
         let tree = tree.clone();
+        if text.len() > SMALL_NOTE_BYTES {
+            let blocks = super::live_blocks::find_blocks(&tree, &text, None, None);
+            self.live.blocks.set_full(revision, blocks);
+            return;
+        }
         let leaves = decorate(&tree, &text, None, &self.live.cache, self.live.options);
         let context = super::live_context::NoteContext::compute(&tree, &text, true);
         let blocks = super::live_blocks::find_blocks(&tree, &text, None, Some(&context));
-        self.live.blocks.full = Some((revision, Arc::new(blocks)));
+        self.live.blocks.set_full(revision, blocks);
         self.live.blocks.context = Some((revision, Arc::new(context)));
         self.live.full = Some(Full {
             revision,
@@ -1228,7 +1251,7 @@ impl EditorView {
                 }
                 view.live.job_for = None;
                 view.live._job = None;
-                view.live.blocks.full = Some((revision, Arc::new(blocks)));
+                view.live.blocks.set_full(revision, blocks);
                 view.live.blocks.context = Some((revision, context));
                 view.live.full = Some(Full {
                     revision,
@@ -1354,6 +1377,7 @@ pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
             resolver: None,
             load: 0..usize::MAX,
             lone_images: &[],
+            context: None,
         }
     }
     use std::time::{Duration, Instant};
