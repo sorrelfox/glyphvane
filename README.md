@@ -10,10 +10,10 @@ profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
 **Status:** 1.0 released. Download it from
 [GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
-`.rpm`, AppImage and `.tar.gz` for Linux (x86_64 and arm64), `.dmg` and `.zip`
-for macOS (Apple silicon and Intel), and `.msi` and `.zip` for Windows (x64
-and arm64). The macOS builds are not notarized; see "First launch.txt" in the
-disk image. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+`.rpm`, AppImage and `.tar.gz` for Linux (x86_64 and arm64), and `.msi` and
+`.zip` for Windows (x64 and arm64). macOS builds will follow in a later
+release; until then, macOS users can build from source (below). Changes are
+listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building from source
 

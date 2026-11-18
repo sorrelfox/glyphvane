@@ -5,8 +5,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 
 ## [1.0.0] - 2026-11-18
 
-The first stable release, with builds for Linux (x86_64 and arm64), macOS
-(Apple silicon and Intel) and Windows (x64 and arm64) on GitHub Releases.
+The first stable release, with builds for Linux (x86_64 and arm64) and
+Windows (x64 and arm64) on GitHub Releases. macOS builds will follow in a
+later release; the code supports macOS and can be built from source.
 
 ### Reading and editing
 
@@ -58,7 +59,7 @@ The first stable release, with builds for Linux (x86_64 and arm64), macOS
 
 ### Packaging
 
-- `.deb`, `.rpm`, AppImage and `.tar.gz` for Linux; `.dmg` and `.zip` for
-  macOS (ad-hoc signed, not notarized); `.msi` and `.zip` for Windows.
+- `.deb`, `.rpm`, AppImage and `.tar.gz` for Linux; `.msi` and `.zip` for
+  Windows.
 - Each release carries SHA-256 checksums, build-provenance attestations and
   CycloneDX SBOMs.
