@@ -3,17 +3,26 @@
 [![CI](https://github.com/sorrelfox/glyphvane/actions/workflows/ci.yml/badge.svg)](https://github.com/sorrelfox/glyphvane/actions/workflows/ci.yml)
 
 Glyphvane is a native, GPU-rendered Markdown editor and viewer written in Rust,
-for Linux, macOS and Windows. It aims at precise link navigation between
+for Linux and Windows. It aims at precise link navigation between
 documents (relative links, wikilinks, headings and block references across a
 folder of notes) and renders each document according to a selectable flavor
 profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
-**Status:** 1.0 released. Download it from
+**Status:** 1.1 released. Download it from
 [GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
-`.rpm`, AppImage and `.tar.gz` for Linux (x86_64 and arm64), and `.msi` and
-`.zip` for Windows (x64 and arm64). macOS builds will follow in a later
-release; until then, macOS users can build from source (below). Changes are
+`.rpm`, AppImage, Flatpak bundle and `.tar.gz` for Linux (x86_64 and arm64),
+an Arch Linux package (x86_64), and `.msi` and `.zip` for Windows (x64 and
+arm64). There are no macOS builds. Changes are
 listed in [CHANGELOG.md](CHANGELOG.md).
+
+```sh
+flatpak install --user Glyphvane-<version>-<arch>.flatpak    # Flatpak
+sudo pacman -U glyphvane-<version>-1-x86_64.pkg.tar.zst      # Arch Linux
+```
+
+The Flatpak has access to your home folder, so links between notes keep
+working outside the opened vault; it leaves updates to Flatpak and keeps its
+settings in `~/.var/app/io.github.sorrelfox.Glyphvane/`.
 
 ## Building from source
 

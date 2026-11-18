@@ -3,11 +3,49 @@
 All notable changes to Glyphvane are listed here. The format follows
 Conventional Commits, and versions follow Semantic Versioning.
 
+## [1.1.0] - 2026-11-18
+
+### Live Preview
+
+- A new editing style in Edit mode (View > Live Preview, per tab, kept in
+  the session): Markdown markers are hidden except where the caret or a
+  selection touches them, and the caret moves over hidden text as one unit.
+- Inline widgets: images, inline math, task checkboxes (click to toggle),
+  emoji shortcodes and tags.
+- Block widgets drawn like the Reading view: code blocks, tables, display
+  math, diagrams, note and canvas/base embeds, callouts, horizontal rules,
+  front matter and images on their own line. A block shows its source while
+  the caret is inside it; links in blocks follow with Mod+click, and wide
+  blocks scroll sideways.
+
+### Zoom
+
+- Clicking the zoom level in the status bar opens a menu of levels with Zoom
+  in, Zoom out and Reset.
+- Mod++ and Mod+wheel or pinch over the document zoom too; the zoom level is
+  kept between launches.
+
+### Fixes
+
+- Code files in plain-text mode use a monospace font; viewer tabs take the
+  keyboard when they open; the compare view header wraps in narrow windows.
+- Load once approvals are shared between notes and bases; folds in the Split
+  preview and renamed callouts are kept with the session.
+- The home folder check ignores case on Windows.
+- Typing before a byte-order mark at the start of a file no longer leaves an
+  invalid interim parse.
+
+### Packaging
+
+- A Flatpak bundle (`io.github.sorrelfox.Glyphvane`, x86_64 and arm64, on
+  the freedesktop 26.08 runtime) with access to the home folder. Inside a
+  Flatpak the update check is off, since Flatpak updates the app.
+- An Arch Linux package (x86_64); the helper is in `/usr/lib/glyphvane/`.
+
 ## [1.0.0] - 2026-11-18
 
 The first stable release, with builds for Linux (x86_64 and arm64) and
-Windows (x64 and arm64) on GitHub Releases. macOS builds will follow in a
-later release; the code supports macOS and can be built from source.
+Windows (x64 and arm64) on GitHub Releases.
 
 ### Reading and editing
 

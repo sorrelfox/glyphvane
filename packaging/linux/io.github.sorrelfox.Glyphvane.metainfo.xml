@@ -23,6 +23,15 @@
   <content_rating type="oars-1.1"/>
   <!-- Add an entry for every release, newest first. -->
   <releases>
+    <release version="1.1.0" date="2026-11-18">
+      <description>
+        <p>Live Preview: an Edit-mode style that hides Markdown markers away
+          from the cursor and draws images, math, task checkboxes, tags, code
+          blocks, tables, diagrams, callouts and embeds in place. A zoom menu
+          in the status bar, more zoom keys, and the zoom level kept between
+          launches.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-11-18">
       <description>
         <p>The first stable release. Glyphvane reads and edits Markdown files
