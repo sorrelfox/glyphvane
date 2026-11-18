@@ -175,9 +175,19 @@ impl Focusable for AudioPlayerView {
 
 impl AudioPlayerView {
     /// A player for `path`, loading it at once on a background thread.
+    ///
+    /// The player's state is first read after the caller has the view, so a
+    /// file that fails at once still reaches subscribers as
+    /// [`AudioPlayerEvent::Failed`] (an event emitted while the view is
+    /// being built has no subscriber yet).
     pub fn new(path: impl Into<PathBuf>, cx: &mut Context<'_, Self>) -> Self {
         let mut view = Self::lazy(path, cx);
-        view.ensure_loaded(cx);
+        view.loaded = true;
+        view.player.load(&view.path);
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |view, cx| view.sync(cx)).ok();
+        })
+        .detach();
         view
     }
 
