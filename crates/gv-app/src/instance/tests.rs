@@ -248,6 +248,8 @@ fn a_rejected_wait_starts_on_its_own() {
     assert!(matches!(claim, Claim::Standalone), "{claim:?}");
 }
 
+// Unix paths: `/run/user/…` is not absolute on Windows, where no Flatpak runs.
+#[cfg(unix)]
 #[test]
 fn the_runtime_folder_is_the_apps_own_inside_a_flatpak() {
     let dir =
