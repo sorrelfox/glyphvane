@@ -232,7 +232,12 @@ impl EditorView {
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
-        let handled = match current_syntax(doc) {
+        let syntax = if self.plain.is_some() {
+            None
+        } else {
+            current_syntax(doc)
+        };
+        let handled = match syntax {
             Some(syntax) => {
                 let (tree, text) = (syntax.tree.clone(), syntax.text.clone());
                 commands
@@ -252,6 +257,9 @@ impl EditorView {
     /// primary selection, no composition). Returns whether it was handled;
     /// if not, the caller inserts the text as usual.
     pub(super) fn type_smart(&mut self, range: Option<&Range<usize>>, text: &str) -> bool {
+        if self.plain.is_some() {
+            return false;
+        }
         let commands = self.commands;
         let Some(doc) = self.doc.as_mut() else {
             return false;

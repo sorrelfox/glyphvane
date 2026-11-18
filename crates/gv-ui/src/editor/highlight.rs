@@ -274,6 +274,9 @@ pub(crate) struct HighlightCache {
     lines: HashMap<usize, Rc<LineStyle>>,
     /// The fences' code highlighting.
     pub code: FenceCode,
+    /// Plain-text mode ([`super::plain`]): no Markdown roles; the whole
+    /// text is code of this language, if any.
+    plain: Option<Option<String>>,
 }
 
 /// Code highlighting of fenced code in the Source view.
@@ -304,19 +307,39 @@ impl FenceCode {
     /// The highlighting of fence `leaf` (opened by info string `info`), if
     /// there is one to draw now.
     fn spans(&mut self, text: &TextSnapshot, leaf: &Leaf<'_>, info: &str) -> Option<LineSpans> {
+        let contents = leaf.lines.iter().map(|l| l.content.clone());
+        self.spans_of(text, contents, leaf.open_line, info)
+    }
+
+    /// The highlighting of the whole of `text` as code of `info` (plain-text
+    /// mode), if there is one to draw now.
+    fn whole(&mut self, text: &TextSnapshot, info: &str) -> Option<LineSpans> {
+        let contents = (0..text.line_count()).filter_map(|line| text.line_range(line).ok());
+        self.spans_of(text, contents, 0, info)
+    }
+
+    /// The highlighting of the lines of `text` whose contents are
+    /// `contents`, remembered under `open_line`.
+    fn spans_of(
+        &mut self,
+        text: &TextSnapshot,
+        contents: impl Iterator<Item = Range<usize>> + Clone,
+        open_line: usize,
+        info: &str,
+    ) -> Option<LineSpans> {
         // The content, unless it is over the cap anyway.
-        let bytes: usize = leaf.lines.iter().map(|l| l.content.len() + 1).sum();
+        let bytes: usize = contents.clone().map(|c| c.len() + 1).sum();
         if bytes > gv_highlight::Limits::default().max_bytes {
             return None;
         }
         let mut code = String::with_capacity(bytes);
-        let mut lines: Vec<Range<usize>> = Vec::with_capacity(leaf.lines.len());
-        for (i, line) in leaf.lines.iter().enumerate() {
+        let mut lines: Vec<Range<usize>> = Vec::new();
+        for (i, content) in contents.enumerate() {
             if i > 0 {
                 code.push('\n');
             }
             let start = code.len();
-            if let Ok(t) = text.text_for_range(line.content.clone()) {
+            if let Ok(t) = text.text_for_range(content) {
                 code.push_str(&t);
             }
             lines.push(start..code.len());
@@ -327,13 +350,13 @@ impl FenceCode {
         }
         if let Some(h) = code_highlight::cached(&key) {
             let spans = LineSpans::new(h, lines.into());
-            self.last.insert(leaf.open_line, spans.clone());
+            self.last.insert(open_line, spans.clone());
             return Some(spans);
         }
         if self.jobs.start(key) {
             self.requests.push((key, code));
         }
-        let last = self.last.get(&leaf.open_line).cloned();
+        let last = self.last.get(&open_line).cloned();
         #[cfg(test)]
         if last.is_none() {
             code_highlight::tests::count_pending_draw();
@@ -349,6 +372,14 @@ const MARGIN: usize = 32;
 const MAX_LINES: usize = 20_000;
 
 impl HighlightCache {
+    /// Plain-text mode (`Some`), with the code language of the whole text,
+    /// or Markdown (`None`).
+    pub fn set_plain(&mut self, plain: Option<Option<String>>) {
+        self.plain = plain;
+        self.key = None;
+        self.lines.clear();
+    }
+
     /// Makes sure `lines` are highlighted with the shown tree of `syntax`.
     pub fn ensure(&mut self, syntax: &Syntax, links: &mut LinkStatuses, lines: Range<usize>) {
         let key = (syntax.generation(), links.generation());
@@ -369,7 +400,11 @@ impl HighlightCache {
         if window.is_empty() {
             return;
         }
-        for (line, style) in highlight(tree, text, window, links, &mut self.code) {
+        let styles = match &self.plain {
+            Some(info) => highlight_plain(text, window, info.as_deref(), &mut self.code),
+            None => highlight(tree, text, window, links, &mut self.code),
+        };
+        for (line, style) in styles {
             self.lines.entry(line).or_insert_with(|| Rc::new(style));
         }
     }
@@ -550,6 +585,35 @@ pub(crate) fn highlight(
         containers: Vec::new(),
     };
     walk_range(tree, range, &mut leaves);
+    painter.finish()
+}
+
+/// Highlights `lines` of `text` in plain-text mode: plain text, coloured
+/// by the code highlighter as language `info` when there is one.
+pub(crate) fn highlight_plain(
+    text: &TextSnapshot,
+    lines: Range<usize>,
+    info: Option<&str>,
+    code: &mut FenceCode,
+) -> Vec<(usize, LineStyle)> {
+    let mut painter = Painter::new(text, lines.clone());
+    let spans = info.and_then(|info| code.whole(text, info));
+    if let Some(spans) = spans {
+        for line in lines {
+            let Ok(c) = text.line_range(line) else {
+                continue;
+            };
+            for (r, class) in spans.line(line, c.len()) {
+                let font = class.font_style();
+                let style = Style {
+                    bold: font.bold,
+                    italic: font.italic,
+                    ..Style::of(code_highlight::token_of(class))
+                };
+                painter.set(c.start + r.start..c.start + r.end, style);
+            }
+        }
+    }
     painter.finish()
 }
 

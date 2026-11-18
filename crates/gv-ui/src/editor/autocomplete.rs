@@ -178,6 +178,9 @@ impl EditorView {
     /// other changes keep an open one in step, or close it.
     pub(super) fn update_autocomplete(&mut self) {
         let typed = std::mem::take(&mut self.autocomplete.typed);
+        if self.plain.is_some() {
+            return;
+        }
         if !typed && !self.autocomplete.is_open() && !self.autocomplete.has_dismissed() {
             return;
         }

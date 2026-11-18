@@ -128,6 +128,7 @@ mod links;
 mod markdown;
 mod metrics;
 mod paste;
+mod plain;
 mod rename;
 mod rows;
 mod spell;
@@ -420,6 +421,8 @@ pub struct EditorView {
     paste_profile: gv_html::Profile,
     /// Viewer mode: the text cannot be changed.
     read_only: bool,
+    /// Plain-text mode: the file is not Markdown ([`plain`]).
+    plain: Option<plain::Plain>,
     /// The caret's place and the word count, for the status bar.
     stats: stats::Stats,
     /// Misspellings and the spelling menu.
@@ -517,6 +520,7 @@ impl EditorView {
             selection_history: gv_editor::commands::SelectionHistory::default(),
             paste_profile: paste_profile(gv_profile::ProfileId::CommonMark.as_str()),
             read_only: false,
+            plain: None,
             stats: stats::Stats::default(),
             spell: spell::SpellState::default(),
             scroll_y: 0.0,
@@ -640,6 +644,7 @@ impl EditorView {
         self.links = LinkStatuses::new(Some(&path), index.as_ref(), self.links.profile());
         self.autocomplete.index = index;
         self.path = Some(path.clone());
+        self.plain_for_path();
         self.untitled = None;
         self.status = EditorStatus::Loading;
         self.doc = None;
@@ -761,7 +766,7 @@ impl EditorView {
     ) {
         let mut editor = Editor::new(buffer);
         // Soft wrap starts with the first frame, which knows the width.
-        editor.set_wrap_indent(Arc::new(MarkdownHangingIndent::default()));
+        editor.set_wrap_indent(wrap_indent(self.plain.is_some()));
         let large_file = wrap::is_large_file(editor.text(), limits);
         let queue = EditQueue::default();
         let sink = queue.clone();
@@ -786,11 +791,13 @@ impl EditorView {
         });
         let syntax = Syntax::new(tree, editor.snapshot());
         self.handed_off = Some(editor.text().revision());
+        let mut highlights = HighlightCache::default();
+        highlights.set_plain(self.plain_language());
         self.doc = Some(Doc {
             editor,
             queue,
             syntax,
-            highlights: HighlightCache::default(),
+            highlights,
             rows: RowCache::default(),
             state,
             large_file,
@@ -1168,6 +1175,8 @@ impl EditorView {
         if self.read_only {
             return;
         }
+        // A file that is not Markdown gets the clipboard's text as it is.
+        let plain = plain || self.plain.is_some();
         let item = cx.read_from_clipboard();
         // An image (a screenshot, an image copied in a browser) is saved
         // as an attachment and embedded ([`insert`]).
@@ -1298,6 +1307,16 @@ pub(crate) struct Extra {
     scroll: f64,
 }
 
+/// How wrapped rows are indented: as the line, plus a hanging indent for
+/// list items and quotes in Markdown.
+fn wrap_indent(plain: bool) -> Arc<dyn gv_editor::display_map::WrapIndent> {
+    if plain {
+        Arc::new(gv_editor::display_map::IndentAdjustment::SameIndent)
+    } else {
+        Arc::new(MarkdownHangingIndent::default())
+    }
+}
+
 /// Autocomplete for built-in profile `id`.
 fn autocomplete_state(id: gv_profile::ProfileId) -> crate::autocomplete::State {
     let mut state = crate::autocomplete::State::default();
@@ -1402,7 +1421,11 @@ impl Render for EditorView {
         let host = div().id("editor-host").relative().size_full();
         let host = self.autocomplete_handlers(host, cx);
         let host = self.find_handlers(host, cx);
-        let host = self.rename_handlers(host, cx);
+        let host = if self.plain.is_some() {
+            host
+        } else {
+            self.rename_handlers(host, cx)
+        };
         let popover = self
             .find_popover()
             .filter(|_| self.status == EditorStatus::Ready);
@@ -1499,7 +1522,12 @@ impl Render for EditorView {
                     this.toggle_soft_wrap(cx);
                 }),
             );
-        let root = fold_handlers(root, cx);
+        // Plain text has no folds.
+        let root = if self.plain.is_some() {
+            root
+        } else {
+            fold_handlers(root, cx)
+        };
         let root = self.go_handlers(root, cx);
         let root = self.spell_handlers(root, cx);
         // Viewer mode: nothing that changes the text has a handler, so its
@@ -1545,11 +1573,12 @@ impl Render for EditorView {
                 this.paste(true, w, cx);
             }))
         };
-        let root = self
-            .markdown_handlers(root, cx)
-            .relative()
-            .size_full()
-            .bg(theme.surface.page);
+        let root = if self.plain.is_some() {
+            self.plain_handlers(root, cx)
+        } else {
+            self.markdown_handlers(root, cx)
+        };
+        let root = root.relative().size_full().bg(theme.surface.page);
         let root = match &self.status {
             EditorStatus::Ready => root.child(EditorElement::new(cx.entity())),
             EditorStatus::Failed(err) => {

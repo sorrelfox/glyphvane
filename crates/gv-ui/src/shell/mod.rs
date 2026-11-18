@@ -567,9 +567,23 @@ impl Tab {
             .is_some_and(viewer_tabs::is_viewer_file)
     }
 
-    /// Whether the tab shows a file in a read-only view of its own (a
-    /// canvas, a base or the built-in viewer) instead of the Reading and
-    /// Source views.
+    /// Whether the built-in viewer of the tab shows text, which the Source
+    /// view may edit in plain-text mode: its viewer shows text or, while it
+    /// loads, the file is not an image by its name.
+    fn viewer_shows_text(&self, cx: &App) -> bool {
+        use crate::file_viewer::{ViewerKind, ViewerStatus};
+        match self.viewer.as_ref().map(|v| v.read(cx).status()) {
+            Some(ViewerStatus::Text { .. }) => true,
+            Some(ViewerStatus::Image(_) | ViewerStatus::NotShown(_)) => false,
+            Some(ViewerStatus::Loading) | None => self
+                .path
+                .as_deref()
+                .is_some_and(|p| crate::file_viewer::kind(p) != Some(ViewerKind::Image)),
+        }
+    }
+
+    /// Whether the tab shows a file in a view of its own (a canvas, a base
+    /// or the built-in viewer) instead of the Reading view.
     fn is_special_view(&self) -> bool {
         self.is_canvas() || self.is_base() || self.is_viewer()
     }
@@ -1974,7 +1988,12 @@ impl Workspace {
             return false;
         };
         // The Canvas and Bases views are read-only and have no Source view.
-        if tab.is_special_view() {
+        if tab.is_canvas() || tab.is_base() {
+            return false;
+        }
+        // The built-in viewer's text is edited as plain text; images and
+        // files it does not show are not.
+        if tab.is_viewer() && !tab.viewer_shows_text(cx) {
             return false;
         }
         tab.edit_requested || tab.untitled.is_some() || !AppSettings::viewer_mode(cx)
@@ -1986,9 +2005,14 @@ impl Workspace {
     }
 
     /// Whether the active tab can be shown in `mode` (Edit and Split are
-    /// unavailable in viewer mode).
+    /// unavailable in viewer mode; a file that is not a note has no Split
+    /// view).
     pub fn mode_available(&self, mode: ViewMode, cx: &App) -> bool {
-        mode == ViewMode::Preview || self.can_edit(self.active, cx)
+        match mode {
+            ViewMode::Preview => true,
+            ViewMode::Edit => self.can_edit(self.active, cx),
+            ViewMode::Split => self.can_edit(self.active, cx) && !self.active_tab().is_viewer(),
+        }
     }
 
     /// Viewer mode was switched on or off: each Source view is read-only
@@ -2010,7 +2034,7 @@ impl Workspace {
     /// not be edited (viewer mode; a restored tab, a setting changed).
     fn leave_locked_mode(&mut self, cx: &mut Context<'_, Self>) {
         let from = self.mode();
-        if from == ViewMode::Preview || self.can_edit(self.active, cx) {
+        if self.mode_available(from, cx) {
             return;
         }
         self.tabs[self.active].mode = ViewMode::Preview;

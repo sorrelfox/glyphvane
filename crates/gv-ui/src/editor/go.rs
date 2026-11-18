@@ -62,10 +62,14 @@ impl EditorView {
         if self.doc.is_none() {
             return root;
         }
+        let root = root.on_action(cx.listener(|this, _: &navigation::GoToLine, window, cx| {
+            this.go_to_line(window, cx);
+        }));
+        // Plain text has no headings, footnotes or syntax to step through.
+        if self.plain.is_some() {
+            return root;
+        }
         let root = root
-            .on_action(cx.listener(|this, _: &navigation::GoToLine, window, cx| {
-                this.go_to_line(window, cx);
-            }))
             .on_action(
                 cx.listener(|this, _: &navigation::GoToHeading, window, cx| {
                     this.go_to_heading(window, cx);

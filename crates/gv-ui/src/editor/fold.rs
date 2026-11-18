@@ -289,7 +289,8 @@ impl EditorView {
     /// Finds the foldable regions in the tree, if it is the complete parse
     /// of the current text and the regions are older.
     pub(super) fn refresh_foldable(&mut self) {
-        let Some(doc) = self.doc.as_mut() else {
+        // Plain text has no folds.
+        let Some(doc) = self.doc.as_mut().filter(|_| self.plain.is_none()) else {
             return;
         };
         let revision = doc.editor.text().revision();
@@ -308,7 +309,7 @@ impl EditorView {
     /// rested for [`FOLDABLE_DELAY`] (a later reparse starts the wait
     /// again).
     pub(super) fn schedule_foldable(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(doc) = self.doc.as_ref() else {
+        let Some(doc) = self.doc.as_ref().filter(|_| self.plain.is_none()) else {
             return;
         };
         if doc.foldable_at == Some(doc.editor.text().revision()) {

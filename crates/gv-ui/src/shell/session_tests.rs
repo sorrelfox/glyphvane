@@ -808,3 +808,53 @@ fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
     vcx.update(|_, cx| save_now(cx));
     assert_eq!(memory.last().windows[0].tabs[0].reading_folds, folds);
 }
+
+#[gpui::test]
+fn a_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "# not a heading\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: file.clone(),
+                mode: ViewMode::Edit,
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let editor = loop {
+        draw(&mut vcx);
+        let editor = workspace.read_with(&vcx, |ws, cx| {
+            ws.active_tab()
+                .editor()
+                .filter(|e| *e.read(cx).status() == crate::editor::EditorStatus::Ready)
+                .cloned()
+        });
+        if let Some(editor) = editor {
+            break editor;
+        }
+        assert!(std::time::Instant::now() < deadline, "the editor loads");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let mode = workspace.read_with(&vcx, |ws, _| ws.active_tab().mode());
+    assert_eq!(mode, ViewMode::Edit);
+    assert!(editor.read_with(&vcx, |e, _| e.is_plain()));
+    assert!(workspace.read_with(&vcx, |ws, _| ws.active_tab().viewer().is_some()));
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory.last().windows[0].tabs[0].mode, ViewMode::Edit);
+}

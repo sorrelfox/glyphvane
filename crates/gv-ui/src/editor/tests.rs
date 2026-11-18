@@ -31,6 +31,7 @@ mod code;
 mod find;
 mod fold;
 mod paste;
+mod plain;
 mod rename;
 mod rows;
 mod spell;

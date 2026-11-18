@@ -83,7 +83,8 @@ impl Workspace {
         if let Some(base) = self.shown_base() {
             return area.child(base.clone()).into_any_element();
         }
-        // And any other file, in the built-in viewer.
+        // And any other file, in the built-in viewer in Preview (its text
+        // in the Source view in Edit).
         if let Some(viewer) = self.shown_viewer() {
             return area.child(viewer.clone()).into_any_element();
         }
@@ -150,11 +151,14 @@ impl Workspace {
         tab.bases.as_ref().filter(|_| tab.is_base())
     }
 
-    /// The built-in viewer on screen: the active tab's, when it shows a
-    /// file that is not a note, a canvas or a base.
+    /// The built-in viewer on screen: the active tab's, in Preview mode,
+    /// when it shows a file that is not a note, a canvas or a base (in
+    /// Edit mode its Source view shows the file as plain text).
     pub(super) fn shown_viewer(&self) -> Option<&Entity<crate::file_viewer::FileViewer>> {
         let tab = self.active_tab();
-        tab.viewer.as_ref().filter(|_| tab.is_viewer())
+        tab.viewer
+            .as_ref()
+            .filter(|_| tab.is_viewer() && tab.mode == ViewMode::Preview)
     }
 
     /// The Source view on screen: the active tab's, in Edit and Split
@@ -412,6 +416,8 @@ impl Workspace {
         };
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let read_only = !self.can_edit(index, cx);
+        // A file that is not a note is edited as plain text.
+        let plain = super::viewer_tabs::is_viewer_file(&path);
         let folds = match self.tabs[index].restored_folds.take() {
             Some((p, folds)) if p == path => folds,
             _ => Vec::new(),
@@ -420,6 +426,7 @@ impl Workspace {
             let mut editor = EditorView::new(profile.parse_options(), cx);
             editor.set_compiled_profile(&profile.compiled, cx);
             editor.set_read_only(read_only, cx);
+            editor.set_plain(plain, cx);
             editor
         });
         // Watchers first: the view tells them about its saves.
@@ -485,6 +492,17 @@ impl Workspace {
             (ViewMode::Edit | ViewMode::Split, ViewMode::Preview) => {
                 let split = self.tabs[index].split.clone();
                 let tab = &self.tabs[index];
+                // The built-in viewer shows the edited text, saved or not.
+                if tab.is_viewer() {
+                    let (Some(editor), Some(viewer)) = (tab.editor.clone(), tab.viewer.clone())
+                    else {
+                        return;
+                    };
+                    if let Some(text) = editor.update(cx, |e, _| e.take_preview_text()) {
+                        viewer.update(cx, |v, cx| v.show_text(&text, cx));
+                    }
+                    return;
+                }
                 let (Some(editor), Some(reader), Some(path)) =
                     (tab.editor.clone(), tab.reader.clone(), tab.path.clone())
                 else {

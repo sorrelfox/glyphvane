@@ -1548,7 +1548,11 @@ impl EditorView {
             return;
         };
         let revision = doc.editor.text().revision();
-        if doc.large_file || doc.state.markers.is_some_and(|(at, _)| at == revision) {
+        // Plain text is not checked: the warning is about notes.
+        if doc.large_file
+            || self.plain.is_some()
+            || doc.state.markers.is_some_and(|(at, _)| at == revision)
+        {
             return;
         }
         let snapshot = doc.editor.snapshot();

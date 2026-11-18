@@ -12,10 +12,14 @@
 //!   its first bytes look like text it opens in the text viewer too;
 //!   otherwise the window asks before handing it to the default app
 //!   ([`Workspace::open_other_file`]).
-//! - The viewer has no Source view: Edit and Split are unavailable in its
-//!   tab ([`Workspace::can_edit`]).
+//! - Edit shows a text file in the Source view in plain-text mode
+//!   ([`crate::editor::EditorView::set_plain`]); leaving Edit shows the
+//!   edited text, saved or not, in the viewer again. Images and files the
+//!   viewer does not show cannot be edited, and no viewer tab has a Split
+//!   view ([`Workspace::can_edit`], [`Workspace::mode_available`]).
 //! - The file is watched like a note shown in Preview and read again when
-//!   it changes on disk.
+//!   it changes on disk (once the tab has a Source view, the Source view
+//!   takes the change and the viewer follows it).
 //! - The viewer's *Open with default app* goes through the same question.
 
 use std::path::{Path, PathBuf};

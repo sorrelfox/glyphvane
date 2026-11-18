@@ -22,8 +22,8 @@ use gpui::{
     Focusable as _, InteractiveElement as _, Pixels, Stateful, Window, point,
 };
 
-use super::Workspace;
 use super::panels::SidebarPanel;
+use super::{ViewMode, Workspace};
 use crate::keymap::actions::{file as file_commands, tabs as tab_commands, workspace as commands};
 use crate::menu::{
     ContextMenu, ContextMenuPopover, ContextTarget, MenuState, Placement, context_target,
@@ -54,6 +54,7 @@ impl Workspace {
             can_go_back: self.can_go_back(),
             can_go_forward: self.can_go_forward(),
             edit_locked: !self.can_edit(self.active, cx),
+            split_locked: !self.mode_available(ViewMode::Split, cx),
             has_file: self.tabs.get(index).is_some_and(|t| t.path.is_some()),
             misspelled: false,
             in_vault: false,

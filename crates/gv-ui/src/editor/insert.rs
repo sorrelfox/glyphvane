@@ -78,7 +78,8 @@ impl EditorView {
         window: &Window,
         cx: &App,
     ) -> Option<usize> {
-        if self.status != EditorStatus::Ready || self.read_only {
+        // Plain text takes no links: the files dropped open instead.
+        if self.status != EditorStatus::Ready || self.read_only || self.plain.is_some() {
             return None;
         }
         if !self.bounds?.contains(&position) {

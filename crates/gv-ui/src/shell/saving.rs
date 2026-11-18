@@ -479,6 +479,16 @@ impl Workspace {
         if tab.mode != ViewMode::Preview {
             return;
         }
+        // The built-in viewer of a file that is not a note.
+        if tab.is_viewer() {
+            let Some(viewer) = tab.viewer.clone() else {
+                return;
+            };
+            if let Some(text) = editor.update(cx, |e, _| e.take_preview_text()) {
+                viewer.update(cx, |v, cx| v.show_text(&text, cx));
+            }
+            return;
+        }
         let (Some(reader), Some(path)) = (tab.reader.clone(), tab.path.clone()) else {
             return;
         };

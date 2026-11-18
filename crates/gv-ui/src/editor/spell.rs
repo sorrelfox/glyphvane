@@ -172,7 +172,8 @@ impl EditorView {
         let Some(doc) = self.doc.as_ref() else {
             return;
         };
-        let setup = if doc.large_file {
+        // Code is not spell checked.
+        let setup = if doc.large_file || self.plain.as_ref().is_some_and(|p| !p.spell) {
             None
         } else {
             SpellService::setup(cx)

@@ -116,7 +116,8 @@ fn a_code_file_opens_in_the_text_viewer_read_only(cx: &mut TestAppContext) {
     });
     workspace.read_with(&vcx, |ws, cx| {
         assert!(ws.active_tab().reader().is_none());
-        assert!(!ws.mode_available(ViewMode::Edit, cx));
+        // Text is edited as plain text; there is no Split view.
+        assert!(ws.mode_available(ViewMode::Edit, cx));
         assert!(!ws.mode_available(ViewMode::Split, cx));
     });
     assert!(vcx.debug_bounds("file-viewer").is_some());
@@ -167,6 +168,11 @@ fn an_image_link_opens_the_image_viewer_and_back_returns(cx: &mut TestAppContext
         viewer.read_with(vcx, |v, _| matches!(v.status(), ViewerStatus::Image(_)))
     });
     assert!(vcx.debug_bounds("image-viewer-body").is_some());
+    // An image has no Source view.
+    workspace.read_with(&vcx, |ws, cx| {
+        assert!(!ws.mode_available(ViewMode::Edit, cx));
+        assert!(!ws.mode_available(ViewMode::Split, cx));
+    });
     // No question about the default app.
     let topic = workspace.read_with(&vcx, |ws, cx| ws.active_notice(cx).map(|(n, _)| n.topic));
     assert_eq!(topic, None);
@@ -238,4 +244,78 @@ fn the_viewer_offers_the_default_app_for_what_it_cannot_show(cx: &mut TestAppCon
     draw(&mut vcx);
     let topic = workspace.read_with(&vcx, |ws, cx| ws.active_notice(cx).map(|(n, _)| n.topic));
     assert_eq!(topic, Some(Topic::Confirm));
+}
+
+#[gpui::test]
+fn edit_switches_a_text_file_to_the_editor_and_back(cx: &mut TestAppContext) {
+    // CRLF line endings and no line ending at the end.
+    let original = b"{\r\n  \"a\": 1\r\n}";
+    let dir = temp(&[("data.json", original)]);
+    let file = dir.path().join("data.json");
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let viewer = viewer(&workspace, &mut vcx);
+    until(&mut vcx, "the text", |vcx| {
+        viewer.read_with(vcx, |v, cx| v.text_ready(cx))
+    });
+
+    // Mod+E: the Source view, in plain-text mode, with the keyboard.
+    vcx.update(|window, cx| {
+        workspace.update(cx, |ws, cx| ws.focus_document(window, cx));
+    });
+    vcx.simulate_keystrokes("secondary-e");
+    draw(&mut vcx);
+    let editor = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("the tab has an editor");
+    assert_eq!(
+        workspace.read_with(&vcx, |ws, _| ws.active_tab().mode()),
+        ViewMode::Edit
+    );
+    until(&mut vcx, "the editor", |vcx| {
+        editor.read_with(vcx, |e, _| {
+            *e.status() == crate::editor::EditorStatus::Ready
+        })
+    });
+    assert!(editor.read_with(&vcx, |e, _| e.is_plain() && !e.is_read_only()));
+    assert!(vcx.debug_bounds("file-viewer").is_none());
+    let focused = vcx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "the editor has the keyboard");
+
+    // Edit and save: the rest of the file is kept byte for byte.
+    let end_of_a = "{\r\n  \"a\": 1".len();
+    editor.update(&mut vcx, |e, cx| e.set_cursor(end_of_a, cx));
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_input("\"b\": 2");
+    draw(&mut vcx);
+    editor.update(&mut vcx, |e, cx| e.save(cx));
+    let expected = b"{\r\n  \"a\": 1\r\n  \"b\": 2\r\n}";
+    until(&mut vcx, "the save", |_| {
+        std::fs::read(&file).is_ok_and(|bytes| bytes == expected)
+    });
+
+    // Mod+E again: the viewer shows the edited text.
+    vcx.simulate_keystrokes("secondary-e");
+    draw(&mut vcx);
+    assert_eq!(
+        workspace.read_with(&vcx, |ws, _| ws.active_tab().mode()),
+        ViewMode::Preview
+    );
+    assert!(vcx.debug_bounds("file-viewer").is_some());
+    until(&mut vcx, "the edited text", |vcx| {
+        viewer.read_with(vcx, |v, cx| {
+            v.reader()
+                .and_then(|r| r.read(cx).plain_text())
+                .is_some_and(|t| t.contains("\"b\": 2"))
+        })
+    });
+    // Split stays unavailable; its command does nothing.
+    vcx.dispatch_action(crate::keymap::actions::view::ToggleSplit);
+    draw(&mut vcx);
+    assert_eq!(
+        workspace.read_with(&vcx, |ws, _| ws.active_tab().mode()),
+        ViewMode::Preview
+    );
 }

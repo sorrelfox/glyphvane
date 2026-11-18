@@ -54,7 +54,8 @@ fn follow_hint() -> &'static str {
 impl EditorView {
     /// The link at byte `offset` of the text, once the parse is current.
     pub(crate) fn link_at_offset(&self, offset: usize) -> Option<SourceLink> {
-        let doc = self.doc.as_ref()?;
+        // Plain text has no links.
+        let doc = self.doc.as_ref().filter(|_| self.plain.is_none())?;
         let (tree, text) = doc.syntax.shown();
         if text.len() != doc.editor.text().len() || !doc.syntax.is_current(doc.editor.text()) {
             return None;

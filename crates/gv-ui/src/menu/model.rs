@@ -87,6 +87,8 @@ pub enum Requirement {
     /// The active tab may be edited (viewer mode is off, or does not apply
     /// to it).
     CanEdit,
+    /// The active tab can be shown in Split mode.
+    CanSplit,
     /// The tab the menu is about shows a file (not an untitled document or
     /// an empty tab).
     HasFile,
@@ -135,6 +137,9 @@ pub struct MenuState {
     pub can_go_forward: bool,
     /// Viewer mode keeps the active tab out of Edit and Split.
     pub edit_locked: bool,
+    /// The active tab has no Split view (viewer mode, or a file that is
+    /// not a note).
+    pub split_locked: bool,
     /// The tab the menu is about shows a file.
     pub has_file: bool,
     /// The editor's menu is about a misspelled word.
@@ -149,6 +154,7 @@ impl MenuState {
             Requirement::CanGoBack => self.can_go_back,
             Requirement::CanGoForward => self.can_go_forward,
             Requirement::CanEdit => !self.edit_locked,
+            Requirement::CanSplit => !self.split_locked,
             Requirement::HasFile => self.has_file,
             Requirement::Misspelled => self.misspelled,
             Requirement::MisspelledInVault => self.misspelled && self.in_vault,
@@ -169,7 +175,8 @@ const fn item(command: &'static str, title: &'static str) -> Entry {
 const fn mode_item(command: &'static str, title: &'static str, mode: ViewMode) -> Entry {
     let requires = match mode {
         ViewMode::Preview => None,
-        ViewMode::Edit | ViewMode::Split => Some(Requirement::CanEdit),
+        ViewMode::Edit => Some(Requirement::CanEdit),
+        ViewMode::Split => Some(Requirement::CanSplit),
     };
     Entry::Command(Item {
         command,

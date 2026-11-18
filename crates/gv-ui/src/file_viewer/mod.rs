@@ -21,7 +21,8 @@
 //!   [`TEXT_MAX_BYTES`] and shown read-only in a Reading view as one code
 //!   block, highlighted by the language its extension names (the shared
 //!   highlighter, with its own size caps). Selection, copy and Find work
-//!   as in a note.
+//!   as in a note. The tab's Edit mode edits the file in the Source view
+//!   as plain text; [`FileViewer::show_text`] then shows the edited text.
 //! - Anything else, a text file over the cap, or an image that does not
 //!   decode, says why, with *Open with default app* (the window asks
 //!   first, as for any file it does not show).
@@ -630,6 +631,26 @@ impl FileViewer {
             Loaded::Image(image) => self.status = ViewerStatus::Image(image),
             Loaded::NotShown(why) => self.status = ViewerStatus::NotShown(why.into()),
         }
+        cx.notify();
+    }
+
+    /// Shows `text` in place of the file's text (the Source view's edits,
+    /// saved or not), when the viewer shows text.
+    pub fn show_text(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let ViewerStatus::Text { bytes, .. } = &mut self.status else {
+            return;
+        };
+        let Some(reader) = self.reader.clone() else {
+            return;
+        };
+        *bytes = text.len() as u64;
+        let language = language_info(&self.path);
+        let markdown: Arc<str> = fenced(text, language.as_deref()).into();
+        let path = self.path.clone();
+        reader.update(cx, |r, cx| {
+            let at = r.position();
+            r.open_text(path, markdown, at, cx);
+        });
         cx.notify();
     }
 
