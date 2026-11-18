@@ -62,8 +62,17 @@ pub(super) struct SafetyState {
     /// Source views whose unsaved text the user chose not to save; their
     /// journals go when they close.
     discarded: HashSet<EntityId>,
-    /// Sync-conflict copies to compare once a Source view has loaded.
-    compare_after_load: Vec<(EntityId, PathBuf)>,
+    /// Compares to open once a Source view has loaded.
+    compare_after_load: Vec<(EntityId, AfterLoad)>,
+}
+
+/// A compare asked for before the Source view had loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AfterLoad {
+    /// Against this sync-conflict copy.
+    Copy(PathBuf),
+    /// The text's own conflict markers.
+    Markers,
 }
 
 /// What is being closed.
@@ -397,8 +406,11 @@ impl Workspace {
                     .iter()
                     .position(|(e, _)| *e == id)
                 {
-                    let (_, copy) = self.safety.compare_after_load.remove(at);
-                    editor.update(cx, |e, cx| e.compare_with_copy(copy, cx));
+                    let (_, wanted) = self.safety.compare_after_load.remove(at);
+                    editor.update(cx, |e, cx| match wanted {
+                        AfterLoad::Copy(copy) => e.compare_with_copy(copy, cx),
+                        AfterLoad::Markers => e.resolve_conflict_markers(cx),
+                    });
                 }
                 self.version_after_load(editor, cx);
             }
@@ -758,7 +770,27 @@ impl Workspace {
         } else {
             self.safety
                 .compare_after_load
-                .push((editor.entity_id(), copy));
+                .push((editor.entity_id(), AfterLoad::Copy(copy)));
+        }
+    }
+
+    /// The conflict-marker infobar's *Resolve…*: the active tab's text
+    /// split at its markers in the compare and merge view, once its Source
+    /// view has loaded (one is made for a tab that shows only its Reading
+    /// view). The compare view replaces the document in every mode.
+    pub(super) fn resolve_conflict_markers(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.can_edit(self.active, cx) {
+            return;
+        }
+        let Some(editor) = self.ensure_editor(self.active, cx) else {
+            return;
+        };
+        if *editor.read(cx).status() == EditorStatus::Ready {
+            editor.update(cx, |e, cx| e.resolve_conflict_markers(cx));
+        } else {
+            self.safety
+                .compare_after_load
+                .push((editor.entity_id(), AfterLoad::Markers));
         }
     }
 

@@ -64,6 +64,7 @@ pub(crate) mod embeds;
 mod engine;
 pub(crate) mod expanded;
 mod find;
+pub mod fold_state;
 pub(crate) mod follow;
 mod heights;
 mod items;

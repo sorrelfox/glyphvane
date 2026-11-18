@@ -611,6 +611,23 @@ impl Reader {
         Some(Notice::remote_content(&self.remote.waiting, vault))
     }
 
+    /// Whether the document shown holds Git conflict markers outside code
+    /// fences (checked once per document version).
+    pub fn conflict_markers(&self) -> bool {
+        let st = self.state.borrow();
+        let Some(doc) = st.doc.as_ref() else {
+            return false;
+        };
+        if let Some((version, found)) = st.markers.get()
+            && version == st.doc_version
+        {
+            return found;
+        }
+        let found = crate::compare::markers::has_conflict_markers(&doc.text);
+        st.markers.set(Some((st.doc_version, found)));
+        found
+    }
+
     /// The infobar's dismiss button: hidden until other sites wait.
     pub fn dismiss_remote(&mut self, cx: &mut Context<'_, Self>) {
         self.remote.dismissed = self.remote.waiting.clone();

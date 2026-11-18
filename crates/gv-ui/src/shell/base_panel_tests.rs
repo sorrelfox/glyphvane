@@ -175,3 +175,87 @@ fn show_base_puts_a_base_in_the_right_panel_that_follows_the_active_file(cx: &mu
         matched(&panel, vcx) == Some(1)
     });
 }
+
+#[gpui::test]
+fn the_base_section_folds_and_the_session_keeps_base_view_and_fold(cx: &mut TestAppContext) {
+    use super::session::{self, SidebarBase};
+
+    const TWO: &str = "views:\n  - type: table\n    name: All\n  - type: table\n    name: Second\n";
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join(".obsidian")).expect("marker");
+    std::fs::write(dir.path().join(".obsidian/app.json"), "{}").expect("app.json");
+    for (name, text) in [("two.base", TWO), ("a.md", "# A\n")] {
+        std::fs::write(dir.path().join(name), text).expect("write");
+    }
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    vcx.dispatch_action(ShowBase);
+    draw(&mut vcx);
+    let panel = workspace
+        .read_with(&vcx, |ws, _| ws.base_panel())
+        .expect("the panel is made");
+    panel.update(&mut vcx, |p, cx| p.choose_base("two.base".into(), cx));
+    let view_name = |panel: &Entity<BasesPanel>, vcx: &mut VisualTestContext| {
+        panel.read_with(vcx, |p, cx| p.view().and_then(|v| v.read(cx).view_name()))
+    };
+    until("the base read", &workspace, &mut vcx, |vcx| {
+        view_name(&panel, vcx).as_deref() == Some("All")
+    });
+    panel.update(&mut vcx, |p, cx| p.choose_view(1, cx));
+    draw(&mut vcx);
+    assert_eq!(view_name(&panel, &mut vcx).as_deref(), Some("Second"));
+
+    // The head folds the section: only the head stays.
+    let head = vcx.debug_bounds("base-head").expect("the section head");
+    let open_height = vcx
+        .debug_bounds("right-panel-base")
+        .expect("drawn")
+        .size
+        .height;
+    vcx.simulate_click(head.center(), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(workspace.read_with(&vcx, |ws, _| ws.panels.base_collapsed));
+    let folded = vcx.debug_bounds("right-panel-base").expect("drawn");
+    assert!(folded.size.height < open_height, "{folded:?}");
+    assert_eq!(folded.size.height, head.size.height);
+
+    // The session keeps it.
+    let state = workspace.read_with(&vcx, session::snapshot);
+    assert_eq!(
+        state.base,
+        Some(SidebarBase {
+            file: Some("two.base".into()),
+            view: Some("Second".into()),
+            collapsed: true,
+        })
+    );
+
+    // A window restored from it shows the same base, view and fold.
+    let (window2, workspace2) = cx.update(|cx| {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(800.0)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        gpui::open_window(options, cx, |window, cx| {
+            cx.new(|cx| Workspace::restored(state, window, cx))
+        })
+        .expect("test window opens")
+    });
+    let mut vcx2 = VisualTestContext::from_window(window2, cx);
+    draw(&mut vcx2);
+    let panel2 = workspace2
+        .read_with(&vcx2, |ws, _| {
+            assert!(ws.panels.base_collapsed);
+            ws.base_panel()
+        })
+        .expect("the panel is back");
+    assert_eq!(
+        panel2.read_with(&vcx2, |p, _| p.chosen().map(str::to_owned)),
+        Some("two.base".into())
+    );
+    until("the restored view", &workspace2, &mut vcx2, |vcx| {
+        view_name(&panel2, vcx).as_deref() == Some("Second")
+    });
+}

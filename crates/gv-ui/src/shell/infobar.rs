@@ -37,6 +37,8 @@ pub(super) enum NoticeSource {
     Tab,
     /// The Reading view on screen (remote content).
     Reader,
+    /// The note's text: Git conflict markers.
+    Markers,
 }
 
 impl Workspace {
@@ -56,9 +58,44 @@ impl Workspace {
         if let Some(notice) = tab.notice.clone() {
             return Some((notice, NoticeSource::Tab));
         }
+        if let Some(notice) = self.markers_notice(cx) {
+            return Some((notice, NoticeSource::Markers));
+        }
         self.visible_reader(cx)
             .and_then(|r| r.read(cx).remote_notice(cx))
             .map(|n| (n, NoticeSource::Reader))
+    }
+
+    /// The conflict-marker warning (plan 10 § Git awareness), in every
+    /// mode, while the active tab's text holds Git conflict markers outside
+    /// code fences and the warning was not dismissed: the Source view's
+    /// text once checked, else the Reading view's document.
+    fn markers_notice(&self, cx: &App) -> Option<Notice> {
+        let tab = self.active_tab();
+        if tab.is_special_view() {
+            return None;
+        }
+        let editor = tab
+            .editor
+            .as_ref()
+            .map(|e| e.read(cx))
+            .filter(|e| *e.status() == crate::editor::EditorStatus::Ready);
+        let found = editor
+            .and_then(|e| e.conflict_markers())
+            .unwrap_or_else(|| {
+                tab.reader
+                    .as_ref()
+                    .is_some_and(|r| r.read(cx).conflict_markers())
+            });
+        if !found {
+            // Markers that come back warn again.
+            tab.markers_dismissed.set(false);
+            return None;
+        }
+        if tab.markers_dismissed.get() {
+            return None;
+        }
+        Some(Notice::conflict_markers(self.can_edit(self.active, cx)))
     }
 
     /// Shows a failed-save notice on the active tab.
@@ -255,6 +292,13 @@ impl Workspace {
         if source == NoticeSource::Tab && self.answer(action, cx) {
             return;
         }
+        if source == NoticeSource::Markers {
+            if *action == NoticeAction::ResolveConflictMarkers {
+                self.resolve_conflict_markers(cx);
+            }
+            cx.notify();
+            return;
+        }
         if source == NoticeSource::Reader {
             if let Some(reader) = self.visible_reader(cx) {
                 reader.update(cx, |r, cx| r.answer_remote(action, cx));
@@ -282,7 +326,7 @@ impl Workspace {
             action => {
                 let editor = match source {
                     NoticeSource::Document => self.active_tab().editor.clone(),
-                    NoticeSource::Tab | NoticeSource::Reader => None,
+                    NoticeSource::Tab | NoticeSource::Reader | NoticeSource::Markers => None,
                 };
                 if let Some(editor) = editor {
                     editor.update(cx, |e, cx| e.notice_action(action, cx));
@@ -293,7 +337,7 @@ impl Workspace {
     }
 
     /// The infobar's dismiss button.
-    fn dismiss_notice(&mut self, source: NoticeSource, cx: &mut Context<'_, Self>) {
+    pub(super) fn dismiss_notice(&mut self, source: NoticeSource, cx: &mut Context<'_, Self>) {
         match source {
             NoticeSource::Document => {
                 if let Some(editor) = self.active_tab().editor.clone() {
@@ -305,6 +349,7 @@ impl Workspace {
                     reader.update(cx, |r, cx| r.dismiss_remote(cx));
                 }
             }
+            NoticeSource::Markers => self.active_tab().markers_dismissed.set(true),
             NoticeSource::Tab if self.active_tab().has_question() => {
                 self.question_dismissed(cx);
             }

@@ -179,3 +179,55 @@ fn a_click_on_a_tag_asks_for_a_search(cx: &mut TestAppContext) {
     // No navigation.
     assert_eq!(file_of(&workspace, &mut vcx), "t.md");
 }
+
+#[gpui::test]
+fn callout_folds_are_named_for_the_session_and_come_back_after_an_edit(cx: &mut TestAppContext) {
+    use crate::reader::fold_state::{FoldKind, ReadingFold};
+
+    let path_text = "> [!faq]- Question?\n> The answer.\n\nAfter.\n";
+    let dir = vault(&[("c.md", path_text)]);
+    let path = dir.path().join("c.md");
+    let (window, workspace) = open(cx, &path);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    assert!(reader.read_with(&vcx, |r, _| r.reading_folds()).is_empty());
+    let at = {
+        let st = state(&reader, &mut vcx);
+        let st = st.borrow();
+        st.geometry
+            .controls
+            .iter()
+            .find(|c| matches!(c.kind, ControlKind::Details { .. }))
+            .map(|c| c.bounds.center())
+            .expect("the title row folds")
+    };
+    vcx.simulate_click(at, Modifiers::none());
+    settle(&mut vcx);
+    let folds = reader.read_with(&vcx, |r, _| r.reading_folds());
+    assert_eq!(
+        folds,
+        [ReadingFold {
+            kind: FoldKind::Callout,
+            line: "Question?".into(),
+            nth: 0,
+            open: true,
+        }]
+    );
+
+    // The note changed above the callout; its fold comes back by name.
+    std::fs::write(&path, format!("# Added\n\nText.\n\n{path_text}")).expect("write");
+    state(&reader, &mut vcx).borrow_mut().cache.folds.clear();
+    reader.update(&mut vcx, |r, cx| {
+        r.open(path.clone(), None, cx);
+        r.restore_reading_folds(&path, folds.clone(), cx);
+    });
+    settle(&mut vcx);
+    assert!(
+        painted(&reader, &mut vcx)
+            .iter()
+            .any(|t| t == "The answer."),
+        "{:?}",
+        painted(&reader, &mut vcx)
+    );
+    assert_eq!(reader.read_with(&vcx, |r, _| r.reading_folds()), folds);
+}

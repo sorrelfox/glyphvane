@@ -68,6 +68,9 @@ use crate::files::notice::{Notice, NoticeAction, Topic};
 use crate::files::worker::{Msg, SaveReply, Worker};
 use crate::files::{self, ExecutorClock};
 
+/// How long after a change the text is checked for conflict markers.
+const MARKERS_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// What the window hears from a Source view about its document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocEvent {
@@ -327,6 +330,8 @@ pub(crate) enum ComparePurpose {
         label: SharedString,
         text: std::sync::Arc<str>,
     },
+    /// The two sides of the buffer's own Git conflict markers.
+    Markers,
 }
 
 /// A compare view on screen.
@@ -374,6 +379,10 @@ pub(crate) struct DocState {
     /// The compare view on screen.
     compare: Option<OpenCompare>,
     compare_task: Option<Task<()>>,
+    /// Whether the text holds Git conflict markers, and the revision that
+    /// was checked.
+    markers: Option<(Revision, bool)>,
+    markers_task: Option<Task<()>>,
     /// Told when no save is running any more.
     save_waiters: Vec<oneshot::Sender<()>>,
     timer: Option<Task<()>>,
@@ -423,6 +432,8 @@ impl DocState {
             blocked: false,
             compare: None,
             compare_task: None,
+            markers: None,
+            markers_task: None,
             save_waiters: Vec::new(),
             timer: None,
             save_task: None,
@@ -616,6 +627,7 @@ impl EditorView {
         self.find_after_edit(cx);
         self.schedule_word_count(cx);
         self.schedule_spell(cx);
+        self.schedule_markers(cx);
     }
 
     /// Tells the window when the text went from saved to modified or back.
@@ -1400,6 +1412,7 @@ impl EditorView {
             | NoticeAction::OpenCopy(_)
             | NoticeAction::SwitchProfile => {}
             NoticeAction::Revert => self.revert(cx),
+            NoticeAction::ResolveConflictMarkers => self.resolve_conflict_markers(cx),
             // The window's questions.
             NoticeAction::OpenUrl(_)
             | NoticeAction::OpenExternally(_)
@@ -1498,6 +1511,71 @@ impl EditorView {
         }));
     }
 
+    /// The conflict-marker infobar's *Resolve…*: the text split at its Git
+    /// conflict markers, "ours" on the left and "theirs" on the right, in
+    /// the compare and merge view. *Apply* writes the merged text back as
+    /// one undoable edit. Does nothing in viewer mode or without markers.
+    pub fn resolve_conflict_markers(&mut self, cx: &mut Context<'_, Self>) {
+        if self.read_only {
+            return;
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let ending = line_ending_of(doc.state.file.as_ref());
+        let text = text_of(&doc.editor.snapshot());
+        // Made here, not in the background: there is nothing to show
+        // without markers.
+        let Some(comparison) = crate::compare::markers::conflict_comparison(&text, ending) else {
+            return;
+        };
+        self.open_compare(ComparePurpose::Markers, cx, move || comparison);
+    }
+
+    /// Whether the text, as last checked, holds Git conflict markers
+    /// outside code fences (checked a moment after each change, off the UI
+    /// thread; never in large-file mode). `None` until checked once.
+    pub fn conflict_markers(&self) -> Option<bool> {
+        self.doc
+            .as_ref()
+            .and_then(|d| d.state.markers)
+            .map(|(_, found)| found)
+    }
+
+    /// Checks the text for conflict markers a moment after a change.
+    pub(super) fn schedule_markers(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let revision = doc.editor.text().revision();
+        if doc.large_file || doc.state.markers.is_some_and(|(at, _)| at == revision) {
+            return;
+        }
+        let snapshot = doc.editor.snapshot();
+        doc.state.markers_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MARKERS_DELAY).await;
+            let found = cx
+                .background_spawn(async move {
+                    crate::compare::markers::has_conflict_markers(&text_of(&snapshot))
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                let Some(doc) = view.doc.as_mut() else {
+                    return;
+                };
+                doc.state.markers_task = None;
+                let before = doc.state.markers.is_some_and(|(_, f)| f);
+                doc.state.markers = Some((revision, found));
+                if before != found {
+                    view.notice_changed(cx);
+                }
+                // Edits made meanwhile are checked too.
+                view.schedule_markers(cx);
+            })
+            .ok();
+        }));
+    }
+
     /// The File history panel's *Compare with current*: the buffer (left)
     /// against `text`, a kept version of the file named `label` (right), a
     /// 2-way compare. Its result replaces the text as one undoable edit.
@@ -1588,6 +1666,7 @@ impl EditorView {
             ComparePurpose::Recovered => "Compare the recovered text with the file".to_owned(),
             ComparePurpose::Copy(copy) => format!("Compare with “{}”", file_name(copy)),
             ComparePurpose::Version { label, .. } => format!("Compare with the {label}"),
+            ComparePurpose::Markers => "Resolve the conflict markers".to_owned(),
         };
         let view = cx.new(|_| CompareView::new(comparison, title.into(), this));
         doc.state.compare = Some(OpenCompare {
@@ -1624,6 +1703,7 @@ impl EditorView {
                 ComparePurpose::Conflict | ComparePurpose::Recovered => {
                     self.compare_with_disk(cx);
                 }
+                ComparePurpose::Markers => self.resolve_conflict_markers(cx),
             }
             return;
         }
@@ -1633,7 +1713,7 @@ impl EditorView {
         match open.purpose {
             ComparePurpose::Conflict => self.keep_mine(cx),
             ComparePurpose::Recovered => self.keep_recovered(cx),
-            ComparePurpose::Copy(_) | ComparePurpose::Version { .. } => {}
+            ComparePurpose::Copy(_) | ComparePurpose::Version { .. } | ComparePurpose::Markers => {}
         }
         self.notice_changed(cx);
         self.after_edit(cx);

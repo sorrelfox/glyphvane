@@ -1033,6 +1033,7 @@ impl EditorView {
         }
         self.schedule_foldable(cx);
         self.schedule_spell(cx);
+        self.schedule_markers(cx);
     }
 
     fn with_editor(

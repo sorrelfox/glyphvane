@@ -16,6 +16,8 @@ mod bookmarks_tests;
 mod canvas_tabs;
 #[cfg(test)]
 mod canvas_tabs_tests;
+#[cfg(test)]
+mod conflict_markers_tests;
 mod controls;
 mod daily_notes;
 #[cfg(test)]
@@ -415,6 +417,12 @@ pub struct Tab {
     /// A restored tab's Source-view folds, for its file, until the Source
     /// view is made.
     restored_folds: Option<(PathBuf, Vec<std::ops::Range<usize>>)>,
+    /// A restored tab's Reading-view folds, for its file, until its
+    /// Reading view has shown that file.
+    restored_reading_folds: Option<(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
+    /// The conflict-marker warning was dismissed; it comes back once the
+    /// markers have gone and come back ([`infobar`]).
+    markers_dismissed: std::cell::Cell<bool>,
 }
 
 impl Tab {
@@ -443,6 +451,8 @@ impl Tab {
             profile: None,
             split_ratio: None,
             restored_folds: None,
+            restored_reading_folds: None,
+            markers_dismissed: std::cell::Cell::new(false),
         }
     }
 
@@ -457,6 +467,26 @@ impl Tab {
             }
         }
         match &self.restored_folds {
+            Some((p, folds)) if Some(p.as_path()) == path => folds.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The Reading view's folds of the tab's file, as the session keeps
+    /// them: the Reading view's once it shows the file, else those
+    /// restored and not applied yet.
+    fn reading_folds(&self, cx: &App) -> Vec<crate::reader::fold_state::ReadingFold> {
+        let path = self.path.as_deref();
+        if let Some(reader) = &self.reader {
+            let reader = reader.read(cx);
+            if *reader.status() == LoadStatus::Ready
+                && reader.path().is_some()
+                && reader.path() == path
+            {
+                return reader.reading_folds();
+            }
+        }
+        match &self.restored_reading_folds {
             Some((p, folds)) if Some(p.as_path()) == path => folds.clone(),
             _ => Vec::new(),
         }
@@ -633,6 +663,8 @@ impl DocFacts {
 struct ReaderWatch {
     /// The loaded document; `None` while one loads.
     doc: Option<DocFacts>,
+    /// Whether its document held conflict markers when last looked at.
+    markers: bool,
     _count: Option<Task<()>>,
     _events: Subscription,
     _changes: Subscription,
@@ -918,6 +950,9 @@ impl Workspace {
         }
         if state.panel_open {
             this.set_panel_open(true, window, cx);
+        }
+        if let Some(base) = state.base {
+            this.restore_sidebar_base(base, window, cx);
         }
         this.focus_document(window, cx);
         this
@@ -1350,8 +1385,16 @@ impl Workspace {
         let content = self.vault.as_ref().map(|v| v.read(cx).content());
         let profile = self.tab_profile(index, cx).compiled;
         let delay = link_preview::hover_delay(cx);
+        let folds = self.tabs[index]
+            .restored_reading_folds
+            .as_ref()
+            .filter(|(p, _)| *p == path)
+            .map(|(_, folds)| folds.clone());
         let reader = cx.new(|cx| {
             let mut reader = Reader::new(cx);
+            if let Some(folds) = folds {
+                reader.restore_reading_folds(&path, folds, cx);
+            }
             reader.set_hover_previews(Some(delay));
             reader.set_index(snapshot, cx);
             // With a vault the window hands its content snapshots.
@@ -1380,6 +1423,7 @@ impl Workspace {
             reader.entity_id(),
             ReaderWatch {
                 doc: None,
+                markers: false,
                 _count: None,
                 _events: events,
                 _changes: changes,
@@ -1403,6 +1447,15 @@ impl Workspace {
                         .and_then(|w| w.doc.as_ref())
                         .is_some_and(|d| d.path == path);
                     if known {
+                        // A document read again: the infobar follows its
+                        // conflict markers.
+                        let markers = r.conflict_markers();
+                        if let Some(watch) = self.readers.get_mut(&id)
+                            && watch.markers != markers
+                        {
+                            watch.markers = markers;
+                            cx.notify();
+                        }
                         self.refresh_heading(id, cx);
                         return;
                     }
@@ -2160,6 +2213,7 @@ impl Render for Workspace {
                                             self.outline.clone(),
                                             self.links.clone(),
                                             &self.panels,
+                                            cx,
                                         ))
                                     })
                                     .children(expanded),

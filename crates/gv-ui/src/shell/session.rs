@@ -9,11 +9,15 @@
 //! Per window: its bounds, its tabs in order, the active tab, whether each
 //! side panel is shown, which panel the sidebar shows, and the folder it
 //! was opened on (*Open folder*: its vault comes back with it, even without
-//! tabs). Per tab: the file, the view mode, the scroll anchor (the source
-//! offset of the block at the top, never pixels), the back and forward
-//! history, the Split view's divider and the Source view's folds (byte
-//! ranges; restored only where they are still foldable regions). Closed
-//! tabs are not kept.
+//! tabs), and the sidebar base in the right panel (its base file, view and
+//! whether its section is folded). Per tab: the file, the view mode, the
+//! scroll anchor (the source offset of the block at the top, never
+//! pixels), the back and forward history, the Split view's divider, the
+//! Source view's folds (byte ranges; restored only where they are still
+//! foldable regions) and the Reading view's folds (callouts and
+//! `<details>`, by kind, first source line and repeat, so they survive
+//! edits elsewhere; [`crate::reader::fold_state`]). Closed tabs are not
+//! kept.
 //!
 //! Every window that is not created for a file is a session window, so
 //! several windows (`workspace.new_window`, *Open folder* in a window
@@ -70,6 +74,7 @@ use super::panels::SidebarPanel;
 use super::{FileLabel, History, HistoryEntry, ViewMode, Workspace, most_recent_window};
 use crate::chrome::WindowChrome;
 use crate::reader::ScrollTarget;
+use crate::reader::fold_state::ReadingFold;
 
 /// The session format this build reads and writes.
 pub const SESSION_VERSION: u32 = 1;
@@ -162,6 +167,23 @@ pub struct WindowState {
     /// The folder the window was opened on: its vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<PathBuf>,
+    /// The sidebar base in the right panel, once shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<SidebarBase>,
+}
+
+/// The right panel's sidebar base: which base and view it showed, and
+/// whether its section was folded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidebarBase {
+    /// The base file, as a vault path; none chosen yet when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The view shown, by name (the base's first view when missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 /// Where a window was, in logical pixels.
@@ -232,6 +254,10 @@ pub struct TabState {
     /// The Source view's folds, as byte ranges `[start, end]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folds: Vec<[usize; 2]>,
+    /// The Reading view's folds (callouts and `<details>` opened or
+    /// closed), by block kind, first source line and repeat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reading_folds: Vec<ReadingFold>,
 }
 
 /// A place in a tab's history.
@@ -343,7 +369,10 @@ impl TabState {
             .map(|[start, end]| *start..*end)
             .collect();
         if !folds.is_empty() {
-            tab.restored_folds = Some((self.path, folds));
+            tab.restored_folds = Some((self.path.clone(), folds));
+        }
+        if !self.reading_folds.is_empty() {
+            tab.restored_reading_folds = Some((self.path, self.reading_folds));
         }
         tab
     }
@@ -382,6 +411,7 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             forward: places(tab.history.forward()),
             split_ratio,
             folds,
+            reading_folds: tab.reading_folds(cx),
         });
     }
     WindowState {
@@ -401,6 +431,7 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             .filter(|v| v.opened_as_folder())
             .map(|v| v.root().to_path_buf())
             .filter(|p| storable(p)),
+        base: workspace.sidebar_base_state(cx),
     }
 }
 

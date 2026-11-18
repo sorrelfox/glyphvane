@@ -24,6 +24,7 @@
 //! | The conflict infobar's Compare (a file changed on disk with unsaved edits) | The buffer | The file on disk | 3-way, against the text last loaded or saved (the journal base) |
 //! | The recovery infobar's Compare | The recovered text | The file on disk | 2-way |
 //! | The sync-conflict infobar's Compare | The buffer | The conflict copy | 2-way |
+//! | The conflict-marker infobar's Resolve | The note's "ours" side | Its "theirs" side | Split at the markers ([`markers`]) |
 //!
 //! # Rules
 //!
@@ -38,6 +39,7 @@
 //!   cannot be typed in while it shows; should it have changed anyway,
 //!   *Apply* compares again instead of overwriting the change.
 
+pub mod markers;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -131,6 +133,19 @@ impl Comparison {
                 })
             })
             .collect();
+        Self {
+            regions,
+            sides,
+            line_ending,
+        }
+    }
+
+    /// A comparison made of `regions` (the conflict markers of a note).
+    pub(crate) fn from_regions(
+        regions: Vec<Region>,
+        sides: Sides,
+        line_ending: LineEnding,
+    ) -> Self {
         Self {
             regions,
             sides,

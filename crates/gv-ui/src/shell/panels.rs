@@ -139,6 +139,12 @@ pub(super) struct Panels {
     /// The chosen base file as last read: its vault path, size and mtime
     /// (a change on disk reads it again).
     pub base_seen: Option<super::base_panel::BaseSeen>,
+    /// The sidebar base's section is folded to its head.
+    pub base_collapsed: bool,
+    /// The sidebar base's view as last saved (base file, view name), and
+    /// the observer of its Bases view.
+    pub base_shown: Option<(Option<String>, Option<String>)>,
+    pub _base_view_observer: Option<(gpui::EntityId, Subscription)>,
     /// The Search panel, once shown ([`super::search`]).
     pub search: Option<Entity<crate::search_panel::SearchPanel>>,
     pub _search_events: Option<Subscription>,
@@ -445,6 +451,9 @@ impl Workspace {
         }
         if section == RightSection::Base {
             self.ensure_base_panel(window, cx);
+            if self.panels.base_collapsed {
+                self.toggle_base_section(cx);
+            }
         }
         if section == RightSection::Outline
             && let Some(outline) = &self.outline
@@ -549,7 +558,9 @@ pub(super) fn right_panel(
     outline: Option<Entity<OutlinePanel>>,
     links: Option<Entity<LinksPanel>>,
     panels: &Panels,
+    cx: &mut Context<'_, Workspace>,
 ) -> Stateful<Div> {
+    let base_open = !panels.base_collapsed;
     div()
         .id("right-panel")
         .a11y_group(Role::Complementary, "Right panel")
@@ -567,20 +578,29 @@ pub(super) fn right_panel(
         .when_some(panels.link_checker.clone(), |panel, checker| {
             panel.child(checker)
         })
-        // The sidebar base takes the room left (not designed: its place
-        // below the other sections, the line above it).
+        // The sidebar base takes the room left when unfolded (not
+        // designed: its place below the other sections, its head).
         .when_some(panels.base.clone(), |panel, base| {
             panel.child(
                 div()
                     .id("right-panel-base")
                     .debug_selector(|| "right-panel-base".into())
-                    .flex_1()
+                    .map(|section| {
+                        if base_open {
+                            section.flex_1()
+                        } else {
+                            section.flex_none()
+                        }
+                    })
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .border_t_1()
-                    .border_color(theme.border.default)
-                    .child(base),
+                    .child(
+                        section_head("base-head", "Base", None, base_open, true, theme)
+                            .debug_selector(|| "base-head".into())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_base_section(cx))),
+                    )
+                    .when(base_open, |section| section.child(base)),
             )
         })
 }

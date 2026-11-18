@@ -387,6 +387,13 @@ fn the_dialog_is_a_named_modal_dialog_with_named_controls(cx: &mut TestAppContex
     ] {
         assert!(testing::has(&mut f.vcx, label), "{label}");
     }
+    // The segmented choices are radio groups named by their rows.
+    let groups: Vec<String> = testing::with_role(&mut f.vcx, Role::RadioGroup)
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(groups.iter().any(|g| g == "Paper"), "{groups:?}");
+    assert!(groups.iter().any(|g| g == "Orientation"), "{groups:?}");
     // Tab reaches the controls; Space works a switch, and Enter there does
     // not confirm.
     let toc = f.choices().toc;
@@ -413,6 +420,11 @@ fn html_can_embed_remote_images(cx: &mut TestAppContext) {
     f.open(ExportKind::Html, None);
     assert!(f.drawn("export-remote-images-switch"));
     assert!(testing::has(&mut f.vcx, "Embed remote images"));
+    assert!(
+        testing::with_role(&mut f.vcx, Role::RadioGroup)
+            .into_iter()
+            .any(|n| n.label.as_deref() == Some("Images"))
+    );
     assert!(!f.choices().remote_images, "off by default");
     f.click("export-remote-images-switch");
     assert!(f.choices().remote_images);

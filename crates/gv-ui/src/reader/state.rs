@@ -366,6 +366,12 @@ pub(crate) struct State {
     /// The table or rendered diagram under the pointer (the block of
     /// its rows or its fence).
     pub hover_table: Option<BlockId>,
+    /// Whether the document holds Git conflict markers, for the document
+    /// version checked ([`super::Reader::conflict_markers`]).
+    pub markers: std::cell::Cell<Option<(u64, bool)>>,
+    /// Folds of a restored session waiting for their file to be shown
+    /// ([`super::fold_state`]).
+    pub pending_folds: Option<(std::path::PathBuf, Vec<super::fold_state::ReadingFold>)>,
 }
 
 impl std::fmt::Debug for State {
@@ -405,6 +411,8 @@ impl State {
             wide_max: f32::INFINITY,
             expandable: true,
             hover_table: None,
+            markers: std::cell::Cell::new(None),
+            pending_folds: None,
         }
     }
 
@@ -445,6 +453,7 @@ impl State {
         self.geometry = Geometry::default();
         self.stale.clear();
         self.doc_version += 1;
+        self.apply_pending_folds();
     }
 
     /// The selection as a non-empty range.

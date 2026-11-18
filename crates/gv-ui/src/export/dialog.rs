@@ -618,7 +618,13 @@ impl ExportDialog {
                     "Paper",
                     None,
                     None,
-                    vec![controls::segmented(papers, true, theme).into_any_element()],
+                    vec![controls::radio_group(
+                        "export-paper-group",
+                        "Paper",
+                        papers,
+                        true,
+                        theme,
+                    )],
                     theme,
                 )
                 .accessible()
@@ -644,7 +650,13 @@ impl ExportDialog {
                     "Orientation",
                     None,
                     None,
-                    vec![controls::segmented(orientation, true, theme).into_any_element()],
+                    vec![controls::radio_group(
+                        "export-orientation-group",
+                        "Orientation",
+                        orientation,
+                        true,
+                        theme,
+                    )],
                     theme,
                 )
                 .accessible()
@@ -706,7 +718,13 @@ impl ExportDialog {
                     "Images",
                     Some("Inside the page, or copied to an assets folder beside it.".into()),
                     None,
-                    vec![controls::segmented(images, true, theme).into_any_element()],
+                    vec![controls::radio_group(
+                        "export-images-group",
+                        "Images",
+                        images,
+                        true,
+                        theme,
+                    )],
                     theme,
                 )
                 .accessible()

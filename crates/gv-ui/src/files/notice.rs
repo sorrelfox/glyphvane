@@ -63,6 +63,8 @@ pub enum Topic {
     /// A file operation of the Files panel was done or refused (rename,
     /// move, duplicate, trash, new folder).
     FileOp,
+    /// The note holds Git conflict markers (plan 10 § Git awareness).
+    ConflictMarkers,
 }
 
 /// What an infobar button does.
@@ -128,6 +130,9 @@ pub enum NoticeAction {
     RewriteLink,
     /// Undo the last rename or move, with its link updates.
     UndoFileOp,
+    /// Split the note at its conflict markers into the compare and merge
+    /// view.
+    ResolveConflictMarkers,
 }
 
 /// A button of an infobar.
@@ -742,6 +747,24 @@ impl Notice {
         } else {
             notice
         }
+    }
+
+    /// The note holds Git conflict markers (plan 10: "files containing
+    /// conflict markers get a warning banner"). Not designed: a warning
+    /// infobar whose *Resolve…* opens the compare and merge view with the
+    /// two sides; it cannot be used where the note may not be edited.
+    pub fn conflict_markers(can_edit: bool) -> Self {
+        let mut resolve = NoticeButton::new(NoticeAction::ResolveConflictMarkers, "Resolve…");
+        if !can_edit {
+            resolve.disabled = Some("This note cannot be edited here (viewer mode).".into());
+        }
+        Self::new(
+            Topic::ConflictMarkers,
+            NoticeKind::Warning,
+            "This note has merge conflict markers.",
+            Some("A merge left both versions of some lines in the text.".to_owned()),
+        )
+        .with(resolve)
     }
 
     /// A file operation was refused or failed (not designed: an error

@@ -32,6 +32,7 @@ fn tab(path: &str) -> TabState {
         forward: Vec::new(),
         split_ratio: None,
         folds: Vec::new(),
+        reading_folds: Vec::new(),
     }
 }
 
@@ -67,6 +68,7 @@ fn sample() -> Session {
             panel_open: false,
             sidebar_panel: None,
             vault: None,
+            base: None,
         }],
         active_window: Some(0),
         recent_files: vec![PathBuf::from("/n/c.md"), PathBuf::from("/n/b.md")],
@@ -144,6 +146,7 @@ fn files_that_are_gone_are_skipped() {
         panel_open: false,
         sidebar_panel: None,
         vault: None,
+        base: None,
     };
     let exists = |p: &Path| !p.ends_with("gone.md");
     let kept = present(window.clone(), exists).expect("two tabs left");
@@ -545,6 +548,7 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 panel_open: true,
                 sidebar_panel: None,
                 vault: None,
+                base: None,
             },
             WindowState {
                 bounds: None,
@@ -557,6 +561,7 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 panel_open: false,
                 sidebar_panel: None,
                 vault: None,
+                base: None,
             },
         ],
         ..Session::default()
@@ -590,13 +595,24 @@ fn panels_folders_dividers_and_folds_survive_json() {
     session.windows[0].vault = Some(PathBuf::from("/n"));
     session.windows[0].tabs[1].split_ratio = Some(0.3);
     session.windows[0].tabs[1].folds = vec![[0, 40], [60, 90]];
+    session.windows[0].tabs[1].reading_folds = vec![crate::reader::fold_state::ReadingFold {
+        kind: crate::reader::fold_state::FoldKind::Details,
+        line: "<details>".into(),
+        nth: 2,
+        open: true,
+    }];
+    session.windows[0].base = Some(SidebarBase {
+        file: Some("Books.base".into()),
+        view: Some("Shelf".into()),
+        collapsed: true,
+    });
     let text = serde_json::to_string(&session).expect("serializes");
     let back: Session = serde_json::from_str(&text).expect("parses");
     assert_eq!(back, session);
     // An older session has none of them.
     let text = serde_json::to_string(&sample()).expect("serializes");
     assert!(
-        !text.contains("sidebar_panel") && !text.contains("folds"),
+        !text.contains("sidebar_panel") && !text.contains("folds") && !text.contains("base"),
         "{text}"
     );
 }
@@ -611,6 +627,7 @@ fn a_window_opened_on_a_folder_stays_without_its_files() {
         panel_open: false,
         sidebar_panel: None,
         vault: Some(PathBuf::from("/n")),
+        base: None,
     };
     let kept = present(window, |_| false).expect("the folder's window stays");
     assert!(kept.tabs.is_empty());
@@ -717,6 +734,7 @@ fn a_folder_window_without_files_comes_back_with_its_vault(cx: &mut TestAppConte
             panel_open: false,
             sidebar_panel: None,
             vault: Some(dir.path().to_path_buf()),
+            base: None,
         }],
         ..Session::default()
     };
@@ -729,4 +747,64 @@ fn a_folder_window_without_files_comes_back_with_its_vault(cx: &mut TestAppConte
     let (root, open) = workspace.read_with(&vcx, |ws, cx| (ws.vault_root(cx), ws.sidebar_open));
     assert_eq!(root.as_deref(), Some(dir.path()));
     assert!(open);
+}
+
+#[gpui::test]
+fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
+    use crate::reader::fold_state::{FoldKind, ReadingFold};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    // An Obsidian vault: callouts are read as such.
+    std::fs::create_dir(dir.path().join(".obsidian")).expect("marker");
+    std::fs::write(dir.path().join(".obsidian/app.json"), "{}").expect("app.json");
+    let a = dir.path().join("a.md");
+    std::fs::write(&a, "# A\n\n> [!faq]- Question?\n> The answer.\n").expect("write");
+    let folds = vec![ReadingFold {
+        kind: FoldKind::Callout,
+        line: "Question?".into(),
+        nth: 0,
+        open: true,
+    }];
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: a.clone(),
+                reading_folds: folds.clone(),
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    // Saved before the Reading view has shown the file: kept as restored.
+    cx.update(save_now);
+    assert_eq!(memory.last().windows[0].tabs[0].reading_folds, folds);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        draw(&mut vcx);
+        let shown = workspace.read_with(&vcx, |ws, cx| {
+            ws.active_tab()
+                .reader()
+                .map(|r| r.read(cx).reading_folds())
+                .unwrap_or_default()
+        });
+        if shown == folds {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{shown:?}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory.last().windows[0].tabs[0].reading_folds, folds);
 }

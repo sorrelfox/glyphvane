@@ -634,6 +634,25 @@ impl BasesView {
         }
     }
 
+    /// The shown view's name, once the base is read (`None` for a view
+    /// without one).
+    pub fn view_name(&self) -> Option<String> {
+        self.compiled
+            .as_ref()
+            .and_then(|b| b.base().views.get(self.view))
+            .and_then(|v| v.name.clone())
+    }
+
+    /// Shows the view named `name`: now, or once the base is read (a
+    /// restored sidebar base).
+    pub fn want_view(&mut self, name: String, cx: &mut Context<'_, Self>) {
+        if self.compiled.is_some() {
+            self.select_view_named(&name, cx);
+        } else {
+            self.wanted_view = Some(name);
+        }
+    }
+
     /// Shows the view named `name`; `false` when the base has none.
     pub fn select_view_named(&mut self, name: &str, cx: &mut Context<'_, Self>) -> bool {
         match self

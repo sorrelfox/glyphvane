@@ -11,6 +11,11 @@
 //!   whenever the tab changes.
 //! - The chosen base file is read again when the index sees it change on
 //!   disk (its size or modification time).
+//! - The section folds to its head like the other right-panel sections
+//!   ([`Workspace::toggle_base_section`]).
+//! - The session keeps it per window: the base file, the view (by name)
+//!   and whether the section is folded ([`super::session::SidebarBase`]);
+//!   a base file that is gone is not chosen again.
 //! - Its events are handled as a base tab's are: a file opens from the
 //!   active tab like a followed link; a link value is followed as a link
 //!   written in the base file.
@@ -25,6 +30,7 @@ use gpui::{Context, Entity, Window};
 
 use super::Workspace;
 use super::canvas_tabs::opens_as_tab;
+use super::session::SidebarBase;
 use crate::bases_view::{BasesEvent, BasesPanel};
 use crate::reader::ScrollTarget;
 use crate::reader::link_info::LinkAt;
@@ -55,8 +61,13 @@ impl Workspace {
             cx.subscribe_in(&panel, window, |this, _, event: &BasesEvent, window, cx| {
                 this.base_panel_event(event.clone(), window, cx);
             }),
-            // A base chosen: its file as it is now, to notice changes.
-            cx.observe(&panel, |this, _, cx| this.note_base_file(cx)),
+            // A base chosen: its file as it is now, to notice changes, and
+            // the session.
+            cx.observe(&panel, |this, _, cx| {
+                this.note_base_file(cx);
+                this.watch_base_view(cx);
+                this.base_shown_changed(cx);
+            }),
         ];
         self.panels.base = Some(panel.clone());
         self.sync_base_panel(cx);
@@ -161,6 +172,95 @@ impl Workspace {
                 self.follow_link_at(index, link, request.disposition, false, window, cx);
             }
         }
+    }
+
+    /// Watches the sidebar base's Bases view for a change of view.
+    fn watch_base_view(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(view) = self
+            .panels
+            .base
+            .as_ref()
+            .and_then(|p| p.read(cx).view().cloned())
+        else {
+            self.panels._base_view_observer = None;
+            return;
+        };
+        if self
+            .panels
+            ._base_view_observer
+            .as_ref()
+            .is_some_and(|(id, _)| *id == view.entity_id())
+        {
+            return;
+        }
+        let observer = cx.observe(&view, |this, _, cx| this.base_shown_changed(cx));
+        self.panels._base_view_observer = Some((view.entity_id(), observer));
+    }
+
+    /// The base and view the sidebar base shows: when they changed, the
+    /// session is saved.
+    fn base_shown_changed(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(panel) = self.panels.base.as_ref() else {
+            return;
+        };
+        let panel = panel.read(cx);
+        let shown = (
+            panel.chosen().map(str::to_owned),
+            panel.view().and_then(|v| v.read(cx).view_name()),
+        );
+        if self.panels.base_shown.as_ref() != Some(&shown) {
+            self.panels.base_shown = Some(shown);
+            self.session_changed(cx);
+        }
+    }
+
+    /// The sidebar base as the session keeps it, once it was shown.
+    pub(super) fn sidebar_base_state(&self, cx: &gpui::App) -> Option<SidebarBase> {
+        let panel = self.panels.base.as_ref()?.read(cx);
+        Some(SidebarBase {
+            file: panel.chosen().map(str::to_owned),
+            view: panel.view().and_then(|v| v.read(cx).view_name()),
+            collapsed: self.panels.base_collapsed,
+        })
+    }
+
+    /// Brings back a session's sidebar base: the section, folded or not,
+    /// with its base and view when the base file is still there.
+    pub(super) fn restore_sidebar_base(
+        &mut self,
+        state: SidebarBase,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.panels.base_collapsed = state.collapsed;
+        let panel = self.ensure_base_panel(window, cx);
+        let root = self.link_vault_root(cx);
+        let Some(file) = state.file else {
+            return;
+        };
+        let exists = root.is_some_and(|mut path| {
+            path.extend(file.split('/').filter(|s| !s.is_empty()));
+            path.is_file()
+        });
+        if !exists {
+            tracing::info!("session: the sidebar base's file is gone");
+            return;
+        }
+        panel.update(cx, |p, cx| {
+            p.choose_base(Arc::from(file.as_str()), cx);
+            if let (Some(view), Some(name)) = (p.view().cloned(), state.view) {
+                view.update(cx, |v, cx| v.want_view(name, cx));
+            }
+        });
+        self.panels.base_shown = None;
+        self.base_shown_changed(cx);
+    }
+
+    /// The base section's head: folds the section to it, or unfolds it.
+    pub(super) fn toggle_base_section(&mut self, cx: &mut Context<'_, Self>) {
+        self.panels.base_collapsed = !self.panels.base_collapsed;
+        self.session_changed(cx);
+        cx.notify();
     }
 
     /// The chosen base's file on disk.
