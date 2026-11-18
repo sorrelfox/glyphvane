@@ -112,6 +112,7 @@ use load::Loaded;
 use state::{Selection, State};
 use typography::Typography;
 
+pub(crate) use items::math_engine;
 pub(crate) use live::{Spot, SyncRequest};
 pub use state::ReaderLayout;
 

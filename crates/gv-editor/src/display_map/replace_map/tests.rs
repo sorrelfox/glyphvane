@@ -627,6 +627,7 @@ fn test_random_chunk_bitmaps() {
             );
             let plain = Chunk {
                 replaced: None,
+                box_width: None,
                 ..chunk.clone()
             };
             assert_eq!(plain, Chunk::new(chunk_text), "bitmaps of {chunk_text:?}");

@@ -58,6 +58,11 @@ impl Fonts {
         }
     }
 
+    /// The text size.
+    pub fn size(&self) -> f32 {
+        self.size
+    }
+
     pub fn regular(&self) -> &Font {
         &self.regular
     }
@@ -105,6 +110,8 @@ pub(crate) struct Row {
     /// folded ranges and the highlighting.
     source: String,
     folded: Vec<Range<usize>>,
+    /// A fingerprint of the replacements (Live Preview) on the line.
+    replaced: u64,
     styles: LineStyles,
     whitespace: bool,
     theme: ThemeId,
@@ -155,10 +162,23 @@ impl Row {
         replace: &ReplaceSnapshot,
         column: usize,
     ) -> usize {
+        self.offset_of_biased(text, replace, column, Bias::Left)
+    }
+
+    /// [`Self::offset_of`], with the side of hidden text (Live Preview's
+    /// markers) a column between it and shown text takes: before it
+    /// ([`Bias::Left`]) or after it.
+    pub fn offset_of_biased(
+        &self,
+        text: &TextSnapshot,
+        replace: &ReplaceSnapshot,
+        column: usize,
+        bias: Bias,
+    ) -> usize {
         let input = self.text.input_of_column(column);
         let point = replace.to_buffer_point(
             ReplacePoint::new(self.row, u32::try_from(input).unwrap_or(u32::MAX)),
-            Bias::Left,
+            bias,
         );
         text.point_to_offset(BufferPoint::new(point.line, point.column))
             .unwrap_or(text.len())
@@ -261,12 +281,14 @@ impl Row {
             .collect();
         let runs = text_runs(&self.text, &self.runs, &selected, fonts, palette);
         let display = self.segments[segment].display.clone();
-        shape(
+        let mut shaped = shape(
             window,
             fonts.size,
             &self.text.display[display.clone()],
-            &slice_runs(&runs, display),
-        )
+            &slice_runs(&runs, display.clone()),
+        );
+        space_out(&mut shaped, &self.text.boxes, display.start);
+        shaped
     }
 }
 
@@ -306,6 +328,70 @@ fn closest_index(line: &ShapedLine, x: f32) -> usize {
         }
     }
     best.0
+}
+
+/// Spaces out the box widgets of `shaped` (shaped from display bytes
+/// starting at `from`): the space each is drawn over gets the box's width
+/// (`boxes`: display byte, width in 1/64 px), and the glyphs after it move along.
+/// Caret x, hit-testing and painting all read glyph positions, so they
+/// follow.
+pub(crate) fn space_out(shaped: &mut ShapedLine, boxes: &[(usize, u32)], from: usize) {
+    let len = shaped.len;
+    let boxes: Vec<(usize, f32)> = boxes
+        .iter()
+        .filter(|(at, _)| *at >= from && *at < from + len)
+        .map(|(at, width)| (at - from, *width as f32 / 64.0))
+        .collect();
+    if boxes.is_empty() {
+        return;
+    }
+    let layout: &gpui::LineLayout = shaped;
+    let mut runs = layout.runs.clone();
+    // Positions in index order (left to right text).
+    let mut xs: Vec<(usize, f32)> = runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter().map(|g| (g.index, f32::from(g.position.x))))
+        .collect();
+    xs.sort_by_key(|(index, _)| *index);
+    let width = f32::from(layout.width);
+    let x_after = |index: usize| {
+        xs.iter()
+            .find(|(i, _)| *i > index)
+            .map_or(width, |(_, x)| *x)
+    };
+    let x_at = |index: usize| {
+        xs.iter()
+            .find(|(i, _)| *i >= index)
+            .map_or(width, |(_, x)| *x)
+    };
+    // The extra width each box adds, after its byte.
+    let deltas: Vec<(usize, f32)> = boxes
+        .iter()
+        .map(|&(at, w)| (at, w - (x_after(at) - x_at(at)).max(0.0)))
+        .collect();
+    let shift = |index: usize| -> f32 {
+        deltas
+            .iter()
+            .filter(|(at, _)| *at < index)
+            .map(|(_, d)| d)
+            .sum()
+    };
+    for run in &mut runs {
+        for glyph in &mut run.glyphs {
+            glyph.position.x += px(shift(glyph.index));
+        }
+    }
+    let total: f32 = deltas.iter().map(|(_, d)| d).sum();
+    let spaced = gpui::LineLayout {
+        font_size: layout.font_size,
+        width: px(width + total),
+        ascent: layout.ascent,
+        descent: layout.descent,
+        runs,
+        len: layout.len,
+    };
+    let arc: &mut std::sync::Arc<gpui::LineLayout> = shaped;
+    *arc = std::sync::Arc::new(spaced);
 }
 
 fn shape(window: &Window, size: f32, display: &str, runs: &[TextRun]) -> ShapedLine {
@@ -409,7 +495,11 @@ fn runs_of(text: &RowText, styles: &[Style]) -> Vec<(Range<usize>, Style)> {
         .map(|span| {
             let style = match span.replaced {
                 Some(Replaced::Fold(_)) => Style::of(Token::TextSecondary),
-                _ => span
+                Some(Replaced::Widget(_)) => span
+                    .style
+                    .and_then(super::live_widgets::widget_style)
+                    .unwrap_or(Style::PLAIN),
+                None => span
                     .style
                     .and_then(|id| styles.get(id.0 as usize))
                     .copied()
@@ -462,6 +552,34 @@ fn decorations(text: &RowText, runs: &[(Range<usize>, Style)]) -> Vec<Decoration
     out
 }
 
+/// A fingerprint of the replacements other than folds (Live Preview's
+/// hidden markers and widgets) that touch `range`: 0 without any.
+fn replaced_key(replace: &ReplaceSnapshot, range: Range<usize>) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    if !replace.has_replacements() {
+        return 0;
+    }
+    let replacements = replace.replacements_in(range);
+    if replacements.is_empty() {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for r in &replacements {
+        r.range.hash(&mut hasher);
+        if let Some(widget) = &r.widget {
+            widget.id.hash(&mut hasher);
+            widget.style.hash(&mut hasher);
+            match &widget.content {
+                gv_editor::display_map::WidgetContent::Text(text) => text.hash(&mut hasher),
+                gv_editor::display_map::WidgetContent::Box { width } => {
+                    width.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish() | 1
+}
+
 /// What a row is made with, besides its line.
 #[derive(Clone, Copy)]
 pub(crate) struct RowEnv<'a> {
@@ -503,9 +621,11 @@ impl RowCache {
     ) -> Option<&Row> {
         let key = line.first;
         self.used.push(key);
+        let replaced = replaced_key(env.tabs.replace_snapshot(), line.range.clone());
         let fresh = match self.rows.get_mut(&key) {
             Some(row) => {
                 let stale = row.whitespace != env.whitespace
+                    || row.replaced != replaced
                     || row.theme != env.theme
                     || row.tab_size != env.tab_size
                     || row.breaks != breaks
@@ -523,7 +643,8 @@ impl RowCache {
             None => true,
         };
         if fresh {
-            let row = make_row(line, styles, breaks, env, window);
+            let mut row = make_row(line, styles, breaks, env, window);
+            row.replaced = replaced;
             self.rows.insert(key, row);
         }
         self.rows.get(&key)
@@ -578,7 +699,11 @@ fn make_row(
             columns: 0..content.len(),
             display: 0..text.display.len(),
             indent: 0.0,
-            shaped: shape(window, env.fonts.size, &text.display, &all_runs),
+            shaped: {
+                let mut shaped = shape(window, env.fonts.size, &text.display, &all_runs);
+                space_out(&mut shaped, &text.boxes, 0);
+                shaped
+            },
         }]
     } else {
         breaks
@@ -593,12 +718,13 @@ fn make_row(
                     text.to_display(end)
                 };
                 let display = text.to_display(b.column).min(display_end)..display_end;
-                let shaped = shape(
+                let mut shaped = shape(
                     window,
                     env.fonts.size,
                     &text.display[display.clone()],
                     &slice_runs(&all_runs, display.clone()),
                 );
+                space_out(&mut shaped, &text.boxes, display.start);
                 Segment {
                     columns: b.column..end,
                     display,
@@ -616,6 +742,7 @@ fn make_row(
             .text_for_range(line.range.clone())
             .unwrap_or_default(),
         folded: line.marks.iter().map(|mark| mark.buffer.clone()).collect(),
+        replaced: 0,
         styles,
         whitespace: env.whitespace,
         theme: env.theme,

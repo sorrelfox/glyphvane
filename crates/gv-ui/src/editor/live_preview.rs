@@ -38,12 +38,12 @@
 //!
 //! Live Preview is never used in plain-text mode or large-file mode.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash as _, Hasher as _};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Context, Task};
 use gv_editor::display_map::Replacement;
@@ -52,6 +52,7 @@ use gv_syntax::{Leaf, LeafKind, SyntaxTree, TokenKind, Visitor, walk, walk_range
 use gv_text::{Revision, TextSnapshot, TextSource as _};
 
 use super::EditorView;
+use super::live_widgets::{Sizes, WidgetClick, WidgetSpec, Widgets};
 
 /// Lines decorated above and below the ones on screen.
 pub(super) const MARGIN_LINES: usize = 80;
@@ -72,7 +73,14 @@ pub(crate) struct Construct {
     /// What it hides while not revealed: sorted, not overlapping, each on
     /// one line.
     pub hidden: Vec<Range<usize>>,
+    /// The widget it shows in place of a range while not revealed (on one
+    /// line, apart from `hidden`).
+    pub widget: Option<(Range<usize>, Arc<WidgetSpec>)>,
 }
+
+/// What a construct puts in the layer while not revealed: hidden bytes,
+/// or a widget in place of them.
+pub(crate) type Desired = (Range<usize>, Option<Arc<WidgetSpec>>);
 
 /// The constructs of one leaf, relative to its start.
 type Decor = Arc<[Construct]>;
@@ -114,6 +122,11 @@ struct Full {
     leaves: Vec<(usize, Decor)>,
     /// Applied to the whole document once.
     applied: bool,
+    /// The whole-document splices still to apply, a slice per frame
+    /// (applying them all at once takes too long on a large note), with
+    /// what they were worked out for.
+    pending: VecDeque<(Range<usize>, Vec<Replacement>)>,
+    pending_for: Option<(u64, u64)>,
 }
 
 /// What the last refresh worked from: nothing changed, nothing to do.
@@ -124,6 +137,7 @@ struct RefreshKey {
     selections: u64,
     window: Range<usize>,
     full: bool,
+    widgets: u64,
 }
 
 /// The Live Preview state of a view.
@@ -132,12 +146,21 @@ pub(super) struct LivePreview {
     /// The user chose Live Preview for this tab (it may still be inactive:
     /// plain text, large file).
     pub chosen: bool,
+    /// The profile's options decorations follow.
+    pub options: Options,
     cache: Arc<Mutex<DecorCache>>,
     full: Option<Full>,
     last: Option<RefreshKey>,
     /// The revision a whole-document pass runs or waits for.
     job_for: Option<Revision>,
     _job: Option<Task<()>>,
+    /// Inline widgets: images, math, checkboxes, emoji, tags.
+    pub widgets: Widgets,
+    /// The search a click on a tag asked for (`tag:#name`), taken by the
+    /// vault search.
+    tag_search: std::cell::RefCell<Option<Arc<str>>>,
+    /// Clickable widgets drawn in the last frame: bounds and id.
+    pub hits: Vec<(gpui::Bounds<gpui::Pixels>, gv_editor::display_map::WidgetId)>,
 }
 
 impl LivePreview {
@@ -148,8 +171,16 @@ impl LivePreview {
         self.last = None;
         self.job_for = None;
         self._job = None;
+        self.widgets.reset();
     }
 }
+
+/// How long a frame may spend on whole-document splices.
+const SLICE_BUDGET: Duration = Duration::from_millis(6);
+
+/// Whole-document splices applied together, between two looks at the
+/// clock.
+const SLICE_SPLICES: usize = 256;
 
 // ----- decorations ---------------------------------------------------------------
 
@@ -161,10 +192,12 @@ fn leaf_key(
     text: &TextSnapshot,
     leaf: &Leaf<'_>,
     refs: u64,
+    options: Options,
     buf: &mut Vec<u8>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     kind_code(leaf.kind).hash(&mut hasher);
+    options.hash(&mut hasher);
     tree.options().hash(&mut hasher);
     refs.hash(&mut hasher);
     let start = leaf.range.start;
@@ -210,12 +243,28 @@ fn refs_fingerprint(tree: &SyntaxTree, text: &TextSnapshot) -> u64 {
     hasher.finish() | 1
 }
 
+/// What decorations depend on besides the tree and the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Options {
+    /// The profile has `:shortcode:` emoji.
+    pub emoji: bool,
+}
+
+/// A construct found in a leaf: its range, what it hides and the widget
+/// it shows.
+type Found = (
+    Range<usize>,
+    Vec<Range<usize>>,
+    Option<(Range<usize>, WidgetSpec)>,
+);
+
 /// The constructs of `leaf` (absolute offsets), its text in `bytes`.
 pub(crate) fn decorate_leaf(
     tree: &SyntaxTree,
     text: &TextSnapshot,
     leaf: &Leaf<'_>,
     bytes: &[u8],
+    options: Options,
 ) -> Vec<Construct> {
     let mut out = Vec::new();
     let base = leaf.range.start;
@@ -224,26 +273,40 @@ pub(crate) fn decorate_leaf(
             .get(range.start.wrapping_sub(base)..range.end.wrapping_sub(base))
             .is_some_and(|b| !b.contains(&b'\n') && !b.contains(&b'\r'))
     };
-    let mut push = |range: Range<usize>, hidden: Vec<Range<usize>>| {
+    let mut push = |(range, hidden, widget): Found| {
         let mut hidden: Vec<Range<usize>> = hidden.into_iter().filter(|r| !r.is_empty()).collect();
-        if hidden.is_empty() || !hidden.iter().all(one_line) {
+        let widget = widget.filter(|(r, _)| !r.is_empty());
+        if (hidden.is_empty() && widget.is_none())
+            || !hidden.iter().all(one_line)
+            || widget.as_ref().is_some_and(|(r, _)| !one_line(r))
+        {
             return;
+        }
+        if let Some((r, _)) = &widget {
+            hidden.push(r.clone());
         }
         hidden.sort_by_key(|r| r.start);
         if hidden.windows(2).any(|p| p[0].end > p[1].start) {
             return;
         }
-        out.push(Construct { range, hidden });
+        if let Some((r, _)) = &widget {
+            hidden.retain(|h| h != r);
+        }
+        out.push(Construct {
+            range,
+            hidden,
+            widget: widget.map(|(r, spec)| (r, Arc::new(spec))),
+        });
     };
     match leaf.kind {
         LeafKind::Heading { setext: false, .. } => {
             if let Some((range, hidden)) = heading_markers(tree, leaf) {
-                push(range, hidden);
+                push((range, hidden, None));
             }
-            inlines(tree, text, leaf, &mut push);
+            inlines(tree, text, leaf, options, &mut push);
         }
         LeafKind::Heading { setext: true, .. } | LeafKind::Paragraph | LeafKind::CalloutTitle => {
-            inlines(tree, text, leaf, &mut push);
+            inlines(tree, text, leaf, options, &mut push);
         }
         LeafKind::Comment => {
             let content = leaf.lines.first().map(|l| l.content.start).unwrap_or(base);
@@ -256,7 +319,7 @@ pub(crate) fn decorate_leaf(
             if end >= content + 4 && at(end - 2).starts_with(b"%%") {
                 hidden.push(end - 2..end);
             }
-            push(base..end, hidden);
+            push((base..end, hidden, None));
         }
         _ => {}
     }
@@ -298,15 +361,54 @@ fn inlines(
     tree: &SyntaxTree,
     text: &TextSnapshot,
     leaf: &Leaf<'_>,
-    push: &mut dyn FnMut(Range<usize>, Vec<Range<usize>>),
+    options: Options,
+    push: &mut dyn FnMut(Found),
 ) {
     let inline = tree.inlines(leaf, text);
     for node in inline.top_level() {
-        inline_node(node, push);
+        inline_node(node, options, push);
     }
 }
 
-fn inline_node(node: InlineNode<'_>, push: &mut dyn FnMut(Range<usize>, Vec<Range<usize>>)) {
+/// Image file extensions an embed shows inline.
+const IMAGE_EXTENSIONS: [&str; 10] = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "tif", "tiff",
+];
+
+/// Whether an embed's path names an image file.
+fn is_image_path(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, ext)| {
+        IMAGE_EXTENSIONS
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(ext.trim()))
+    })
+}
+
+/// The `:shortcode:` emoji of a text token: each code's range and emoji.
+fn emoji_in(text: &str, start: usize) -> Vec<(Range<usize>, &'static str)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while let Some(open) = bytes[i..].iter().position(|&b| b == b':').map(|p| p + i) {
+        let code_len = bytes[open + 1..]
+            .iter()
+            .take_while(|&&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_+-".contains(&b))
+            .count();
+        let close = open + 1 + code_len;
+        if code_len > 0
+            && bytes.get(close) == Some(&b':')
+            && let Some(emoji) = emojis::get_by_shortcode(&text[open + 1..close])
+        {
+            out.push((start + open..start + close + 1, emoji.as_str()));
+            i = close + 1;
+            continue;
+        }
+        i = open + 1;
+    }
+    out
+}
+
+fn inline_node(node: InlineNode<'_>, options: Options, push: &mut dyn FnMut(Found)) {
     let range = node.range();
     let markers = || -> Vec<Range<usize>> {
         node.children()
@@ -320,18 +422,88 @@ fn inline_node(node: InlineNode<'_>, push: &mut dyn FnMut(Range<usize>, Vec<Rang
         | InlineKind::Strikethrough
         | InlineKind::Highlight
         | InlineKind::CodeSpan
-        | InlineKind::Comment => push(range, markers()),
+        | InlineKind::Comment => push((range, markers(), None)),
         InlineKind::Autolink => {
             // A GFM extended autolink has no markers.
-            push(range, markers());
+            push((range, markers(), None));
         }
         InlineKind::Link => {
             if let Some(text) = link_text(&node) {
-                push(
+                push((
                     range.clone(),
                     vec![range.start..text.start, text.end..range.end],
-                );
+                    None,
+                ));
             }
+        }
+        InlineKind::Text if options.emoji => {
+            for (code, glyph) in emoji_in(node.text(), range.start) {
+                push((
+                    code.clone(),
+                    Vec::new(),
+                    Some((code, WidgetSpec::Emoji { glyph })),
+                ));
+            }
+            return;
+        }
+        InlineKind::Tag => {
+            let spec = WidgetSpec::Tag {
+                text: node.text().into(),
+            };
+            push((range.clone(), Vec::new(), Some((range, spec))));
+            return;
+        }
+        InlineKind::InlineMath => {
+            if let Some(tex) = node.math() {
+                let spec = WidgetSpec::Math {
+                    tex: tex.into(),
+                    source: node.text().into(),
+                };
+                push((range.clone(), Vec::new(), Some((range, spec))));
+            }
+            return;
+        }
+        InlineKind::Image => {
+            if let Some(link) = node.link() {
+                let alt = node
+                    .text()
+                    .get(link.text_range.start - range.start..link.text_range.end - range.start)
+                    .unwrap_or_default();
+                let (alt, width) = match alt.rsplit_once('|') {
+                    Some((a, size)) => match gv_syntax::inline::image_size(size) {
+                        Some((w, _)) => (a, Some(w)),
+                        None => (alt, None),
+                    },
+                    None => (alt, None),
+                };
+                let spec = WidgetSpec::Image {
+                    destination: link.destination.into(),
+                    embed: false,
+                    alt: alt.into(),
+                    width,
+                };
+                push((range.clone(), Vec::new(), Some((range, spec))));
+            }
+            return;
+        }
+        InlineKind::Embed => {
+            if let Some(wiki) = node.wikilink()
+                && is_image_path(wiki.path())
+            {
+                let width = wiki.size().map(|(w, _)| w);
+                let alt = match (wiki.alias, width) {
+                    (Some(alias), None) => alias,
+                    _ => "",
+                };
+                let spec = WidgetSpec::Image {
+                    destination: wiki.path().into(),
+                    embed: true,
+                    alt: alt.into(),
+                    width,
+                };
+                push((range.clone(), Vec::new(), Some((range, spec))));
+            }
+            return;
         }
         InlineKind::Wikilink => {
             let alias = node
@@ -339,25 +511,22 @@ fn inline_node(node: InlineNode<'_>, push: &mut dyn FnMut(Range<usize>, Vec<Rang
                 .find(|c| c.kind() == InlineKind::WikiAlias)
                 .map(|c| c.range());
             match alias {
-                Some(alias) => push(
+                Some(alias) => push((
                     range.clone(),
                     vec![range.start..alias.start, alias.end..range.end],
-                ),
-                None => push(range, markers()),
+                    None,
+                )),
+                None => push((range, markers(), None)),
             }
             return;
         }
-        // Inline widgets come in phase 2: their source stays.
-        InlineKind::Image
-        | InlineKind::Embed
-        | InlineKind::InlineMath
-        | InlineKind::DisplayMath
-        | InlineKind::RawHtml => return,
+        // Display math is a block widget (phase 3): its source stays.
+        InlineKind::DisplayMath | InlineKind::RawHtml => return,
         _ => {}
     }
     for child in node.children() {
-        if !child.kind().is_token() {
-            inline_node(child, push);
+        if !child.kind().is_token() || child.kind() == InlineKind::Text {
+            inline_node(child, options, push);
         }
     }
 }
@@ -377,16 +546,46 @@ struct Collect<'a> {
     text: &'a TextSnapshot,
     cache: &'a Mutex<DecorCache>,
     refs: u64,
+    options: Options,
     buf: Vec<u8>,
     leaves: Vec<(usize, Decor)>,
 }
 
 impl Visitor for Collect<'_> {
+    fn enter(&mut self, container: &gv_syntax::Container) {
+        // A task's checkbox, as an entry of its own at the `[`.
+        let Some(marker) = container.marker.clone().filter(|_| container.is_task()) else {
+            return;
+        };
+        let mut status = Vec::new();
+        self.text.copy_range(
+            marker.start + 1..(marker.start + 2).min(marker.end),
+            &mut status,
+        );
+        let checked = !matches!(status.as_slice(), b" " | b"\t");
+        if marker.len() != 3 {
+            return;
+        }
+        let decor: Decor = Arc::from([Construct {
+            range: 0..marker.len(),
+            hidden: Vec::new(),
+            widget: Some((0..marker.len(), Arc::new(WidgetSpec::Task { checked }))),
+        }]);
+        self.leaves.push((marker.start, decor));
+    }
+
     fn leaf(&mut self, leaf: &Leaf<'_>) {
         if kind_code(leaf.kind).is_none() {
             return;
         }
-        let key = leaf_key(self.tree, self.text, leaf, self.refs, &mut self.buf);
+        let key = leaf_key(
+            self.tree,
+            self.text,
+            leaf,
+            self.refs,
+            self.options,
+            &mut self.buf,
+        );
         let hit = self
             .cache
             .lock()
@@ -397,13 +596,15 @@ impl Visitor for Collect<'_> {
             None => {
                 let base = leaf.range.start;
                 let relative = |r: &Range<usize>| r.start - base..r.end - base;
-                let decor: Decor = decorate_leaf(self.tree, self.text, leaf, &self.buf)
-                    .into_iter()
-                    .map(|c| Construct {
-                        range: relative(&c.range),
-                        hidden: c.hidden.iter().map(relative).collect(),
-                    })
-                    .collect();
+                let decor: Decor =
+                    decorate_leaf(self.tree, self.text, leaf, &self.buf, self.options)
+                        .into_iter()
+                        .map(|c| Construct {
+                            range: relative(&c.range),
+                            hidden: c.hidden.iter().map(relative).collect(),
+                            widget: c.widget.map(|(r, spec)| (relative(&r), spec)),
+                        })
+                        .collect();
                 self.cache
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -425,11 +626,13 @@ fn decorate(
     text: &TextSnapshot,
     range: Option<Range<usize>>,
     cache: &Mutex<DecorCache>,
+    options: Options,
 ) -> Vec<(usize, Decor)> {
     let mut collect = Collect {
         tree,
         text,
         cache,
+        options,
         refs: refs_fingerprint(tree, text),
         buf: Vec::new(),
         leaves: Vec::new(),
@@ -450,20 +653,20 @@ fn decorate(
     leaves
 }
 
-/// The hidden ranges of `leaves` (from [`decorate`]) inside `span`, with
-/// the constructs a selection touches (ends included) revealed. Sorted, not
-/// overlapping.
+/// What `leaves` (from [`decorate`]) put in the layer inside `span`, with
+/// the constructs a selection touches (ends included) revealed: hidden
+/// ranges and widgets, sorted, not overlapping.
 fn hidden_ranges(
     leaves: &[(usize, Decor)],
     span: &Range<usize>,
     selections: &[Range<usize>],
-) -> Vec<Range<usize>> {
+) -> Vec<Desired> {
     let touched = |range: &Range<usize>| {
         let index = selections.partition_point(|s| s.end < range.start);
         selections.get(index).is_some_and(|s| s.start <= range.end)
     };
     let first = leaves.partition_point(|(start, _)| *start < span.start);
-    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut out: Vec<Desired> = Vec::new();
     for (start, decor) in &leaves[first..] {
         if *start >= span.end {
             break;
@@ -477,30 +680,35 @@ fn hidden_ranges(
                 construct
                     .hidden
                     .iter()
-                    .map(|r| start + r.start..start + r.end)
-                    .filter(|r| r.end <= span.end),
+                    .map(|r| (start + r.start..start + r.end, None))
+                    .chain(
+                        construct.widget.iter().map(|(r, spec)| {
+                            (start + r.start..start + r.end, Some(Arc::clone(spec)))
+                        }),
+                    )
+                    .filter(|(r, _)| r.end <= span.end),
             );
         }
     }
-    out.sort_by_key(|r| (r.start, r.end));
-    let mut kept: Vec<Range<usize>> = Vec::with_capacity(out.len());
-    for range in out {
-        if kept.last().is_none_or(|last| last.end <= range.start) {
-            kept.push(range);
+    out.sort_by_key(|(r, _)| (r.start, r.end));
+    let mut kept: Vec<Desired> = Vec::with_capacity(out.len());
+    for item in out {
+        if kept.last().is_none_or(|(last, _)| last.end <= item.0.start) {
+            kept.push(item);
         }
     }
     kept
 }
 
 /// The splices that turn `actual` into `desired` (both sorted, not
-/// overlapping): one per cluster of differing ranges.
+/// overlapping): one per cluster of differing replacements.
 pub(crate) fn splices_between(
-    actual: &[Range<usize>],
-    desired: &[Range<usize>],
+    actual: &[Replacement],
+    desired: &[Replacement],
 ) -> Vec<(Range<usize>, Vec<Replacement>)> {
     let mut differing: Vec<Range<usize>> = Vec::new();
     let (mut i, mut j) = (0, 0);
-    let key = |r: &Range<usize>| (r.start, r.end);
+    let key = |r: &Replacement| (r.range.start, r.range.end);
     loop {
         match (actual.get(i), desired.get(j)) {
             (None, None) => break,
@@ -508,16 +716,21 @@ pub(crate) fn splices_between(
                 i += 1;
                 j += 1;
             }
+            (Some(a), Some(d)) if key(a) == key(d) => {
+                differing.push(a.range.clone());
+                i += 1;
+                j += 1;
+            }
             (Some(a), Some(d)) if key(a) < key(d) => {
-                differing.push(a.clone());
+                differing.push(a.range.clone());
                 i += 1;
             }
             (Some(a), None) => {
-                differing.push(a.clone());
+                differing.push(a.range.clone());
                 i += 1;
             }
             (_, Some(d)) => {
-                differing.push(d.clone());
+                differing.push(d.range.clone());
                 j += 1;
             }
         }
@@ -533,15 +746,50 @@ pub(crate) fn splices_between(
     clusters
         .into_iter()
         .map(|cluster| {
-            let from = desired.partition_point(|d| d.start < cluster.start);
+            let from = desired.partition_point(|d| d.range.start < cluster.start);
             let inside = desired[from..]
                 .iter()
-                .take_while(|d| d.end <= cluster.end)
-                .map(|d| Replacement::hide(d.clone()))
+                .take_while(|d| d.range.end <= cluster.end)
+                .cloned()
                 .collect();
             (cluster, inside)
         })
         .collect()
+}
+
+/// The splices that bring the layer to what `leaves` put in `span` with
+/// `selections`: widgets measured for `sizes` (images found through
+/// `resolver`).
+fn splices_for(
+    editor: &gv_editor::Editor,
+    leaves: &[(usize, Decor)],
+    span: Range<usize>,
+    selections: &[Range<usize>],
+    widgets: &mut Widgets,
+    sizes: &Sizes,
+    resolver: Option<&crate::reader::Resolver>,
+) -> Vec<(Range<usize>, Vec<Replacement>)> {
+    // A leaf that starts in the span may end after it.
+    let span = span.start
+        ..leaves
+            .iter()
+            .map(|(start, decor)| decor.iter().map(|c| start + c.range.end).max().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            .max(span.end);
+    let desired: Vec<Replacement> = hidden_ranges(leaves, &span, selections)
+        .into_iter()
+        .map(|(range, spec)| match spec {
+            None => Replacement::hide(range),
+            Some(spec) => Replacement::widget(range, widgets.widget(&spec, sizes, resolver)),
+        })
+        .collect();
+    let actual: Vec<Replacement> = editor
+        .replacements_in(span.clone())
+        .into_iter()
+        .filter(|r| span.start <= r.range.start && r.range.end <= span.end)
+        .collect();
+    splices_between(&actual, &desired)
 }
 
 // ----- the view ------------------------------------------------------------------
@@ -559,6 +807,17 @@ impl EditorView {
         self.live.chosen
             && self.plain.is_none()
             && self.doc.as_ref().is_some_and(|doc| !doc.large_file)
+    }
+
+    /// The profile's switches: emoji shortcodes show as emoji with them.
+    pub(super) fn set_live_switches(&mut self, switches: &gv_profile::Switches) {
+        let options = Options {
+            emoji: switches.emoji,
+        };
+        if self.live.options != options {
+            self.live.options = options;
+            self.live.reset();
+        }
     }
 
     /// Chooses Live Preview (`true`) or Source for this view.
@@ -611,12 +870,20 @@ impl EditorView {
         first..first + rows_on_screen
     }
 
-    /// Brings the hidden markers of lines `lines` (the ones on screen) up
-    /// to date: see the module docs. Cheap when nothing changed.
-    pub(super) fn refresh_live_preview(&mut self, lines: Range<usize>, cx: &mut Context<'_, Self>) {
+    /// Brings the hidden markers and widgets of lines `lines` (the ones on
+    /// screen) up to date: see the module docs. Widgets are measured for
+    /// `sizes`. Cheap when nothing changed.
+    pub(super) fn refresh_live_preview(
+        &mut self,
+        lines: Range<usize>,
+        sizes: &Sizes,
+        cx: &mut Context<'_, Self>,
+    ) {
         if !self.is_live_preview_active() {
             return;
         }
+        self.live.widgets.set_sizes(sizes);
+        let resolver = self.links.resolver();
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
@@ -635,6 +902,7 @@ impl EditorView {
         let mut hasher = DefaultHasher::new();
         selections.hash(&mut hasher);
         let selection_key = hasher.finish();
+        let widgets_generation = self.live.widgets.generation();
 
         let line_count = text.line_count();
         let first = lines
@@ -657,66 +925,99 @@ impl EditorView {
             selections: selection_key,
             window: window.clone(),
             full: full.is_some(),
+            widgets: widgets_generation,
         };
-        if self.live.last.as_ref() == Some(&key) && !whole {
-            self.schedule_live_full(&tree, &text, cx);
-            return;
-        }
-
-        let (leaves, span) = match full {
-            Some(full) if whole => (full.leaves.clone(), 0..text.len()),
-            Some(full) => {
-                // The leaves around the window, from the whole-document
-                // decorations.
-                let from = full
-                    .leaves
-                    .partition_point(|(start, _)| *start < window.start);
-                let from = from.saturating_sub(1);
-                let to = full
-                    .leaves
-                    .partition_point(|(start, _)| *start < window.end);
-                let leaves = full.leaves[from..to].to_vec();
-                let start = leaves
-                    .first()
-                    .map_or(window.start, |(s, _)| *s)
-                    .min(window.start);
-                (leaves, start..window.end)
+        if self.live.last.as_ref() != Some(&key) {
+            let (leaves, span) = match full {
+                Some(full) => {
+                    // The leaves around the window, from the whole-document
+                    // decorations.
+                    let from = full
+                        .leaves
+                        .partition_point(|(start, _)| *start < window.start);
+                    let from = from.saturating_sub(1);
+                    let to = full
+                        .leaves
+                        .partition_point(|(start, _)| *start < window.end);
+                    let leaves = full.leaves[from..to].to_vec();
+                    let start = leaves
+                        .first()
+                        .map_or(window.start, |(s, _)| *s)
+                        .min(window.start);
+                    (leaves, start..window.end)
+                }
+                None => {
+                    let leaves = decorate(
+                        &tree,
+                        &text,
+                        Some(window.clone()),
+                        &self.live.cache,
+                        self.live.options,
+                    );
+                    let start = leaves
+                        .first()
+                        .map_or(window.start, |(s, _)| *s)
+                        .min(window.start);
+                    (leaves, start..window.end)
+                }
+            };
+            let splices = splices_for(
+                &doc.editor,
+                &leaves,
+                span,
+                &selections,
+                &mut self.live.widgets,
+                sizes,
+                resolver,
+            );
+            if !splices.is_empty() {
+                doc.editor.splice_replacements(splices);
             }
-            None => {
-                let leaves = decorate(&tree, &text, Some(window.clone()), &self.live.cache);
-                let start = leaves
-                    .first()
-                    .map_or(window.start, |(s, _)| *s)
-                    .min(window.start);
-                (leaves, start..window.end)
-            }
-        };
-        // A leaf that starts in the span may end after it.
-        let span = span.start
-            ..leaves
-                .iter()
-                .map(|(start, decor)| decor.iter().map(|c| start + c.range.end).max().unwrap_or(0))
-                .max()
-                .unwrap_or(0)
-                .max(span.end);
-        let desired = hidden_ranges(&leaves, &span, &selections);
-        let actual: Vec<Range<usize>> = doc
-            .editor
-            .replacements_in(span.clone())
-            .into_iter()
-            .filter(|r| {
-                r.widget.is_none() && span.start <= r.range.start && r.range.end <= span.end
-            })
-            .map(|r| r.range)
-            .collect();
-        let splices = splices_between(&actual, &desired);
-        if !splices.is_empty() {
-            doc.editor.splice_replacements(splices);
         }
-        if let Some(full) = self.live.full.as_mut().filter(|_| whole) {
-            full.applied = true;
+        // The whole document, once per text, in slices over frames.
+        if whole && let Some(full) = self.live.full.as_mut() {
+            let pending_key = (selection_key, widgets_generation);
+            if full.pending_for != Some(pending_key) {
+                full.pending = splices_for(
+                    &doc.editor,
+                    &full.leaves,
+                    0..text.len(),
+                    &selections,
+                    &mut self.live.widgets,
+                    sizes,
+                    resolver,
+                )
+                .into();
+                full.pending_for = Some(pending_key);
+            }
+            let started = Instant::now();
+            while !full.pending.is_empty() && started.elapsed() < SLICE_BUDGET {
+                let take = full.pending.len().min(SLICE_SPLICES);
+                let slice: Vec<_> = full.pending.drain(..take).collect();
+                doc.editor.splice_replacements(slice);
+            }
+            if full.pending.is_empty() {
+                full.applied = true;
+                full.pending_for = None;
+            } else {
+                cx.notify();
+            }
         }
         self.live.last = Some(key);
+        for job in self.live.widgets.take_jobs() {
+            let key = job.key.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move { super::live_widgets::load_image(&job) })
+                    .await;
+                this.update(cx, |view, cx| {
+                    view.live.widgets.landed(&key, result);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.schedule_live_full(&tree, &text, cx);
     }
 
@@ -741,10 +1042,11 @@ impl EditorView {
         self.live.job_for = Some(revision);
         let (tree, text) = (tree.clone(), text.clone());
         let cache = Arc::clone(&self.live.cache);
+        let options = self.live.options;
         self.live._job = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FULL_DELAY).await;
             let leaves = cx
-                .background_spawn(async move { decorate(&tree, &text, None, &cache) })
+                .background_spawn(async move { decorate(&tree, &text, None, &cache, options) })
                 .await;
             this.update(cx, |view, cx| {
                 if view.live.job_for != Some(revision) {
@@ -756,11 +1058,85 @@ impl EditorView {
                     revision,
                     leaves,
                     applied: false,
+                    pending: VecDeque::new(),
+                    pending_for: None,
                 });
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// The search a click on a tag asked for (`tag:#name`), taken.
+    pub fn take_tag_search(&self) -> Option<Arc<str>> {
+        self.live.tag_search.borrow_mut().take()
+    }
+
+    /// A plain click at window point `position`: on a checkbox it toggles
+    /// its task (one undoable edit), on a tag it runs the tag's search.
+    /// Returns whether the click was taken.
+    pub(super) fn click_live_widget(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut gpui::Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if !self.is_live_preview_active() {
+            return false;
+        }
+        let Some(id) = self
+            .live
+            .hits
+            .iter()
+            .find(|(bounds, _)| bounds.contains(&position))
+            .map(|(_, id)| *id)
+        else {
+            return false;
+        };
+        let Some((_, click)) = self.live.widgets.paint(id).cloned() else {
+            return false;
+        };
+        let Some(offset) = self.offset_at(position, window, cx) else {
+            return false;
+        };
+        let Some(range) = self.doc.as_ref().and_then(|doc| {
+            doc.editor
+                .replacements_in(offset..offset)
+                .into_iter()
+                .find(|r| r.widget.as_ref().is_some_and(|w| w.id == id))
+                .map(|r| r.range)
+        }) else {
+            return false;
+        };
+        match click {
+            WidgetClick::Task => {
+                let Some(from) = self.doc.as_ref().and_then(|doc| {
+                    let text = doc.editor.text().text_for_range(range.clone()).ok()?;
+                    text.chars().nth(1)
+                }) else {
+                    return false;
+                };
+                let to = if from == ' ' { 'x' } else { ' ' };
+                let toggle = crate::reader::TaskToggle {
+                    offset: range.start + 1,
+                    from,
+                    to,
+                };
+                self.apply_task_toggle(toggle, cx)
+            }
+            WidgetClick::Tag(tag) => {
+                *self.live.tag_search.borrow_mut() = Some(format!("tag:{tag}").into());
+                window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);
+                true
+            }
+            WidgetClick::Reveal => false,
+        }
+    }
+
+    /// Whether the whole document's splices are all applied (for tests).
+    #[cfg(test)]
+    pub(crate) fn live_settled(&self) -> bool {
+        self.live.full.as_ref().is_some_and(|f| f.applied)
     }
 
     /// The hidden ranges of the display map (for tests).
@@ -782,51 +1158,121 @@ impl EditorView {
 pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
     use std::time::{Duration, Instant};
     let cache = Mutex::new(DecorCache::default());
+    let options = Options { emoji: true };
     let time = |f: &mut dyn FnMut()| {
         let start = Instant::now();
         f();
         start.elapsed()
     };
+    let sizes = Sizes {
+        line: 22.0,
+        font: 15.0,
+        advance: 9.0,
+        column: 700.0,
+        scale: 1.0,
+    };
+    let mut widgets = Widgets::default();
     let mut leaves = Vec::new();
-    let cold = time(&mut || leaves = decorate(tree, text, None, &cache));
-    let warm = time(&mut || leaves = decorate(tree, text, None, &cache));
+    let cold = time(&mut || leaves = decorate(tree, text, None, &cache, options));
+    let warm = time(&mut || leaves = decorate(tree, text, None, &cache, options));
     let mut hidden = Vec::new();
     let ranges = time(&mut || hidden = hidden_ranges(&leaves, &(0..text.len()), &[]));
-    let mut editor = gv_editor::Editor::new(gv_text::Buffer::new(&text.to_string()));
-    let splice = time(&mut || {
-        editor.splice_replacements(splices_between(&[], &hidden));
-    });
+    let widget_count = hidden.iter().filter(|(_, w)| w.is_some()).count();
+    let new_editor = |wrap: bool| {
+        let mut editor = gv_editor::Editor::new(gv_text::Buffer::new(&text.to_string()));
+        if wrap {
+            editor.set_measure(Box::new(gv_editor::display_map::MonospaceMeasure::new(
+                sizes.advance,
+            )));
+            editor.set_wrap_width(Some(sizes.column));
+        }
+        editor
+    };
+    let mut lines = Vec::new();
+    for wrap in [false, true] {
+        // At once, as phase 1 did.
+        let mut editor = new_editor(wrap);
+        let mut splices = Vec::new();
+        let diff = time(&mut || {
+            splices = splices_for(
+                &editor,
+                &leaves,
+                0..text.len(),
+                &[],
+                &mut widgets,
+                &sizes,
+                None,
+            );
+        });
+        let once = time(&mut || {
+            editor.splice_replacements(splices.clone());
+        });
+        // In slices, as frames do.
+        let mut editor = new_editor(wrap);
+        let mut pending: VecDeque<_> = splices.into();
+        let mut frames: Vec<Duration> = Vec::new();
+        while !pending.is_empty() {
+            frames.push(time(&mut || {
+                let started = Instant::now();
+                while !pending.is_empty() && started.elapsed() < SLICE_BUDGET {
+                    let take = pending.len().min(SLICE_SPLICES);
+                    let slice: Vec<_> = pending.drain(..take).collect();
+                    editor.splice_replacements(slice);
+                }
+            }));
+        }
+        let worst = frames.iter().max().copied().unwrap_or_default();
+        lines.push(format!(
+            "whole document ({}): diff {diff:?}; splice at once {once:?}; in {} frames of at most {worst:?}",
+            if wrap { "soft wrap" } else { "no wrap" },
+            frames.len()
+        ));
+    }
     // Caret moves mid-document: decorate a window of about 200 lines from
     // the cache, reveal, diff and splice, as a frame does.
+    let mut editor = new_editor(true);
+    let all = splices_for(
+        &editor,
+        &leaves,
+        0..text.len(),
+        &[],
+        &mut widgets,
+        &sizes,
+        None,
+    );
+    editor.splice_replacements(all);
     let mid = text.len() / 2;
     let mut moves: Vec<Duration> = Vec::new();
     for step in 0..200 {
         let caret = text.clip_offset(mid + step * 37, gv_text::Bias::Left);
         let window = caret.saturating_sub(8_000)..(caret + 8_000).min(text.len());
         moves.push(time(&mut || {
-            let leaves = decorate(tree, text, Some(window.clone()), &cache);
+            let leaves = decorate(tree, text, Some(window.clone()), &cache, options);
             let span = leaves
                 .first()
                 .map_or(window.start, |(s, _)| *s)
                 .min(window.start)..window.end;
-            let desired = hidden_ranges(&leaves, &span, std::slice::from_ref(&(caret..caret)));
-            let actual: Vec<Range<usize>> = editor
-                .replacements_in(span.clone())
-                .into_iter()
-                .filter(|r| span.start <= r.range.start && r.range.end <= span.end)
-                .map(|r| r.range)
-                .collect();
-            editor.splice_replacements(splices_between(&actual, &desired));
+            let splices = splices_for(
+                &editor,
+                &leaves,
+                span,
+                std::slice::from_ref(&(caret..caret)),
+                &mut widgets,
+                &sizes,
+                None,
+            );
+            editor.splice_replacements(splices);
         }));
     }
     moves.sort();
     format!(
-        "{} bytes, {} leaves with constructs, {} hidden ranges\n\
-         whole document: decorate cold {cold:?}, from cache {warm:?}, reveal {ranges:?}, splice into the layer {splice:?}\n\
-         caret move + window refresh: p50 {:?}, p95 {:?}, max {:?}",
+        "{} bytes, {} leaves with constructs, {} replacements ({widget_count} widgets)\n\
+         decorate cold {cold:?}, from cache {warm:?}, reveal {ranges:?}\n{}\n\
+         caret move + window refresh (soft wrap): p50 {:?}, p95 {:?}, max {:?}",
         text.len(),
         leaves.len(),
         hidden.len(),
+        lines.join("\n"),
         moves[moves.len() / 2],
         moves[moves.len() * 95 / 100],
         moves[moves.len() - 1],
@@ -838,17 +1284,33 @@ mod tests {
     use super::*;
     use gv_syntax::ParseOptions;
 
-    /// The hidden ranges of `text` as the strings they hide, with the
-    /// caret at `caret` (`None`: no selection).
+    /// The hidden ranges of `text` as the strings they hide (`w:` and
+    /// the source for a widget), with the caret at `caret` (`None`: no
+    /// selection).
     fn hidden(text: &str, options: ParseOptions, caret: Option<usize>) -> Vec<String> {
         let snapshot = TextSnapshot::new(text);
         let tree = SyntaxTree::parse_with(&snapshot, options);
         let cache = Mutex::new(DecorCache::default());
-        let leaves = decorate(&tree, &snapshot, None, &cache);
+        let leaves = decorate(&tree, &snapshot, None, &cache, Options { emoji: true });
         let selections: Vec<Range<usize>> = caret.map(|c| c..c).into_iter().collect();
         hidden_ranges(&leaves, &(0..text.len()), &selections)
             .into_iter()
-            .map(|r| text[r].to_owned())
+            .map(|(r, widget)| match widget {
+                Some(_) => format!("w:{}", &text[r]),
+                None => text[r].to_owned(),
+            })
+            .collect()
+    }
+
+    /// The widgets of `text` (with no selection).
+    fn widgets(text: &str, options: ParseOptions) -> Vec<(String, WidgetSpec)> {
+        let snapshot = TextSnapshot::new(text);
+        let tree = SyntaxTree::parse_with(&snapshot, options);
+        let cache = Mutex::new(DecorCache::default());
+        let leaves = decorate(&tree, &snapshot, None, &cache, Options { emoji: true });
+        hidden_ranges(&leaves, &(0..text.len()), &[])
+            .into_iter()
+            .filter_map(|(r, w)| Some((text[r].to_owned(), (*w?).clone())))
             .collect()
     }
 
@@ -919,8 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn images_and_multiline_links_stay_source() {
-        assert!(hidden("![alt](i.png)\n", ParseOptions::default(), None).is_empty());
+    fn multiline_links_stay_source() {
         // The destination is on the next line: hiding it would join them.
         assert_eq!(
             hidden("[a](\n/u)\n", ParseOptions::default(), None),
@@ -930,8 +1391,11 @@ mod tests {
 
     #[test]
     fn splices_cover_only_differences() {
-        let actual = [0..2, 5..7, 10..12];
-        let desired = [0..2, 5..6, 10..12, 20..22];
+        let hide = |list: &[Range<usize>]| -> Vec<Replacement> {
+            list.iter().cloned().map(Replacement::hide).collect()
+        };
+        let actual = hide(&[0..2, 5..7, 10..12]);
+        let desired = hide(&[0..2, 5..6, 10..12, 20..22]);
         let splices = splices_between(&actual, &desired);
         let ranges: Vec<_> = splices
             .iter()
@@ -939,5 +1403,67 @@ mod tests {
             .collect();
         assert_eq!(ranges, [(5..7, 1), (20..22, 1)]);
         assert!(splices_between(&desired, &desired).is_empty());
+    }
+
+    #[test]
+    fn widgets_of_images_math_tasks_emoji_and_tags() {
+        let text = "- [ ] a ![cat|40](c.png) and ![[d.png|200]] ![[Note]]\n- [x] $x^2$ :smile: #tag `:smile:`\n";
+        let found = widgets(text, obsidian());
+        let sources: Vec<&str> = found.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            sources,
+            [
+                "[ ]",
+                "![cat|40](c.png)",
+                "![[d.png|200]]",
+                "[x]",
+                "$x^2$",
+                ":smile:",
+                "#tag"
+            ]
+        );
+        assert_eq!(found[0].1, WidgetSpec::Task { checked: false });
+        assert_eq!(
+            found[1].1,
+            WidgetSpec::Image {
+                destination: "c.png".into(),
+                embed: false,
+                alt: "cat".into(),
+                width: Some(40),
+            }
+        );
+        assert_eq!(
+            found[2].1,
+            WidgetSpec::Image {
+                destination: "d.png".into(),
+                embed: true,
+                alt: "".into(),
+                width: Some(200),
+            }
+        );
+        assert_eq!(found[3].1, WidgetSpec::Task { checked: true });
+        assert!(matches!(&found[4].1, WidgetSpec::Math { tex, .. } if &**tex == "x^2"));
+        assert_eq!(found[5].1, WidgetSpec::Emoji { glyph: "😄" });
+        assert_eq!(
+            found[6].1,
+            WidgetSpec::Tag {
+                text: "#tag".into()
+            }
+        );
+        // Without emoji in the profile, shortcodes stay text.
+        let snapshot = TextSnapshot::new(":smile:\n");
+        let tree = SyntaxTree::parse_with(&snapshot, obsidian());
+        let cache = Mutex::new(DecorCache::default());
+        let leaves = decorate(&tree, &snapshot, None, &cache, Options { emoji: false });
+        assert!(hidden_ranges(&leaves, &(0..8), &[]).is_empty());
+    }
+
+    #[test]
+    fn a_touched_widget_shows_its_source() {
+        let text = "a $x$ b\n";
+        assert_eq!(hidden(text, obsidian(), None), ["w:$x$"]);
+        assert!(hidden(text, obsidian(), Some(2)).is_empty());
+        assert!(hidden(text, obsidian(), Some(5)).is_empty());
+        assert_eq!(hidden(text, obsidian(), Some(6)), ["w:$x$"]);
     }
 }

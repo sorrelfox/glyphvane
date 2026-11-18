@@ -668,13 +668,20 @@ fn wrap_rows(
     transforms: &mut Vec<Transform>,
 ) {
     let mut line = String::new();
+    // Box widgets of the line: their byte offset in it and their width.
+    let mut boxes: Vec<(usize, f32)> = Vec::new();
     let mut remaining = "";
     let mut chunks = tab_snapshot.chunks(TabPoint::new(rows.start, 0)..tab_snapshot.max_point());
     for row in rows {
         loop {
             let text = if remaining.is_empty() {
                 match chunks.next() {
-                    Some(chunk) => chunk.text,
+                    Some(chunk) => {
+                        if let Some(width) = chunk.box_width_px() {
+                            boxes.push((line.len(), width));
+                        }
+                        chunk.text
+                    }
                     None => break,
                 }
             } else {
@@ -695,11 +702,11 @@ fn wrap_rows(
 
         let mut prev_boundary_ix = 0;
         if let Some(wrap_width) = wrap_width
-            && !fits(wrapper, &line, wrap_width)
+            && !fits(wrapper, &line, &boxes, wrap_width)
         {
             let content = line.strip_suffix('\n').unwrap_or(&line);
             let adjustment = indent.indent(tab_snapshot, row, content);
-            let fragments = [LineFragment::text(&line)];
+            let fragments = fragments(&line, &boxes);
             for boundary in wrapper.wrap_line(&fragments, wrap_width, adjustment) {
                 let wrapped = &line[prev_boundary_ix..boundary.ix];
                 push_isomorphic(transforms, TextSummary::from(wrapped));
@@ -713,21 +720,47 @@ fn wrap_rows(
         }
 
         line.clear();
+        boxes.clear();
     }
+}
+
+/// `line` as fragments to wrap: its text, with each box widget (at a byte
+/// offset, with a width; its text is one U+FFFC) as an element.
+fn fragments<'a>(line: &'a str, boxes: &[(usize, f32)]) -> Vec<LineFragment<'a>> {
+    let mut out = Vec::with_capacity(boxes.len() * 2 + 1);
+    let mut at = 0;
+    for &(offset, width) in boxes {
+        let len = line[offset..].chars().next().map_or(0, char::len_utf8);
+        if offset > at {
+            out.push(LineFragment::text(&line[at..offset]));
+        }
+        out.push(LineFragment::element(width, len));
+        at = offset + len;
+    }
+    if at < line.len() || out.is_empty() {
+        out.push(LineFragment::text(&line[at..]));
+    }
+    out
 }
 
 /// Whether `line` fits in `wrap_width` without wrapping. The widths add up
 /// in the same order as in [`LineWrapper::wrap_line`], which wraps only
 /// once the sum exceeds the width, so a line that fits needs no wrapping
-/// pass (and no break opportunities or graphemes).
-fn fits(wrapper: &mut LineWrapper, line: &str, wrap_width: f32) -> bool {
+/// pass (and no break opportunities or graphemes). Box widgets (`boxes`:
+/// byte offset, width) take their width.
+fn fits(wrapper: &mut LineWrapper, line: &str, boxes: &[(usize, f32)], wrap_width: f32) -> bool {
     let mut width = 0.0;
-    for c in line.chars() {
-        if c != '\n' {
-            width += wrapper.width_for_char(c);
-            if width > wrap_width {
-                return false;
-            }
+    let mut next_box = boxes.iter().peekable();
+    for (at, c) in line.char_indices() {
+        if c == '\n' {
+            continue;
+        }
+        width += match next_box.next_if(|(offset, _)| *offset == at) {
+            Some((_, box_width)) => *box_width,
+            None => wrapper.width_for_char(c),
+        };
+        if width > wrap_width {
+            return false;
         }
     }
     true

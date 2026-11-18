@@ -126,6 +126,7 @@ mod insert;
 mod layout;
 mod links;
 mod live_preview;
+mod live_widgets;
 mod markdown;
 mod metrics;
 mod paste;
@@ -570,8 +571,9 @@ impl EditorView {
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
         if let Some(profile) = gv_profile::ProfileId::from_id(id) {
-            self.autocomplete
-                .set_switches(&gv_profile::definition(profile).switches);
+            let switches = &gv_profile::definition(profile).switches;
+            self.autocomplete.set_switches(switches);
+            self.set_live_switches(switches);
         }
         self.options =
             gv_profile::ProfileId::from_id(id).map_or(self.options, ParseOptions::builtin);
@@ -593,6 +595,7 @@ impl EditorView {
         self.commands = MarkdownCommands::for_profile(id);
         self.paste_profile = paste_profile(id);
         self.autocomplete.set_switches(&profile.switches);
+        self.set_live_switches(&profile.switches);
         self.availabilities.reset();
         if self.links.profile() != profile.id {
             self.links.set_profile(profile.id);

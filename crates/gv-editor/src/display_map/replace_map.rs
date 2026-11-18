@@ -92,7 +92,9 @@ use sum_tree::{Cursor, Dimensions, SumTree};
 use replacements::ReplacementTree;
 
 use super::BufferPoint;
-use super::primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, StyleId, TextSummary};
+use super::primitives::{
+    Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, StyleId, TextSummary, fixed_of_px,
+};
 
 /// The text a fold shows in place of its range: one `⋯` (U+22EF, three
 /// bytes), as in Zed.
@@ -195,6 +197,15 @@ impl Widget {
         Self {
             id,
             content: WidgetContent::Text(Arc::from(text)),
+            style,
+        }
+    }
+
+    /// A box `width` px wide that the view draws itself.
+    pub fn boxed(id: WidgetId, width: f32, style: Option<StyleId>) -> Self {
+        Self {
+            id,
+            content: WidgetContent::Box { width },
             style,
         }
     }
@@ -2045,14 +2056,21 @@ impl<'a> ReplaceChunks<'a> {
         }
         let (head, tail) = text.split_at(len);
         self.replaced = tail;
-        let (replaced, style) = match payload {
-            Payload::Fold(id) => (Replaced::Fold(*id), None),
-            Payload::Widget(widget) => (Replaced::Widget(widget.id), widget.style),
+        let (replaced, style, box_width) = match payload {
+            Payload::Fold(id) => (Replaced::Fold(*id), None, None),
+            Payload::Widget(widget) => {
+                let width = match widget.content {
+                    WidgetContent::Box { width } => Some(fixed_of_px(width)),
+                    WidgetContent::Text(_) => None,
+                };
+                (Replaced::Widget(widget.id), widget.style, width)
+            }
             Payload::Hidden => unreachable!("hidden text has no chunks"),
         };
         Chunk {
             style,
             replaced: Some(replaced),
+            box_width,
             ..Chunk::new(head)
         }
     }

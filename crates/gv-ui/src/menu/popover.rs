@@ -655,7 +655,7 @@ impl MenuPopover {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let enabled = self.enabled(&item, window);
-        let checked = item.mode.is_some_and(|mode| mode == self.state.mode);
+        let checked = self.state.checks(&item);
         item_row(
             "app-menu",
             index,

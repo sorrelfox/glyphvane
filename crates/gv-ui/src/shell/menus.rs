@@ -58,6 +58,7 @@ impl Workspace {
             has_file: self.tabs.get(index).is_some_and(|t| t.path.is_some()),
             misspelled: false,
             in_vault: false,
+            live_preview: self.tabs.get(self.active).is_some_and(|t| t.live_preview),
         }
     }
 

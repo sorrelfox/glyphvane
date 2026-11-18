@@ -62,6 +62,10 @@ pub(crate) struct RowText {
     pub spans: Vec<Span>,
     /// Columns of the fold placeholders.
     pub placeholders: Vec<Range<usize>>,
+    /// Box widgets (Live Preview): the display byte each is drawn over (a
+    /// space, spaced out to the width after shaping) and its width in
+    /// 1/64 px.
+    pub boxes: Vec<(usize, u32)>,
     tabs: Vec<Tab>,
 }
 
@@ -141,7 +145,9 @@ impl RowText {
         let hard_break = show_whitespace && typed_spaces >= 2;
 
         let needs_map = !placeholders.is_empty()
-            || chunks.iter().any(|c| !plain(c.text))
+            || chunks
+                .iter()
+                .any(|c| !plain(c.text) || c.box_width.is_some())
             || (show_whitespace
                 && (!tabs.is_empty()
                     || trailing_from < content.len()
@@ -161,6 +167,7 @@ impl RowText {
                 marks,
                 spans,
                 placeholders,
+                boxes: Vec::new(),
                 tabs,
             };
         }
@@ -168,9 +175,20 @@ impl RowText {
         let mut display = String::with_capacity(content.len() + 8);
         let mut map = vec![0u32; content.len() + 1];
         let mut marks = Vec::new();
+        let mut boxes = Vec::new();
         let mut at = 0;
         for chunk in &chunks {
             let text = chunk.text;
+            if let Some(width) = chunk.box_width {
+                let start = display.len();
+                for slot in &mut map[at..at + text.len()] {
+                    *slot = to_u32(start);
+                }
+                display.push(' ');
+                boxes.push((start, width));
+                at += text.len();
+                continue;
+            }
             if matches!(chunk.replaced, Some(Replaced::Fold(_))) {
                 let start = display.len();
                 for slot in &mut map[at..at + text.len()] {
@@ -240,6 +258,7 @@ impl RowText {
             marks,
             spans,
             placeholders,
+            boxes,
             tabs,
         }
     }

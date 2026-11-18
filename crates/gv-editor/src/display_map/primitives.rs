@@ -236,6 +236,10 @@ pub struct Chunk<'a> {
     /// The replacement the chunk shows (a fold placeholder or a widget's
     /// text, always a chunk of its own); `None` for buffer text.
     pub replaced: Option<Replaced>,
+    /// The width of a box widget's chunk (its text is one U+FFFC), in
+    /// 1/64 px ([`Chunk::box_width_px`]): soft wrap gives it this width.
+    /// `None` for anything else.
+    pub box_width: Option<u32>,
 }
 
 impl<'a> Chunk<'a> {
@@ -265,8 +269,28 @@ impl<'a> Chunk<'a> {
             is_tab: false,
             style: None,
             replaced: None,
+            box_width: None,
         }
     }
+
+    /// A box widget's width in px ([`Self::box_width`]).
+    pub fn box_width_px(&self) -> Option<f32> {
+        self.box_width.map(px_of_fixed)
+    }
+}
+
+/// `px` in 1/64 px (negative and non-finite widths are 0).
+pub fn fixed_of_px(px: f32) -> u32 {
+    if px.is_finite() && px > 0.0 {
+        (px * 64.0).round().min(u32::MAX as f32) as u32
+    } else {
+        0
+    }
+}
+
+/// 1/64 px in px.
+pub fn px_of_fixed(fixed: u32) -> f32 {
+    fixed as f32 / 64.0
 }
 
 #[cfg(test)]

@@ -46,7 +46,7 @@ impl Menu {
 
     /// Whether some item shows a check mark.
     pub fn has_checks(&self) -> bool {
-        self.items().any(|i| i.mode.is_some())
+        self.items().any(|i| i.mode.is_some() || i.toggle.is_some())
     }
 }
 
@@ -71,11 +71,20 @@ pub struct Item {
     pub title: &'static str,
     /// The item is checked while the active tab shows this mode.
     pub mode: Option<ViewMode>,
+    /// The item is checked while this setting is on.
+    pub toggle: Option<Toggle>,
     /// The item is enabled only while this holds.
     pub requires: Option<Requirement>,
     /// What the system knows the item as (macOS routes these through the
     /// text system).
     pub role: Option<Role>,
+}
+
+/// A setting a menu item turns on and off, checked while it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toggle {
+    /// The active tab's editing style is Live Preview.
+    LivePreview,
 }
 
 /// A condition for an item to be enabled, besides its command having a
@@ -146,9 +155,19 @@ pub struct MenuState {
     pub misspelled: bool,
     /// A vault is open (it has a dictionary of its own).
     pub in_vault: bool,
+    /// The active tab's editing style is Live Preview.
+    pub live_preview: bool,
 }
 
 impl MenuState {
+    /// Whether `item` shows a check mark.
+    pub fn checks(self, item: &Item) -> bool {
+        item.mode.is_some_and(|mode| mode == self.mode)
+            || item.toggle.is_some_and(|toggle| match toggle {
+                Toggle::LivePreview => self.live_preview,
+            })
+    }
+
     pub fn allows(self, requirement: Requirement) -> bool {
         match requirement {
             Requirement::CanGoBack => self.can_go_back,
@@ -167,6 +186,18 @@ const fn item(command: &'static str, title: &'static str) -> Entry {
         command,
         title,
         mode: None,
+        toggle: None,
+        requires: None,
+        role: None,
+    })
+}
+
+const fn toggle_item(command: &'static str, title: &'static str, toggle: Toggle) -> Entry {
+    Entry::Command(Item {
+        command,
+        title,
+        mode: None,
+        toggle: Some(toggle),
         requires: None,
         role: None,
     })
@@ -182,6 +213,7 @@ const fn mode_item(command: &'static str, title: &'static str, mode: ViewMode) -
         command,
         title,
         mode: Some(mode),
+        toggle: None,
         requires,
         role: None,
     })
@@ -192,6 +224,7 @@ const fn requiring(command: &'static str, title: &'static str, requires: Require
         command,
         title,
         mode: None,
+        toggle: None,
         requires: Some(requires),
         role: None,
     })
@@ -202,6 +235,7 @@ const fn with_role(command: &'static str, title: &'static str, role: Role) -> En
         command,
         title,
         mode: None,
+        toggle: None,
         requires: None,
         role: Some(role),
     })
@@ -354,7 +388,11 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             SEPARATOR,
             item("view.toggle_mode", "Toggle Preview and Edit"),
             item("view.toggle_split", "Toggle split view"),
-            item("view.toggle_live_preview", "Live Preview"),
+            toggle_item(
+                "view.toggle_live_preview",
+                "Live Preview",
+                Toggle::LivePreview,
+            ),
             item("view.toggle_viewer_mode", "Viewer mode"),
             SEPARATOR,
             item("workspace.toggle_sidebar", "Toggle sidebar"),

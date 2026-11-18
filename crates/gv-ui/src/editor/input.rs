@@ -219,9 +219,27 @@ impl EditorView {
         let segment = display_row.saturating_sub(first);
         let x = f32::from(position.x) - self.text_origin_x(&columns);
         let column = row.column_at(segment, x).min(row.content_len());
+        let live = self.is_live_preview_active();
         let editor = &self.doc.as_ref()?.editor;
         let text = editor.text();
-        let offset = row.offset_of(text, editor.display().replace_snapshot(), column);
+        let replace = editor.display().replace_snapshot();
+        let mut offset = row.offset_of(text, replace, column);
+        // Live Preview: a column between hidden markers and shown text is
+        // on the side of the character the pointer is over, so the caret
+        // stays by that character once the markers show.
+        if live && x >= row.x_in(segment, column) {
+            let after = row.offset_of_biased(text, replace, column, Bias::Right);
+            if after > offset
+                && replace.folded_range_at(offset).is_none()
+                && replace.folded_range_at(after).is_none()
+                && replace
+                    .replacements_in(offset..after)
+                    .iter()
+                    .all(|r| r.widget.is_none() || r.range.end <= offset || r.range.start >= after)
+            {
+                offset = after;
+            }
+        }
         let offset = snap_to_grapheme(text, offset);
         Some(clip_caret(text, offset, Bias::Left))
     }

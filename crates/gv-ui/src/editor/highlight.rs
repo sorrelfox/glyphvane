@@ -168,6 +168,11 @@ impl LinkStatuses {
         self.generation += 1;
     }
 
+    /// The resolver links are resolved with, once the document has a file.
+    pub(crate) fn resolver(&self) -> Option<&Resolver> {
+        self.resolver.as_ref()
+    }
+
     /// The profile links are resolved in.
     pub fn profile(&self) -> ProfileId {
         self.profile

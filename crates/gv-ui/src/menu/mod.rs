@@ -38,7 +38,7 @@ pub use context::{
     ContextMenuPopover, ContextTarget, MAX_SUGGESTIONS, Placement, SpellMenu, context_menu_of,
     context_target, show_context_menu,
 };
-pub use model::{ContextMenu, Item, Menu, MenuState};
+pub use model::{ContextMenu, Item, Menu, MenuState, Toggle};
 use model::{Entry, Role, SystemEntry};
 pub use popover::{DEBUG_APP_MENU_ENV, MenuButton, MenuPopover};
 pub(crate) use popover::{open_in_last_window, panel, row, separator};

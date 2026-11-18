@@ -545,7 +545,7 @@ impl Render for ContextMenuPopover {
                 Entry::Separator => Some(separator(theme).into_any_element()),
                 Entry::Command(item) => {
                     let enabled = item_enabled(&item, open.state, open.restore.as_ref(), window);
-                    let checked = item.mode.is_some_and(|mode| mode == open.state.mode);
+                    let checked = open.state.checks(&item);
                     Some(
                         item_row(
                             "context-menu",

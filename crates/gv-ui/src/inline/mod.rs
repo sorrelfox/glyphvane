@@ -67,6 +67,7 @@ use gv_inline::{
 
 pub use element::{InlineParagraph, PaintStats};
 pub use fonts::{FontFamilies, FontTable, Glyphs, GpuiMeasure, font_of};
+pub(crate) use math::paint_math;
 pub use palette::{Palette, Token};
 
 /// Fonts and shaped runs shared by the paragraphs of a view.

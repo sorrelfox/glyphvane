@@ -102,6 +102,9 @@ impl Workspace {
         for reader in readers.iter().flatten() {
             tag = reader.read(cx).take_tag_search().or(tag);
         }
+        if let Some(editor) = self.shown_editor() {
+            tag = editor.read(cx).take_tag_search().or(tag);
+        }
         if let Some(tag) = tag {
             return Some(tag.to_string());
         }

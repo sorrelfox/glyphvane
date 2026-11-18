@@ -33,6 +33,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use super::fold::{self, VisualLine};
 use super::highlight::Underline;
 use super::input::Columns;
+use super::live_widgets::{WidgetClick, WidgetPaint};
 use super::rows::RowEnv;
 use super::wrap::RowMap;
 use super::{EditorLayout, EditorView, Top};
@@ -142,6 +143,11 @@ pub(crate) struct Probe {
     pub chips: Vec<(Bounds<Pixels>, Range<usize>)>,
     /// Their fills.
     pub chip_tokens: Vec<Token>,
+    /// Live Preview widgets: bounds and kind (`chip`, `text`, `task`,
+    /// `image`, `math`).
+    pub widgets: Vec<(Bounds<Pixels>, &'static str)>,
+    /// The display text of each line drawn.
+    pub row_texts: Vec<(usize, String)>,
     pub columns: Option<Columns>,
 }
 
@@ -175,6 +181,23 @@ pub(crate) struct Frame {
     text_area: Option<Bounds<Pixels>>,
     /// Where the pointer is a hand: chevrons and chips.
     pointers: Vec<Bounds<Pixels>>,
+    /// Live Preview widgets, over the rows.
+    widgets: Vec<Drawn>,
+}
+
+/// A Live Preview widget to draw.
+enum Drawn {
+    Image {
+        bounds: Bounds<Pixels>,
+        image: std::sync::Arc<gpui::RenderImage>,
+    },
+    Math {
+        origin: Point<Pixels>,
+        layout: std::sync::Arc<gv_math::MathLayout>,
+        em: f32,
+        color: Hsla,
+    },
+    Quad(PaintQuad),
 }
 
 impl Frame {
@@ -197,6 +220,7 @@ impl Frame {
             ticks: Vec::new(),
             text_area: None,
             pointers: Vec::new(),
+            widgets: Vec::new(),
         }
     }
 }
@@ -242,7 +266,14 @@ impl EditorView {
         self.sync_wrap(columns.text_w, cx);
         if self.is_live_preview_active() {
             let lines = self.live_window(f32::from(bounds.size.height));
-            self.refresh_live_preview(lines, cx);
+            let sizes = super::live_widgets::Sizes {
+                line: line_px,
+                font: self.fonts.size(),
+                advance: space,
+                column: columns.text_w,
+                scale: window.scale_factor(),
+            };
+            self.refresh_live_preview(lines, &sizes, cx);
         }
         let Some((lines, rows_total, wrapping)) = self.row_map().map(|map| {
             (
@@ -305,8 +336,10 @@ impl EditorView {
             links,
             find,
             spell,
+            live,
             ..
         } = self;
+        live.hits.clear();
         let Some(doc) = doc.as_mut() else {
             return frame;
         };
@@ -409,6 +442,8 @@ impl EditorView {
                 continue;
             };
             widest = widest.max(row.content_width());
+            #[cfg(test)]
+            probe.row_texts.push((line, row.text.display.clone()));
             let local = |offset: usize| row.column_of(&text, replace, offset, Bias::Left);
             let local_end = |offset: usize| row.column_of(&text, replace, offset, Bias::Right);
             let on_line = |offset: usize| visual.holds(offset);
@@ -655,6 +690,112 @@ impl EditorView {
                         .push(fill(rect, color(chip)).corner_radii(px(radius::CHIP)));
                     frame.pointers.push(rect);
                 }
+                // Live Preview widgets on this row.
+                for span in &row.text.spans {
+                    let Some(gv_editor::display_map::Replaced::Widget(id)) = span.replaced else {
+                        continue;
+                    };
+                    let (a, b) = (
+                        span.columns.start.max(cols.start),
+                        span.columns.end.min(cols.end),
+                    );
+                    let Some((paint, click)) = live.widgets.paint(id).filter(|_| a < b) else {
+                        continue;
+                    };
+                    let (x0, x1) = (origin_x + row.x_in(k, a), origin_x + row.x_in(k, b));
+                    let clickable = !matches!(click, WidgetClick::Reveal);
+                    let kind = match paint {
+                        WidgetPaint::Chip => {
+                            let h = metrics.chip_height;
+                            let rect = bounds_of(x0, top + (line_px - h) / 2.0, x1 - x0, h);
+                            let token = if clickable {
+                                Token::AccentTint
+                            } else if row.code || current {
+                                Token::StatePress
+                            } else {
+                                Token::SurfaceSunken
+                            };
+                            frame
+                                .chips
+                                .push(fill(rect, color(token)).corner_radii(px(radius::CHIP)));
+                            "chip"
+                        }
+                        WidgetPaint::Text => "text",
+                        WidgetPaint::Task { checked } => {
+                            let side = (line_px * 0.6).min(x1 - x0).max(4.0);
+                            let rect = bounds_of(
+                                (x0 + x1 - side) / 2.0,
+                                top + (line_px - side) / 2.0,
+                                side,
+                                side,
+                            );
+                            let (fill_token, border) = if *checked {
+                                (Token::AccentDefault, Token::AccentDefault)
+                            } else {
+                                (Token::SurfacePage, Token::BorderStrong)
+                            };
+                            frame.widgets.push(Drawn::Quad(
+                                fill(rect, color(fill_token))
+                                    .corner_radii(px(radius::CHIP))
+                                    .border_widths(px(1.0))
+                                    .border_color(color(border)),
+                            ));
+                            if *checked {
+                                let inset = side * 0.15;
+                                let mark = bounds_of(
+                                    f32::from(rect.origin.x) + inset,
+                                    f32::from(rect.origin.y) + inset,
+                                    side - 2.0 * inset,
+                                    side - 2.0 * inset,
+                                );
+                                frame.icons.push((
+                                    mark,
+                                    Icon::MenuCheck.name().path(),
+                                    color(Token::AccentOn),
+                                ));
+                            }
+                            "task"
+                        }
+                        WidgetPaint::Image(image) => {
+                            let size = image.size(0);
+                            let (iw, ih) = (size.width.0 as f32, size.height.0 as f32);
+                            let (w, h) = (x1 - x0, line_px);
+                            let scale = if iw > 0.0 && ih > 0.0 {
+                                (w / iw).min(h / ih)
+                            } else {
+                                0.0
+                            };
+                            let (dw, dh) = (iw * scale, ih * scale);
+                            frame.widgets.push(Drawn::Image {
+                                bounds: bounds_of(x0, top + (h - dh) / 2.0, dw, dh),
+                                image: image.clone(),
+                            });
+                            "image"
+                        }
+                        WidgetPaint::Math {
+                            layout,
+                            em,
+                            baseline,
+                        } => {
+                            frame.widgets.push(Drawn::Math {
+                                origin: point(px(x0), px(top + baseline - layout.height * em)),
+                                layout: layout.clone(),
+                                em: *em,
+                                color: color(Token::TextPrimary),
+                            });
+                            "math"
+                        }
+                    };
+                    let rect = bounds_of(x0, top, x1 - x0, line_px);
+                    if clickable {
+                        frame.pointers.push(rect);
+                        live.hits.push((rect, id));
+                    }
+                    #[cfg(test)]
+                    probe.widgets.push((rect, kind));
+                    #[cfg(not(test))]
+                    let _ = kind;
+                }
                 frame.rows.push((shaped, point(px(seg_x), px(top))));
 
                 // The line number, on the line's first row only.
@@ -886,6 +1027,14 @@ impl EditorView {
             && let Some(hit) = self.fold_hit(e.position, window, cx)
         {
             self.press_fold(hit, window, cx);
+            return;
+        }
+        // A checkbox or a tag in Live Preview.
+        if !e.modifiers.modified()
+            && e.click_count <= 1
+            && self.click_live_widget(e.position, window, cx)
+        {
+            cx.notify();
             return;
         }
         // Mod+Click on a link follows it (a plain click never does).
@@ -1304,6 +1453,30 @@ impl Element for EditorElement {
                             off,
                             color,
                         } => paint_broken(window, bounds, on, off, color),
+                    }
+                }
+                let text_font = gpui::font(crate::metrics::font::SYSTEM_FALLBACK);
+                for widget in frame.widgets.drain(..) {
+                    match widget {
+                        Drawn::Image { bounds, image } => {
+                            let _ = window.paint_image(
+                                bounds,
+                                bounds,
+                                gpui::Corners::default(),
+                                image,
+                                0,
+                                false,
+                            );
+                        }
+                        Drawn::Math {
+                            origin,
+                            layout,
+                            em,
+                            color,
+                        } => crate::inline::paint_math(
+                            window, cx, &layout, origin, em, color, &text_font,
+                        ),
+                        Drawn::Quad(quad) => window.paint_quad(quad),
                     }
                 }
                 for quad in frame.carets.drain(..) {

@@ -218,3 +218,32 @@ fn motions_never_end_inside_hidden_runs() {
         }
     }
 }
+
+#[test]
+fn box_widgets_take_their_width_in_soft_wrap() {
+    use gv_editor::display_map::{Widget, WidgetId};
+    // 0123456789012
+    // aa XXXX bb cc
+    let mut editor = Editor::new(Buffer::new("aa XXXX bb cc"));
+    editor.set_measure(Box::new(MonospaceMeasure::new(1.0)));
+    editor.set_wrap_width(Some(10.0));
+    let rows = |editor: &Editor| editor.wrap().expect("soft wrap").max_point().row().0 + 1;
+    assert_eq!(rows(&editor), 2, "13 characters in 10 px");
+    // A box 1 px wide: "aa ￼ bb cc" is 10 px and fits.
+    let narrow = Widget::boxed(WidgetId(1), 1.0, None);
+    editor.splice_replacements([(0..13, vec![Replacement::widget(3..7, narrow)])]);
+    assert_eq!(editor.display().text(), "aa \u{fffc} bb cc");
+    assert_eq!(rows(&editor), 1);
+    // A box 6 px wide: "aa ￼ " is 10 px, "bb cc" goes on.
+    let wide = Widget::boxed(WidgetId(2), 6.0, None);
+    editor.splice_replacements([(0..13, vec![Replacement::widget(3..7, wide)])]);
+    assert_eq!(rows(&editor), 2);
+    // A box wider than the column gets a row of its own.
+    let huge = Widget::boxed(WidgetId(3), 30.0, None);
+    editor.splice_replacements([(0..13, vec![Replacement::widget(3..7, huge)])]);
+    assert_eq!(rows(&editor), 3);
+    // The caret moves over it as one unit.
+    editor.set_cursor(3);
+    editor.move_selections(Motion::Right, false);
+    assert_eq!(caret(&editor), 7);
+}

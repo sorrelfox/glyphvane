@@ -173,6 +173,21 @@ fn edits_inside_revealed_constructs_and_undo(cx: &mut TestAppContext) {
     }));
 }
 
+/// Draws until the whole-document splices, a slice per frame, are all
+/// applied: the number of replacements then.
+fn settle(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> usize {
+    let mut last = usize::MAX;
+    for _ in 0..200 {
+        draw(vcx);
+        let now = view.read_with(vcx, |v, _| v.live_hidden().len());
+        if now == last && view.read_with(vcx, |v, _| v.live_settled()) {
+            return now;
+        }
+        last = now;
+    }
+    last
+}
+
 #[gpui::test]
 fn the_whole_document_is_decorated_in_the_background(cx: &mut TestAppContext) {
     let mut text = String::new();
@@ -184,9 +199,7 @@ fn the_whole_document_is_decorated_in_the_background(cx: &mut TestAppContext) {
     assert!(on_screen > 0 && on_screen < 600 * 4, "{on_screen}");
     vcx.executor()
         .advance_clock(super::super::live_preview::FULL_DELAY * 2);
-    draw(&mut vcx);
-    draw(&mut vcx);
-    let all = view.read_with(&vcx, |v, _| v.live_hidden().len());
+    let all = settle(&view, &mut vcx);
     assert_eq!(all, 600 * 4);
     // An edit far below decorates again only that block.
     let end = text.len();
@@ -200,9 +213,7 @@ fn the_whole_document_is_decorated_in_the_background(cx: &mut TestAppContext) {
     draw(&mut vcx);
     vcx.executor()
         .advance_clock(super::super::live_preview::FULL_DELAY * 2);
-    draw(&mut vcx);
-    draw(&mut vcx);
-    let all = view.read_with(&vcx, |v, _| v.live_hidden().len());
+    let all = settle(&view, &mut vcx);
     // The caret is after the new line: its strong hides too.
     assert_eq!(all, 600 * 4 + 2);
 }
@@ -224,6 +235,241 @@ fn plain_text_and_large_files_never_use_live_preview(cx: &mut TestAppContext) {
     });
     assert_eq!(shown(&view, &mut vcx), "Some **bold** text\n");
     assert!(!view.read_with(&vcx, |v, _| v.is_live_preview_active()));
+}
+
+fn obsidian() -> ParseOptions {
+    ParseOptions::from_profile(&gv_profile::compile_builtin(
+        gv_profile::ProfileId::Obsidian,
+    ))
+}
+
+/// A Source view of `text` in Live Preview with the Obsidian syntax.
+fn live_obsidian(cx: &mut TestAppContext, text: &str) -> (Entity<EditorView>, VisualTestContext) {
+    let (view, mut vcx) = editor_with(cx, text, obsidian());
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    draw(&mut vcx);
+    (view, vcx)
+}
+
+/// The widgets drawn: their kinds.
+fn widget_kinds(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> Vec<&'static str> {
+    draw(vcx);
+    probe_of(view, vcx)
+        .widgets
+        .iter()
+        .map(|(_, k)| *k)
+        .collect()
+}
+
+/// The display text drawn for line `line`.
+fn drawn(view: &Entity<EditorView>, vcx: &mut VisualTestContext, line: usize) -> String {
+    draw(vcx);
+    probe_of(view, vcx)
+        .row_texts
+        .iter()
+        .find(|(l, _)| *l == line)
+        .map(|(_, t)| t.clone())
+        .unwrap_or_default()
+}
+
+#[gpui::test]
+fn drawn_rows_follow_hidden_markers(cx: &mut TestAppContext) {
+    let (view, mut vcx) = live(cx, "Some **bold** text\n");
+    assert_eq!(drawn(&view, &mut vcx, 0), "Some bold text");
+    caret_at(&view, &mut vcx, 8);
+    assert_eq!(drawn(&view, &mut vcx, 0), "Some **bold** text");
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(drawn(&view, &mut vcx, 0), "Some bold text");
+}
+
+#[gpui::test]
+fn a_click_lands_on_the_character_under_the_pointer(cx: &mut TestAppContext) {
+    // 0123456789012345678
+    // Some **bold** text
+    let (view, mut vcx) = live(cx, "Some **bold** text\n");
+    caret_at(&view, &mut vcx, 18);
+    assert_eq!(shown(&view, &mut vcx), "Some bold text\n");
+    // The left half of the `b` shown: the caret goes before the `b`, past
+    // the hidden `**`, and stays there once they show.
+    let at = point_of(&view, &mut vcx, 5) + point(px(1.0), px(0.0));
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(selections(&view, &mut vcx), [(7, 7)]);
+    assert_eq!(shown(&view, &mut vcx), "Some **bold** text\n");
+    // The right half of the `d`: after it, before the closing `**`.
+    caret_at(&view, &mut vcx, 18);
+    let at = point_of(&view, &mut vcx, 11) - point(px(1.0), px(0.0));
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(selections(&view, &mut vcx), [(11, 11)]);
+    // The right half of the space before it: before the opening `**`.
+    caret_at(&view, &mut vcx, 18);
+    let at = point_of(&view, &mut vcx, 5) - point(px(1.0), px(0.0));
+    press(&mut vcx, at, 1, Modifiers::none());
+    assert_eq!(selections(&view, &mut vcx), [(5, 5)]);
+}
+
+#[gpui::test]
+fn task_checkboxes_toggle_their_task(cx: &mut TestAppContext) {
+    // 0123456789
+    // - [ ] task
+    let (view, mut vcx) = live_obsidian(cx, "x\n- [ ] task\n");
+    let base = 2;
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
+    assert_eq!(widget_kinds(&view, &mut vcx), ["task"]);
+    // The box is as wide as the source it replaces.
+    let probe = probe_of(&view, &mut vcx);
+    let (bounds, _) = probe.widgets[0];
+    assert!((f32::from(bounds.size.width) - 3.0 * CHAR).abs() < 0.01);
+    // A click toggles the task, as one undoable edit; the caret stays.
+    let center = bounds.center();
+    press(&mut vcx, center, 1, Modifiers::none());
+    assert_eq!(text_of(&view, &mut vcx), "x\n- [x] task\n");
+    assert_eq!(selections(&view, &mut vcx), [(0, 0)]);
+    assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
+    press(&mut vcx, center, 1, Modifiers::none());
+    assert_eq!(text_of(&view, &mut vcx), "x\n- [ ] task\n");
+    vcx.simulate_keystrokes("secondary-z");
+    assert_eq!(text_of(&view, &mut vcx), "x\n- [x] task\n");
+    // A caret next to it shows its source (ends touch); motions through
+    // a shown box are tested in gv-editor (`box_widgets_take_their_width`).
+    caret_at(&view, &mut vcx, base + 6);
+    assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
+    vcx.simulate_keystrokes("left");
+    assert_eq!(selections(&view, &mut vcx), [(base + 5, base + 5)]);
+    assert_eq!(shown(&view, &mut vcx), "x\n- [x] task\n");
+}
+
+#[gpui::test]
+fn inline_math_is_drawn_and_shows_its_source_when_touched(cx: &mut TestAppContext) {
+    // 012345678
+    // a $x^2$ b
+    let (view, mut vcx) = live_obsidian(cx, "a $x^2$ b\nnext\n");
+    caret_at(&view, &mut vcx, 12);
+    assert_eq!(shown(&view, &mut vcx), "a \u{fffc} b\nnext\n");
+    assert_eq!(widget_kinds(&view, &mut vcx), ["math"]);
+    caret_at(&view, &mut vcx, 7);
+    assert_eq!(shown(&view, &mut vcx), "a $x^2$ b\nnext\n");
+    assert!(widget_kinds(&view, &mut vcx).is_empty());
+    // Right from before it: over it in one step.
+    caret_at(&view, &mut vcx, 1);
+    vcx.simulate_keystrokes("right");
+    assert_eq!(selections(&view, &mut vcx), [(2, 2)]);
+    // A formula that does not typeset shows its source, as text.
+    let (view, mut vcx) = live_obsidian(cx, "a $\\frac{$ b\nnext\n");
+    caret_at(&view, &mut vcx, 14);
+    assert_eq!(shown(&view, &mut vcx), "a $\\frac{$ b\nnext\n");
+    assert_eq!(widget_kinds(&view, &mut vcx), ["text"]);
+}
+
+#[gpui::test]
+fn tags_are_chips_that_search(cx: &mut TestAppContext) {
+    let (view, mut vcx) = live_obsidian(cx, "see #idea now\nnext\n");
+    caret_at(&view, &mut vcx, 16);
+    assert_eq!(shown(&view, &mut vcx), "see #idea now\nnext\n");
+    assert_eq!(widget_kinds(&view, &mut vcx), ["chip"]);
+    let (bounds, _) = probe_of(&view, &mut vcx).widgets[0];
+    press(&mut vcx, bounds.center(), 1, Modifiers::none());
+    let search = view.read_with(&vcx, |v, _| v.take_tag_search());
+    assert_eq!(search.as_deref(), Some("tag:#idea"));
+    assert_eq!(selections(&view, &mut vcx), [(16, 16)], "the caret stays");
+    // The caret on it shows it as source.
+    caret_at(&view, &mut vcx, 6);
+    assert!(widget_kinds(&view, &mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn emoji_shortcodes_follow_the_profile(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor_with(
+        cx,
+        "hi :smile: there\nnext\n",
+        ParseOptions::builtin(gv_profile::ProfileId::GfmFile),
+    );
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("gfm-file", cx);
+        v.set_live_preview(true, cx);
+    });
+    caret_at(&view, &mut vcx, 20);
+    assert_eq!(shown(&view, &mut vcx), "hi 😄 there\nnext\n");
+    caret_at(&view, &mut vcx, 5);
+    assert_eq!(shown(&view, &mut vcx), "hi :smile: there\nnext\n");
+    // Obsidian has no shortcodes.
+    let (view, mut vcx) = live_obsidian(cx, "hi :smile: there\nnext\n");
+    caret_at(&view, &mut vcx, 20);
+    assert_eq!(shown(&view, &mut vcx), "hi :smile: there\nnext\n");
+}
+
+#[gpui::test]
+fn images_without_a_file_show_their_alt_text(cx: &mut TestAppContext) {
+    let (view, mut vcx) = live(cx, "![A cat](cat.png) and ![](https://x.org/d.png)\nnext\n");
+    caret_at(&view, &mut vcx, 50);
+    assert_eq!(shown(&view, &mut vcx), "A cat and d.png\nnext\n");
+    assert_eq!(widget_kinds(&view, &mut vcx), ["chip", "chip"]);
+}
+
+#[gpui::test]
+fn local_images_show_as_thumbnails_one_line_high(cx: &mut TestAppContext) {
+    let dir = temp(&[("note.md", "![pic](pic.png) and ![[pic.png|10]]\nnext\n")]);
+    image::RgbaImage::from_pixel(40, 20, image::Rgba([10, 20, 30, 255]))
+        .save(dir.path().join("pic.png"))
+        .expect("png");
+    let (window, view) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        gpui::open_window(options(), cx, |_, cx| {
+            cx.new(|cx| EditorView::new(obsidian(), cx))
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let path = dir.path().join("note.md");
+    view.update(&mut vcx, |v, cx| {
+        v.open(path, None, cx);
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    draw(&mut vcx);
+    draw(&mut vcx);
+    draw(&mut vcx);
+    caret_at(&view, &mut vcx, 40);
+    assert_eq!(shown(&view, &mut vcx), "\u{fffc} and \u{fffc}\nnext\n");
+    let probe = probe_of(&view, &mut vcx);
+    let widths: Vec<f32> = probe
+        .widgets
+        .iter()
+        .map(|(b, _)| f32::from(b.size.width))
+        .collect();
+    assert_eq!(widget_kinds(&view, &mut vcx), ["image", "image"]);
+    // Twice as wide as high, one line high; the size in the alias caps it.
+    assert!((widths[0] - 2.0 * LINE).abs() < 0.01, "{widths:?}");
+    assert!((widths[1] - 10.0).abs() < 0.01, "{widths:?}");
+    // Touched, the image shows its source.
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(
+        shown(&view, &mut vcx),
+        "![pic](pic.png) and \u{fffc}\nnext\n"
+    );
+}
+
+#[gpui::test]
+fn widgets_take_their_width_in_soft_wrap(cx: &mut TestAppContext) {
+    // A long paragraph of tasks' worth of math: rows wrap where the boxes
+    // say, and every widget lands on a drawn row.
+    let line = "word $x$ ".repeat(60);
+    let (view, mut vcx) = live_obsidian(cx, &format!("{line}\nnext\n"));
+    let end = line.len() + 3;
+    caret_at(&view, &mut vcx, end);
+    let probe = probe_of(&view, &mut vcx);
+    let rows = rows_of(&probe, 0).len();
+    assert!(rows > 1, "the line wraps");
+    let math = probe.widgets.iter().filter(|(_, k)| *k == "math").count();
+    assert_eq!(math, 60);
+    // Every box stays inside the text column.
+    let columns = probe.columns.expect("columns");
+    for (bounds, _) in &probe.widgets {
+        assert!(f32::from(bounds.right()) <= columns.text_x + columns.text_w + 0.5);
+    }
 }
 
 /// Live Preview keeps its timing budget on a large note: decorating it

@@ -292,7 +292,7 @@ impl ImageTargets {
 }
 
 /// Resolves an image destination of a document (blocking).
-fn image_target(destination: &str, resolver: &Resolver, root: &Path) -> ImageTarget {
+pub(crate) fn image_target(destination: &str, resolver: &Resolver, root: &Path) -> ImageTarget {
     let bare = match scheme_only(destination) {
         Some(_) => destination.rsplit_once('#').map_or(destination, |(d, _)| d),
         None => destination,
