@@ -46,6 +46,7 @@ yanked = "warn"
 ignore = [
   { id = "RUSTSEC-2026-0194", reason = "CSL parsing unused; helper-only; no fixed version (ADR-018)" },
   { id = "RUSTSEC-2026-0195", reason = "CSL parsing unused; helper-only; no fixed version (ADR-018)" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (not a vulnerability); required by GPUI and trash, used here for local dates only" },
 ]
 
 # ---------------------------------------------------------------------------

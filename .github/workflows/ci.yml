@@ -307,5 +307,7 @@ jobs:
             --no-progress
             --include-fragments
             --exclude-path target
+            --exclude-path '(^|/)tests/'
+            --exclude-path '(^|/)fuzz/'
             './**/*.md'
           fail: true
