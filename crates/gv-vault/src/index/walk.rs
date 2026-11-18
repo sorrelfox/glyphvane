@@ -102,7 +102,7 @@ impl Collector<'_> {
             Ok(m) => FileMeta {
                 size: if ft.is_file() { m.len() } else { 0 },
                 mtime: m.modified().ok(),
-                identity: identity(&m),
+                identity: identity(entry.path(), &m),
             },
             Err(e) => {
                 self.error(format!("{}: {e}", entry.path().display()));
@@ -205,13 +205,15 @@ pub(crate) fn entry_of(
     let meta = FileMeta {
         size: if ft.is_file() { m.len() } else { 0 },
         mtime: m.modified().ok(),
-        identity: identity(&m),
+        identity: identity(path, &m),
     };
     Ok((kind, meta))
 }
 
+/// The identity of the entry at `path` with metadata `m`, not following a
+/// final symbolic link (as `m` does not).
 #[cfg(unix)]
-fn identity(m: &fs::Metadata) -> Option<FileIdentity> {
+fn identity(_path: &Path, m: &fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     Some(FileIdentity {
         dev: m.dev(),
@@ -219,10 +221,18 @@ fn identity(m: &fs::Metadata) -> Option<FileIdentity> {
     })
 }
 
-#[cfg(not(unix))]
-fn identity(_m: &fs::Metadata) -> Option<FileIdentity> {
-    // The NTFS file id needs a handle-based query; added with the Windows
-    // watcher work.
+/// The identity of the entry at `path`, not following a final symbolic link
+/// (as `m` does not): its volume serial number and file index.
+#[cfg(windows)]
+fn identity(path: &Path, _m: &fs::Metadata) -> Option<FileIdentity> {
+    crate::files::disk::windows::path_identity(path, false).map(|i| FileIdentity {
+        dev: i.device,
+        ino: i.inode,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity(_path: &Path, _m: &fs::Metadata) -> Option<FileIdentity> {
     None
 }
 

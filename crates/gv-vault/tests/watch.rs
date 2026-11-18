@@ -80,8 +80,10 @@ impl Harness {
         self.watcher.as_ref().expect("running")
     }
 
+    /// The path of `rel` under the root, built by components as the
+    /// watcher builds it (so it holds no `/` on Windows).
     fn path(&self, rel: &str) -> PathBuf {
-        self.root.join(rel)
+        rel.split('/').fold(self.root.clone(), |p, seg| p.join(seg))
     }
 
     fn index(&self) -> PathIndex {

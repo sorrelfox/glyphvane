@@ -40,6 +40,10 @@ url.workspace = true
 # Write access checks, extended attributes and the file-system type for saves.
 rustix = { workspace = true, features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+# File identity (volume serial number and file index) for rename detection.
+windows-sys.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true

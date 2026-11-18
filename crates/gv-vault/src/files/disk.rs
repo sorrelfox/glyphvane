@@ -10,34 +10,112 @@ use std::time::SystemTime;
 
 use super::hash::ContentHash;
 
-/// The identity of a file independent of its name: device and inode on Unix.
-/// A save by rename gives the file a new identity; an in-place write keeps
-/// it.
+/// The identity of a file independent of its name: device and inode on Unix,
+/// volume serial number and file index on Windows. A save by rename gives
+/// the file a new identity; an in-place write keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
-    /// The device.
+    /// The device (the volume serial number on Windows).
     pub device: u64,
-    /// The inode.
+    /// The inode (the file index on Windows).
     pub inode: u64,
 }
 
 impl FileIdentity {
-    /// The identity in `meta`. `None` where the platform does not expose one
-    /// through the standard library (Windows).
-    pub fn of(meta: &fs::Metadata) -> Option<Self> {
+    /// The identity of the file at `path` whose metadata (following
+    /// symbolic links) is `meta`. Unix reads it from `meta`; Windows opens
+    /// `path` to query it. `None` where it cannot be had.
+    pub fn of(path: &Path, meta: &fs::Metadata) -> Option<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let _ = path;
             Some(Self {
                 device: meta.dev(),
                 inode: meta.ino(),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
             let _ = meta;
+            windows::path_identity(path, true)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, meta);
             None
         }
+    }
+
+    /// The identity of the open `file`, with `meta` its metadata.
+    fn of_file(file: &fs::File, meta: &fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            let _ = file;
+            Self::of(Path::new(""), meta)
+        }
+        #[cfg(windows)]
+        {
+            let _ = meta;
+            windows::file_identity(file)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (file, meta);
+            None
+        }
+    }
+}
+
+/// File identity on Windows: `GetFileInformationByHandle`, which the
+/// standard library does not expose on stable.
+#[cfg(windows)]
+pub(crate) mod windows {
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+
+    use super::FileIdentity;
+
+    /// The identity of the entry at `path`, following a final symbolic link
+    /// when `follow`. The entry is opened without read or write access and
+    /// with full sharing, so it neither blocks nor is blocked by other
+    /// handles; directories open too.
+    pub(crate) fn path_identity(path: &Path, follow: bool) -> Option<FileIdentity> {
+        let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+        if !follow {
+            flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+        }
+        let file = fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(flags)
+            .open(path)
+            .ok()?;
+        file_identity(&file)
+    }
+
+    /// The identity of the open `file`.
+    #[expect(
+        unsafe_code,
+        reason = "FFI call to GetFileInformationByHandle; see the SAFETY comment"
+    )]
+    pub(crate) fn file_identity(file: &fs::File) -> Option<FileIdentity> {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the handle is valid for the lifetime of `file`, which
+        // outlives the call, and `info` is a writable struct of the type the
+        // call fills.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
+        (ok != 0).then(|| FileIdentity {
+            device: u64::from(info.dwVolumeSerialNumber),
+            inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
     }
 }
 
@@ -49,7 +127,7 @@ pub struct DiskState {
     pub len: u64,
     /// Last modification time, where the file system has one.
     pub modified: Option<SystemTime>,
-    /// Device and inode (Unix).
+    /// Device and inode, or volume and file index (Windows).
     pub identity: Option<FileIdentity>,
     /// Whether the file is read-only for this process.
     pub read_only: bool,
@@ -58,14 +136,18 @@ pub struct DiskState {
 }
 
 impl DiskState {
-    /// The state of a file with metadata `meta` and contents `bytes`.
-    /// `read_only` is taken from the metadata; [`DiskState::read`] checks
-    /// real write access instead.
-    pub fn from_parts(meta: &fs::Metadata, bytes: &[u8]) -> Self {
+    /// The state of the file at `path` with metadata `meta` and contents
+    /// `bytes`. `read_only` is taken from the metadata; [`DiskState::read`]
+    /// checks real write access instead.
+    pub fn from_parts(path: &Path, meta: &fs::Metadata, bytes: &[u8]) -> Self {
+        Self::with_identity(meta, bytes, FileIdentity::of(path, meta))
+    }
+
+    fn with_identity(meta: &fs::Metadata, bytes: &[u8], identity: Option<FileIdentity>) -> Self {
         Self {
             len: meta.len(),
             modified: meta.modified().ok(),
-            identity: FileIdentity::of(meta),
+            identity,
             read_only: meta.permissions().readonly(),
             hash: ContentHash::of(bytes),
         }
@@ -91,7 +173,8 @@ impl DiskState {
         let meta = file.metadata()?;
         let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
         file.read_to_end(&mut bytes)?;
-        let mut state = Self::from_parts(&meta, &bytes);
+        let identity = FileIdentity::of_file(&file, &meta);
+        let mut state = Self::with_identity(&meta, &bytes, identity);
         // The handle's metadata describes the bytes just read even if the
         // file was replaced meanwhile; only the length can be trusted from
         // the read itself.
@@ -103,10 +186,10 @@ impl DiskState {
     /// Whether `meta` matches this state's length, modification time,
     /// identity and write access. A match is taken as "unchanged" by
     /// [`CheckMode::Quick`].
-    fn stat_matches(&self, meta: &fs::Metadata, writable: bool) -> bool {
+    fn stat_matches(&self, path: &Path, meta: &fs::Metadata, writable: bool) -> bool {
         self.len == meta.len()
             && self.modified == meta.modified().ok()
-            && self.identity == FileIdentity::of(meta)
+            && self.identity == FileIdentity::of(path, meta)
             && self.read_only == !writable
     }
 }
@@ -198,7 +281,7 @@ pub fn check_external_change(
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ExternalChange::Deleted),
             Err(e) => return Err(e),
         };
-        if baseline.stat_matches(&meta, writable) {
+        if baseline.stat_matches(path, &meta, writable) {
             return Ok(ExternalChange::Unchanged);
         }
     }

@@ -416,7 +416,7 @@ fn verify(target: &Path, bytes: &[u8], fs_kind: FsKind) -> Result<(DiskState, bo
             path: target.to_path_buf(),
         });
     }
-    let mut state = DiskState::from_parts(&meta, bytes);
+    let mut state = DiskState::from_parts(target, &meta, bytes);
     state.read_only = !is_writable(target, &meta);
     Ok((state, false))
 }

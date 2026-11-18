@@ -820,7 +820,7 @@ fn stat_matches(path: &Path, state: &DiskState) -> bool {
     fs::metadata(path).is_ok_and(|m| {
         m.len() == state.len
             && m.modified().ok() == state.modified
-            && FileIdentity::of(&m) == state.identity
+            && FileIdentity::of(path, &m) == state.identity
     })
 }
 

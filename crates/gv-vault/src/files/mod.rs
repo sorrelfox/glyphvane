@@ -75,7 +75,7 @@
 mod autosave;
 mod clock;
 mod conflicts;
-mod disk;
+pub(crate) mod disk;
 mod document;
 mod fskind;
 mod hash;
