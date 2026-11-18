@@ -2,8 +2,8 @@
 # Copyright (C) 2026 Glyphvane contributors
 
 # Nightly: the long test runs that do not fit a pull request, and packaged
-# builds of `main` as workflow artifacts (no release, no signing beyond the
-# macOS ad-hoc signature).
+# builds of `main` as workflow artifacts for Linux and Windows (no release,
+# no signing).
 
 name: Nightly
 
@@ -154,16 +154,6 @@ jobs:
             runtime: runtime-aarch64
             runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
             jobs: 2
-          - name: macos-arm64
-            os: macos-15
-            target: aarch64-apple-darwin
-            formats: app,zip,dmg
-            jobs: 2
-          - name: macos-x86_64
-            os: macos-15
-            target: x86_64-apple-darwin
-            formats: app,zip,dmg
-            jobs: 2
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -235,10 +225,6 @@ jobs:
               tar -xzf dist/glyphvane-*.tar.gz -C "$RUNNER_TEMP/tarball"
               "$RUNNER_TEMP"/tarball/glyphvane-*/glyphvane --version
               APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Glyphvane-*.AppImage --version ;;
-            macOS)
-              app="target/package-work/${{ matrix.target }}/macos/Glyphvane.app"
-              codesign --verify --strict --verbose=2 "$app"
-              "$app/Contents/MacOS/glyphvane" --version ;;
             Windows)
               target/${{ matrix.target }}/dist/glyphvane.exe --version ;;
           esac

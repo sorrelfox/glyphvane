@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+#
+# Arch Linux package of the release binaries: repackages the Linux tarball
+# from GitHub Releases (the [profile.dist] glyphvane and glyphvane-helper,
+# the PDF and emoji fonts, the desktop file, the AppStream metadata and the
+# icons) into /usr. The helper goes to /usr/lib/glyphvane/, where glyphvane
+# looks for it; it finds its fonts in /usr/share/glyphvane/fonts/.
+#
+# The release workflow sets pkgver and the checksums, puts the tarball next
+# to this file (makepkg then uses it instead of downloading it) and runs
+# makepkg. For the AUR, set pkgver and run `updpkgsums`.
+
+pkgname=glyphvane-bin
+_pkgname=glyphvane
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Native Markdown viewer and editor"
+arch=('x86_64' 'aarch64')
+url="https://github.com/sorrelfox/glyphvane"
+license=('GPL-3.0-or-later' 'OFL-1.1')
+# Linked: glibc, gcc-libs, alsa-lib, libxcb, libxkbcommon(-x11). Loaded at
+# run time: wayland, Vulkan (vulkan-icd-loader plus a driver) and EGL.
+depends=(
+  'glibc'
+  'gcc-libs'
+  'alsa-lib'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'wayland'
+  'vulkan-icd-loader'
+  'hicolor-icon-theme'
+)
+optdepends=(
+  'libglvnd: EGL, used when Vulkan is not available'
+  'vulkan-driver: GPU rendering'
+  'xdg-desktop-portal: file dialogs, printing and the colour scheme'
+)
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+options=('!strip' '!debug')
+source_x86_64=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "$srcdir/$_pkgname-$pkgver-$CARCH-unknown-linux-gnu"
+
+  install -Dm755 glyphvane "$pkgdir/usr/bin/glyphvane"
+  install -Dm755 glyphvane-helper "$pkgdir/usr/lib/glyphvane/glyphvane-helper"
+
+  install -d "$pkgdir/usr/share"
+  cp -r --no-preserve=ownership share/applications share/metainfo share/icons share/glyphvane \
+    "$pkgdir/usr/share/"
+  find "$pkgdir/usr/share" -type d -exec chmod 755 {} +
+  find "$pkgdir/usr/share" -type f -exec chmod 644 {} +
+
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" \
+    LICENSE THIRD-PARTY-NOTICES.txt share/glyphvane/fonts/*-OFL.txt
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

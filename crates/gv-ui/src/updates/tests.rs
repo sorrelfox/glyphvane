@@ -259,6 +259,14 @@ fn the_build_allows_the_check_by_default() {
     assert!(enabled_by_build());
 }
 
+#[test]
+fn a_flatpak_sandbox_is_recognised_by_its_info_file() {
+    let root = tempfile::tempdir().expect("a temporary folder");
+    assert!(!flatpak_info_in(root.path()));
+    std::fs::write(root.path().join(".flatpak-info"), "[Application]\n").expect("written");
+    assert!(flatpak_info_in(root.path()));
+}
+
 /// A long detail wraps in its own column, clear of the buttons and inside
 /// the window, at every width.
 #[gpui::test]

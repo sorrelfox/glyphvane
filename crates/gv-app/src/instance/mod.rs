@@ -30,9 +30,10 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -222,9 +223,28 @@ pub fn runtime_dir_from_env() -> Option<PathBuf> {
     if cfg!(any(target_os = "macos", windows)) {
         return None;
     }
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
+    runtime_dir(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("FLATPAK_ID"),
+    )
+}
+
+/// The runtime folder for `XDG_RUNTIME_DIR` and `FLATPAK_ID`. Each
+/// `flatpak run` gets its own view of `XDG_RUNTIME_DIR`; only
+/// `app/<FLATPAK_ID>/` in it is shared by every instance of the app, so the
+/// socket goes there.
+pub(crate) fn runtime_dir(
+    xdg_runtime_dir: Option<OsString>,
+    flatpak_id: Option<OsString>,
+) -> Option<PathBuf> {
+    let dir = PathBuf::from(xdg_runtime_dir?);
+    if !dir.is_absolute() {
+        return None;
+    }
+    match flatpak_id.filter(|id| !id.is_empty() && Path::new(id).file_name() == Some(id)) {
+        Some(id) => Some(dir.join("app").join(id)),
+        None => Some(dir),
+    }
 }
 
 /// Becomes the first instance, or hands `request` to the running one.

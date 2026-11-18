@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+
+# Flatpak bundle of the release binaries. Nothing is compiled here: the
+# module repackages the Linux tarball that `cargo xtask package --format
+# tar.gz` makes (the [profile.dist] `glyphvane` and `glyphvane-helper`, the
+# PDF and emoji fonts, the desktop file, the AppStream metadata and the
+# icons) into /app with the deb's layout, so the programs find the helper
+# and the fonts at the same relative paths.
+#
+# Build (the release workflow does this):
+#   cp dist/glyphvane-<version>-<triple>.tar.gz packaging/flatpak/glyphvane.tar.gz
+#   flatpak-builder --user --install-deps-from=flathub --repo=repo \
+#     build-dir packaging/flatpak/io.github.sorrelfox.Glyphvane.yml
+#   flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+#     repo Glyphvane-<version>-<arch>.flatpak io.github.sorrelfox.Glyphvane
+#
+# The app recognises the sandbox by /.flatpak-info: it turns the update
+# check off (Flatpak updates it) and keeps the single-instance socket in
+# $XDG_RUNTIME_DIR/app/io.github.sorrelfox.Glyphvane/, which every
+# instance of the app shares.
+
+app-id: io.github.sorrelfox.Glyphvane
+runtime: org.freedesktop.Platform
+runtime-version: "26.08"
+sdk: org.freedesktop.Sdk
+command: glyphvane
+
+finish-args:
+  # Windows: Wayland, with X11 where there is no Wayland.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU rendering (wgpu / Vulkan).
+  - --device=dri
+  # Audio embeds: cpal opens ALSA's default device, which the runtime
+  # routes to PulseAudio (or PipeWire's PulseAudio server).
+  - --socket=pulseaudio
+  # Remote images in notes. The update check is off in the Flatpak.
+  - --share=network
+  # Links between notes may leave the opened vault (Q-10), so the home
+  # folder rather than portal-only access. File dialogs, printing, opening
+  # links and files, notifications and the colour scheme go through the
+  # desktop portals, which need no permission here.
+  - --filesystem=home
+
+modules:
+  - name: glyphvane
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 glyphvane /app/bin/glyphvane
+      - install -Dm755 glyphvane-helper /app/libexec/glyphvane/glyphvane-helper
+      - mkdir -p /app/share
+      - cp -r share/applications share/metainfo share/icons share/glyphvane /app/share/
+      - install -Dm644 -t /app/share/licenses/io.github.sorrelfox.Glyphvane LICENSE THIRD-PARTY-NOTICES.txt
+    sources:
+      # The release tarball for this architecture, copied here under a
+      # fixed name before the build. Its top folder is stripped.
+      - type: archive
+        path: glyphvane.tar.gz

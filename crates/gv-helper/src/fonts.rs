@@ -6,7 +6,8 @@
 //! The packages ship Inter and JetBrains Mono (variable, OFL-1.1) in
 //! `share/glyphvane/fonts/`: next to the helper in the tarball and the
 //! Windows zip, `../share/` in the AppImage, `../../share/` from
-//! `/usr/libexec/glyphvane/` in the deb and rpm, and
+//! `/usr/libexec/glyphvane/` in the deb and rpm (`/usr/lib/glyphvane/` in
+//! the Arch package), and
 //! `Contents/Resources/fonts/` in the macOS bundle. A family the bundled
 //! faces have is taken from them only, never from the installed fonts, so
 //! the same note gives the same PDF on every machine. Families they lack

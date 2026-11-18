@@ -8,7 +8,8 @@
 //!   on (first-run onboarding asks; the settings window can change it).
 //!   Builds for a package manager turn the check off at build time
 //!   (`GLYPHVANE_UPDATE_CHECK=off`), since the package manager updates
-//!   them.
+//!   them. The Flatpak repackages the release binaries, so it is
+//!   recognised at run time instead ([`in_flatpak`]).
 //! - **At most once a day**, in the background: the first look is a
 //!   minute after start-up, then every 30 minutes the schedule is
 //!   consulted. A failed request is retried after 1 h, 2 h, 4 h … up to a
@@ -31,7 +32,8 @@ pub mod notices;
 mod tests;
 pub mod version;
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext as _, Global, PromptLevel};
@@ -57,6 +59,24 @@ const TICK: Duration = Duration::from_secs(30 * 60);
 /// check off when they are built.
 pub fn enabled_by_build() -> bool {
     !matches!(option_env!("GLYPHVANE_UPDATE_CHECK"), Some("off" | "0"))
+}
+
+/// Whether this copy may check at all: not when the build turns the check
+/// off ([`enabled_by_build`]) and not inside a Flatpak, which Flatpak
+/// keeps up to date.
+pub fn enabled() -> bool {
+    enabled_by_build() && !in_flatpak()
+}
+
+/// Whether this copy runs inside a Flatpak sandbox (`/.flatpak-info`).
+pub fn in_flatpak() -> bool {
+    static IN_FLATPAK: OnceLock<bool> = OnceLock::new();
+    *IN_FLATPAK.get_or_init(|| cfg!(target_os = "linux") && flatpak_info_in(Path::new("/")))
+}
+
+/// Whether `root` holds the file Flatpak puts at the root of every sandbox.
+fn flatpak_info_in(root: &Path) -> bool {
+    root.join(".flatpak-info").is_file()
 }
 
 /// The update checker.
@@ -128,7 +148,7 @@ fn now(cx: &mut App) -> u64 {
 /// Whether automatic checks are on: the user opted in, the build allows
 /// it, and this is not safe mode.
 pub fn automatic(cx: &App) -> bool {
-    enabled_by_build()
+    enabled()
         && cx
             .try_global::<AppSettings>()
             .is_some_and(|s| !s.safe_mode() && s.settings().general.check_for_updates)
@@ -179,7 +199,7 @@ pub fn tick(cx: &mut App) {
 /// `app.check_for_updates`: checks now and answers in a dialog. Without
 /// the opt-in, asks first.
 pub fn check_now(cx: &mut App) {
-    if !enabled_by_build() {
+    if !enabled() {
         prompt(
             cx,
             PromptLevel::Info,

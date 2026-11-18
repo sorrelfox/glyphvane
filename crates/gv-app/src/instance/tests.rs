@@ -248,6 +248,36 @@ fn a_rejected_wait_starts_on_its_own() {
     assert!(matches!(claim, Claim::Standalone), "{claim:?}");
 }
 
+#[test]
+fn the_runtime_folder_is_the_apps_own_inside_a_flatpak() {
+    let dir =
+        |xdg: Option<&str>, id: Option<&str>| runtime_dir(xdg.map(Into::into), id.map(Into::into));
+    assert_eq!(dir(None, None), None);
+    assert_eq!(dir(Some("relative"), None), None);
+    assert_eq!(
+        dir(Some("/run/user/1000"), None),
+        Some(PathBuf::from("/run/user/1000"))
+    );
+    assert_eq!(
+        dir(
+            Some("/run/user/1000"),
+            Some("io.github.sorrelfox.Glyphvane")
+        ),
+        Some(PathBuf::from(
+            "/run/user/1000/app/io.github.sorrelfox.Glyphvane"
+        ))
+    );
+    // An unusable id is ignored.
+    assert_eq!(
+        dir(Some("/run/user/1000"), Some("")),
+        Some(PathBuf::from("/run/user/1000"))
+    );
+    assert_eq!(
+        dir(Some("/run/user/1000"), Some("../x")),
+        Some(PathBuf::from("/run/user/1000"))
+    );
+}
+
 #[cfg(unix)]
 mod unix {
     use std::fs;

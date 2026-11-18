@@ -281,7 +281,7 @@ Examples: `feat(parser): parse GFM task list items`,
 - Keep pull requests focused; split unrelated changes.
 - Fill in the pull request template: tests, docs, performance impact and,
   for UI changes, screenshots in all three themes.
-- CI must pass on Linux (x64 and arm64), macOS and Windows, together with
+- CI must pass on Linux (x64 and arm64) and Windows, together with
   `cargo-deny` and the Markdown link check.
 - Update user-facing documentation when behaviour changes.
 

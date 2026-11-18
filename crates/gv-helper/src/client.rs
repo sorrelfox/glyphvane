@@ -38,7 +38,8 @@ const POLL: Duration = Duration::from_millis(25);
 /// 1. in debug builds, the `GLYPHVANE_HELPER` environment variable;
 /// 2. next to the executable (symlinks resolved, so a macOS
 ///    `/usr/local/bin/glyphvane` link finds the bundle's helper);
-/// 3. on Linux, `<exe_dir>/../libexec/glyphvane/` (deb and rpm);
+/// 3. on Linux, `<exe_dir>/../libexec/glyphvane/` (deb, rpm, Flatpak)
+///    or `<exe_dir>/../lib/glyphvane/` (Arch Linux);
 /// 4. the build-time `GLYPHVANE_HELPER_PATH`, for distribution packagers.
 pub fn locate() -> Option<PathBuf> {
     if cfg!(debug_assertions)
@@ -53,6 +54,7 @@ pub fn locate() -> Option<PathBuf> {
     let mut candidates = vec![dir.join(&name)];
     if cfg!(target_os = "linux") {
         candidates.push(dir.join("../libexec/glyphvane").join(&name));
+        candidates.push(dir.join("../lib/glyphvane").join(&name));
     }
     if let Some(path) = option_env!("GLYPHVANE_HELPER_PATH") {
         candidates.push(PathBuf::from(path));

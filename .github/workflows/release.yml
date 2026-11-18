@@ -3,14 +3,14 @@
 
 # Release pipeline: build every target with [profile.dist], package with one
 # pinned tool per format (`cargo xtask package`), sign (Windows: SignPath
-# when configured; macOS: ad-hoc), then checksums, build-provenance
+# when configured), then checksums, build-provenance
 # attestations, an SBOM, and a draft GitHub Release.
 #
 # Secrets and variables (all optional; without them Windows builds ship
 # unsigned):
 #   secrets.SIGNPATH_API_TOKEN       SignPath API token (environment `release`)
 #   vars.SIGNPATH_ORGANIZATION_ID    SignPath organization id
-# No Apple credentials: macOS builds are ad-hoc signed and not notarized.
+# Linux and Windows only: there are no macOS builds.
 
 name: Release
 
@@ -179,77 +179,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  macos:
-    name: macOS (${{ matrix.arch }})
-    needs: check
-    # Off for now: GitHub's macOS runners had no capacity for 1.0.0. Remove
-    # this line, and add `macos` back to the publish job's `needs`, to
-    # build the macOS downloads again.
-    if: false
-    # Both architectures build on the arm64 runner. One download per
-    # architecture rather than a universal binary, to stay within the
-    # 50 MB download budget (NFR-SIZE-03).
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
-    runs-on: macos-15
-    timeout-minutes: 240
-    permissions:
-      contents: read
-    env:
-      # 7 GB runners: keep the GUI build to 2 parallel jobs.
-      CARGO_BUILD_JOBS: 2
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install
-          rustup target add ${{ matrix.target }}
-
-      - name: Set SOURCE_DATE_EPOCH to the commit time
-        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
-
-      # Both executables: `xtask package --no-build` packages glyphvane-helper
-      # (and the PDF fonts) whenever gv-helper has its binary.
-      - name: Build
-        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app -p gv-helper
-
-      # Builds Glyphvane.app (Info.plist template, iconutil), signs it ad hoc
-      # inside-out and verifies it, then wraps it with ditto and hdiutil.
-      - name: Package and sign (ad hoc)
-        run: >-
-          cargo xtask package --no-build
-          --target ${{ matrix.target }}
-          --format app,zip,dmg
-          --out dist
-
-      - name: Smoke test
-        run: |
-          app="target/package-work/${{ matrix.target }}/macos/Glyphvane.app"
-          codesign --verify --strict --verbose=2 "$app"
-          codesign --display --verbose=2 "$app"
-          otool -L "$app/Contents/MacOS/glyphvane"
-          # The x86_64 build runs under Rosetta on the arm64 runner.
-          "$app/Contents/MacOS/glyphvane" --version
-          hdiutil verify dist/Glyphvane-*.dmg
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-macos-${{ matrix.arch }}
-          path: |
-            dist/*
-            !dist/SHA256SUMS
-          if-no-files-found: error
-          retention-days: 7
-
   windows:
     name: Windows (${{ matrix.arch }})
     needs: check
@@ -376,9 +305,155 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Repackages the Linux job's tarball (no compiling) into a Flatpak bundle
+  # on the freedesktop runtime: packaging/flatpak/.
+  flatpak:
+    name: Flatpak (${{ matrix.arch }})
+    needs: [check, linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      APP_ID: io.github.sorrelfox.Glyphvane
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: linux
+
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder appstream desktop-file-utils dbus-daemon
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # flatpak-builder installs the runtime and SDK from Flathub and runs
+      # AppStream compose on the metadata.
+      - name: Build
+        run: |
+          cp "linux/glyphvane-$VERSION-${{ matrix.target }}.tar.gz" packaging/flatpak/glyphvane.tar.gz
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --force-clean --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/build-dir" \
+            "packaging/flatpak/$APP_ID.yml"
+
+      - name: Check the metadata
+        run: |
+          files="$RUNNER_TEMP/build-dir/files"
+          appstreamcli validate --no-net --explain "$files/share/metainfo/$APP_ID.metainfo.xml"
+          desktop-file-validate "$files/share/applications/$APP_ID.desktop"
+          ls "$files/share/app-info/xmls/$APP_ID.xml.gz"
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          flatpak build-bundle \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            "$RUNNER_TEMP/repo" "dist/Glyphvane-$VERSION-${{ matrix.arch }}.flatpak" "$APP_ID"
+
+      - name: Smoke test
+        run: |
+          flatpak install --user -y --noninteractive "dist/Glyphvane-$VERSION-${{ matrix.arch }}.flatpak"
+          dbus-run-session -- flatpak run "$APP_ID" --version | tee "$RUNNER_TEMP/version"
+          grep -q "$VERSION" "$RUNNER_TEMP/version"
+          # PDF export runs the helper from /app/libexec with the bundled fonts.
+          printf '# Smoke test\n\nSome *text* and `code`.\n' > "$RUNNER_TEMP/smoke.md"
+          dbus-run-session -- flatpak run "$APP_ID" export --pdf "$RUNNER_TEMP/smoke.md" -o "$RUNNER_TEMP/flatpak.pdf"
+          head -c 5 "$RUNNER_TEMP/flatpak.pdf" | grep -q '%PDF-'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-flatpak-${{ matrix.arch }}
+          path: dist/*.flatpak
+          if-no-files-found: error
+          retention-days: 7
+
+  # Repackages the Linux job's tarball (no compiling) with makepkg in an
+  # Arch Linux container: packaging/arch/PKGBUILD. x86_64 only, since Arch
+  # Linux ARM is a separate, unofficial port.
+  arch:
+    name: Arch Linux (x86_64)
+    needs: [check, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux-x86_64
+          path: linux
+
+      - name: Set SOURCE_DATE_EPOCH to the commit time
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # makepkg finds the tarball next to the PKGBUILD and does not download
+      # it; pkgver and the checksum are set for this release.
+      - name: Build (makepkg)
+        run: |
+          tarball="glyphvane-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$RUNNER_TEMP/arch" dist
+          cp packaging/arch/PKGBUILD "linux/$tarball" "$RUNNER_TEMP/arch/"
+          sum=$(sha256sum "linux/$tarball" | cut -d' ' -f1)
+          sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" \
+            -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$sum')/" "$RUNNER_TEMP/arch/PKGBUILD"
+          docker run --rm -e SOURCE_DATE_EPOCH -v "$RUNNER_TEMP/arch:/build" archlinux:base-devel \
+            bash -euo pipefail -c '
+              useradd -m builder
+              chown -R builder /build
+              su builder -c "cd /build && makepkg --nodeps --noconfirm"
+              chmod -R a+rX /build'
+          cp "$RUNNER_TEMP/arch/glyphvane-bin-$VERSION-1-x86_64.pkg.tar.zst" \
+            "dist/glyphvane-$VERSION-1-x86_64.pkg.tar.zst"
+
+      - name: Smoke test (pacman -U)
+        run: |
+          docker run --rm -e VERSION -v "$PWD/dist:/dist:ro" archlinux:latest \
+            bash -euo pipefail -c '
+              pacman -Syu --noconfirm >/dev/null
+              pacman -U --noconfirm /dist/glyphvane-*.pkg.tar.zst >/dev/null
+              glyphvane --version | grep -q "$VERSION"
+              printf "# Smoke test\n" | glyphvane render - | grep -q "<h1>Smoke test</h1>"
+              # PDF export runs the helper from /usr/lib/glyphvane.
+              printf "# Smoke test\n\nSome *text* and \`code\`.\n" > /tmp/smoke.md
+              glyphvane export --pdf /tmp/smoke.md -o /tmp/arch.pdf
+              head -c 5 /tmp/arch.pdf | grep -q "%PDF-"'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-arch-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Checksums, attestations, SBOM, draft release
-    needs: [check, linux, windows]
+    needs: [check, linux, windows, flatpak, arch]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -431,15 +506,24 @@ jobs:
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Downloads
+
+          | System | File | Install |
+          |---|---|---|
+          | Debian, Ubuntu | \`glyphvane_${VERSION}-1_<arch>.deb\` | \`sudo apt install ./glyphvane_${VERSION}-1_<arch>.deb\` |
+          | Fedora, openSUSE | \`glyphvane-${VERSION}-1.<arch>.rpm\` | \`sudo dnf install ./glyphvane-${VERSION}-1.<arch>.rpm\` |
+          | Arch Linux (x86_64) | \`glyphvane-${VERSION}-1-x86_64.pkg.tar.zst\` | \`sudo pacman -U glyphvane-${VERSION}-1-x86_64.pkg.tar.zst\` |
+          | Any Linux (Flatpak) | \`Glyphvane-${VERSION}-<arch>.flatpak\` | \`flatpak install --user Glyphvane-${VERSION}-<arch>.flatpak\` |
+          | Any Linux | \`Glyphvane-${VERSION}-<arch>.AppImage\` | make it executable and run it |
+          | Any Linux | \`glyphvane-${VERSION}-<target>.tar.gz\` | unpack and run \`glyphvane\` |
+          | Windows | \`.msi\` or \`.zip\` (x64, arm64) | run the installer, or unpack the zip |
+
           ## Verifying the downloads
 
           \`\`\`sh
           sha256sum --check --ignore-missing SHA256SUMS
           gh attestation verify <file> --repo $GITHUB_REPOSITORY
           \`\`\`
-
-          This release has builds for Linux and Windows. macOS builds will
-          follow in a later release.
 
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* \
