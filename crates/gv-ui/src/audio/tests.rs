@@ -282,6 +282,9 @@ fn unsupported_file_reports_failure(cx: &mut TestAppContext) {
     std::fs::write(&path, vec![0x5a; 2048]).expect("writes the test file");
     let mut f = player(cx, path, true);
     f.wait("error", |v| v.error().is_some());
+    // The event is emitted with the state change but delivered in a later
+    // effect flush; a slow machine can look in between.
+    f.vcx.run_until_parked();
     assert_eq!(
         f.events.borrow().as_slice(),
         [AudioPlayerEvent::Failed(AudioError::UnsupportedFormat)]

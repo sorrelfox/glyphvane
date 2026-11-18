@@ -219,9 +219,25 @@ proptest! {
         profile in prop::sample::select(PROFILES.to_vec()),
         wiki in any::<bool>(),
     ) {
-        // No NFC/NFD twins (they are different files and legitimately differ).
-        let mut seen = BTreeSet::new();
-        let paths: Vec<String> = paths.into_iter().filter(|p| seen.insert(nfc_key(p).into_owned())).collect();
+        // No NFC/NFD twins, of files or of the folders they are in (they are
+        // different entries and legitimately differ).
+        let mut spelled: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let paths: Vec<String> = paths
+            .into_iter()
+            .filter(|p| {
+                let mut prefixes = p.match_indices('/').map(|(i, _)| &p[..i]).collect::<Vec<_>>();
+                prefixes.push(p);
+                let clash = prefixes.iter().any(|raw| {
+                    spelled.get(nfc_key(raw).as_ref()).is_some_and(|seen| seen != raw)
+                }) || spelled.contains_key(nfc_key(p).as_ref());
+                if !clash {
+                    for raw in prefixes {
+                        spelled.insert(nfc_key(raw).into_owned(), raw.to_owned());
+                    }
+                }
+                !clash
+            })
+            .collect();
         let idx = index_of(&paths);
         let target = pick.get(&paths);
         let text = link_text(target, basename, !wiki);
