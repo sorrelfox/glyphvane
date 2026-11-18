@@ -20,6 +20,7 @@ use gpui::{
     MouseButton, MouseDownEvent, ParentElement as _, Quad, Render, ScaledPixels, Styled as _,
     TestAppContext, VisualTestContext, Window, div, px,
 };
+#[cfg_attr(not(unix), allow(unused_imports))]
 use gv_inline::{
     Affinity, Background, BoxKind, DecorationKind, InlineBox, LineHeight, Paragraph,
     ParagraphBuilder, ParagraphStyle, RunStyle, Strikethrough, StyleId, Underline, UnderlineStyle,

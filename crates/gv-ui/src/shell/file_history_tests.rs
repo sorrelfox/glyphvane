@@ -204,9 +204,9 @@ fn histories_follow_renames_and_moved_folders(cx: &mut TestAppContext) {
     let root = f.dir.path().to_path_buf();
     let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     std::fs::create_dir(root.join("Dir")).expect("dir");
-    std::fs::write(root.join("Dir/C.md"), "c\n").expect("write");
+    std::fs::write(root.join("Dir").join("C.md"), "c\n").expect("write");
     store_in(&root)
-        .record(&root.join("Dir/C.md"), b"c old\n", t0)
+        .record(&root.join("Dir").join("C.md"), b"c old\n", t0)
         .expect("kept");
 
     std::fs::rename(root.join("A.md"), root.join("Z.md")).expect("renamed");
@@ -218,9 +218,9 @@ fn histories_follow_renames_and_moved_folders(cx: &mut TestAppContext) {
     });
     let count = |path: &Path| store_in(&root).versions(path).map_or(0, |v| v.len());
     let z = root.join("Z.md");
-    let c = root.join("Moved/C.md");
+    let c = root.join("Moved").join("C.md");
     f.until("Z's history", |_| count(&z) == 1);
     f.until("C's history", |_| count(&c) == 1);
     assert_eq!(count(&root.join("A.md")), 0);
-    assert_eq!(count(&root.join("Dir/C.md")), 0);
+    assert_eq!(count(&root.join("Dir").join("C.md")), 0);
 }

@@ -211,6 +211,12 @@ fn bounds_are_fitted_to_the_displays() {
     );
 }
 
+/// `path` made absolute the way the recent lists store it (on Windows
+/// `/n/1.md` gains the current drive).
+fn abs(path: &str) -> PathBuf {
+    std::path::absolute(path).expect("absolute")
+}
+
 #[test]
 fn recent_lists_move_to_the_front_and_are_bounded() {
     let mut session = Session::default();
@@ -218,9 +224,9 @@ fn recent_lists_move_to_the_front_and_are_bounded() {
         session.touch_recent_file(Path::new(&format!("/n/{i}.md")));
     }
     assert_eq!(session.recent_files.len(), RECENT_LIMIT);
-    assert_eq!(session.recent_files[0], Path::new("/n/54.md"));
+    assert_eq!(session.recent_files[0], abs("/n/54.md"));
     session.touch_recent_file(Path::new("/n/30.md"));
-    assert_eq!(session.recent_files[0], Path::new("/n/30.md"));
+    assert_eq!(session.recent_files[0], abs("/n/30.md"));
     assert_eq!(session.recent_files.len(), RECENT_LIMIT);
     assert_eq!(
         session
@@ -233,7 +239,7 @@ fn recent_lists_move_to_the_front_and_are_bounded() {
     session.touch_recent_folder(Path::new("/n"));
     session.touch_recent_folder(Path::new("/m"));
     session.touch_recent_folder(Path::new("/n"));
-    assert_eq!(session.recent_folders, [Path::new("/n"), Path::new("/m")]);
+    assert_eq!(session.recent_folders, [abs("/n"), abs("/m")]);
 }
 
 #[test]

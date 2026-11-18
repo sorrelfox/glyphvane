@@ -164,7 +164,9 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|cx| {
-            assert_eq!(cx.global::<Synced>().files, paths(&["/notes/a.md"]));
+            // Stored absolute: on Windows `/notes/a.md` gains the current drive.
+            let expected = std::path::absolute("/notes/a.md").expect("absolute");
+            assert_eq!(cx.global::<Synced>().files, [expected]);
         });
     }
 }

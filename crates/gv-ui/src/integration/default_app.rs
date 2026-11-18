@@ -60,13 +60,25 @@ const DESKTOP_FILE: &str = "io.github.sorrelfox.Glyphvane.desktop";
 const MIME_TYPES: &[&str] = &["text/markdown", "text/x-markdown"];
 
 /// Carries out the offer; `done` gets a sentence for the user.
+///
+/// `done` always runs later, never inside this call: the caller is usually
+/// in the middle of updating the view that `done` updates again.
 pub fn apply(cx: &mut App, done: impl FnOnce(Result<String, String>, &mut App) + 'static) {
-    match offer() {
+    apply_offer(offer(), cx, done);
+}
+
+/// [`apply`] for a given offer, so every platform's branch can be tested.
+fn apply_offer(
+    offer: Offer,
+    cx: &mut App,
+    done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+) {
+    match offer {
         Offer::OpenSystemSettings => {
             crate::platform::launcher(cx).open_url("ms-settings:defaultapps", cx);
-            done(Ok("Settings ▸ Default apps is open.".to_owned()), cx);
+            cx.defer(move |cx| done(Ok("Settings ▸ Default apps is open.".to_owned()), cx));
         }
-        Offer::Explain => done(Ok(description().to_owned()), cx),
+        Offer::Explain => cx.defer(move |cx| done(Ok(description().to_owned()), cx)),
         Offer::SetDirectly => {
             let task = cx.background_spawn(async { set_with_xdg_mime() });
             cx.spawn(async move |cx| {
@@ -94,4 +106,34 @@ fn set_with_xdg_mime() -> Result<String, String> {
 fn set_with_xdg_mime() -> Result<String, String> {
     let _ = (DESKTOP_FILE, MIME_TYPES);
     Ok("test: not run".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// Holds the answer, like the onboarding view.
+    struct View(Option<String>);
+
+    #[gpui::test]
+    fn every_offer_answers_after_the_caller_is_done(cx: &mut TestAppContext) {
+        for offer in [
+            Offer::OpenSystemSettings,
+            Offer::Explain,
+            Offer::SetDirectly,
+        ] {
+            let view = cx.new(|_| View(None));
+            // Like the button: the answer updates the view that asked.
+            view.update(cx, |_, cx| {
+                let weak = cx.entity().downgrade();
+                apply_offer(offer, cx, move |result, cx| {
+                    let _ = weak.update(cx, |this, _| this.0 = result.ok());
+                });
+            });
+            cx.run_until_parked();
+            assert!(view.read_with(cx, |v, _| v.0.is_some()), "{offer:?}");
+        }
+    }
 }

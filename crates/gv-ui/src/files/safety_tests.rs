@@ -7,11 +7,13 @@
 //! the large-file and read-only infobars, in headless windows over
 //! temporary files.
 
+#[cfg_attr(not(unix), allow(unused_imports))]
 use std::path::Path;
 use std::time::Duration;
 
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use gv_vault::WatchEvent;
+#[cfg_attr(not(unix), allow(unused_imports))]
 use gv_vault::files::ExternalChange;
 use gv_vault::files::journal::JournalStore;
 use gv_vault::index::conflict::SyncService;

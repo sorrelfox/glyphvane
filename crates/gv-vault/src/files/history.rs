@@ -335,6 +335,9 @@ impl HistoryStore {
     // ----- inside ---------------------------------------------------------------
 
     fn log_path(&self, path: &Path) -> PathBuf {
+        // Rebuilt from its components, so `a/./b`, `a//b` and (on Windows)
+        // `C:\a/b` share the log of `a/b` and `C:\a\b`.
+        let path: PathBuf = path.components().collect();
         let key = ContentHash::of(path.as_os_str().as_encoded_bytes()).to_hex();
         self.dir.join(LOGS).join(format!("{}.log", &key[..32]))
     }
@@ -877,6 +880,20 @@ mod tests {
         assert!(matches!(store.read(&newest), Err(HistoryError::Damaged(_))));
         fs::remove_file(&object).expect("removed");
         assert!(matches!(store.read(&newest), Err(HistoryError::Missing)));
+    }
+
+    #[test]
+    fn spellings_of_one_path_share_a_history() {
+        let (_dir, store) = store(HistoryPolicy::default());
+        store
+            .record(Path::new("/v/dir/./a.md"), b"one", t0())
+            .expect("record");
+        assert_eq!(texts(&store, Path::new("/v/dir/a.md")), vec!["one"]);
+        assert_eq!(texts(&store, Path::new("/v//dir/a.md")), vec!["one"]);
+        if cfg!(windows) {
+            // Either separator, as Windows itself accepts.
+            assert_eq!(texts(&store, Path::new("/v\\dir/a.md")), vec!["one"]);
+        }
     }
 
     #[test]

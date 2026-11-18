@@ -893,6 +893,9 @@ fn a_filesystem_root_is_never_indexed_unasked(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &[], None);
     let root = PathBuf::from(std::path::MAIN_SEPARATOR_STR);
     f.answer(Ok(Some(vec![root.clone()])));
+    // The vault keeps the folder absolute: on Windows `\` is the current
+    // drive's root, such as `D:\`.
+    let root = std::path::absolute(&root).expect("absolute");
     f.dispatch(file_commands::OpenFolder);
     f.settle();
     assert_eq!(f.topic(), Some(Topic::IndexAsk));
