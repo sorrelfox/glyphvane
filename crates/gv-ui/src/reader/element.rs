@@ -591,6 +591,7 @@ impl Element for ReaderElement {
         // and the room beside it that tables and diagrams too wide for it
         // may grow into.
         let (x0, column) = st.layout.column(bounds, st.column_max);
+        let is_block = st.layout == super::ReaderLayout::Block;
         let (area, limit) = st.layout.wide(bounds, (x0, column), st.wide_max);
         let limit_changed = st.cache.set_limit(limit);
         find::reveal_current(st, column, &ts);
@@ -1938,7 +1939,13 @@ impl Element for ReaderElement {
         // The scrollbar: a thumb, no track.
         let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
         let track_h = f32::from(bounds.size.height) - 2.0 * scrollbar::INSET_Y;
-        if let Some(thumb) = engine.thumb(track_h, SCROLLBAR_MIN_THUMB) {
+        // A Live Preview block is as tall as its content: no scrollbar.
+        let thumb = if is_block {
+            None
+        } else {
+            engine.thumb(track_h, SCROLLBAR_MIN_THUMB)
+        };
+        if let Some(thumb) = thumb {
             let right = f32::from(bounds.right());
             let x = right - scrollbar::INSET_X - SCROLLBAR_THUMB;
             let rect = bounds_of(x, track_top + thumb.top, SCROLLBAR_THUMB, thumb.height);

@@ -30,6 +30,7 @@ mod autocomplete;
 mod code;
 mod find;
 mod fold;
+mod live_blocks;
 mod live_preview;
 mod paste;
 mod plain;

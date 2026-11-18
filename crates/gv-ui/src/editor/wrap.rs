@@ -523,9 +523,28 @@ impl EditorView {
         let doc = self.doc.as_mut()?;
         let (line, delta) = {
             let map = RowMap::of(&doc.editor);
-            let row = ((self.scroll_y - pad) / old_px).floor().max(0.0) as usize;
+            // Live Preview blocks: rows are where the block layer has them.
+            let blocks = doc.editor.blocks();
+            let blocks = (blocks.block_count() > 0).then_some(blocks);
+            let row = match blocks {
+                Some(blocks) => {
+                    let y = gv_editor::display_map::Y::from_px((self.scroll_y - pad).max(0.0));
+                    match blocks.item_at(y) {
+                        Some(gv_editor::display_map::DisplayItem::Row { row, .. }) => row as usize,
+                        Some(gv_editor::display_map::DisplayItem::Block(item)) => {
+                            item.rows.start as usize
+                        }
+                        None => map.row_count(),
+                    }
+                }
+                None => ((self.scroll_y - pad) / old_px).floor().max(0.0) as usize,
+            };
             let line = map.line_of_row(row);
-            let line_top = pad + map.first_row(line) as f64 * old_px;
+            let line_top = pad
+                + match blocks {
+                    Some(blocks) => blocks.row_top(map.first_row(line) as u32).to_px(),
+                    None => map.first_row(line) as f64 * old_px,
+                };
             // Into the line's rows: scaled with them; above the first row
             // (the top padding, which does not scale): kept.
             let delta = self.scroll_y - line_top;
@@ -543,7 +562,13 @@ impl EditorView {
             let map = RowMap::of(&doc.editor);
             let first = map.first_row(line);
             let rows = map.row_end(line).saturating_sub(first).max(1) as f64;
-            let line_top = pad + first as f64 * new_px;
+            let line_top = if doc.editor.blocks().block_count() > 0 {
+                doc.editor
+                    .set_row_height(gv_editor::display_map::Height::from_px(new_px as f32));
+                pad + doc.editor.blocks().row_top(first as u32).to_px()
+            } else {
+                pad + first as f64 * new_px
+            };
             self.scroll_y = (line_top + delta.min(rows * new_px - 1.0)).max(0.0);
         }
         Some(result)

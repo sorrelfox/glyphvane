@@ -161,6 +161,19 @@ pub(super) struct LivePreview {
     tag_search: std::cell::RefCell<Option<Arc<str>>>,
     /// Clickable widgets drawn in the last frame: bounds and id.
     pub hits: Vec<(gpui::Bounds<gpui::Pixels>, gv_editor::display_map::WidgetId)>,
+    /// Block widgets ([`super::live_blocks`]).
+    pub blocks: super::live_blocks::LiveBlocks,
+    /// The blocks drawn in the last frame: id, bounds and view.
+    pub blocks_drawn: Vec<(
+        gv_editor::display_map::BlockId,
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Entity<crate::reader::Reader>,
+    )>,
+    /// A press went to a block's view: the editor takes the focus back
+    /// when it ends.
+    pub refocus: bool,
+    /// The profile block views read their source with.
+    pub profile: Option<Arc<gv_profile::CompiledProfile>>,
 }
 
 impl LivePreview {
@@ -172,6 +185,7 @@ impl LivePreview {
         self.job_for = None;
         self._job = None;
         self.widgets.reset();
+        self.blocks.invalidate();
     }
 }
 
@@ -654,7 +668,8 @@ fn decorate(
 }
 
 /// What `leaves` (from [`decorate`]) put in the layer inside `span`, with
-/// the constructs a selection touches (ends included) revealed: hidden
+/// the constructs a selection touches (ends included) revealed, and the
+/// widgets a caret is strictly inside or a selection overlaps: hidden
 /// ranges and widgets, sorted, not overlapping.
 fn hidden_ranges(
     leaves: &[(usize, Decor)],
@@ -665,6 +680,19 @@ fn hidden_ranges(
         let index = selections.partition_point(|s| s.end < range.start);
         selections.get(index).is_some_and(|s| s.start <= range.end)
     };
+    let inside = |range: &Range<usize>| {
+        let index = selections.partition_point(|s| s.end < range.start);
+        selections[index..]
+            .iter()
+            .take_while(|s| s.start <= range.end)
+            .any(|s| {
+                if s.is_empty() {
+                    range.start < s.start && s.start < range.end
+                } else {
+                    s.start < range.end && s.end > range.start
+                }
+            })
+    };
     let first = leaves.partition_point(|(start, _)| *start < span.start);
     let mut out: Vec<Desired> = Vec::new();
     for (start, decor) in &leaves[first..] {
@@ -673,7 +701,16 @@ fn hidden_ranges(
         }
         for construct in decor.iter() {
             let range = start + construct.range.start..start + construct.range.end;
-            if touched(&range) {
+            // An inline widget stays drawn while a caret is only next to
+            // it: it shows its source when a caret is strictly inside or a
+            // selection overlaps it. Markers show when anything touches
+            // their construct, ends included.
+            let revealed = if construct.widget.is_some() {
+                inside(&range)
+            } else {
+                touched(&range)
+            };
+            if revealed {
                 continue;
             }
             out.extend(
@@ -757,17 +794,28 @@ pub(crate) fn splices_between(
         .collect()
 }
 
+/// Where widgets are made for a splice.
+pub(super) struct WidgetEnv<'a> {
+    pub sizes: &'a Sizes,
+    /// Images are found through it.
+    pub resolver: Option<&'a crate::reader::Resolver>,
+    /// Images are decoded only inside it (the lines on screen with a
+    /// margin).
+    pub load: Range<usize>,
+    /// Lines that are images on their own (block widgets): no inline
+    /// widget there.
+    pub lone_images: &'a [Range<usize>],
+}
+
 /// The splices that bring the layer to what `leaves` put in `span` with
-/// `selections`: widgets measured for `sizes` (images found through
-/// `resolver`).
+/// `selections`, widgets made in `env`.
 fn splices_for(
     editor: &gv_editor::Editor,
     leaves: &[(usize, Decor)],
     span: Range<usize>,
     selections: &[Range<usize>],
     widgets: &mut Widgets,
-    sizes: &Sizes,
-    resolver: Option<&crate::reader::Resolver>,
+    env: &WidgetEnv<'_>,
 ) -> Vec<(Range<usize>, Vec<Replacement>)> {
     // A leaf that starts in the span may end after it.
     let span = span.start
@@ -777,11 +825,21 @@ fn splices_for(
             .max()
             .unwrap_or(0)
             .max(span.end);
+    let lone = |range: &Range<usize>| {
+        let index = env.lone_images.partition_point(|l| l.end < range.start);
+        env.lone_images
+            .get(index)
+            .is_some_and(|l| l.start <= range.start && range.end <= l.end)
+    };
     let desired: Vec<Replacement> = hidden_ranges(leaves, &span, selections)
         .into_iter()
+        .filter(|(range, spec)| spec.is_none() || !lone(range))
         .map(|(range, spec)| match spec {
             None => Replacement::hide(range),
-            Some(spec) => Replacement::widget(range, widgets.widget(&spec, sizes, resolver)),
+            Some(spec) => {
+                let load = range.start < env.load.end && range.end > env.load.start;
+                Replacement::widget(range, widgets.widget(&spec, env.sizes, env.resolver, load))
+            }
         })
         .collect();
     let actual: Vec<Replacement> = editor
@@ -790,6 +848,31 @@ fn splices_for(
         .filter(|r| span.start <= r.range.start && r.range.end <= span.end)
         .collect();
     splices_between(&actual, &desired)
+}
+
+/// The images of `leaves` inside `window`.
+fn image_keys(
+    leaves: &[(usize, Decor)],
+    window: &Range<usize>,
+) -> std::collections::HashSet<super::live_widgets::ImageKey> {
+    let mut keys = std::collections::HashSet::new();
+    for (start, decor) in leaves {
+        for construct in decor.iter() {
+            let Some((range, spec)) = &construct.widget else {
+                continue;
+            };
+            let (a, b) = (start + range.start, start + range.end);
+            if let WidgetSpec::Image {
+                destination, embed, ..
+            } = spec.as_ref()
+                && a < window.end
+                && b > window.start
+            {
+                keys.insert((Arc::clone(destination), *embed));
+            }
+        }
+    }
+    keys
 }
 
 // ----- the view ------------------------------------------------------------------
@@ -810,6 +893,15 @@ impl EditorView {
     }
 
     /// The profile's switches: emoji shortcodes show as emoji with them.
+    /// The profile block widgets read their source with.
+    pub(super) fn set_live_profile(&mut self, profile: Arc<gv_profile::CompiledProfile>) {
+        if self.live.profile.as_ref().is_some_and(|p| **p == *profile) {
+            return;
+        }
+        self.live.profile = Some(profile);
+        self.live.blocks.forget_views();
+    }
+
     pub(super) fn set_live_switches(&mut self, switches: &gv_profile::Switches) {
         let options = Options {
             emoji: switches.emoji,
@@ -835,6 +927,7 @@ impl EditorView {
     /// it is off.
     pub(super) fn live_settings_changed(&mut self) {
         let active = self.is_live_preview_active();
+        self.clear_live_blocks();
         self.live.reset();
         let Some(doc) = self.doc.as_mut() else {
             return;
@@ -861,13 +954,27 @@ impl EditorView {
             Some(super::Top::Line(line)) => line,
             None => {
                 let pad = f64::from(self.layout.pad_top());
-                let row = ((self.scroll_y - pad) / f64::from(self.metrics.line))
-                    .floor()
-                    .max(0.0) as usize;
+                let rows = self.row_map().map_or(0, |map| map.row_count());
+                let row = self.geo().row_at(self.scroll_y - pad, rows);
                 self.row_map().map_or(row, |map| map.line_of_row(row))
             }
         };
         first..first + rows_on_screen
+    }
+
+    /// The bytes of `lines` with the decoration margin around them.
+    pub(super) fn live_span(&self, lines: Range<usize>) -> Range<usize> {
+        let Some(doc) = self.doc.as_ref() else {
+            return 0..0;
+        };
+        let text = doc.editor.text();
+        let line_count = text.line_count();
+        let first = lines
+            .start
+            .saturating_sub(MARGIN_LINES)
+            .min(line_count.saturating_sub(1));
+        let last = (lines.end + MARGIN_LINES).min(line_count.saturating_sub(1));
+        text.line_start(first).unwrap_or(0)..text.line_range(last).map_or(text.len(), |r| r.end)
     }
 
     /// Brings the hidden markers and widgets of lines `lines` (the ones on
@@ -902,7 +1009,14 @@ impl EditorView {
         let mut hasher = DefaultHasher::new();
         selections.hash(&mut hasher);
         let selection_key = hasher.finish();
-        let widgets_generation = self.live.widgets.generation();
+        let widgets_generation = {
+            // Images on their own line have no inline widget: a change of
+            // those lines is a change of the widgets.
+            let mut hasher = DefaultHasher::new();
+            self.live.widgets.generation().hash(&mut hasher);
+            self.live.blocks.lone_images.hash(&mut hasher);
+            hasher.finish()
+        };
 
         let line_count = text.line_count();
         let first = lines
@@ -961,15 +1075,24 @@ impl EditorView {
                     (leaves, start..window.end)
                 }
             };
+            let env = WidgetEnv {
+                sizes,
+                resolver,
+                load: window.clone(),
+                lone_images: &self.live.blocks.lone_images,
+            };
             let splices = splices_for(
                 &doc.editor,
                 &leaves,
                 span,
                 &selections,
                 &mut self.live.widgets,
-                sizes,
-                resolver,
+                &env,
             );
+            // Image jobs for what left the lines on screen go.
+            self.live
+                .widgets
+                .keep_loading(&image_keys(&leaves, &window));
             if !splices.is_empty() {
                 doc.editor.splice_replacements(splices);
             }
@@ -978,14 +1101,19 @@ impl EditorView {
         if whole && let Some(full) = self.live.full.as_mut() {
             let pending_key = (selection_key, widgets_generation);
             if full.pending_for != Some(pending_key) {
+                let env = WidgetEnv {
+                    sizes,
+                    resolver,
+                    load: window.clone(),
+                    lone_images: &self.live.blocks.lone_images,
+                };
                 full.pending = splices_for(
                     &doc.editor,
                     &full.leaves,
                     0..text.len(),
                     &selections,
                     &mut self.live.widgets,
-                    sizes,
-                    resolver,
+                    &env,
                 )
                 .into();
                 full.pending_for = Some(pending_key);
@@ -1045,8 +1173,12 @@ impl EditorView {
         let options = self.live.options;
         self.live._job = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FULL_DELAY).await;
-            let leaves = cx
-                .background_spawn(async move { decorate(&tree, &text, None, &cache, options) })
+            let (leaves, blocks) = cx
+                .background_spawn(async move {
+                    let leaves = decorate(&tree, &text, None, &cache, options);
+                    let blocks = super::live_blocks::find_blocks(&tree, &text, None);
+                    (leaves, blocks)
+                })
                 .await;
             this.update(cx, |view, cx| {
                 if view.live.job_for != Some(revision) {
@@ -1054,6 +1186,7 @@ impl EditorView {
                 }
                 view.live.job_for = None;
                 view.live._job = None;
+                view.live.blocks.full = Some((revision, Arc::new(blocks)));
                 view.live.full = Some(Full {
                     revision,
                     leaves,
@@ -1073,7 +1206,8 @@ impl EditorView {
     }
 
     /// A plain click at window point `position`: on a checkbox it toggles
-    /// its task (one undoable edit), on a tag it runs the tag's search.
+    /// its task (one undoable edit), on a tag it runs the tag's search, on
+    /// another widget it puts the caret inside it (its source shows).
     /// Returns whether the click was taken.
     pub(super) fn click_live_widget(
         &mut self,
@@ -1129,7 +1263,22 @@ impl EditorView {
                 window.dispatch_action(Box::new(crate::keymap::actions::search::Vault), cx);
                 true
             }
-            WidgetClick::Reveal => false,
+            WidgetClick::Reveal => {
+                // The caret goes inside it, which shows its source.
+                let Some(doc) = self.doc.as_mut() else {
+                    return false;
+                };
+                let first = doc
+                    .editor
+                    .text()
+                    .text_for_range(range.clone())
+                    .ok()
+                    .and_then(|t| t.chars().next())
+                    .map_or(0, char::len_utf8);
+                doc.editor.set_cursor((range.start + first).min(range.end));
+                self.autoscroll = true;
+                true
+            }
         }
     }
 
@@ -1156,6 +1305,14 @@ impl EditorView {
 /// Timings of decorating a document (the ignored timing test).
 #[cfg(test)]
 pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
+    fn env(sizes: &Sizes) -> WidgetEnv<'_> {
+        WidgetEnv {
+            sizes,
+            resolver: None,
+            load: 0..usize::MAX,
+            lone_images: &[],
+        }
+    }
     use std::time::{Duration, Instant};
     let cache = Mutex::new(DecorCache::default());
     let options = Options { emoji: true };
@@ -1200,8 +1357,7 @@ pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
                 0..text.len(),
                 &[],
                 &mut widgets,
-                &sizes,
-                None,
+                &env(&sizes),
             );
         });
         let once = time(&mut || {
@@ -1237,8 +1393,7 @@ pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
         0..text.len(),
         &[],
         &mut widgets,
-        &sizes,
-        None,
+        &env(&sizes),
     );
     editor.splice_replacements(all);
     let mid = text.len() / 2;
@@ -1258,8 +1413,7 @@ pub(crate) fn bench(tree: &SyntaxTree, text: &TextSnapshot) -> String {
                 span,
                 std::slice::from_ref(&(caret..caret)),
                 &mut widgets,
-                &sizes,
-                None,
+                &env(&sizes),
             );
             editor.splice_replacements(splices);
         }));
@@ -1459,11 +1613,29 @@ mod tests {
     }
 
     #[test]
-    fn a_touched_widget_shows_its_source() {
+    fn a_widget_shows_its_source_with_a_caret_inside_only() {
         let text = "a $x$ b\n";
         assert_eq!(hidden(text, obsidian(), None), ["w:$x$"]);
-        assert!(hidden(text, obsidian(), Some(2)).is_empty());
-        assert!(hidden(text, obsidian(), Some(5)).is_empty());
+        // Next to it (either end): still drawn.
+        assert_eq!(hidden(text, obsidian(), Some(2)), ["w:$x$"]);
+        assert_eq!(hidden(text, obsidian(), Some(5)), ["w:$x$"]);
         assert_eq!(hidden(text, obsidian(), Some(6)), ["w:$x$"]);
+        // Strictly inside: source.
+        assert!(hidden(text, obsidian(), Some(3)).is_empty());
+        assert!(hidden(text, obsidian(), Some(4)).is_empty());
+        // A selection that overlaps it shows its source; one that ends at
+        // its start does not.
+        let snapshot = TextSnapshot::new(text);
+        let tree = SyntaxTree::parse_with(&snapshot, obsidian());
+        let cache = Mutex::new(DecorCache::default());
+        let leaves = decorate(&tree, &snapshot, None, &cache, Options { emoji: true });
+        assert!(hidden_ranges(&leaves, &(0..8), std::slice::from_ref(&(1..3))).is_empty());
+        assert_eq!(
+            hidden_ranges(&leaves, &(0..8), std::slice::from_ref(&(0..2))).len(),
+            1
+        );
+        // Markers keep the touching rule: a caret at a construct's end
+        // shows them.
+        assert!(hidden("**b** x\n", obsidian(), Some(5)).is_empty());
     }
 }

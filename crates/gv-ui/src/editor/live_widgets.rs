@@ -185,6 +185,8 @@ pub(crate) struct Widgets {
     generation: u64,
     sizes: Option<[u32; 5]>,
     jobs: Vec<ImageJob>,
+    /// The images being decoded, with their jobs' cancel flags.
+    loading: HashMap<ImageKey, CancelFlag>,
     paints: HashMap<WidgetId, (WidgetPaint, WidgetClick)>,
 }
 
@@ -233,6 +235,9 @@ impl Widgets {
         for job in &self.jobs {
             job.cancel.cancel();
         }
+        for cancel in self.loading.values() {
+            cancel.cancel();
+        }
         *self = Self {
             generation: self.generation + 1,
             ..Self::default()
@@ -249,8 +254,31 @@ impl Widgets {
         std::mem::take(&mut self.jobs)
     }
 
+    /// Cancels the image jobs for images not in `keys` (the images near
+    /// the lines on screen): they start again when those images come back.
+    pub fn keep_loading(&mut self, keys: &std::collections::HashSet<ImageKey>) {
+        self.loading.retain(|key, cancel| {
+            let keep = keys.contains(key);
+            if !keep {
+                cancel.cancel();
+                self.images.remove(key);
+            }
+            keep
+        });
+    }
+
+    /// Images being decoded.
+    #[cfg(test)]
+    pub fn loading_count(&self) -> usize {
+        self.loading.len()
+    }
+
     /// An image job finished.
     pub fn landed(&mut self, key: &ImageKey, result: ImageResult) {
+        // A job cancelled since (its image left the screen) lands nothing.
+        if self.loading.remove(key).is_none_or(|c| c.is_cancelled()) {
+            return;
+        }
         let state = match result.image {
             Some((image, width, height)) => ImageState::Ready {
                 image,
@@ -264,12 +292,14 @@ impl Widgets {
     }
 
     /// The widget `spec` shows now, measured for `sizes`; an image not
-    /// known yet starts a job (with `resolver`; without one it fails).
+    /// known yet starts a job when `load` (with `resolver`; without one
+    /// it fails), else shows its placeholder.
     pub fn widget(
         &mut self,
         spec: &WidgetSpec,
         sizes: &Sizes,
         resolver: Option<&Resolver>,
+        load: bool,
     ) -> Widget {
         let (widget, paint, click) = match spec {
             WidgetSpec::Task { checked } => {
@@ -334,7 +364,16 @@ impl Widgets {
                 embed,
                 alt,
                 width,
-            } => self.image(spec, destination, *embed, alt, *width, sizes, resolver),
+            } => self.image(
+                spec,
+                destination,
+                *embed,
+                alt,
+                *width,
+                sizes,
+                resolver.filter(|_| load),
+                load,
+            ),
         };
         self.paints.insert(widget.id, (paint, click));
         widget
@@ -350,21 +389,26 @@ impl Widgets {
         width: Option<u32>,
         sizes: &Sizes,
         resolver: Option<&Resolver>,
+        load: bool,
     ) -> (Widget, WidgetPaint, WidgetClick) {
         let key: ImageKey = (Arc::clone(destination), embed);
         let cap = sizes.column.max(sizes.line);
         let max_width = width.map_or(cap, |w| (w as f32).min(cap));
         let state = match self.images.get(&key) {
             Some(state) => state.clone(),
+            // Away from the screen: the placeholder until it comes near.
+            None if !load => ImageState::Loading,
             None => match resolver {
                 Some(resolver) => {
                     let device = |px: f32| (px * sizes.scale).ceil().max(1.0) as u32;
+                    let cancel = CancelFlag::new();
                     self.jobs.push(ImageJob {
                         key: key.clone(),
                         resolver: resolver.clone(),
                         fit: (device(max_width), device(sizes.line)),
-                        cancel: CancelFlag::new(),
+                        cancel: cancel.clone(),
                     });
+                    self.loading.insert(key.clone(), cancel);
                     self.images.insert(key, ImageState::Loading);
                     ImageState::Loading
                 }
@@ -467,7 +511,7 @@ mod tests {
     #[test]
     fn task_boxes_are_as_wide_as_their_source() {
         let mut widgets = Widgets::default();
-        let widget = widgets.widget(&WidgetSpec::Task { checked: true }, &sizes(), None);
+        let widget = widgets.widget(&WidgetSpec::Task { checked: true }, &sizes(), None, true);
         assert_eq!(
             widget.content,
             gv_editor::display_map::WidgetContent::Box { width: 24.0 }
@@ -485,7 +529,7 @@ mod tests {
             tex: "\\frac{a}{b}".into(),
             source: "$\\frac{a}{b}$".into(),
         };
-        let widget = widgets.widget(&spec, &sizes(), None);
+        let widget = widgets.widget(&spec, &sizes(), None, true);
         let Some((WidgetPaint::Math { layout, em, .. }, _)) = widgets.paint(widget.id) else {
             panic!("no formula");
         };
@@ -494,7 +538,7 @@ mod tests {
             tex: "\\frac{".into(),
             source: "$\\frac{$".into(),
         };
-        let widget = widgets.widget(&bad, &sizes(), None);
+        let widget = widgets.widget(&bad, &sizes(), None, true);
         assert_eq!(widget.display_text(), "$\\frac{$");
         assert_eq!(widget.style, Some(MATH_ERROR_STYLE));
     }
@@ -508,10 +552,50 @@ mod tests {
             alt: alt.into(),
             width: None,
         };
-        let widget = widgets.widget(&spec("A cat"), &sizes(), None);
+        let widget = widgets.widget(&spec("A cat"), &sizes(), None, true);
         assert_eq!(widget.display_text(), "A cat");
         assert_eq!(widget.style, Some(PLACEHOLDER_STYLE));
-        let widget = widgets.widget(&spec(""), &sizes(), None);
+        let widget = widgets.widget(&spec(""), &sizes(), None, true);
         assert_eq!(widget.display_text(), "cat.png");
+    }
+
+    #[test]
+    fn images_decode_only_near_the_screen_and_jobs_that_leave_it_stop() {
+        let mut widgets = Widgets::default();
+        let resolver = Resolver::statuses(
+            std::path::Path::new("/vault/note.md"),
+            None,
+            gv_profile::ProfileId::Obsidian,
+        );
+        let spec = WidgetSpec::Image {
+            destination: "cat.png".into(),
+            embed: false,
+            alt: "A cat".into(),
+            width: None,
+        };
+        // Away from the screen: its placeholder, no job.
+        let widget = widgets.widget(&spec, &sizes(), Some(&resolver), false);
+        assert_eq!(widget.display_text(), "A cat");
+        assert!(widgets.take_jobs().is_empty());
+        assert_eq!(widgets.loading_count(), 0);
+        // Near it: a job.
+        widgets.widget(&spec, &sizes(), Some(&resolver), true);
+        let jobs = widgets.take_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(widgets.loading_count(), 1);
+        // It left the screen: cancelled, and what it decodes is dropped.
+        let generation = widgets.generation();
+        widgets.keep_loading(&std::collections::HashSet::new());
+        assert!(jobs[0].cancel.is_cancelled());
+        assert_eq!(widgets.loading_count(), 0);
+        widgets.landed(&jobs[0].key, ImageResult { image: None });
+        assert_eq!(widgets.generation(), generation);
+        // Back near the screen: a new job.
+        widgets.widget(&spec, &sizes(), Some(&resolver), true);
+        assert_eq!(widgets.take_jobs().len(), 1);
+        // Kept while it stays near.
+        let keys = std::iter::once((Arc::<str>::from("cat.png"), false)).collect();
+        widgets.keep_loading(&keys);
+        assert_eq!(widgets.loading_count(), 1);
     }
 }

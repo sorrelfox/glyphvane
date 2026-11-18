@@ -509,8 +509,12 @@ impl EditorView {
             if y < 0.0 {
                 return None;
             }
-            let line = f64::from(self.metrics.line);
-            (map.row_count(), (y / line).floor() as usize)
+            let rows = map.row_count();
+            let geo = self.geo();
+            if geo.hidden(geo.row_at(y, rows)) {
+                return None;
+            }
+            (rows, geo.row_at(y, rows))
         };
         if row >= rows {
             return None;

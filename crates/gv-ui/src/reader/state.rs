@@ -40,6 +40,9 @@ pub enum ReaderLayout {
     /// The Split view's preview pane: padding `20 28 0`, the column fills
     /// the pane.
     Pane,
+    /// A Live Preview block widget in the editor: no padding, the column
+    /// fills the view, nothing grows beside it, no scrollbar.
+    Block,
 }
 
 impl ReaderLayout {
@@ -48,6 +51,7 @@ impl ReaderLayout {
         match self {
             Self::Column => document::PAD_TOP,
             Self::Pane => split::PREVIEW_PAD_TOP,
+            Self::Block => 0.0,
         }
     }
 
@@ -68,6 +72,7 @@ impl ReaderLayout {
                 let column = (width - 2.0 * split::PREVIEW_PAD_X).floor().max(1.0);
                 (left + split::PREVIEW_PAD_X, column)
             }
+            Self::Block => (left, width.floor().max(1.0)),
         }
     }
 
@@ -91,7 +96,7 @@ impl ReaderLayout {
                 let limit = wide_max.min(area.1 - area.0).max(column).floor();
                 (area, limit)
             }
-            Self::Pane => ((x0, x0 + column), column),
+            Self::Pane | Self::Block => ((x0, x0 + column), column),
         }
     }
 }

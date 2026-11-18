@@ -333,12 +333,23 @@ fn task_checkboxes_toggle_their_task(cx: &mut TestAppContext) {
     assert_eq!(text_of(&view, &mut vcx), "x\n- [ ] task\n");
     vcx.simulate_keystrokes("secondary-z");
     assert_eq!(text_of(&view, &mut vcx), "x\n- [x] task\n");
-    // A caret next to it shows its source (ends touch); motions through
-    // a shown box are tested in gv-editor (`box_widgets_take_their_width`).
+    // The box stays drawn with the caret at the start of the task text
+    // and right after the box (only a caret strictly inside, or a
+    // selection over it, shows the source); Left then goes over it in one
+    // step.
     caret_at(&view, &mut vcx, base + 6);
     assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
     vcx.simulate_keystrokes("left");
     assert_eq!(selections(&view, &mut vcx), [(base + 5, base + 5)]);
+    assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
+    vcx.simulate_keystrokes("left");
+    assert_eq!(selections(&view, &mut vcx), [(base + 2, base + 2)]);
+    assert_eq!(shown(&view, &mut vcx), "x\n- \u{fffc} task\n");
+    // A selection over it shows the source.
+    vcx.simulate_keystrokes("shift-right");
+    assert_eq!(shown(&view, &mut vcx), "x\n- [x] task\n");
+    // A caret put inside it (an API, a search) shows it too.
+    caret_at(&view, &mut vcx, base + 3);
     assert_eq!(shown(&view, &mut vcx), "x\n- [x] task\n");
 }
 
@@ -350,9 +361,18 @@ fn inline_math_is_drawn_and_shows_its_source_when_touched(cx: &mut TestAppContex
     caret_at(&view, &mut vcx, 12);
     assert_eq!(shown(&view, &mut vcx), "a \u{fffc} b\nnext\n");
     assert_eq!(widget_kinds(&view, &mut vcx), ["math"]);
+    // Next to it: still drawn; strictly inside: its source.
     caret_at(&view, &mut vcx, 7);
+    assert_eq!(shown(&view, &mut vcx), "a \u{fffc} b\nnext\n");
+    caret_at(&view, &mut vcx, 5);
     assert_eq!(shown(&view, &mut vcx), "a $x^2$ b\nnext\n");
     assert!(widget_kinds(&view, &mut vcx).is_empty());
+    // A click on it puts the caret inside: its source shows.
+    caret_at(&view, &mut vcx, 12);
+    let (bounds, _) = probe_of(&view, &mut vcx).widgets[0];
+    press(&mut vcx, bounds.center(), 1, Modifiers::none());
+    assert_eq!(selections(&view, &mut vcx), [(3, 3)]);
+    assert_eq!(shown(&view, &mut vcx), "a $x^2$ b\nnext\n");
     // Right from before it: over it in one step.
     caret_at(&view, &mut vcx, 1);
     vcx.simulate_keystrokes("right");
@@ -444,8 +464,8 @@ fn local_images_show_as_thumbnails_one_line_high(cx: &mut TestAppContext) {
     // Twice as wide as high, one line high; the size in the alias caps it.
     assert!((widths[0] - 2.0 * LINE).abs() < 0.01, "{widths:?}");
     assert!((widths[1] - 10.0).abs() < 0.01, "{widths:?}");
-    // Touched, the image shows its source.
-    caret_at(&view, &mut vcx, 0);
+    // A caret inside it shows its source.
+    caret_at(&view, &mut vcx, 3);
     assert_eq!(
         shown(&view, &mut vcx),
         "![pic](pic.png) and \u{fffc}\nnext\n"

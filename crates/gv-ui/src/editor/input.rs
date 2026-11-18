@@ -140,7 +140,7 @@ impl EditorView {
 
     /// The top of display row `row` in window coordinates.
     pub(crate) fn row_top(&self, columns: &Columns, row: usize) -> f32 {
-        let y = row as f64 * f64::from(self.metrics.line) - self.scroll_y;
+        let y = self.geo().row_y(row) - self.scroll_y;
         columns.top + y as f32
     }
 
@@ -208,7 +208,7 @@ impl EditorView {
             if y < 0.0 {
                 return Some(0);
             }
-            let row = (y / f64::from(self.metrics.line)).floor() as usize;
+            let row = self.geo().row_at(y, map.row_count());
             let len = self.doc.as_ref()?.editor.text().len();
             (map.row_count(), map.line_of_row(row), len, row)
         };

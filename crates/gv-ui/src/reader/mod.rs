@@ -863,6 +863,45 @@ impl Reader {
     }
 }
 
+impl Reader {
+    /// A Reading view for a Live Preview block widget in the editor
+    /// ([`ReaderLayout::Block`]): no padding, no scrollbar; the editor
+    /// sizes it to [`Self::content_height`].
+    pub(crate) fn for_block(cx: &mut Context<'_, Self>) -> Self {
+        let reader = Self::new(cx);
+        reader.state.borrow_mut().set_layout(ReaderLayout::Block);
+        reader
+    }
+
+    /// The height of the shown document as laid out so far (measured
+    /// items, estimates for the others); `None` until it is built.
+    pub(crate) fn content_height(&self) -> Option<f32> {
+        if self.status != LoadStatus::Ready {
+            return None;
+        }
+        let st = self.state.borrow();
+        st.doc.as_ref()?;
+        Some(st.engine.total() as f32)
+    }
+
+    /// The source offset in the shown text under window point `position`,
+    /// as of the last frame.
+    pub(crate) fn source_offset_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<usize> {
+        self.state.borrow().offset_at(position)
+    }
+
+    /// Whether a press at window point `position` is the view's own: a
+    /// button, a control (fold toggles, checkboxes, diagram zoom, live
+    /// blocks), a sideways scrollbar or a hosted view.
+    pub(crate) fn takes_press_at(&self, position: gpui::Point<gpui::Pixels>) -> bool {
+        let st = self.state.borrow();
+        st.button_at(position).is_some()
+            || st.control_at(position).is_some()
+            || st.hbar_at(position).is_some()
+            || st.in_host(position)
+    }
+}
+
 #[cfg(test)]
 impl Reader {
     /// The items the last frame painted: the source offset each starts at

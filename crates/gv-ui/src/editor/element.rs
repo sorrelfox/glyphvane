@@ -148,6 +148,8 @@ pub(crate) struct Probe {
     pub widgets: Vec<(Bounds<Pixels>, &'static str)>,
     /// The display text of each line drawn.
     pub row_texts: Vec<(usize, String)>,
+    /// Live Preview block widgets: bounds and kind.
+    pub blocks: Vec<(Bounds<Pixels>, &'static str)>,
     pub columns: Option<Columns>,
 }
 
@@ -183,6 +185,8 @@ pub(crate) struct Frame {
     pointers: Vec<Bounds<Pixels>>,
     /// Live Preview widgets, over the rows.
     widgets: Vec<Drawn>,
+    /// Live Preview block widgets: their views, over the rows.
+    blocks: Vec<super::live_blocks::DrawnBlock>,
 }
 
 /// A Live Preview widget to draw.
@@ -221,6 +225,7 @@ impl Frame {
             text_area: None,
             pointers: Vec::new(),
             widgets: Vec::new(),
+            blocks: Vec::new(),
         }
     }
 }
@@ -234,12 +239,6 @@ fn bounds_of(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 fn baseline(line: &ShapedLine, top: f32, row_h: f32) -> f32 {
     let (ascent, descent) = (f32::from(line.ascent), f32::from(line.descent));
     top + (row_h - ascent - descent) / 2.0 + ascent
-}
-
-/// The total height of the content: `rows` display rows `row_h` tall
-/// between the top padding `pad` and as much again below.
-fn content_height(rows: usize, row_h: f32, pad: f32) -> f64 {
-    2.0 * f64::from(pad) + rows as f64 * f64::from(row_h)
 }
 
 impl EditorView {
@@ -264,8 +263,16 @@ impl EditorView {
             return frame;
         };
         self.sync_wrap(columns.text_w, cx);
+        if let Some(doc) = self.doc.as_mut() {
+            doc.editor
+                .set_row_height(gv_editor::display_map::Height::from_px(line_px));
+        }
         if self.is_live_preview_active() {
             let lines = self.live_window(f32::from(bounds.size.height));
+            // Blocks first: images on their own line are blocks, not
+            // inline widgets.
+            let span = self.live_span(lines.clone());
+            self.refresh_live_blocks(span, columns.text_w, cx);
             let sizes = super::live_widgets::Sizes {
                 line: line_px,
                 font: self.fonts.size(),
@@ -305,13 +312,15 @@ impl EditorView {
             self.scroll_y = if row == 0 {
                 0.0
             } else {
-                f64::from(pad_top) + row as f64 * f64::from(line_px)
+                f64::from(pad_top) + self.geo().row_y(row)
             };
         }
         if std::mem::take(&mut self.autoscroll) {
             self.scroll_into_view(&columns, viewport, space, window, cx);
         }
-        let max_y = (content_height(rows_total, line_px, pad_top) - f64::from(viewport)).max(0.0);
+        let geo = self.geo();
+        let content = 2.0 * f64::from(pad_top) + geo.total(rows_total);
+        let max_y = (content - f64::from(viewport)).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         let max_x = if wrapping {
             0.0
@@ -322,12 +331,18 @@ impl EditorView {
 
         let scroll_y = self.scroll_y;
         let pad = f64::from(pad_top);
-        let row_h = f64::from(line_px);
-        let first_row = ((scroll_y - pad) / row_h).floor().max(0.0) as usize;
-        let last_row =
-            ((((scroll_y - pad + f64::from(viewport)) / row_h).ceil()).max(0.0) as usize + 1)
-                .min(rows_total);
+        let first_row = geo.row_at(scroll_y - pad, rows_total);
+        let last_row = geo
+            .rows_until(scroll_y - pad + f64::from(viewport), rows_total)
+            .min(rows_total);
         let origin_x = self.text_origin_x(&columns);
+        let drawn_blocks = self.blocks_to_draw(
+            &geo,
+            (scroll_y - pad, scroll_y - pad + f64::from(viewport)),
+            (columns.text_x, columns.text_w),
+            f64::from(columns.top) - scroll_y,
+            cx,
+        );
         let whitespace = self.show_whitespace;
         let layout = self.layout;
         let fonts = self.fonts.clone();
@@ -430,10 +445,14 @@ impl EditorView {
             columns: Some(columns),
             ..Probe::default()
         };
-        let row_top = |row: usize| columns.top + (row as f64 * row_h - scroll_y) as f32;
+        let row_top = |row: usize| columns.top + (geo.row_y(row) - scroll_y) as f32;
 
         for (line_row, visual) in &visuals {
             let (line_row, line) = (*line_row, visual.first);
+            // A block shows instead of the line.
+            if geo.hidden(line_row) {
+                continue;
+            }
             let range = visual.range.clone();
             let has_terminator = text.line_terminator(visual.last).ok().flatten().is_some();
             let breaks = map.breaks(visual);
@@ -789,8 +808,8 @@ impl EditorView {
                     let rect = bounds_of(x0, top, x1 - x0, line_px);
                     if clickable {
                         frame.pointers.push(rect);
-                        live.hits.push((rect, id));
                     }
+                    live.hits.push((rect, id));
                     #[cfg(test)]
                     probe.widgets.push((rect, kind));
                     #[cfg(not(test))]
@@ -865,6 +884,18 @@ impl EditorView {
             }
         }
         doc.rows.end_frame();
+        live.blocks_drawn = drawn_blocks
+            .iter()
+            .map(|b| (b.id, b.bounds, b.reader.clone()))
+            .collect();
+        #[cfg(test)]
+        {
+            probe.blocks = drawn_blocks
+                .iter()
+                .map(|b| (b.bounds, b.kind.name()))
+                .collect();
+        }
+        frame.blocks = drawn_blocks;
         self.widest = self.widest.max(widest);
         #[cfg(test)]
         {
@@ -887,7 +918,6 @@ impl EditorView {
 
         // The scrollbar: a thumb, no track.
         self.scrollbar = None;
-        let content = content_height(rows_total, line_px, pad_top);
         if content > f64::from(viewport) {
             let track_top = f32::from(bounds.top()) + scrollbar::INSET_Y;
             let track_h = viewport - 2.0 * scrollbar::INSET_Y;
@@ -913,9 +943,7 @@ impl EditorView {
             if let Some(doc) = &self.doc {
                 let mut last = f32::NEG_INFINITY;
                 for row in self.spell.rows(&doc.editor) {
-                    let y = (track_top
-                        + track_h * (row as f64 * f64::from(line_px) / content) as f32)
-                        .floor();
+                    let y = (track_top + track_h * (geo.row_y(row) / content) as f32).floor();
                     if y <= last {
                         continue;
                     }
@@ -981,10 +1009,11 @@ impl EditorView {
         let pad = f64::from(pad_top);
         let row_px = self.metrics.line;
         let row_h = f64::from(row_px);
-        let top = pad + display_row as f64 * row_h;
+        let geo = self.geo();
+        let top = pad + geo.row_y(display_row);
         let wanted_top = if display_row == 0 { 0.0 } else { top - row_h };
         let wanted_bottom = if display_row + 1 >= rows {
-            content_height(rows, row_px, pad_top)
+            2.0 * pad + geo.total(rows)
         } else {
             top + 2.0 * row_h
         };
@@ -1220,7 +1249,7 @@ impl EditorView {
         }
         let top = f32::from(position.y - bar.track.top()) - grab;
         let ratio = f64::from((top / room).clamp(0.0, 1.0));
-        let max_y = (content_height(rows, self.metrics.line, self.layout.pad_top())
+        let max_y = (2.0 * f64::from(self.layout.pad_top()) + self.geo().total(rows)
             - f64::from(f32::from(bounds.size.height)))
         .max(0.0);
         self.scroll_y = ratio * max_y;
@@ -1305,6 +1334,8 @@ pub(crate) struct Prepaint {
     /// Over the fold chevrons and chips.
     pointer_hitboxes: Vec<Hitbox>,
     frame: Frame,
+    /// The views of the Live Preview blocks on screen, prepainted.
+    blocks: Vec<gpui::AnyElement>,
 }
 
 impl Element for EditorElement {
@@ -1384,11 +1415,39 @@ impl Element for EditorElement {
             .filter(|b| b.intersects(&bounds))
             .map(|b| window.insert_hitbox(b.intersect(&bounds), HitboxBehavior::Normal))
             .collect();
+        // Live Preview blocks: their views laid out at their places, and
+        // the heights they measure for the next frame.
+        let clip = frame.text_clip.unwrap_or(bounds);
+        let mut blocks = Vec::with_capacity(frame.blocks.len());
+        let mut heights = Vec::with_capacity(frame.blocks.len());
+        for block in &frame.blocks {
+            let mut element = gpui::AnyView::from(block.reader.clone()).into_any_element();
+            element.layout_as_root(
+                size(
+                    gpui::AvailableSpace::Definite(block.bounds.size.width),
+                    gpui::AvailableSpace::Definite(block.bounds.size.height),
+                ),
+                window,
+                cx,
+            );
+            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                element.prepaint_at(block.bounds.origin, window, cx);
+            });
+            blocks.push(element);
+            if let Some(height) = block.reader.read(cx).content_height() {
+                heights.push((block.id, height));
+            }
+        }
+        if !heights.is_empty() {
+            self.view
+                .update(cx, |view, cx| view.block_heights(heights, cx));
+        }
         Prepaint {
             hitbox,
             text_hitbox,
             pointer_hitboxes,
             frame,
+            blocks,
         }
     }
 
@@ -1479,6 +1538,9 @@ impl Element for EditorElement {
                         Drawn::Quad(quad) => window.paint_quad(quad),
                     }
                 }
+                for element in &mut pre.blocks {
+                    element.paint(window, cx);
+                }
                 for quad in frame.carets.drain(..) {
                     window.paint_quad(quad);
                 }
@@ -1520,6 +1582,21 @@ impl EditorElement {
                     || !hitbox.is_hovered(window)
                 {
                     return;
+                }
+                // A Live Preview block: the caret goes into it, unless the
+                // press is on one of its view's controls.
+                if !e.modifiers.modified() {
+                    let block = view.update(cx, |view, cx| view.press_block(e.position, cx));
+                    match block {
+                        Some(true) => {
+                            let focus = view.read(cx).focus.clone();
+                            focus.focus(window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        Some(false) => return,
+                        None => {}
+                    }
                 }
                 view.update(cx, |view, cx| view.mouse_down(e, window, cx));
                 cx.stop_propagation();
@@ -1610,6 +1687,11 @@ impl EditorElement {
             window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                     return;
+                }
+                // A press a block's view took: the editor keeps the focus.
+                if view.update(cx, |v, _| std::mem::take(&mut v.live.refocus)) {
+                    let focus = view.read(cx).focus.clone();
+                    focus.focus(window, cx);
                 }
                 let pressed = view.read(cx).press != Press::None;
                 if pressed {

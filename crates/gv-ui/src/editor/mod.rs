@@ -125,6 +125,7 @@ mod input;
 mod insert;
 mod layout;
 mod links;
+mod live_blocks;
 mod live_preview;
 mod live_widgets;
 mod markdown;
@@ -574,6 +575,7 @@ impl EditorView {
             let switches = &gv_profile::definition(profile).switches;
             self.autocomplete.set_switches(switches);
             self.set_live_switches(switches);
+            self.set_live_profile(Arc::new(gv_profile::compile_builtin(profile)));
         }
         self.options =
             gv_profile::ProfileId::from_id(id).map_or(self.options, ParseOptions::builtin);
@@ -596,6 +598,7 @@ impl EditorView {
         self.paste_profile = paste_profile(id);
         self.autocomplete.set_switches(&profile.switches);
         self.set_live_switches(&profile.switches);
+        self.set_live_profile(Arc::new(profile.clone()));
         self.availabilities.reset();
         if self.links.profile() != profile.id {
             self.links.set_profile(profile.id);
@@ -898,7 +901,9 @@ impl EditorView {
 
     /// The line of the first row that is at least half visible.
     fn top_line(&self) -> usize {
-        let row = (self.scroll_y - f64::from(self.layout.pad_top())) / f64::from(self.metrics.line);
+        let row = self
+            .geo()
+            .fractional_row(self.scroll_y - f64::from(self.layout.pad_top()));
         let row = row.round().max(0.0) as usize;
         self.row_map().map_or(row, |map| map.line_of_row(row))
     }
@@ -942,7 +947,7 @@ impl EditorView {
         if self.scroll_y < pad {
             return Some(self.scroll_y / pad.max(1.0) - 1.0);
         }
-        let row = (self.scroll_y - pad) / f64::from(self.metrics.line);
+        let row = self.geo().fractional_row(self.scroll_y - pad);
         let line = map.line_of_row(row.floor() as usize);
         let (first, rows) = line_rows(map, line);
         Some(line as f64 + ((row - first as f64) / rows as f64).clamp(0.0, 1.0))
@@ -964,7 +969,9 @@ impl EditorView {
             let line = (position.floor() as usize).min(lines.saturating_sub(1));
             let (first, rows) = line_rows(map, line);
             let frac = (position - line as f64).clamp(0.0, 1.0);
-            pad + (first as f64 + frac * rows as f64) * f64::from(self.metrics.line)
+            pad + self
+                .geo()
+                .y_of_fractional_row(first as f64 + frac * rows as f64)
         };
         self.pending_top = None;
         if (y - self.scroll_y).abs() > f64::EPSILON {
@@ -1100,8 +1107,15 @@ impl EditorView {
             } else {
                 Motion::UpRows(rows)
             };
-            editor.move_selections(motion, extend);
             let px = f64::from(rows) * f64::from(extra.line);
+            if editor.blocks().block_count() > 0 {
+                // Live Preview blocks: a page is the view's height in
+                // pixels, through the blocks' heights.
+                let dy = if down { px } else { -px };
+                editor.move_selections_by_pixels(dy as f32, extend);
+            } else {
+                editor.move_selections(motion, extend);
+            }
             extra.scroll = if down { px } else { -px };
         });
     }
