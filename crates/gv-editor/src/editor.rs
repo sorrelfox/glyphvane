@@ -24,9 +24,9 @@ use crate::commands::SyntaxRef;
 use crate::display_map::{
     Block, BlockChanges, BlockId, BlockInput, BlockItem, BlockKind, BlockMap, BlockProperties,
     BlockSnapshot, DisplayItem, Fold, FoldId, Height, IndentAdjustment, MonospaceMeasure, Removal,
-    ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot, Reveal, RewrapJob, RowEdit, TabEdit,
-    TabMap, TabPoint, TabSnapshot, TextMeasure, WrapEdit, WrapIndent, WrapMap, WrapPoint, WrapRow,
-    WrapSnapshot, Y,
+    ReplaceEdit, ReplaceMap, ReplacePoint, ReplaceSnapshot, Replacement, Reveal, RewrapJob,
+    RowEdit, TabEdit, TabMap, TabPoint, TabSnapshot, TextMeasure, WrapEdit, WrapIndent, WrapMap,
+    WrapPoint, WrapRow, WrapSnapshot, Y,
 };
 use crate::folds::{FoldCandidate, FoldKind, foldable_ranges};
 use crate::history::{
@@ -121,7 +121,7 @@ pub enum EditorEvent<'a> {
     /// text change.
     CompositionChanged,
     /// The display map changed without a text change: the tab size, or
-    /// folds were added or removed.
+    /// folds or other replacements were added or removed.
     DisplayChanged {
         /// The display map after the change.
         display: &'a TabSnapshot,
@@ -1753,6 +1753,30 @@ impl Editor {
         self.change_folds(|map| map.unfold_intersecting(ranges, inclusive))
     }
 
+    /// Replaces the replacements other than folds in some ranges (see
+    /// [`ReplaceMap::splice`]): Live Preview's hidden markers and inline
+    /// widgets, derived state the owner computes from the syntax tree and
+    /// the selections. The tab, wrap and block layers follow, and
+    /// observers get [`EditorEvent::DisplayChanged`] and
+    /// [`EditorEvent::WrapChanged`] for what changed. Not an edit: the
+    /// text, the selections and the history stay. Returns whether the
+    /// display changed.
+    ///
+    /// Motions never end strictly inside a run of adjacent replacements
+    /// (see [`ReplaceSnapshot::atomic_range_at`]).
+    pub fn splice_replacements(
+        &mut self,
+        splices: impl IntoIterator<Item = (Range<usize>, Vec<Replacement>)>,
+    ) -> bool {
+        self.change_folds(|map| map.splice(splices))
+    }
+
+    /// The replacements other than folds that share bytes with `range` or
+    /// touch it (see [`ReplaceSnapshot::replacements_in`]).
+    pub fn replacements_in(&self, range: Range<usize>) -> Vec<Replacement> {
+        self.display.replace().replacements_in(range)
+    }
+
     /// The placeholders on display rows `rows` (wrap rows while soft wrap
     /// is on, tab rows otherwise), in order.
     pub fn fold_placeholders(&self, rows: Range<u32>) -> Vec<FoldPlaceholder> {
@@ -2458,8 +2482,10 @@ fn move_selection(
         SelectionGoal::None
     };
     let (to, goal) = display.move_caret(from, goal, motion);
-    // Folded text is skipped as a whole.
-    let to = match display.replace().folded_range_at(to) {
+    // Folded text is skipped as a whole, and so is a run of adjacent
+    // replacements (hidden markers and widgets): in the direction of the
+    // motion.
+    let to = match display.replace().atomic_range_at(to) {
         Some(range) if to > from => range.end,
         Some(range) => range.start,
         None => to,

@@ -102,6 +102,7 @@ impl EditorView {
             doc.highlights.set_plain(language);
             doc.editor.set_wrap_indent(super::wrap_indent(plain));
         }
+        self.live_settings_changed();
         self.sync_code_font(cx);
         self.schedule_spell(cx);
         cx.notify();

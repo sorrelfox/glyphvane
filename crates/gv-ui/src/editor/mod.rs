@@ -125,6 +125,7 @@ mod input;
 mod insert;
 mod layout;
 mod links;
+mod live_preview;
 mod markdown;
 mod metrics;
 mod paste;
@@ -423,6 +424,8 @@ pub struct EditorView {
     read_only: bool,
     /// Plain-text mode: the file is not Markdown ([`plain`]).
     plain: Option<plain::Plain>,
+    /// Live Preview ([`live_preview`]).
+    live: live_preview::LivePreview,
     /// The caret's place and the word count, for the status bar.
     stats: stats::Stats,
     /// Misspellings and the spelling menu.
@@ -521,6 +524,7 @@ impl EditorView {
             paste_profile: paste_profile(gv_profile::ProfileId::CommonMark.as_str()),
             read_only: false,
             plain: None,
+            live: live_preview::LivePreview::default(),
             stats: stats::Stats::default(),
             spell: spell::SpellState::default(),
             scroll_y: 0.0,
@@ -818,6 +822,7 @@ impl EditorView {
         self.wrap.pending = None;
         self._rewrap = None;
         self._rewrap_wait = None;
+        self.live_settings_changed();
     }
 
     pub fn status(&self) -> &EditorStatus {

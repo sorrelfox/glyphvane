@@ -53,6 +53,8 @@ pub struct SettingsFile {
     layer: Layer,
     chain: &'static [Migration],
     target: u32,
+    /// `text` has edits not written yet ([`SettingsFile::set_value_unsaved`]).
+    unsaved: bool,
 }
 
 impl SettingsFile {
@@ -93,6 +95,7 @@ impl SettingsFile {
                         layer,
                         chain,
                         target,
+                        unsaved: false,
                     });
                 }
             },
@@ -121,6 +124,7 @@ impl SettingsFile {
             layer,
             chain,
             target,
+            unsaved: false,
         })
     }
 
@@ -134,7 +138,8 @@ impl SettingsFile {
         self.kind
     }
 
-    /// The file contents as last read or written.
+    /// The file contents as last read or written, with the edits not
+    /// written yet.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -160,6 +165,46 @@ impl SettingsFile {
 
     /// [`SettingsFile::set`] with a TOML value.
     pub fn set_value(&mut self, key: &str, value: &toml::Value) -> Result<(), SettingsError> {
+        let text = self.edited(key, value)?;
+        self.write(text)
+    }
+
+    /// [`SettingsFile::set_value`] in memory only: the layer has the new
+    /// value at once and [`SettingsFile::save`] writes it later, for values
+    /// that change many times a second (the zoom under the mouse wheel).
+    /// The next write of any edit writes this one too.
+    pub fn set_value_unsaved(
+        &mut self,
+        key: &str,
+        value: &toml::Value,
+    ) -> Result<(), SettingsError> {
+        let text = self.edited(key, value)?;
+        if text != self.text {
+            self.layer = self.parse(&text);
+            self.text = text;
+            self.unsaved = true;
+        }
+        Ok(())
+    }
+
+    /// Whether edits wait to be written ([`SettingsFile::set_value_unsaved`]).
+    pub fn has_unsaved(&self) -> bool {
+        self.unsaved
+    }
+
+    /// Writes the edits made with [`SettingsFile::set_value_unsaved`], if
+    /// any.
+    pub fn save(&mut self) -> Result<(), SettingsError> {
+        if !self.unsaved {
+            return Ok(());
+        }
+        self.ensure_writable()?;
+        let text = self.text.clone();
+        self.write(text)
+    }
+
+    /// The text with `key` set to `value`, checked against the schema.
+    fn edited(&mut self, key: &str, value: &toml::Value) -> Result<String, SettingsError> {
         let spec = spec::spec(key).ok_or_else(|| SettingsError::UnknownKey(key.to_owned()))?;
         if spec.scope == Scope::GlobalOnly && self.kind.is_vault_level() {
             return Err(SettingsError::GlobalOnly(key.to_owned()));
@@ -175,8 +220,7 @@ impl SettingsFile {
         if base.trim().is_empty() {
             base = format!("version = {}\n", self.target);
         }
-        let text = edit::set_value(&base, key, &value)?;
-        self.write(text)
+        Ok(edit::set_value(&base, key, &value)?)
     }
 
     /// The text to edit. An in-vault file upgraded only in memory is written
@@ -219,6 +263,7 @@ impl SettingsFile {
     pub fn reload_from_text(&mut self, text: String) {
         self.layer = self.parse(&text);
         self.text = text;
+        self.unsaved = false;
     }
 
     fn parse(&self, text: &str) -> Layer {
@@ -251,6 +296,7 @@ impl SettingsFile {
         })?;
         self.layer = self.parse(&text);
         self.text = text;
+        self.unsaved = false;
         Ok(())
     }
 }

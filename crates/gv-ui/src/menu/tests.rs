@@ -191,6 +191,7 @@ fn the_menus_follow_each_platform() {
                 "view.split",
                 "view.toggle_mode",
                 "view.toggle_split",
+                "view.toggle_live_preview",
                 "view.toggle_viewer_mode",
                 "workspace.toggle_sidebar",
                 "workspace.toggle_panel",
@@ -874,8 +875,9 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     f.keys("down down down right");
     assert!(f.bounds("app-menu-item:view.preview").is_some());
     // Preview, Edit, Split, Toggle Preview and Edit, Toggle split view,
-    // Toggle sidebar (Viewer mode has no handler yet and is skipped).
-    f.keys("down down down down down enter");
+    // Live Preview, Toggle sidebar (Viewer mode has no handler yet and is
+    // skipped).
+    f.keys("down down down down down down enter");
     assert!(!f.is_open());
     assert!(f.sidebar_open());
     assert!(f.reader_focused());

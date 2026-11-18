@@ -34,6 +34,7 @@ fn tab(path: &str) -> TabState {
         folds: Vec::new(),
         reading_folds: Vec::new(),
         split_reading_folds: Vec::new(),
+        live_preview: false,
     }
 }
 
@@ -902,6 +903,68 @@ fn a_session_without_split_folds_still_reads() {
     assert!(tab.split_reading_folds.is_empty());
     let back = serde_json::to_string(&tab).expect("json");
     assert!(!back.contains("split_reading_folds"), "{back}");
+}
+
+#[test]
+fn live_preview_is_stored_only_when_chosen() {
+    let json = r#"{"path":"/n/a.md","mode":"edit"}"#;
+    let tab: TabState = serde_json::from_str(json).expect("reads");
+    assert!(!tab.live_preview, "Source by default");
+    let back = serde_json::to_string(&tab).expect("json");
+    assert!(!back.contains("live_preview"), "{back}");
+    let on = TabState {
+        live_preview: true,
+        ..tab
+    };
+    let json = serde_json::to_string(&on).expect("json");
+    let back: TabState = serde_json::from_str(&json).expect("reads");
+    assert!(back.live_preview);
+}
+
+/// A tab restored in Live Preview edits in Live Preview, and is saved so.
+#[gpui::test]
+fn live_preview_comes_back_with_the_session(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("a.md");
+    std::fs::write(&a, "# A\n\nSome **bold** text.\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: a.clone(),
+                mode: ViewMode::Edit,
+                live_preview: true,
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let chosen = workspace.read_with(&vcx, |ws, cx| {
+        ws.active_tab().editor().map(|e| e.read(cx).live_preview())
+    });
+    assert_eq!(chosen, Some(true));
+    vcx.update(|_, cx| save_now(cx));
+    assert!(memory.last().windows[0].tabs[0].live_preview);
+    // Toggled off: Source, and saved so.
+    workspace.update(&mut vcx, |ws, cx| ws.toggle_live_preview(cx));
+    let chosen = workspace.read_with(&vcx, |ws, cx| {
+        ws.active_tab().editor().map(|e| e.read(cx).live_preview())
+    });
+    assert_eq!(chosen, Some(false));
+    vcx.update(|_, cx| save_now(cx));
+    assert!(!memory.last().windows[0].tabs[0].live_preview);
 }
 
 #[gpui::test]

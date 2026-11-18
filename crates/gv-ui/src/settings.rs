@@ -122,6 +122,29 @@ pub struct AppSettings {
 
 impl Global for AppSettings {}
 
+/// How long [`AppSettings::set_value_later`] waits for more changes before
+/// it saves.
+pub const SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The save [`AppSettings::set_value_later`] has scheduled; replacing or
+/// dropping it cancels it.
+struct PendingSave {
+    _task: Option<gpui::Task<()>>,
+}
+
+impl Global for PendingSave {}
+
+/// Whether a settings file has edits not written yet.
+fn this_has_unsaved(cx: &App) -> bool {
+    cx.try_global::<AppSettings>().is_some_and(|this| {
+        let overlay = this.vault.as_ref().and_then(|v| v.overlay.as_ref());
+        this.global_file
+            .iter()
+            .chain(overlay)
+            .any(SettingsFile::has_unsaved)
+    })
+}
+
 /// Which settings an edit changes: the settings window's scope switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Target {
@@ -386,6 +409,8 @@ impl AppSettings {
         if this.vault.as_ref().is_some_and(|v| v.root == root) {
             return;
         }
+        // The overlay in use goes: its waiting edits first.
+        this.save_files();
         let id = vault_id(&root);
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
@@ -513,6 +538,66 @@ impl AppSettings {
         }
         Self::after_edit(cx);
         Ok(())
+    }
+
+    /// [`AppSettings::set_value`] that applies at once but saves the file
+    /// [`SAVE_DELAY`] after the last such change, for values that change many
+    /// times a second (the zoom under the mouse wheel). Quitting, switching
+    /// vaults and any other edit of the file save it sooner.
+    pub fn set_value_later(
+        cx: &mut App,
+        target: Target,
+        key: &str,
+        value: &toml::Value,
+    ) -> Result<(), EditRefused> {
+        let spec = gv_settings::spec(key)
+            .ok_or_else(|| EditRefused(format!("`{key}` is not a setting")))?;
+        if spec.scope == Scope::GlobalOnly && target == Target::Vault {
+            return Err(EditRefused(
+                "This setting applies to all vaults only.".to_owned(),
+            ));
+        }
+        let value = spec
+            .check_owned(value)
+            .map_err(|e| EditRefused(sentence(&e.message)))?;
+        let this = cx.global_mut::<Self>();
+        if target == Target::Vault && this.vault.is_none() {
+            return Err(EditRefused("No vault is open.".to_owned()));
+        }
+        this.edit(
+            target,
+            |file| file.set_value_unsaved(key, &value),
+            |text| gv_settings::set_value(text, key, &value),
+        )?;
+        Self::after_edit(cx);
+        if this_has_unsaved(cx) {
+            let task = cx.spawn(async move |cx| {
+                cx.background_executor().timer(SAVE_DELAY).await;
+                cx.update(Self::save_unsaved);
+            });
+            cx.set_global(PendingSave { _task: Some(task) });
+        }
+        Ok(())
+    }
+
+    /// Writes the edits [`AppSettings::set_value_later`] keeps waiting.
+    pub fn save_unsaved(cx: &mut App) {
+        if cx.has_global::<PendingSave>() {
+            // Ends the scheduled save; this is it.
+            cx.set_global(PendingSave { _task: None });
+        }
+        if this_has_unsaved(cx) {
+            cx.global_mut::<Self>().save_files();
+        }
+    }
+
+    fn save_files(&mut self) {
+        let overlay = self.vault.as_mut().and_then(|v| v.overlay.as_mut());
+        for file in self.global_file.iter_mut().chain(overlay) {
+            if let Err(err) = file.save() {
+                tracing::warn!("settings: cannot save: {err}");
+            }
+        }
     }
 
     /// Removes `key` from the layer of `target`, so the layer below applies

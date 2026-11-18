@@ -8,7 +8,8 @@
 //! encoding and the line endings ([`EditorFacts`]); in Preview the zoom
 //! ([`crate::zoom`]); the profile chip ([`super::profile_chip`]).
 //!
-//! Not designed: what a click on the zoom does. It resets the zoom to 100 %.
+//! Not designed: what a click on the zoom does. It opens the zoom menu
+//! ([`crate::zoom::menu`]).
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -22,10 +23,10 @@ use super::{DocFacts, Tab, ViewMode};
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::editor::EditorFacts;
 use crate::icons::Icon;
-use crate::keymap::actions::view::ZoomReset;
 use crate::metrics::spacing::status_bar as spacing;
 use crate::metrics::{icon, size, text};
 use crate::theme::Theme;
+use crate::zoom::menu::ZoomButton;
 
 /// Reading speed for "M min read", in words per minute.
 const WORDS_PER_MINUTE: usize = 200;
@@ -81,24 +82,7 @@ pub(super) fn status_bar(
                 .gap(px(spacing::GAP))
                 .children(link_findings)
                 .children(facts(tab, doc, editor))
-                .when_some(zoom, |row, label| {
-                    let hover = theme.text.primary;
-                    row.child(
-                        div()
-                            .id("status-zoom")
-                            .a11y_button(format!("Zoom {label}"))
-                            .aria_description("Reset the zoom")
-                            .keyboard_control(theme)
-                            .debug_selector(|| "status-zoom".into())
-                            .flex_none()
-                            .hover(move |style| style.text_color(hover))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ZoomReset), cx);
-                            })
-                            .child(label)
-                            .accessible(),
-                    )
-                })
+                .when_some(zoom, |row, label| row.child(ZoomButton::new(label)))
                 .child(profile_chip),
         )
 }

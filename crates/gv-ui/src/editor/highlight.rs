@@ -277,6 +277,8 @@ pub(crate) struct HighlightCache {
     /// Plain-text mode ([`super::plain`]): no Markdown roles; the whole
     /// text is code of this language, if any.
     plain: Option<Option<String>>,
+    /// Live Preview's styles ([`Self::set_live`]).
+    live: bool,
 }
 
 /// Code highlighting of fenced code in the Source view.
@@ -380,6 +382,16 @@ impl HighlightCache {
         self.lines.clear();
     }
 
+    /// Live Preview's styles (`true`: link text as links, struck
+    /// strikethrough, headings by level) or the Source view's.
+    pub fn set_live(&mut self, live: bool) {
+        if self.live != live {
+            self.live = live;
+            self.key = None;
+            self.lines.clear();
+        }
+    }
+
     /// Makes sure `lines` are highlighted with the shown tree of `syntax`.
     pub fn ensure(&mut self, syntax: &Syntax, links: &mut LinkStatuses, lines: Range<usize>) {
         let key = (syntax.generation(), links.generation());
@@ -402,7 +414,7 @@ impl HighlightCache {
         }
         let styles = match &self.plain {
             Some(info) => highlight_plain(text, window, info.as_deref(), &mut self.code),
-            None => highlight(tree, text, window, links, &mut self.code),
+            None => highlight_with(tree, text, window, links, &mut self.code, self.live),
         };
         for (line, style) in styles {
             self.lines.entry(line).or_insert_with(|| Rc::new(style));
@@ -544,12 +556,26 @@ impl<'t> Painter<'t> {
 }
 
 /// Highlights `lines` of `text` with `tree` (the tree of `text`).
+#[cfg(test)]
 pub(crate) fn highlight(
     tree: &SyntaxTree,
     text: &TextSnapshot,
     lines: Range<usize>,
     links: &mut LinkStatuses,
     code: &mut FenceCode,
+) -> Vec<(usize, LineStyle)> {
+    highlight_with(tree, text, lines, links, code, false)
+}
+
+/// Highlights `lines` of `text` with `tree` (the tree of `text`), with
+/// Live Preview's styles when `live`.
+pub(crate) fn highlight_with(
+    tree: &SyntaxTree,
+    text: &TextSnapshot,
+    lines: Range<usize>,
+    links: &mut LinkStatuses,
+    code: &mut FenceCode,
+    live: bool,
 ) -> Vec<(usize, LineStyle)> {
     let mut painter = Painter::new(text, lines);
     let range = painter.range();
@@ -583,6 +609,7 @@ pub(crate) fn highlight(
         links,
         code,
         containers: Vec::new(),
+        live,
     };
     walk_range(tree, range, &mut leaves);
     painter.finish()
@@ -624,6 +651,8 @@ struct Leaves<'a, 't> {
     links: &'a mut LinkStatuses,
     code: &'a mut FenceCode,
     containers: Vec<Container>,
+    /// Live Preview's styles.
+    live: bool,
 }
 
 impl Visitor for Leaves<'_, '_> {
@@ -637,9 +666,22 @@ impl Visitor for Leaves<'_, '_> {
 
     fn leaf(&mut self, leaf: &Leaf<'_>) {
         match leaf.kind {
-            LeafKind::Heading { .. } => {
+            LeafKind::Heading { level, .. } => {
+                // Live Preview: a style per level (not designed).
+                let color = match level {
+                    1 if self.live => Some(Token::AccentDefault),
+                    3.. if self.live => Some(Token::TextSecondary),
+                    _ => None,
+                };
+                let italic = self.live && level >= 4;
                 for line in leaf.lines {
-                    self.painter.paint(line.content.clone(), |s| s.bold = true);
+                    self.painter.paint(line.content.clone(), |s| {
+                        s.bold = true;
+                        s.italic |= italic;
+                        if let Some(color) = color {
+                            s.color = color;
+                        }
+                    });
                 }
                 self.inlines(leaf);
             }
@@ -730,6 +772,18 @@ impl Leaves<'_, '_> {
                 };
                 node.children().for_each(|c| self.inline(c, ctx));
             }
+            InlineKind::Strikethrough if self.live => {
+                node.children().for_each(|c| self.inline(c, ctx));
+                let markers: Vec<Range<usize>> = node
+                    .children()
+                    .filter(|c| c.kind() == InlineKind::Marker)
+                    .map(|c| c.range())
+                    .collect();
+                if let (Some(open), Some(close)) = (markers.first(), markers.last()) {
+                    self.painter
+                        .paint(open.end..close.start, |s| s.strike = true);
+                }
+            }
             InlineKind::CodeSpan
             | InlineKind::Strikethrough
             | InlineKind::InlineMath
@@ -775,6 +829,11 @@ impl Leaves<'_, '_> {
             InlineKind::WikiAlias => self.painter.paint(range, |s| {
                 s.bold |= ctx.bold;
                 s.italic |= ctx.italic;
+                // Live Preview shows only the alias: in the link's style.
+                if let Some(target) = ctx.target.filter(|_| self.live) {
+                    s.color = target.color;
+                    s.underline = target.underline;
+                }
             }),
             InlineKind::CommentText => self.painter.set(range, Style::COMMENT),
             InlineKind::TagText => self.painter.set(range, Style::of(Token::AccentDefault)),
@@ -783,6 +842,17 @@ impl Leaves<'_, '_> {
                 let target = node.link().map(|link| self.target_style(&link));
                 let ctx = Ctx { target, ..ctx };
                 node.children().for_each(|c| self.inline(c, ctx));
+                // Live Preview shows a link's text in its target's style.
+                if self.live
+                    && node.kind() == InlineKind::Link
+                    && let (Some(target), Some(text)) =
+                        (target, super::live_preview::link_text(&node))
+                {
+                    self.painter.paint(text, |s| {
+                        s.color = target.color;
+                        s.underline = target.underline;
+                    });
+                }
             }
             InlineKind::Text
             | InlineKind::Entity

@@ -119,6 +119,7 @@ command_actions! {
     view {
         ToggleMode = "view.toggle_mode",
         ToggleSplit = "view.toggle_split",
+        ToggleLivePreview = "view.toggle_live_preview",
         Preview = "view.preview",
         Edit = "view.edit",
         Split = "view.split",

@@ -288,6 +288,65 @@ fn new_file_starts_with_the_version() {
 }
 
 #[test]
+fn unsaved_edits_apply_at_once_and_are_written_later() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, "version = 1\n# mine\n").unwrap_or_else(|e| panic!("{e}"));
+    let mut file = SettingsFile::load(&path, LayerKind::Global).unwrap_or_else(|e| panic!("{e}"));
+    let zoom = |file: &SettingsFile| {
+        file.layer()
+            .get("appearance.zoom_percent")
+            .map(|e| e.value.clone())
+    };
+    let disk = || fs::read_to_string(&path).unwrap_or_default();
+
+    // In memory only: the layer has it, the disk does not.
+    for percent in [110, 120, 130] {
+        file.set_value_unsaved("appearance.zoom_percent", &toml::Value::Integer(percent))
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+    assert!(file.has_unsaved());
+    assert_eq!(zoom(&file), Some(toml::Value::Integer(130)));
+    assert_eq!(disk(), "version = 1\n# mine\n");
+    // Invalid values are refused as with a write.
+    assert!(
+        file.set_value_unsaved("appearance.zoom_percent", &toml::Value::Integer(5))
+            .is_err()
+    );
+
+    // Saved once, with the comments kept.
+    file.save().unwrap_or_else(|e| panic!("{e}"));
+    assert!(!file.has_unsaved());
+    let saved = disk();
+    assert!(
+        saved.contains("# mine") && saved.contains("[appearance]\nzoom_percent = 130\n"),
+        "{saved}"
+    );
+    assert_eq!(file.text(), disk());
+    // Nothing waits: saving again writes nothing.
+    fs::write(&path, "version = 1\n").unwrap_or_else(|e| panic!("{e}"));
+    file.save().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(disk(), "version = 1\n");
+
+    // Another edit writes the waiting one with it.
+    file.reload().unwrap_or_else(|e| panic!("{e}"));
+    file.set_value_unsaved("appearance.zoom_percent", &toml::Value::Integer(90))
+        .unwrap_or_else(|e| panic!("{e}"));
+    file.set("editor.prose_font", &true)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(!file.has_unsaved());
+    let reread = SettingsFile::load(&path, LayerKind::Global).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(zoom(&reread), Some(toml::Value::Integer(90)));
+    assert_eq!(
+        reread
+            .layer()
+            .get("editor.prose_font")
+            .map(|e| e.value.clone()),
+        Some(toml::Value::Boolean(true))
+    );
+}
+
+#[test]
 fn settings_file_refuses_invalid_and_misplaced_values() {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
     let mut global = SettingsFile::load(dir.path().join("g.toml"), LayerKind::Global)

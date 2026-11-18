@@ -134,7 +134,7 @@ impl VisualLine {
     /// starts a row of the replace layer).
     pub fn new(text: &TextSnapshot, replace: &ReplaceSnapshot, first: usize) -> Option<Self> {
         let line_range = text.line_range(first).ok()?;
-        let plain = !replace.has_folds() && replace.replacements().is_empty();
+        let plain = !replace.has_folds() && !replace.has_replacements();
         if plain || !replace.is_line_folded(first) {
             let row = if plain {
                 u32::try_from(first).ok()?

@@ -1301,7 +1301,7 @@ fn random_replacements_folds_and_edits() {
             };
             let buffer_snapshot = buffer.snapshot();
             let (expected, shown) =
-                expected_layer(&buffer_snapshot, snapshot.folds(), snapshot.replacements());
+                expected_layer(&buffer_snapshot, snapshot.folds(), &snapshot.replacements());
             assert_eq!(snapshot.text(), expected);
             let (tabs, tab_edits) = tab_map.sync(snapshot.clone(), edits.clone(), tab_size);
             let fresh_tabs = crate::display_map::tab_map::TabMap::new(snapshot.clone(), tab_size).1;
@@ -1427,4 +1427,220 @@ fn random_replacements_folds_and_edits() {
             assert_eq!(rebuilt.replacements(), snapshot.replacements());
         }
     });
+}
+
+// ----- splices ----------------------------------------------------------------
+
+/// What [`ReplaceMap::splice`] does, on a plain list: the replacements of
+/// `range` (overlapping it, or inside it with the ends) go.
+fn model_splice(model: &mut Vec<Replacement>, range: &Range<usize>, new: Vec<Replacement>) {
+    model.retain(|r| {
+        let overlaps = r.range.start < range.end && r.range.end > range.start;
+        let inside = range.start <= r.range.start && r.range.end <= range.end;
+        !(overlaps || inside)
+    });
+    model.extend(new);
+    model.sort_by(replacement_order);
+}
+
+/// What moving through an edit does, on a plain list.
+fn model_move(model: &mut Vec<Replacement>, summary: &EditSummary) {
+    let edits = summary.edits();
+    model.retain(|r| {
+        !edits
+            .iter()
+            .any(|e| e.old.start <= r.range.end && r.range.start <= e.old.end)
+    });
+    for r in model.iter_mut() {
+        let start = summary.transform_offset(r.range.start, Bias::Left);
+        r.range = start..start + r.range.len();
+    }
+}
+
+/// Random sorted, non-overlapping splice ranges, each with random
+/// replacements inside it (normalized as `splice` would).
+fn random_splices(
+    rng: &mut StdRng,
+    buffer: &TextSnapshot,
+) -> Vec<(Range<usize>, Vec<Replacement>)> {
+    let mut cuts: Vec<usize> = (0..rng.random_range(1..=6))
+        .map(|_| buffer.clip_offset(rng.random_range(0..=buffer.len()), Bias::Left))
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut splices = Vec::new();
+    for pair in cuts.chunks(2) {
+        let range = match pair {
+            [a, b] => *a..*b,
+            [a] => *a..*a,
+            _ => continue,
+        };
+        if splices
+            .last()
+            .is_some_and(|(last, _): &(Range<usize>, _)| last.end >= range.start)
+        {
+            continue;
+        }
+        let new: Vec<Replacement> = random_replacements(rng, buffer)
+            .into_iter()
+            .map(|mut r| {
+                // Into the range.
+                let width = range.len();
+                let start = range.start + r.range.start % (width + 1);
+                let end = (start + r.range.len()).min(range.end);
+                r.range = start..end;
+                r
+            })
+            .collect();
+        let new = normalized(buffer, &range, new);
+        splices.push((range, new));
+    }
+    splices
+}
+
+#[test]
+fn random_splices_against_a_model() {
+    let operations = std::env::var("OPERATIONS")
+        .ok()
+        .and_then(|operations| operations.parse().ok())
+        .unwrap_or(16);
+    for_each_seed(300, |mut rng| {
+        let len = rng.random_range(0..120);
+        let mut buffer = Buffer::new(&random_text(&mut rng, len));
+        let (mut map, initial) = ReplaceMap::new(buffer.snapshot());
+        let mut text = initial.text();
+        let mut model: Vec<Replacement> = Vec::new();
+        for _ in 0..operations {
+            let (snapshot, edits) = match rng.random_range(0..=100) {
+                0..=54 => {
+                    let splices = random_splices(&mut rng, &buffer.snapshot());
+                    for (range, new) in &splices {
+                        model_splice(&mut model, range, new.clone());
+                    }
+                    let before = map.snapshot().replacements();
+                    let (snapshot, edits) = map.splice(splices.clone());
+                    if snapshot.replacements() == before {
+                        assert!(edits.is_empty(), "no change, no edits");
+                    }
+                    // Splicing what is there changes nothing.
+                    let again: Vec<_> = splices
+                        .iter()
+                        .map(|(range, _)| (range.clone(), snapshot.replacements_in(range.clone())))
+                        .map(|(range, list)| {
+                            let list = list
+                                .into_iter()
+                                .filter(|r| {
+                                    range.start <= r.range.start && r.range.end <= range.end
+                                })
+                                .collect();
+                            (range, list)
+                        })
+                        .collect();
+                    let (_, none) = map.splice(again);
+                    assert!(none.is_empty(), "{none:?}");
+                    (snapshot, edits)
+                }
+                55..=64 => randomly_mutate(&mut map, &mut rng),
+                _ => {
+                    let summary = random_edit(&mut rng, &mut buffer);
+                    model_move(&mut model, &summary);
+                    map.sync(buffer.snapshot(), &summary)
+                }
+            };
+            assert_eq!(snapshot.replacements(), model);
+            assert_eq!(snapshot.replacement_count(), model.len());
+            let buffer_snapshot = buffer.snapshot();
+            let (expected, _) =
+                expected_layer(&buffer_snapshot, snapshot.folds(), &snapshot.replacements());
+            assert_eq!(snapshot.text(), expected);
+            text = replay_edits(&text, &expected, &edits, |p| p.0);
+            assert_eq!(text, expected, "{edits:?}");
+
+            // Queries against the model.
+            for _ in 0..8 {
+                let a = rng.random_range(0..=buffer_snapshot.len());
+                let b = rng.random_range(a..=buffer_snapshot.len());
+                let touching: Vec<_> = model
+                    .iter()
+                    .filter(|r| r.range.start <= b && r.range.end >= a)
+                    .cloned()
+                    .collect();
+                assert_eq!(snapshot.replacements_in(a..b), touching, "{a}..{b}");
+                let mut run: Option<Range<usize>> = None;
+                for r in &model {
+                    match &mut run {
+                        Some(run) if r.range.start == run.end => run.end = r.range.end,
+                        Some(found) if found.start <= a && a <= found.end => break,
+                        _ => run = Some(r.range.clone()),
+                    }
+                }
+                let run = run.filter(|run| run.start <= a && a <= run.end);
+                assert_eq!(
+                    snapshot.replacement_around(a),
+                    run,
+                    "around {a} in {model:?}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn splices_change_only_their_ranges() {
+    let buffer = TextSnapshot::new("**bold** and *it* and `code`");
+    let (mut map, _) = ReplaceMap::new(buffer);
+    let (snapshot, edits) = map.splice([
+        (0..8, vec![Replacement::hide(0..2), Replacement::hide(6..8)]),
+        (
+            13..17,
+            vec![Replacement::hide(13..14), Replacement::hide(16..17)],
+        ),
+    ]);
+    assert_eq!(snapshot.text(), "bold and it and `code`");
+    assert_eq!(edits.len(), 4, "one per marker: {edits:?}");
+    // Revealing the emphasis touches only its markers.
+    let (snapshot, edits) = map.splice([(13..17, Vec::new())]);
+    assert_eq!(snapshot.text(), "bold and *it* and `code`");
+    assert_eq!(
+        edits,
+        [
+            Edit {
+                old: ReplacePoint::new(0, 9)..ReplacePoint::new(0, 9),
+                new: ReplacePoint::new(0, 9)..ReplacePoint::new(0, 10),
+            },
+            Edit {
+                old: ReplacePoint::new(0, 11)..ReplacePoint::new(0, 11),
+                new: ReplacePoint::new(0, 12)..ReplacePoint::new(0, 13),
+            }
+        ]
+    );
+    // The same again: nothing.
+    let (_, edits) = map.splice([(0..8, vec![Replacement::hide(0..2), Replacement::hide(6..8)])]);
+    assert!(edits.is_empty());
+    // An empty range takes the replacements across it.
+    let (snapshot, _) = map.splice([(1..1, Vec::new())]);
+    assert_eq!(snapshot.text(), "**bold and *it* and `code`");
+    assert_eq!(snapshot.replacements_in(0..30).len(), 1);
+}
+
+#[test]
+fn runs_of_adjacent_replacements() {
+    // `**[x](y)**`: `**[` hidden in two pieces, `](y)**` in two.
+    let buffer = TextSnapshot::new("a **[x](y)** b");
+    let (mut map, _) = ReplaceMap::new(buffer);
+    let (snapshot, _) = map.set_replacements([
+        Replacement::hide(2..4),
+        Replacement::hide(4..5),
+        Replacement::hide(6..10),
+        Replacement::hide(10..12),
+    ]);
+    assert_eq!(snapshot.text(), "a x b");
+    assert_eq!(snapshot.replacement_around(3), Some(2..5));
+    assert_eq!(snapshot.replacement_around(2), Some(2..5));
+    assert_eq!(snapshot.replacement_around(5), Some(2..5));
+    assert_eq!(snapshot.replacement_around(11), Some(6..12));
+    assert_eq!(snapshot.replacement_around(1), None);
+    assert_eq!(snapshot.atomic_range_at(4), Some(2..5));
+    assert_eq!(snapshot.atomic_range_at(5), None, "ends are not inside");
+    assert_eq!(snapshot.atomic_range_at(10), Some(6..12));
 }

@@ -262,6 +262,9 @@ pub struct TabState {
     /// view's (each pane folds on its own).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split_reading_folds: Vec<ReadingFold>,
+    /// Edit mode's editing style: Live Preview (`true`) or Source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_preview: bool,
 }
 
 /// A place in a tab's history.
@@ -361,6 +364,7 @@ impl TabState {
     pub(super) fn into_tab(self) -> super::Tab {
         let mut tab = super::Tab::new(Some(super::OpenTarget::new(self.path.clone())));
         tab.mode = self.mode;
+        tab.live_preview = self.live_preview;
         tab.scroll = self.anchor.map(Anchor::target);
         tab.history = history(&self.back, &self.forward);
         tab.split_ratio = self
@@ -420,6 +424,7 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             folds,
             reading_folds: tab.reading_folds(cx),
             split_reading_folds: tab.split_reading_folds(cx),
+            live_preview: tab.live_preview,
         });
     }
     WindowState {

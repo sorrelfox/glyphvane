@@ -240,6 +240,10 @@ impl EditorView {
             return frame;
         };
         self.sync_wrap(columns.text_w, cx);
+        if self.is_live_preview_active() {
+            let lines = self.live_window(f32::from(bounds.size.height));
+            self.refresh_live_preview(lines, cx);
+        }
         let Some((lines, rows_total, wrapping)) = self.row_map().map(|map| {
             (
                 self.doc

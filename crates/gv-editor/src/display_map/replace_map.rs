@@ -89,6 +89,8 @@ use std::sync::Arc;
 use gv_text::{Bias, EditSummary, TextSnapshot};
 use sum_tree::{Cursor, Dimensions, SumTree};
 
+use replacements::ReplacementTree;
+
 use super::BufferPoint;
 use super::primitives::{Chunk, Edit, Highlight, MAX_CHUNK_LEN, Point, StyleId, TextSummary};
 
@@ -541,14 +543,6 @@ fn merged_folds(folds: &[Fold]) -> Vec<(FoldId, Range<usize>)> {
     merged
 }
 
-/// The replacement that has `offset` strictly inside, if any.
-fn replacement_across(replacements: &[Replacement], offset: usize) -> Option<&Replacement> {
-    let index = replacements.partition_point(|r| r.range.end <= offset);
-    replacements
-        .get(index)
-        .filter(|replacement| replacement.range.start < offset)
-}
-
 /// What the layer shows in place of buffer bytes in `region` (byte offsets
 /// of `folds`' and `replacements`' buffer), in order: the runs of folds
 /// that start in it, and the replacements that start in it and do not
@@ -557,7 +551,7 @@ fn replacement_across(replacements: &[Replacement], offset: usize) -> Option<&Re
 /// `with_end`.
 fn shown_in(
     folds: &[Fold],
-    replacements: &[Replacement],
+    replacements: &ReplacementTree,
     region: Range<usize>,
     with_end: bool,
 ) -> Vec<(Range<usize>, Payload)> {
@@ -585,16 +579,14 @@ fn shown_in(
     if replacements.is_empty() {
         return shown;
     }
-    let mut index = replacements.partition_point(|r| r.range.start < region.start);
     let mut any = false;
-    while let Some(replacement) = replacements.get(index) {
+    for replacement in replacements.iter_from(region.start) {
         let range = &replacement.range;
         let inside =
             range.start < region.end || (with_end && range.is_empty() && range.start == region.end);
         if !inside {
             break;
         }
-        index += 1;
         let run = runs.partition_point(|(run, _)| run.end <= range.start);
         let covered = runs.get(run).is_some_and(|(run, _)| {
             if range.is_empty() {
@@ -620,6 +612,60 @@ fn shown_in(
     shown
 }
 
+/// `replacements` for a splice of `range`: clipped to character
+/// boundaries and out of CRLFs, sorted, and without those outside `range`,
+/// overlapping one before them, hidden and empty, or widgets with a line
+/// break or no room at all.
+fn normalized(
+    buffer: &TextSnapshot,
+    range: &Range<usize>,
+    replacements: Vec<Replacement>,
+) -> Vec<Replacement> {
+    let len = buffer.len();
+    let mut new: Vec<Replacement> = replacements
+        .into_iter()
+        .filter_map(|replacement| {
+            let r = &replacement.range;
+            let r = if r.is_empty() {
+                let at = buffer.clip_offset(r.start.min(len), Bias::Left);
+                let at = clip_out_of_crlf(buffer, at, Bias::Left);
+                at..at
+            } else {
+                let start = buffer.clip_offset(r.start.min(len), Bias::Right);
+                let start = clip_out_of_crlf(buffer, start, Bias::Right);
+                let end = buffer.clip_offset(r.end.min(len), Bias::Left);
+                let end = clip_out_of_crlf(buffer, end, Bias::Left);
+                start..end.max(start)
+            };
+            if r.start < range.start || r.end > range.end {
+                return None;
+            }
+            let keep = match &replacement.widget {
+                None => !r.is_empty(),
+                Some(widget) => {
+                    let text = widget.display_text();
+                    !text.contains(['\n', '\r']) && !(text.is_empty() && r.is_empty())
+                }
+            };
+            keep.then_some(Replacement {
+                range: r,
+                widget: replacement.widget,
+            })
+        })
+        .collect();
+    new.sort_by(replacement_order);
+    let mut kept: Vec<Replacement> = Vec::with_capacity(new.len());
+    for replacement in new {
+        if kept
+            .last()
+            .is_none_or(|last| last.range.end <= replacement.range.start)
+        {
+            kept.push(replacement);
+        }
+    }
+    kept
+}
+
 // ----- the map ----------------------------------------------------------------
 
 /// A buffer edit in byte offsets: old range in the old buffer, new range
@@ -641,7 +687,7 @@ impl ReplaceMap {
             buffer,
             transforms: SumTree::from_item(Transform::isomorphic(input), ()),
             folds: Arc::new(Vec::new()),
-            replacements: Arc::new(Vec::new()),
+            replacements: ReplacementTree::default(),
             version: 0,
         };
         (
@@ -704,7 +750,7 @@ impl ReplaceMap {
         let Some(input_edits) = input_edits else {
             let old_max = self.snapshot.max_point();
             let unfolded = std::mem::take(Arc::make_mut(&mut self.snapshot.folds));
-            self.snapshot.replacements = Arc::new(Vec::new());
+            self.snapshot.replacements = ReplacementTree::default();
             let input = input_summary(&buffer, 0..buffer.len());
             self.snapshot.transforms = SumTree::from_item(Transform::isomorphic(input), ());
             self.snapshot.buffer = buffer;
@@ -846,121 +892,84 @@ impl ReplaceMap {
         if self.snapshot.replacements.is_empty() {
             return;
         }
-        let edits = summary.edits();
-        let moved: Vec<Replacement> = self
-            .snapshot
-            .replacements
-            .iter()
-            .filter_map(|replacement| {
-                let range = &replacement.range;
-                let index = edits.partition_point(|edit| edit.old.end < range.start);
-                if edits
-                    .get(index)
-                    .is_some_and(|edit| edit.old.start <= range.end)
-                {
-                    return None;
-                }
-                let start = summary.transform_offset(range.start, Bias::Left);
-                Some(Replacement {
-                    range: start..start + range.len(),
-                    widget: replacement.widget.clone(),
-                })
-            })
-            .collect();
-        self.snapshot.replacements = Arc::new(moved);
+        self.snapshot.replacements = self.snapshot.replacements.moved(summary);
     }
 
     /// Sets the replacements other than folds, replacing the ones there
-    /// were, and returns the new snapshot and the edits.
-    ///
-    /// Ranges are byte ranges of the current buffer, clipped to character
-    /// boundaries and moved out of CRLFs. Skipped: a replacement that
-    /// overlaps one before it (in start order), hidden empty ranges, and
-    /// widgets whose text holds a line break or that take no room at all.
-    /// Where a replacement overlaps a fold it is kept but not shown.
+    /// were, and returns the new snapshot and the edits: a
+    /// [`splice`](Self::splice) of the whole text.
     pub fn set_replacements(
         &mut self,
         replacements: impl IntoIterator<Item = Replacement>,
     ) -> (ReplaceSnapshot, Vec<ReplaceEdit>) {
+        let all = 0..self.snapshot.buffer.len();
+        self.splice([(all, replacements.into_iter().collect())])
+    }
+
+    /// Replaces the replacements other than folds in some ranges: for
+    /// each `(range, replacements)`, the replacements that overlap `range`
+    /// or lie in it (ends included; a non-empty one that only touches it
+    /// stays) go and `replacements` come. Returns the new snapshot and the
+    /// edits, which cover only what differs (splicing what is there
+    /// already changes nothing).
+    ///
+    /// This is the input of derived replacements (Live Preview computes
+    /// them from the syntax tree and the selections). They are kept in a
+    /// sum tree beside the folds, so a splice costs O(changes · log n).
+    /// An edit that touches one (its ends included) removes it; the owner
+    /// computes it again. Where one overlaps a fold, the fold wins and the
+    /// replacement is kept but not shown.
+    ///
+    /// Ranges are byte ranges of the current buffer; ranges that overlap
+    /// are joined. Replacements are clipped to character boundaries and
+    /// moved out of CRLFs. Skipped: replacements outside their range, one
+    /// that overlaps one before it (in start order), hidden empty ranges,
+    /// and widgets whose text holds a line break or that take no room at
+    /// all.
+    pub fn splice(
+        &mut self,
+        splices: impl IntoIterator<Item = (Range<usize>, Vec<Replacement>)>,
+    ) -> (ReplaceSnapshot, Vec<ReplaceEdit>) {
         let buffer = self.snapshot.buffer.clone();
-        let mut new: Vec<Replacement> = replacements
+        let len = buffer.len();
+        let mut splices: Vec<(Range<usize>, Vec<Replacement>)> = splices
             .into_iter()
-            .filter_map(|replacement| {
-                let range = &replacement.range;
-                let range = if range.is_empty() {
-                    let at = buffer.clip_offset(range.start.min(buffer.len()), Bias::Left);
-                    let at = clip_out_of_crlf(&buffer, at, Bias::Left);
-                    at..at
-                } else {
-                    let start = buffer.clip_offset(range.start.min(buffer.len()), Bias::Right);
-                    let start = clip_out_of_crlf(&buffer, start, Bias::Right);
-                    let end = buffer.clip_offset(range.end.min(buffer.len()), Bias::Left);
-                    let end = clip_out_of_crlf(&buffer, end, Bias::Left);
-                    start..end.max(start)
-                };
-                let keep = match &replacement.widget {
-                    None => !range.is_empty(),
-                    Some(widget) => {
-                        let text = widget.display_text();
-                        !text.contains(['\n', '\r']) && !(text.is_empty() && range.is_empty())
-                    }
-                };
-                keep.then_some(Replacement {
-                    range,
-                    widget: replacement.widget,
-                })
+            .map(|(range, replacements)| {
+                let start = range.start.min(len);
+                (start..range.end.clamp(start, len), replacements)
             })
             .collect();
-        new.sort_by(replacement_order);
-        let mut kept: Vec<Replacement> = Vec::with_capacity(new.len());
-        for replacement in new {
-            if kept
-                .last()
-                .is_none_or(|last| last.range.end <= replacement.range.start)
-            {
-                kept.push(replacement);
+        splices.sort_by_key(|(range, _)| (range.start, range.end));
+        let mut joined: Vec<(Range<usize>, Vec<Replacement>)> = Vec::with_capacity(splices.len());
+        for (range, replacements) in splices {
+            match joined.last_mut() {
+                Some((last, list))
+                    if range.start < last.end || (range.start == last.end && range.is_empty()) =>
+                {
+                    last.end = last.end.max(range.end);
+                    list.extend(replacements);
+                }
+                _ => joined.push((range, replacements)),
             }
         }
-
-        // The ranges of the replacements that differ.
-        let old = &self.snapshot.replacements;
-        let mut edits = Vec::new();
-        let (mut i, mut j) = (0, 0);
-        let key = |r: &Replacement| (r.range.start, r.range.end);
-        loop {
-            let range = match (old.get(i), kept.get(j)) {
-                (None, None) => break,
-                (Some(a), Some(b)) if key(a) == key(b) => {
-                    i += 1;
-                    j += 1;
-                    if a == b {
-                        continue;
-                    }
-                    a.range.clone()
-                }
-                (Some(a), Some(b)) if replacement_order(a, b).is_lt() => {
-                    i += 1;
-                    a.range.clone()
-                }
-                (Some(a), None) => {
-                    i += 1;
-                    a.range.clone()
-                }
-                (_, Some(b)) => {
-                    j += 1;
-                    b.range.clone()
-                }
-            };
-            edits.push(Edit {
-                old: range.clone(),
-                new: range,
-            });
-        }
-        if edits.is_empty() {
+        let joined = joined.into_iter().map(|(range, replacements)| {
+            let replacements = normalized(&buffer, &range, replacements);
+            (range, replacements)
+        });
+        let (tree, changed) = self.snapshot.replacements.spliced(joined);
+        if changed.is_empty() {
             return (self.snapshot.clone(), Vec::new());
         }
-        self.snapshot.replacements = Arc::new(kept);
-        let edits = consolidate_edits(edits);
+        self.snapshot.replacements = tree;
+        let edits = consolidate_edits(
+            changed
+                .into_iter()
+                .map(|range| Edit {
+                    old: range.clone(),
+                    new: range,
+                })
+                .collect(),
+        );
         let replace_edits = self.sync_transforms(buffer, edits);
         self.check_invariants();
         (self.snapshot.clone(), replace_edits)
@@ -1113,7 +1122,7 @@ impl ReplaceMap {
                         sum_tree::Bias::Left,
                     );
                     let new_start = (start.0 as isize + shift) as usize;
-                    let Some(across) = replacement_across(replacements, new_start) else {
+                    let Some(across) = replacements.across(new_start) else {
                         break;
                     };
                     let earlier =
@@ -1152,8 +1161,7 @@ impl ReplaceMap {
                         // A replacement across the region's end (one a
                         // fold hid) takes the region past its end.
                         let new_end = (edit.new.start + edit.old.len()) as isize + delta;
-                        let Some(across) = replacement_across(replacements, new_end as usize)
-                        else {
+                        let Some(across) = replacements.across(new_end as usize) else {
                             break;
                         };
                         let shift = new_end - edit.old.end as isize;
@@ -1267,15 +1275,16 @@ impl ReplaceMap {
             assert!(!snapshot.buffer.is_inside_crlf(fold.range.start));
             assert!(!snapshot.buffer.is_inside_crlf(fold.range.end));
         }
+        let replacements = snapshot.replacements.iter().collect::<Vec<_>>();
+        assert_eq!(replacements.len(), snapshot.replacements.len());
         assert!(
-            snapshot
-                .replacements
+            replacements
                 .windows(2)
                 .all(|pair| pair[0].range.end <= pair[1].range.start),
             "replacements overlap: {:?}",
             snapshot.replacements
         );
-        for replacement in snapshot.replacements.iter() {
+        for replacement in &replacements {
             assert!(!snapshot.buffer.is_inside_crlf(replacement.range.start));
             assert!(!snapshot.buffer.is_inside_crlf(replacement.range.end));
         }
@@ -1538,7 +1547,7 @@ pub struct ReplaceSnapshot {
     folds: Arc<Vec<Fold>>,
     /// Sorted by [`replacement_order`], not overlapping, in `buffer`'s
     /// coordinates.
-    replacements: Arc<Vec<Replacement>>,
+    replacements: ReplacementTree,
     version: usize,
 }
 
@@ -1797,9 +1806,49 @@ impl ReplaceSnapshot {
     }
 
     /// The replacements other than folds, sorted (see
-    /// [`ReplaceMap::set_replacements`]), shown or not.
-    pub fn replacements(&self) -> &[Replacement] {
-        &self.replacements
+    /// [`ReplaceMap::splice`]), shown or not. O(n): prefer
+    /// [`replacements_in`](Self::replacements_in).
+    pub fn replacements(&self) -> Vec<Replacement> {
+        self.replacements.iter().collect()
+    }
+
+    /// The number of replacements other than folds, shown or not.
+    pub fn replacement_count(&self) -> usize {
+        self.replacements.len()
+    }
+
+    /// Whether there is any replacement other than a fold.
+    pub fn has_replacements(&self) -> bool {
+        !self.replacements.is_empty()
+    }
+
+    /// The replacements other than folds that share bytes with `range` or
+    /// touch it (an empty one inside or at its ends counts), in order,
+    /// shown or not.
+    pub fn replacements_in(&self, range: Range<usize>) -> Vec<Replacement> {
+        self.replacements.touching(range).collect()
+    }
+
+    /// The run of replacements other than folds around `offset`: the
+    /// replacements that follow each other without a gap (one ends where
+    /// the next starts, as the hidden markers `**` and `[` of `**[x](y)**`
+    /// do) and hold `offset`, ends included. Its buffer range, or `None`
+    /// when no replacement touches `offset`.
+    pub fn replacement_around(&self, offset: usize) -> Option<Range<usize>> {
+        self.replacements.run_around(offset)
+    }
+
+    /// The bytes a caret cannot stand inside of around `offset`: the run
+    /// of folds ([`folded_range_at`](Self::folded_range_at)) or of
+    /// replacements ([`replacement_around`](Self::replacement_around))
+    /// that has `offset` strictly inside, if any. Motions that end there
+    /// move to its start or end.
+    pub fn atomic_range_at(&self, offset: usize) -> Option<Range<usize>> {
+        if let Some(range) = self.folded_range_at(offset) {
+            return Some(range);
+        }
+        self.replacement_around(offset)
+            .filter(|run| run.start < offset && offset < run.end)
     }
 
     /// What is shown at `point`: the payload of the replacement that starts
@@ -2142,5 +2191,6 @@ fn seek_bias(bias: Bias) -> sum_tree::Bias {
     }
 }
 
+mod replacements;
 #[cfg(test)]
 mod tests;

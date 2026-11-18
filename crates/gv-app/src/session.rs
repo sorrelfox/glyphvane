@@ -265,6 +265,7 @@ mod tests {
                     folds: vec![[10, 20]],
                     reading_folds: Vec::new(),
                     split_reading_folds: Vec::new(),
+                    live_preview: false,
                 }],
                 active_tab: 0,
                 sidebar_open: true,

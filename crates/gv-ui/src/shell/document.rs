@@ -88,18 +88,26 @@ impl Workspace {
         if let Some(viewer) = self.shown_viewer() {
             return area.child(viewer.clone()).into_any_element();
         }
+        // Mod+wheel and pinch zoom the document ([`crate::zoom`]).
         match (self.mode(), &tab.reader, &tab.editor, &tab.split) {
             (ViewMode::Preview, Some(reader), _, _) => {
-                return area.child(reader.clone()).into_any_element();
+                return area
+                    .child(crate::zoom::wheel_layer())
+                    .child(reader.clone())
+                    .into_any_element();
             }
             (ViewMode::Edit, _, Some(editor), _) => {
                 return area
+                    .child(crate::zoom::wheel_layer())
                     .child(editor.clone())
                     .children(startup::enabled().then(|| source_probe(&tab.label.name)))
                     .into_any_element();
             }
             (ViewMode::Split, _, _, Some(split)) => {
-                return area.child(split.clone()).into_any_element();
+                return area
+                    .child(crate::zoom::wheel_layer())
+                    .child(split.clone())
+                    .into_any_element();
             }
             _ => {}
         }
@@ -428,6 +436,7 @@ impl Workspace {
         let read_only = !self.can_edit(index, cx);
         // A file that is not a note is edited as plain text.
         let plain = super::viewer_tabs::is_viewer_file(&path);
+        let live_preview = self.tabs[index].live_preview;
         let folds = match self.tabs[index].restored_folds.take() {
             Some((p, folds)) if p == path => folds,
             _ => Vec::new(),
@@ -437,6 +446,7 @@ impl Workspace {
             editor.set_compiled_profile(&profile.compiled, cx);
             editor.set_read_only(read_only, cx);
             editor.set_plain(plain, cx);
+            editor.set_live_preview(live_preview, cx);
             editor
         });
         // Watchers first: the view tells them about its saves.

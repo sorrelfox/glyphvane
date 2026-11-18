@@ -18,8 +18,27 @@
 //!   column), the Source view (text, rows, line numbers, caret and the
 //!   column, [`crate::editor`]) and both panes of the Split view. The
 //!   interface does not. The status bar shows the zoom in Preview.
+//! - **Keys**: Mod+= and Mod++ (Shift+=, and the keypad's +), Mod+- (the
+//!   keypad's - too), Mod+0 (the keypad's 0 too); Mod is Cmd on macOS. The
+//!   keypad and shifted keys arrive as `+`, `-` and `0` on every platform
+//!   (on Linux the keypad's `add` and `subtract` match through the
+//!   character they type).
+//! - **Wheel and pinch** ([`wheel_layer`]): Mod with the mouse wheel over
+//!   the document zooms one step per notch (per [`PIXELS_PER_STEP`] of a
+//!   smooth scroll), up in, down out; a trackpad pinch one step per
+//!   [`PINCH_PER_STEP`] of its scale. The canvas, bases and image viewers
+//!   keep their own zoom.
+//! - **Status bar menu** ([`menu`], not designed): a click on the zoom
+//!   opens Zoom in, Zoom out and Reset zoom, then the levels of
+//!   [`LEVELS`] with the current one checked.
+//! - **Saving**: the change applies at once and is written
+//!   [`crate::settings::SAVE_DELAY`] after the last one, so a wheel spin
+//!   writes the file once; quitting writes it at once.
 
-use gpui::App;
+use gpui::{
+    App, DispatchPhase, Global, HitboxBehavior, IntoElement, PinchEvent, ScrollDelta, ScrollEvent,
+    Styled as _, canvas,
+};
 use gv_settings::Kind;
 
 use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset};
@@ -31,6 +50,14 @@ pub const KEY: &str = "appearance.zoom_percent";
 pub const DEFAULT: u32 = 100;
 /// One step of the zoom commands, in percentage points.
 pub const STEP: u32 = 10;
+/// The levels the status bar's zoom menu lists.
+pub const LEVELS: [u32; 11] = [50, 70, 80, 90, 100, 110, 120, 150, 200, 250, 300];
+/// A smooth scroll (trackpad) of this many pixels is one zoom step.
+pub const PIXELS_PER_STEP: f32 = 50.0;
+/// A pinch scaling by this much is one zoom step.
+pub const PINCH_PER_STEP: f32 = 0.1;
+
+pub mod menu;
 
 /// The setting's range: (min, max).
 pub fn limits() -> (u32, u32) {
@@ -78,14 +105,18 @@ fn target(settings: &AppSettings) -> Target {
     }
 }
 
-/// Sets the zoom to `percent` and saves it (see the module documentation).
+/// Sets the zoom to `percent`; it is saved shortly after (see the module
+/// documentation).
 pub fn set(cx: &mut App, percent: u32) {
     let Some(settings) = cx.try_global::<AppSettings>() else {
         return;
     };
+    if settings.settings().appearance.zoom_percent == percent {
+        return;
+    }
     let target = target(settings);
     let value = toml::Value::Integer(i64::from(percent));
-    if let Err(err) = AppSettings::set_value(cx, target, KEY, &value) {
+    if let Err(err) = AppSettings::set_value_later(cx, target, KEY, &value) {
         tracing::warn!("zoom: cannot set {KEY} to {percent}: {}", err.0);
     }
 }
@@ -106,11 +137,104 @@ pub fn reset(cx: &mut App) {
 }
 
 /// Installs the handlers of the zoom commands. They are application-wide:
-/// the zoom is one for every window.
+/// the zoom is one for every window. Quitting saves a zoom not saved yet.
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &ZoomIn, cx| zoom_in(cx));
     cx.on_action(|_: &ZoomOut, cx| zoom_out(cx));
     cx.on_action(|_: &ZoomReset, cx| reset(cx));
+    cx.on_app_quit(|cx| {
+        AppSettings::save_unsaved(cx);
+        async {}
+    })
+    .detach();
+}
+
+/// Zoom steps from wheel and pinch input, with the rest of a step carried
+/// over to the next event.
+#[derive(Debug, Default)]
+pub(crate) struct Gesture {
+    rest: f32,
+}
+
+impl Global for Gesture {}
+
+impl Gesture {
+    /// Adds `amount` (in steps, positive in) and returns the whole steps
+    /// reached: +n in, -n out. Turning around drops the rest.
+    pub(crate) fn add(&mut self, amount: f32) -> i32 {
+        if self.rest != 0.0 && self.rest.signum() != amount.signum() {
+            self.rest = 0.0;
+        }
+        self.rest += amount;
+        let steps = self.rest.trunc();
+        self.rest -= steps;
+        steps as i32
+    }
+}
+
+/// Zooms by `amount` steps of wheel or pinch input (see [`Gesture`]).
+fn gesture(amount: f32, cx: &mut App) {
+    let steps = cx.default_global::<Gesture>().add(amount);
+    if steps != 0 {
+        zoom_by(steps, cx);
+    }
+}
+
+/// The steps of a Mod+wheel event: one per notch, one per
+/// [`PIXELS_PER_STEP`] of a smooth scroll; up zooms in.
+pub(crate) fn wheel_steps(delta: ScrollDelta) -> f32 {
+    match delta {
+        ScrollDelta::Lines(lines) => lines.y,
+        ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_STEP,
+    }
+}
+
+/// Zooms by `steps` (positive in).
+pub(crate) fn zoom_by(steps: i32, cx: &mut App) {
+    let mut percent = percent(cx);
+    for _ in 0..steps.unsigned_abs() {
+        percent = if steps > 0 {
+            step_in(percent)
+        } else {
+            step_out(percent)
+        };
+    }
+    set(cx, percent);
+}
+
+/// A layer over the document area that zooms on Mod+wheel and on a pinch
+/// there, before the views below scroll. Put it in the area as its first
+/// child; it takes no room.
+pub fn wheel_layer() -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        |_, hitbox, window, _| {
+            {
+                let hitbox = hitbox.clone();
+                window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture
+                        || !e.modifiers.secondary(cx)
+                        || !hitbox.should_handle_scroll(window)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    gesture(wheel_steps(e.delta), cx);
+                });
+            }
+            window.on_mouse_event(move |e: &PinchEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture || !hitbox.is_hovered(window) {
+                    return;
+                }
+                cx.stop_propagation();
+                gesture(e.delta / PINCH_PER_STEP, cx);
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 #[cfg(test)]

@@ -354,6 +354,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             SEPARATOR,
             item("view.toggle_mode", "Toggle Preview and Edit"),
             item("view.toggle_split", "Toggle split view"),
+            item("view.toggle_live_preview", "Live Preview"),
             item("view.toggle_viewer_mode", "Viewer mode"),
             SEPARATOR,
             item("workspace.toggle_sidebar", "Toggle sidebar"),

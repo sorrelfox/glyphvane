@@ -151,7 +151,7 @@ use crate::chrome::WindowChrome;
 use crate::editor::{EditorFacts, EditorView};
 use crate::files::notice::Notice;
 use crate::files::watch::WatchHandle;
-use crate::keymap::actions::view::ToggleSplit;
+use crate::keymap::actions::view::{ToggleLivePreview, ToggleSplit};
 use crate::keymap::actions::{file as file_commands, tabs as tab_commands};
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
@@ -424,6 +424,8 @@ pub struct Tab {
     /// A restored tab's Split-preview folds, for its file, until its
     /// Split view's preview has shown that file.
     restored_split_folds: Option<(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
+    /// The editing style of Edit mode: Live Preview (`true`) or Source.
+    live_preview: bool,
     /// The conflict-marker warning was dismissed; it comes back once the
     /// markers have gone and come back ([`infobar`]).
     markers_dismissed: std::cell::Cell<bool>,
@@ -457,6 +459,7 @@ impl Tab {
             restored_folds: None,
             restored_reading_folds: None,
             restored_split_folds: None,
+            live_preview: false,
             markers_dismissed: std::cell::Cell::new(false),
         }
     }
@@ -2078,6 +2081,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// `view.toggle_live_preview`: the active tab's editing style, Live
+    /// Preview or Source (kept with the session; Source by default).
+    pub(crate) fn toggle_live_preview(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        tab.live_preview = !tab.live_preview;
+        let on = tab.live_preview;
+        if let Some(editor) = tab.editor.clone() {
+            editor.update(cx, |editor, cx| editor.set_live_preview(on, cx));
+        }
+        self.session_changed(cx);
+        cx.notify();
+    }
+
     fn toggle_edit_mode(&mut self, cx: &mut Context<'_, Self>) {
         let mode = match self.mode() {
             ViewMode::Edit => ViewMode::Preview,
@@ -2153,6 +2171,9 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleEditMode, _, cx| this.toggle_edit_mode(cx)))
             .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| this.toggle_split(cx)))
+            .on_action(cx.listener(|this, _: &ToggleLivePreview, _, cx| {
+                this.toggle_live_preview(cx);
+            }))
             // Files dropped anywhere the document area does not take them
             // open ([`drag_drop`]).
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
