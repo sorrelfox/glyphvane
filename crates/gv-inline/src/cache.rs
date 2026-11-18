@@ -174,7 +174,8 @@ impl<G> RunCache<G> {
         run
     }
 
-    /// Primary-font metrics of `font` at `size`, cached.
+    /// Primary-font metrics of `font` at `size`, cached, never without an
+    /// x-height.
     pub fn metrics<M>(&mut self, measure: &mut M, font: StyleId, size: f32) -> FontMetrics
     where
         M: Measure<Glyphs = G> + ?Sized,
@@ -182,7 +183,12 @@ impl<G> RunCache<G> {
         *self
             .metrics
             .entry((font, size.to_bits()))
-            .or_insert_with(|| measure.metrics(font, size).sanitized())
+            .or_insert_with(|| {
+                measure
+                    .metrics(font, size)
+                    .sanitized()
+                    .with_x_height_fallback(size, None)
+            })
     }
 
     fn insert(&mut self, key: RunKey, text: &str, run: Arc<ShapedRun<G>>) {

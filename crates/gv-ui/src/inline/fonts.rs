@@ -204,8 +204,9 @@ impl Measure for GpuiMeasure<'_> {
 
     fn metrics(&mut self, style: StyleId, size: f32) -> FontMetrics {
         let id = self.text_system.resolve_font(self.fonts.font(style));
+        let em = size;
         let size = px(size);
-        FontMetrics {
+        let metrics = FontMetrics {
             ascent: f32::from(self.text_system.ascent(id, size)),
             descent: f32::from(self.text_system.descent(id, size)),
             // GPUI's `TextSystem` does not expose the line gap; it only
@@ -214,7 +215,19 @@ impl Measure for GpuiMeasure<'_> {
             line_gap: 0.0,
             x_height: f32::from(self.text_system.x_height(id, size)),
         }
-        .sanitized()
+        .sanitized();
+        if metrics.x_height > 0.0 {
+            return metrics;
+        }
+        // No x-height in the font's tables: the `x` glyph's height, where
+        // the text system reports glyph bounds (some report advances, which
+        // the plausibility check rejects), else a ratio of the em.
+        let glyph = self
+            .text_system
+            .typographic_bounds(id, size, 'x')
+            .ok()
+            .map(|bounds| f32::from(bounds.size.height));
+        metrics.with_x_height_fallback(em, glyph)
     }
 }
 

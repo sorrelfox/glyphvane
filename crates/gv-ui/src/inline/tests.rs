@@ -617,6 +617,8 @@ mod real {
             metrics.descent > 0.05 * size && metrics.descent < 0.5 * size,
             "{metrics:?}"
         );
+        // From the font's tables, or (a font without an OS/2 x-height, as
+        // on some Linux systems) the `x` glyph or half an em: never 0.
         assert!(
             metrics.x_height > 0.3 * size && metrics.x_height < 0.7 * size,
             "{metrics:?}"

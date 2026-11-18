@@ -423,3 +423,62 @@ fn bad_lengths_are_sanitized() {
         }
     }
 }
+
+/// [`FakeMono`] with a font that reports no x-height (no OS/2 `sxHeight`).
+struct NoXHeight(FakeMono);
+
+impl gv_inline::Measure for NoXHeight {
+    type Glyphs = ();
+
+    fn shape(&mut self, text: &str, font: gv_inline::StyleId, size: f32) -> gv_inline::ShapedRun {
+        gv_inline::Measure::shape(&mut self.0, text, font, size)
+    }
+
+    fn metrics(&mut self, font: gv_inline::StyleId, size: f32) -> gv_inline::FontMetrics {
+        gv_inline::FontMetrics {
+            x_height: 0.0,
+            ..gv_inline::Measure::metrics(&mut self.0, font, size)
+        }
+    }
+}
+
+#[test]
+fn a_font_without_x_height_gets_half_an_em() {
+    let mut runs = RunCache::default();
+    let mut measure = NoXHeight(FakeMono::default());
+    assert_eq!(
+        runs.metrics(&mut measure, body().font, SIZE).x_height,
+        0.5 * SIZE
+    );
+    // The middle of a box and the strikethrough sit as with a reported
+    // x-height of half an em (`FakeMono`'s), not on the baseline.
+    let paragraph = build(
+        &[
+            text(
+                "x",
+                body().with_strikethrough(Strikethrough {
+                    color: ColorRole(4),
+                    thickness: 1.0,
+                }),
+            ),
+            Piece::Box(
+                InlineBox::new(BoxKind::Image, 10.0, 12.0, 0.0).with_align(BoxAlign::Middle),
+            ),
+        ],
+        paragraph_style(),
+    );
+    let shaped = Arc::new(gv_inline::Shaped::new(
+        Arc::new(paragraph),
+        &mut measure,
+        &mut runs,
+    ));
+    let l = Layout::new(shaped, 1000.0);
+    let b = &l.fragments()[1];
+    assert_eq!((b.ascent, b.descent), (8.5, 3.5));
+    let s = l
+        .decorations(0)
+        .iter()
+        .find(|d| matches!(d.kind, DecorationKind::Strikethrough { .. }))
+        .map(|s| s.rect.y);
+    assert_eq!(s, Some(11.0 - 2.5 - 0.5));
+}

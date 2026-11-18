@@ -34,6 +34,28 @@ impl FontMetrics {
             x_height: fix(self.x_height),
         }
     }
+
+    /// The x-height assumed, per em, for a font that reports none.
+    pub const FALLBACK_X_HEIGHT_EM: f32 = 0.5;
+
+    /// `self` with an x-height at `size` px. Fonts without one in their
+    /// tables (no OS/2 `sxHeight`) report 0, which would put middle-aligned
+    /// boxes and the strikethrough on the baseline: then `measured` (the
+    /// height of the `x` glyph, if the text system can tell) is used when it
+    /// is plausible (positive and below the ascent), else
+    /// [`Self::FALLBACK_X_HEIGHT_EM`] of the size.
+    pub fn with_x_height_fallback(self, size: f32, measured: Option<f32>) -> Self {
+        if self.x_height > 0.0 && self.x_height.is_finite() {
+            return self;
+        }
+        let x_height = measured
+            .filter(|&h| h.is_finite() && h > 0.0 && h < self.ascent)
+            .unwrap_or_else(|| {
+                let size = if size.is_finite() { size.abs() } else { 0.0 };
+                Self::FALLBACK_X_HEIGHT_EM * size
+            });
+        Self { x_height, ..self }
+    }
 }
 
 /// A caret stop in a run: a byte offset and the x of the caret there.
@@ -312,6 +334,30 @@ pub(crate) fn last_stop_within(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_x_height_falls_back() {
+        let m = |x_height| FontMetrics {
+            ascent: 9.0,
+            descent: 3.0,
+            line_gap: 0.0,
+            x_height,
+        };
+        // Reported: kept, whatever was measured.
+        assert_eq!(m(4.0).with_x_height_fallback(12.0, Some(5.0)), m(4.0));
+        // Missing: the measured `x` when plausible, else half an em.
+        assert_eq!(m(0.0).with_x_height_fallback(12.0, Some(5.5)), m(5.5));
+        assert_eq!(m(0.0).with_x_height_fallback(12.0, None), m(6.0));
+        for implausible in [0.0, -1.0, 9.0, 12.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                m(0.0).with_x_height_fallback(12.0, Some(implausible)),
+                m(6.0),
+                "{implausible}"
+            );
+        }
+        assert_eq!(m(f32::NAN).with_x_height_fallback(12.0, None), m(6.0));
+        assert_eq!(m(0.0).with_x_height_fallback(f32::NAN, None), m(0.0));
+    }
 
     #[test]
     fn stops_skip_ligature_insides_and_cluster_continuations() {

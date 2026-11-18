@@ -448,7 +448,9 @@ fn run_case(
         .selections()
         .check(editor.text())
         .map_err(|e| TestCaseError::fail(format!("{label}: selections: {e}")))?;
-    if after != text {
+    // Edits whose bytes happen to cancel out (Enter replacing a selected
+    // line break while another caret adds one) are still one step.
+    if after != text || !edited.is_empty() {
         prop_assert_eq!(editor.history().undo_len(), 1, "{}", label);
         prop_assert_eq!(editor.undo(), UndoOutcome::Undone, "{}", label);
         prop_assert_eq!(editor.text().to_string(), text, "{}: undo", label);
@@ -514,18 +516,21 @@ fn run_case(
     // keystroke completes: not checked.
     // Tab and Shift+Tab in a quote change what the paragraph is (quoted
     // one level deeper or less).
-    let in_items = specs.iter().all(|spec| {
-        let at = spec.head;
-        old_blocks
-            .iter()
-            .filter(|block| {
-                matches!(block.kind, BlockKind::Item | BlockKind::BlockQuote)
-                    && block.range.start <= at
-                    && at < block.range.end.max(block.range.start + 1)
-            })
-            .max_by_key(|block| block.depth)
-            .is_some_and(|block| block.kind == BlockKind::Item)
-    });
+    // Both ends: a selection ending at a line start leaves that line out.
+    let in_items = specs
+        .iter()
+        .flat_map(|spec| [spec.tail, spec.head])
+        .all(|at| {
+            old_blocks
+                .iter()
+                .filter(|block| {
+                    matches!(block.kind, BlockKind::Item | BlockKind::BlockQuote)
+                        && block.range.start <= at
+                        && at < block.range.end.max(block.range.start + 1)
+                })
+                .max_by_key(|block| block.depth)
+                .is_some_and(|block| block.kind == BlockKind::Item)
+        });
     let mode = match command {
         MarkdownCommand::Bold
         | MarkdownCommand::Italic
@@ -581,6 +586,65 @@ proptest! {
             .collect();
         run_case(&text, &picks, command_index, flavor)?;
     }
+}
+
+/// Cases the properties once failed on.
+#[test]
+fn regressions() {
+    let index = |id: &str| {
+        MarkdownCommand::ALL
+            .iter()
+            .position(|command| command.id() == id)
+            .expect("command")
+    };
+    // A table inserted after a lazy continuation line of a list item kept
+    // no indentation: it closed the item, so the nested list after it
+    // became a top-level list and merged with the next one.
+    run_case(
+        "* f\n==z== x\n   - three\n- a",
+        &[(0, 0)],
+        index("editor.table"),
+        Flavor::GfmFile,
+    )
+    .unwrap();
+    // A table on an empty item's line (`-` with nothing after it) went one
+    // column short of the item's content: outside the item.
+    for (text, at) in [
+        (
+            "- a\r\n# q\r\n10. k\r\n- bb cc\r\n-\r\n  1. nested\r\n1.\r\n- bb cc",
+            24,
+        ),
+        ("\n-\n   l\n2. i\n**b** *i* `c`", 1),
+    ] {
+        run_case(text, &[(at, 0)], index("editor.table"), Flavor::GfmFile).unwrap();
+    }
+    // A table on a blank line inside an item went to column 0: it closed
+    // the item, and the lines after it were read anew.
+    for (text, at) in [
+        ("- [ ] u\n  - d\n\n\n\tx\n==z== x\n---\n- a", 14),
+        (
+            "  1. nested\n1. h\n* f\n  - d\nr s t\n-\tw\n\n\tx\n==z== x\n\tx\n1.",
+            37,
+        ),
+    ] {
+        run_case(text, &[(at, 0)], index("editor.table"), Flavor::GfmFile).unwrap();
+    }
+    // Outdent of the line before a selection's end at an item's line start
+    // acts outside the items.
+    run_case(
+        "     deep\n-\n   l\n==z== x\n2. i\n- a\n- a\n==z== x",
+        &[(9, 2)],
+        index("editor.outdent"),
+        Flavor::CommonMark,
+    )
+    .unwrap();
+    run_case(
+        "\n\n\n\n",
+        &[(4, 0), (0, 3)],
+        index("editor.newline"),
+        Flavor::CommonMark,
+    )
+    .unwrap();
 }
 
 /// The indices of the commands under test on table documents.

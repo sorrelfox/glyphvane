@@ -32,7 +32,7 @@ use gv_syntax::LeafKind;
 use gv_syntax::table::{Alignment, delimiter_row, row_cells};
 use unicode_width::UnicodeWidthStr;
 
-use super::context::{LeafInfo, ctx_at};
+use super::context::{LeafInfo, col_after, ctx_at};
 use super::doc::Doc;
 use crate::selection::SelectionSpec;
 
@@ -688,12 +688,16 @@ pub(crate) fn step(doc: &mut Doc, forward: bool) {
     run(doc, &Action::Step(forward));
 }
 
-/// The continuation prefix of line `index`: its container prefix with
-/// list markers turned into spaces.
-fn continuation(doc: &Doc, offset: usize) -> (String, usize, bool) {
+/// The continuation prefix of the line at `offset`: its container prefix
+/// with list markers turned into spaces, the content start and whether the
+/// line is blank after its prefix, plus the spaces the prefix needs past
+/// the line's own to reach the innermost item's content column (a blank
+/// line inside an item has no prefix of its own, and an empty item's
+/// marker with nothing after it, `-`, is one column short).
+fn continuation(doc: &Doc, offset: usize) -> (String, usize, bool, usize) {
     let ctx = ctx_at(doc, offset);
     let line = &ctx.line;
-    let prefix: String = if ctx.lazy {
+    let mut prefix: String = if ctx.lazy {
         String::new()
     } else {
         line.text[..ctx
@@ -704,7 +708,18 @@ fn continuation(doc: &Doc, offset: usize) -> (String, usize, bool) {
             .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
             .collect()
     };
-    (prefix, ctx.content_start, ctx.blank)
+    let mut pad = 0;
+    if let Some(item) = ctx.chain.last().and_then(|level| level.item())
+        && !ctx.lazy
+        && ctx.blank
+    {
+        let target = item.base_col + item.content_offset;
+        while col_after(prefix.as_bytes(), 0) < target {
+            prefix.push(' ');
+            pad += 1;
+        }
+    }
+    (prefix, ctx.content_start, ctx.blank, pad)
 }
 
 /// Whether line `index` is blank (or past the end).
@@ -726,7 +741,7 @@ fn insert_table(doc: &mut Doc) {
     for spec in &doc.sels {
         let ctx = ctx_at(doc, spec.head);
         let line = ctx.line.clone();
-        let (prefix, content_start, blank) = continuation(doc, spec.head);
+        let (prefix, content_start, blank, pad) = continuation(doc, spec.head);
         let eol = doc.line_ending_for(&line);
         let blank_prefix = prefix.trim_end().to_owned();
         let rows = ["|     |     |", "| --- | --- |", "|     |     |"];
@@ -747,6 +762,10 @@ fn insert_table(doc: &mut Doc) {
             if line.index > 0 && !blank_line(doc, line.index - 1) {
                 text.push_str(eol);
                 text.push_str(&prefix);
+            } else {
+                // The first row goes on the line itself, at the content
+                // column.
+                text.push_str(&" ".repeat(pad));
             }
             let caret = text.len() + 2;
             text.push_str(&body(&prefix));
@@ -762,7 +781,16 @@ fn insert_table(doc: &mut Doc) {
                 .filter(|leaf| leaf.kind != LeafKind::Table)
                 .map_or(line.index, |leaf| leaf.last_line.max(line.index));
             let last_line = doc.line(last);
-            let (prefix, _, _) = continuation(doc, last_line.start);
+            // A lazy last line has no container prefix of its own: the
+            // table takes the prefix of the block's first line, so it stays
+            // in the caret's list items and quotes (at column 0 it would
+            // close them and the lines after it would be read anew).
+            let prefix_line = if ctx_at(doc, last_line.start).lazy {
+                ctx.leaf.as_ref().map_or(line.index, |leaf| leaf.first_line)
+            } else {
+                last
+            };
+            let (prefix, _, _, _) = continuation(doc, doc.line(prefix_line).start);
             let blank_prefix = prefix.trim_end().to_owned();
             let mut text = format!("{eol}{blank_prefix}{eol}{prefix}");
             let caret = text.len() + 2;

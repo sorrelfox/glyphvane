@@ -1,3 +1,19 @@
-# Test fixtures are compared byte for byte; never convert their line endings.
+# Text files are stored with LF and checked out with LF on every OS, whatever
+# core.autocrlf says (it is on by default on Windows, which would turn golden
+# files into CRLF while the program prints LF). Binary detection is git's.
+* text=auto eol=lf
+
+# Binary formats, never diffed or converted.
+*.png binary
+*.ico binary
+*.ttf binary
+*.bin binary
+
+# Test inputs and expected outputs are compared byte for byte, and some hold
+# CRLF on purpose: never convert their line endings.
 crates/*/tests/fixtures/** -text
+crates/*/tests/data/** -text
+crates/*/tests/golden/** -text
+crates/*/tests/samples/** -text
+crates/*/tests/snapshots/** -text
 tests/fixtures/** -text

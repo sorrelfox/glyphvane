@@ -180,6 +180,41 @@ fn insert_table() {
         "> quote‸\n",
         "> quote\n>\n> | ‸    |     |\n> | --- | --- |\n> |     |     |\n",
     );
+    // After a lazy continuation line, the table stays in the item (and the
+    // quote): it takes the prefix of the paragraph's first line.
+    check(
+        FORMAT,
+        "* f‸\nlazy\n   - nested\n- a",
+        "* f\nlazy\n\n  | ‸    |     |\n  | --- | --- |\n  |     |     |\n\n   - nested\n- a",
+    );
+    // On an empty item, at the item's content column (a bare `-` is one
+    // column short of it).
+    check(
+        FORMAT,
+        "- a\n-‸\nnext",
+        "- a\n-\n  | ‸    |     |\n  | --- | --- |\n  |     |     |\n\nnext",
+    );
+    check(
+        FORMAT,
+        "\n-‸\n   l",
+        "\n- | ‸    |     |\n  | --- | --- |\n  |     |     |\n\n   l",
+    );
+    // On a blank line inside an item, in the item.
+    check(
+        FORMAT,
+        "- a\n\n‸\n  b\n",
+        "- a\n\n  | ‸    |     |\n  | --- | --- |\n  |     |     |\n\n  b\n",
+    );
+    check(
+        FORMAT,
+        "> 1.‸\n",
+        "> 1. | ‸    |     |\n>    | --- | --- |\n>    |     |     |\n",
+    );
+    check(
+        FORMAT,
+        "> q‸\nlazy\n",
+        "> q\nlazy\n>\n> | ‸    |     |\n> | --- | --- |\n> |     |     |\n",
+    );
 }
 
 #[test]
