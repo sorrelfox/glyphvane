@@ -116,19 +116,28 @@ pub(crate) fn load(
 
 /// Builds the document at `path` from text that is already decoded: the
 /// editor's text, handed to the Reading view when the tab returns to
-/// Preview before the text is saved.
+/// Preview before the text is saved. With `crop`, only the items of that
+/// part of the text are shown, the rest being its context (a Live Preview
+/// block: [`RenderTree::keep_items_in`]).
 pub(crate) fn load_text(
     path: &Path,
     text: Arc<str>,
     links: &Resolver,
     options: RenderOptions,
     profile: &CompiledProfile,
+    crop: Option<std::ops::Range<usize>>,
 ) -> Loaded {
     let timings = Timings {
         bytes: text.len(),
         ..Timings::default()
     };
-    build(path, text, None, timings, None, links, options, profile)
+    let mut loaded = build(path, text, None, timings, None, links, options, profile);
+    if let Some(crop) = crop
+        && let Some(tree) = Arc::get_mut(&mut loaded.tree)
+    {
+        tree.keep_items_in(crop);
+    }
+    loaded
 }
 
 /// Parses `text` in `profile` and builds its model and render tree.

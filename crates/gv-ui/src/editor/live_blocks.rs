@@ -18,12 +18,21 @@
 //! ([`Reader::for_block`]): the same renderers as the Reading view (code
 //! highlighting with its language label, tables, math, diagrams laid out
 //! off the UI thread, callouts with their fold toggle, embeds, front matter
-//! as properties, images at their size). The editor hosts the view at the
+//! as properties, images at their size), with the note's context around
+//! the source (reference and footnote definitions, footnote numbers, math
+//! macros: [`super::live_context`]). The editor hosts the view at the
 //! block's place in the text column and sizes the block to the view's
 //! content height once it is laid out ([`EditorView::block_heights`]);
-//! until then the block is as tall as its source rows (or as it was last
-//! measured). A block above the top of the view that changes height moves
-//! the scroll by as much, so what is on screen stays put.
+//! until then the block is as tall as it was last measured, else as
+//! estimated from the blocks of its kind measured so far (a least-squares
+//! line over their source line counts), else as its source rows. A block
+//! above the top of the view that changes height moves the scroll by as
+//! much, so what is on screen stays put. A short note has all its blocks
+//! from its first frame ([`EditorView::live_first_pass`]).
+//!
+//! Assistive technology gets each block as the Reading view describes it
+//! (tables by rows and cells, code, math, images by their alt text,
+//! callouts), among the editor's text runs ([`EditorView::blocks_a11y`]).
 //!
 //! # Reveal
 //!
@@ -38,7 +47,11 @@
 //! A press on a block puts the caret at the source under the pointer (or
 //! the block's start), which reveals it; presses on the view's own
 //! controls (a callout's fold toggle, a diagram's zoom, a code block's
-//! buttons) stay the view's. The wheel scrolls the editor.
+//! buttons) stay the view's. Links in a block are the source's links:
+//! Mod+click follows one, hovering shows its tooltip or preview, a
+//! right-click its menu. A sideways wheel turn (or Shift) over a table or
+//! code block too wide for the column scrolls it; other turns scroll the
+//! editor.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -56,10 +69,14 @@ use gv_syntax::{Container, ContainerKind, Leaf, LeafKind, SyntaxTree, Visitor, w
 use gv_text::{Anchor, Revision, TextSnapshot, TextSource as _};
 
 use super::EditorView;
+use super::live_context::{BlockContext, NoteContext, SYNC_CONTEXT_BYTES};
 use crate::reader::Reader;
 
 /// Block readers kept at most (the least recently drawn go first).
 const READER_CAP: usize = 64;
+
+/// Block heights applied in one frame at most.
+const RESIZE_SLICE: usize = 256;
 
 /// A height change smaller than this (px) is not applied.
 const HEIGHT_EPSILON: f32 = 0.5;
@@ -112,9 +129,11 @@ pub(crate) struct BlockSpec {
     /// From the start of its first line to the end of its last line's
     /// content (no line break).
     pub range: Range<usize>,
-    /// Its kind and source text, hashed: a block whose key changed is
-    /// drawn anew.
+    /// Its kind, source text and context, hashed: a block whose key
+    /// changed is drawn anew.
     pub key: u64,
+    /// The note's context it is rendered with ([`super::live_context`]).
+    pub context: Option<Arc<BlockContext>>,
 }
 
 /// Fence languages drawn as diagrams by the Reading view.
@@ -137,6 +156,7 @@ fn is_image_path(path: &str) -> bool {
 struct Finder<'a> {
     tree: &'a SyntaxTree,
     text: &'a TextSnapshot,
+    context: Option<&'a NoteContext>,
     depth: usize,
     out: Vec<BlockSpec>,
     buf: Vec<u8>,
@@ -168,10 +188,16 @@ impl Finder<'_> {
         self.buf.clear();
         self.text.copy_range(range.clone(), &mut self.buf);
         self.buf.hash(&mut hasher);
+        let context = self.context.and_then(|note| {
+            note.for_block(kind, &range, &String::from_utf8_lossy(&self.buf))
+                .map(Arc::new)
+        });
+        context.hash(&mut hasher);
         self.out.push(BlockSpec {
             kind,
             range,
             key: hasher.finish(),
+            context,
         });
     }
 
@@ -286,15 +312,17 @@ impl Visitor for Finder<'_> {
 }
 
 /// The top-level blocks of `range` (the whole text with `None`), in
-/// document order.
+/// document order, with the note's `context` when it is known.
 pub(crate) fn find_blocks(
     tree: &SyntaxTree,
     text: &TextSnapshot,
     range: Option<Range<usize>>,
+    context: Option<&NoteContext>,
 ) -> Vec<BlockSpec> {
     let mut finder = Finder {
         tree,
         text,
+        context,
         depth: 0,
         out: Vec::new(),
         buf: Vec::new(),
@@ -437,11 +465,57 @@ impl Geo {
 
 // ----- state -------------------------------------------------------------------------
 
+/// Measured heights of one kind of block against their source lines: a
+/// least-squares line, to estimate the height of a block not drawn yet
+/// from its line count (the content height then changes less when it
+/// comes on screen).
+#[derive(Debug, Default, Clone, Copy)]
+struct Fit {
+    n: f64,
+    x: f64,
+    y: f64,
+    xx: f64,
+    xy: f64,
+}
+
+impl Fit {
+    fn add(&mut self, lines: usize, height: f32) {
+        let (x, y) = (lines as f64, f64::from(height));
+        self.n += 1.0;
+        self.x += x;
+        self.y += y;
+        self.xx += x * x;
+        self.xy += x * y;
+    }
+
+    /// The estimated height of a block of `lines` lines; `None` before a
+    /// measurement.
+    fn estimate(&self, lines: usize) -> Option<f32> {
+        if self.n < 1.0 {
+            return None;
+        }
+        let (mx, my) = (self.x / self.n, self.y / self.n);
+        let var = self.xx / self.n - mx * mx;
+        let lines = lines as f64;
+        let h = if var < 1e-6 {
+            // All measured blocks had the same line count: in proportion.
+            my * lines / mx.max(1.0)
+        } else {
+            let b = (self.xy / self.n - mx * my) / var;
+            my + b * (lines - mx)
+        };
+        Some(h.max(1.0) as f32)
+    }
+}
+
 /// A block in the editor's block layer.
 #[derive(Debug, Clone)]
 struct Shown {
     kind: BlockWidget,
     key: u64,
+    context: Option<Arc<BlockContext>>,
+    /// Its source lines.
+    lines: usize,
     /// Below its line (a touched image) rather than instead of it.
     below: bool,
 }
@@ -474,6 +548,13 @@ pub(crate) struct LiveBlocks {
     landed: Vec<(BlockId, f32)>,
     /// The whole document's blocks, for the text revision.
     pub(super) full: Option<(Revision, Arc<Vec<BlockSpec>>)>,
+    /// The note's context, for the text revision it was worked out for
+    /// (an older one is used until the background pass gives the new one).
+    pub(super) context: Option<(Revision, Arc<NoteContext>)>,
+    /// The path index the block views were given: (generation, complete).
+    index_key: Option<(u64, bool)>,
+    /// Measured heights by kind, to estimate the blocks not measured yet.
+    fits: HashMap<BlockWidget, Fit>,
     last: Option<BlocksKey>,
     frame: u64,
     /// The text column's width blocks are laid out at.
@@ -508,6 +589,14 @@ impl LiveBlocks {
         self.last = None;
     }
 
+    /// How much text block `id`'s view has before the block's source.
+    pub fn prefix_len(&self, id: BlockId) -> usize {
+        self.shown
+            .get(&id)
+            .and_then(|s| s.context.as_ref())
+            .map_or(0, |c| c.prefix.len())
+    }
+
     /// Drops the block views (they read their source anew).
     pub fn forget_views(&mut self) {
         self.readers.clear();
@@ -517,6 +606,7 @@ impl LiveBlocks {
     /// Preview off). The caller removes the blocks from the editor.
     pub fn reset(&mut self) -> Vec<BlockId> {
         self.full = None;
+        self.context = None;
         self.last = None;
         self.landed.clear();
         self.lone_images.clear();
@@ -566,6 +656,7 @@ impl EditorView {
             self.live.blocks.width = width;
             // Laid out anew at the new width: their heights land again.
             self.live.blocks.last = None;
+            self.live.blocks.fits.clear();
         }
         self.apply_block_heights(cx);
         let Some(doc) = self.doc.as_mut() else {
@@ -607,7 +698,15 @@ impl EditorView {
         let (specs, span) = match &full {
             Some(specs) => (specs.as_ref().clone(), 0..text.len()),
             None => {
-                let specs = find_blocks(&tree, &text, Some(window.clone()));
+                // The note's context: worked out here for a short note,
+                // else the last one until the background pass lands.
+                let stale = blocks.context.as_ref().is_none_or(|(r, _)| *r != revision);
+                if stale && text.len() <= SYNC_CONTEXT_BYTES {
+                    blocks.context =
+                        Some((revision, Arc::new(NoteContext::compute(&tree, &text, true))));
+                }
+                let context = blocks.context.as_ref().map(|(_, c)| Arc::clone(c));
+                let specs = find_blocks(&tree, &text, Some(window.clone()), context.as_deref());
                 let start = specs
                     .first()
                     .map_or(window.start, |s| s.range.start.min(window.start));
@@ -686,7 +785,11 @@ impl EditorView {
             };
             let height = match blocks.measured.get(&spec.key) {
                 Some(&(w, h)) if (w - width).abs() <= HEIGHT_EPSILON => h,
-                _ => lines as f32 * line,
+                _ => blocks
+                    .fits
+                    .get(&spec.kind)
+                    .and_then(|f| f.estimate(lines))
+                    .unwrap_or(lines as f32 * line),
             };
             let placement = if below {
                 BlockPlacement::Below(Anchor::before(spec.range.end))
@@ -708,6 +811,8 @@ impl EditorView {
             infos.push(Shown {
                 kind: spec.kind,
                 key: spec.key,
+                context: spec.context.clone(),
+                lines,
                 below,
             });
         }
@@ -751,6 +856,17 @@ impl EditorView {
             .unwrap_or_else(|| std::path::PathBuf::from("Untitled.md"));
         let index = self.autocomplete.index.clone();
         let profile = self.live.profile.clone();
+        // A new path index: the views resolve their links and embeds again.
+        let index_key = index.as_ref().map(|i| (i.generation(), i.is_complete()));
+        if index_key != self.live.blocks.index_key {
+            self.live.blocks.index_key = index_key;
+            for hosted in self.live.blocks.readers.values() {
+                let index = index.clone();
+                hosted
+                    .reader
+                    .update(cx, |reader, cx| reader.set_index(index, cx));
+            }
+        }
         let Some(doc) = self.doc.as_ref() else {
             return Vec::new();
         };
@@ -777,8 +893,9 @@ impl EditorView {
                             text.line_range(line).unwrap_or(a.offset..a.offset)
                         }
                     };
-                    let source: Arc<str> = text.text_for_range(range).unwrap_or_default().into();
+                    let source = text.text_for_range(range).unwrap_or_default();
                     let (path, index, profile) = (path.clone(), index.clone(), profile.clone());
+                    let context = shown.context.clone();
                     let reader = cx.new(|cx| {
                         let mut reader = Reader::for_block(cx);
                         if let Some(profile) = profile {
@@ -787,7 +904,14 @@ impl EditorView {
                         if index.is_some() {
                             reader.set_index(index, cx);
                         }
-                        reader.open_text(path, source, None, cx);
+                        match context {
+                            // With the note's context around it.
+                            Some(context) => {
+                                let (text, crop) = context.text(&source);
+                                reader.open_block(path, text.into(), crop, cx);
+                            }
+                            None => reader.open_text(path, Arc::from(&*source), None, cx),
+                        }
                         reader
                     });
                     self.live.blocks.readers.insert(
@@ -834,17 +958,61 @@ impl EditorView {
             return;
         };
         let width = self.live.blocks.width;
+        let blocks = &mut self.live.blocks;
         let mut changed = false;
+        let mut better = Vec::new();
+        let mut keys = HashSet::new();
         for (id, height) in heights {
             let height = height.max(1.0);
-            let Some(shown) = self.live.blocks.shown.get(&id) else {
+            let Some(shown) = blocks.shown.get(&id) else {
                 continue;
             };
-            self.live.blocks.measured.insert(shown.key, (width, height));
+            let old = blocks.measured.insert(shown.key, (width, height));
+            if old.is_none_or(|(w, h)| {
+                (w - width).abs() > HEIGHT_EPSILON || (h - height).abs() > HEIGHT_EPSILON
+            }) {
+                // A new measurement: the estimates of its kind get better.
+                // The unmeasured ones change at the 1st and the 4th only
+                // (each change resizes every such block).
+                keys.insert(shown.key);
+                let fit = blocks.fits.entry(shown.kind).or_default();
+                fit.add(shown.lines, height);
+                if matches!(fit.n as u64, 1 | 4) {
+                    better.push(shown.kind);
+                }
+            }
             let now = doc.editor.block(id).map(|b| b.height.to_px());
             if now.is_some_and(|now| (now - height).abs() > HEIGHT_EPSILON) {
-                self.live.blocks.landed.push((id, height));
+                blocks.landed.push((id, height));
                 changed = true;
+            }
+        }
+        if !better.is_empty() || !keys.is_empty() {
+            // Blocks not drawn yet: the height measured for the same
+            // source, else the better estimate.
+            for (id, shown) in &blocks.shown {
+                if blocks.landed.iter().any(|(l, _)| l == id) {
+                    continue;
+                }
+                let estimate = if keys.contains(&shown.key) {
+                    blocks.measured.get(&shown.key).map(|&(_, h)| h)
+                } else if better.contains(&shown.kind) && !blocks.measured.contains_key(&shown.key)
+                {
+                    blocks
+                        .fits
+                        .get(&shown.kind)
+                        .and_then(|f| f.estimate(shown.lines))
+                } else {
+                    None
+                };
+                let Some(estimate) = estimate else {
+                    continue;
+                };
+                let now = doc.editor.block(*id).map(|b| b.height.to_px());
+                if now.is_some_and(|now| (now - estimate).abs() > HEIGHT_EPSILON) {
+                    blocks.landed.push((*id, estimate));
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -855,9 +1023,15 @@ impl EditorView {
     /// Resizes the blocks whose heights landed; a block above the top of
     /// the view moves the scroll by its change, so the view stays put.
     fn apply_block_heights(&mut self, cx: &mut Context<'_, Self>) {
-        let landed = std::mem::take(&mut self.live.blocks.landed);
+        // At most a slice per frame (re-estimates can touch thousands of
+        // blocks); measured heights come first.
+        let take = self.live.blocks.landed.len().min(RESIZE_SLICE);
+        let landed: Vec<(BlockId, f32)> = self.live.blocks.landed.drain(..take).collect();
         if landed.is_empty() {
             return;
+        }
+        if !self.live.blocks.landed.is_empty() {
+            cx.notify();
         }
         let pad = f64::from(self.layout.pad_top());
         let top = self.scroll_y - pad;
@@ -895,6 +1069,73 @@ impl EditorView {
             .map(|(id, _, reader)| (*id, reader.clone()))
     }
 
+    /// A wheel turn over a block: a table, code block or diagram there
+    /// that overflows scrolls sideways when the turn is sideways (or Shift
+    /// is held), as in the Reading view. Returns whether it did; other
+    /// turns scroll the editor.
+    pub(super) fn wheel_block(
+        &mut self,
+        e: &gpui::ScrollEvent,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some((_, reader)) = self.block_view_at(e.position) else {
+            return false;
+        };
+        let d = e.delta.pixel_delta(gpui::px(self.metrics.line));
+        reader.update(cx, |reader, cx| {
+            reader.wheel_sideways(
+                e.position,
+                (f32::from(d.x), f32::from(d.y)),
+                e.modifiers.shift,
+                cx,
+            )
+        })
+    }
+
+    /// The blocks drawn in the last frame described for assistive
+    /// technology, as the Reading view describes them (tables by rows and
+    /// cells, code, math, diagrams, images by their alt text, callouts):
+    /// each block's top (window y) and its nodes. Their keys are made
+    /// unique per block; their links get no action (a screen reader reads
+    /// them, the caret follows them from the source).
+    pub(crate) fn blocks_a11y(
+        &self,
+        cx: &gpui::App,
+    ) -> Vec<(f32, Vec<crate::a11y::document::DocNode>)> {
+        fn rekey(nodes: &mut [crate::a11y::document::DocNode], salt: u64) {
+            for node in nodes {
+                node.key.0 ^= salt;
+                node.link = None;
+                rekey(&mut node.children, salt);
+            }
+        }
+        self.live
+            .blocks_drawn
+            .iter()
+            .map(|(id, bounds, reader)| {
+                let mut nodes = reader.read(cx).a11y_nodes();
+                let mut hasher = DefaultHasher::new();
+                id.hash(&mut hasher);
+                rekey(&mut nodes, hasher.finish());
+                (f32::from(bounds.top()), nodes)
+            })
+            .collect()
+    }
+
+    /// Where block `id`'s view's source starts in the text: the block's
+    /// start, or its line's for a block below its line.
+    pub(super) fn block_source_start(&self, id: BlockId) -> Option<usize> {
+        let doc = self.doc.as_ref()?;
+        match &doc.editor.block(id)?.placement {
+            BlockPlacement::Replace(r) => Some(r.start.offset),
+            BlockPlacement::Below(a) | BlockPlacement::Above(a) => {
+                let text = doc.editor.text();
+                let line = text.line_of_offset(a.offset).ok()?;
+                text.line_start(line).ok()
+            }
+        }
+    }
+
     /// A press on a block: the caret goes to the source under the pointer
     /// (or the block's start), which shows the source. Returns `false` for
     /// a press the block's view takes (its controls).
@@ -915,13 +1156,14 @@ impl EditorView {
             BlockPlacement::Below(a) | BlockPlacement::Above(a) => (a.offset, a.offset),
         };
         let below = matches!(block.placement, BlockPlacement::Below(_));
+        let prefix = self.live.blocks.prefix_len(id);
         let offset = if below {
             end
         } else {
             reader
                 .read(cx)
                 .source_offset_at(position)
-                .map_or(start, |o| (start + o).min(end))
+                .map_or(start, |o| (start + o.saturating_sub(prefix)).min(end))
         };
         doc.editor.set_cursor(offset);
         self.autoscroll = true;
@@ -1012,7 +1254,7 @@ mod tests {
     fn specs(text: &str, options: ParseOptions) -> Vec<(&'static str, String)> {
         let snapshot = TextSnapshot::new(text);
         let tree = SyntaxTree::parse_with(&snapshot, options);
-        find_blocks(&tree, &snapshot, None)
+        find_blocks(&tree, &snapshot, None, None)
             .into_iter()
             .map(|s| (s.kind.name(), text[s.range].to_owned()))
             .collect()

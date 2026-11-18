@@ -60,10 +60,30 @@ impl FootnoteIndex {
         text: &S,
         refs: &RefMap,
     ) -> Option<FootnoteIndex> {
+        Self::scan_with_firsts(tree, text, refs).0
+    }
+
+    /// The footnotes of `tree` (the parse of `text`) in the order of their
+    /// numbers: where each is first referenced and its label (normalized,
+    /// or [`inline_label`] for an inline footnote). Empty when the
+    /// document has none.
+    pub fn first_references<S: TextSource + ?Sized>(
+        tree: &SyntaxTree,
+        text: &S,
+        refs: &RefMap,
+    ) -> Vec<(usize, String)> {
+        Self::scan_with_firsts(tree, text, refs).1
+    }
+
+    fn scan_with_firsts<S: TextSource + ?Sized>(
+        tree: &SyntaxTree,
+        text: &S,
+        refs: &RefMap,
+    ) -> (Option<FootnoteIndex>, Vec<(usize, String)>) {
         let opts = tree.options().inline();
         let defined = refs.footnote_count() > 0;
         if !defined && !opts.inline_footnotes {
-            return None;
+            return (None, Vec::new());
         }
         struct Scan<'a, S: TextSource + ?Sized> {
             text: &'a S,
@@ -75,6 +95,8 @@ impl FootnoteIndex {
             index: FootnoteIndex,
             next: u32,
             buf: Vec<u8>,
+            /// Where each footnote is first referenced, by number.
+            firsts: Vec<(usize, String)>,
         }
         impl<S: TextSource + ?Sized> Scan<'_, S> {
             fn count(&mut self, label: &str) -> Option<u32> {
@@ -101,12 +123,15 @@ impl FootnoteIndex {
                     match n.kind() {
                         InlineKind::FootnoteRef if self.defined => {
                             let label = n.footnote_label().unwrap_or("").to_owned();
-                            self.count(&label);
+                            if self.count(&label).is_some() {
+                                self.firsts.push((n.range().start, label));
+                            }
                         }
                         InlineKind::InlineFootnote => {
                             let source = n.range();
                             let label = inline_label(source.start);
                             if let Some(number) = self.count(&label) {
+                                self.firsts.push((source.start, label.clone()));
                                 self.index.inline.push(InlineNote {
                                     label,
                                     number,
@@ -186,9 +211,14 @@ impl FootnoteIndex {
             index: FootnoteIndex::default(),
             next: 0,
             buf: Vec::new(),
+            firsts: Vec::new(),
         };
         gv_syntax::walk(tree, &mut scan);
-        (defined || !scan.index.inline.is_empty()).then_some(scan.index)
+        let firsts = std::mem::take(&mut scan.firsts);
+        (
+            (defined || !scan.index.inline.is_empty()).then_some(scan.index),
+            firsts,
+        )
     }
 
     /// The number of the footnote with normalized label `label`, if it is

@@ -446,3 +446,281 @@ fn blocks_on_a_large_note(cx: &mut TestAppContext) {
     );
     assert_eq!(all, blocks_expected);
 }
+
+#[gpui::test]
+fn a_blocks_height_ends_with_its_last_item(cx: &mut TestAppContext) {
+    // Callouts with a paragraph that has a margin, a table and code: the
+    // Reading view's gaps between items stay, none comes after the last
+    // (the rows around the block keep the editor's spacing).
+    let text = "a\n\n```rust\nfn a() {}\n```\n\nb\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nc\n\n> [!note] T\n> body\n>\n> more\n\nd\n";
+    let (view, mut vcx) = live(cx, text);
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(kinds(&view, &mut vcx), ["code", "table", "callout"]);
+    let heights = view.read_with(&vcx, |v, _| v.live_block_heights());
+    for n in 0..3 {
+        let (bounds, reader) = block_reader(&view, &mut vcx, n);
+        let (total, bottom) = reader.read_with(&vcx, |r, _| r.height_and_last_bottom());
+        assert!((total - bottom).abs() < 0.5, "{n}: {total} {bottom}");
+        assert!(
+            (heights[n] - bottom).abs() < 0.5,
+            "{n}: {heights:?} {bottom}"
+        );
+        assert!((f32::from(bounds.size.height) - bottom).abs() < 0.5);
+    }
+}
+
+/// The view of the `n`th block drawn in the last frame.
+fn block_reader(
+    view: &Entity<EditorView>,
+    vcx: &mut VisualTestContext,
+    n: usize,
+) -> (Bounds<Pixels>, Entity<crate::reader::Reader>) {
+    view.read_with(vcx, |v, _| {
+        let (_, bounds, reader) = v.live.blocks_drawn[n].clone();
+        (bounds, reader)
+    })
+}
+
+/// A point on a link in `bounds` of a block view, found by scanning.
+fn link_point(
+    reader: &Entity<crate::reader::Reader>,
+    bounds: Bounds<Pixels>,
+    vcx: &mut VisualTestContext,
+) -> Point<Pixels> {
+    reader.read_with(vcx, |r, _| {
+        let (x0, y0) = (f32::from(bounds.left()), f32::from(bounds.top()));
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let mut y = y0 + 1.0;
+        while y < y0 + h {
+            let mut x = x0 + 1.0;
+            while x < x0 + w {
+                let p = point(px(x), px(y));
+                if r.link_start_at(p).is_some() {
+                    return p;
+                }
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+        panic!("no link in {bounds:?}")
+    })
+}
+
+const CONTEXT: &str = "$\\newcommand{\\R}{\\mathbb{R}}$ and[^a].\n\n| A | B |\n|---|---|\n| [site] | x[^b] |\n\n$$\n\\R^2\n$$\n\n[site]: https://example.com/\n\n[^a]: A.\n[^b]: B.\n";
+
+#[gpui::test]
+fn blocks_resolve_the_notes_definitions_footnotes_and_macros(cx: &mut TestAppContext) {
+    let (view, mut vcx) = live(cx, CONTEXT);
+    caret_at(&view, &mut vcx, CONTEXT.len());
+    assert_eq!(kinds(&view, &mut vcx), ["table", "math"]);
+    let (_, table) = block_reader(&view, &mut vcx, 0);
+    let (_, math) = block_reader(&view, &mut vcx, 1);
+    // The reference link resolves, the footnote has its number in the
+    // whole note (2: [^a] comes first), and only the table's own rows show
+    // (no footnote section).
+    let (links, notes, _, items) = table.read_with(&vcx, |r, _| r.shown_references());
+    assert_eq!(links, ["https://example.com/"]);
+    assert_eq!(notes, [2]);
+    assert_eq!(items, 2, "header and one row");
+    // The macro defined before the formula is in force.
+    let (_, _, macros, items) = math.read_with(&vcx, |r, _| r.shown_references());
+    assert_eq!((macros, items), (vec![1], 1));
+    // Editing the definition draws the table again, not the formula.
+    let def = CONTEXT.find("example.com/").expect("def") + "example.com/".len();
+    caret_at(&view, &mut vcx, def);
+    vcx.simulate_input("x");
+    settle(&mut vcx);
+    assert_eq!(kinds(&view, &mut vcx), ["table", "math"]);
+    let (_, table2) = block_reader(&view, &mut vcx, 0);
+    let (_, math2) = block_reader(&view, &mut vcx, 1);
+    let (links, _, _, _) = table2.read_with(&vcx, |r, _| r.shown_references());
+    assert_eq!(links, ["https://example.com/x"]);
+    assert_ne!(table2.entity_id(), table.entity_id());
+    assert_eq!(math2.entity_id(), math.entity_id());
+}
+
+#[gpui::test]
+fn mod_click_on_a_link_in_a_block_follows_it_and_a_plain_click_enters(cx: &mut TestAppContext) {
+    let (view, mut vcx) = live(cx, CONTEXT);
+    view.update(&mut vcx, |v, _| {
+        v.path = Some(std::path::PathBuf::from("/vault/Note.md"));
+    });
+    caret_at(&view, &mut vcx, CONTEXT.len());
+    let (bounds, table) = block_reader(&view, &mut vcx, 0);
+    let at = link_point(&table, bounds, &mut vcx);
+    // Hovering shows it as the editor's hovered link (tooltips, previews).
+    vcx.simulate_event(gpui::MouseMoveEvent {
+        position: at,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    settle(&mut vcx);
+    let hovered = view.read_with(&vcx, |v, _| v.hovered_link());
+    assert_eq!(
+        hovered.map(|l| l.destination.to_string()).as_deref(),
+        Some("https://example.com/")
+    );
+    let secondary = vcx.update(|_, cx| Modifiers::secondary_key(cx));
+    press(&mut vcx, at, 1, secondary);
+    settle(&mut vcx);
+    let followed = view.update(&mut vcx, |v, _| v.take_clicked_link());
+    let followed = followed.expect("followed");
+    assert_eq!(&*followed.destination, "https://example.com/");
+    // The caret stayed out: the table is still drawn.
+    assert_eq!(
+        selections(&view, &mut vcx),
+        [(CONTEXT.len(), CONTEXT.len())]
+    );
+    assert_eq!(kinds(&view, &mut vcx), ["table", "math"]);
+    // A plain click enters the block.
+    press(&mut vcx, at, 1, Modifiers::none());
+    settle(&mut vcx);
+    assert_eq!(kinds(&view, &mut vcx), ["math"]);
+    assert!(
+        view.update(&mut vcx, |v, _| v.take_clicked_link())
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn sideways_wheel_scrolls_a_wide_code_block_and_vertical_scrolls_the_editor(
+    cx: &mut TestAppContext,
+) {
+    let long = "x".repeat(600);
+    let mut text = format!("a\n\n```\n{long}\n```\n\n");
+    for i in 0..80 {
+        text.push_str(&format!("line {i}\n\n"));
+    }
+    let (view, mut vcx) = live(cx, &text);
+    caret_at(&view, &mut vcx, text.len());
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(kinds(&view, &mut vcx), ["code"]);
+    let (bounds, code) = block_reader(&view, &mut vcx, 0);
+    let at = bounds.center();
+    let scroll_y = view.read_with(&vcx, |v, _| v.scroll_y);
+    let wheel = |vcx: &mut VisualTestContext, dx: f32, dy: f32, modifiers: Modifiers| {
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(point(px(dx), px(dy))),
+            modifiers,
+            ..gpui::ScrollEvent::default()
+        });
+        settle(vcx);
+    };
+    // Sideways: the block scrolls, the editor does not.
+    wheel(&mut vcx, -40.0, 0.0, Modifiers::none());
+    let x = code.read_with(&vcx, |r, _| r.sideways_scroll());
+    assert!(x > 30.0, "{x}");
+    assert_eq!(view.read_with(&vcx, |v, _| v.scroll_y), scroll_y);
+    // Shift with a vertical turn: sideways too.
+    wheel(&mut vcx, 0.0, -20.0, Modifiers::shift());
+    let x2 = code.read_with(&vcx, |r, _| r.sideways_scroll());
+    assert!(x2 > x + 10.0, "{x} {x2}");
+    // A vertical turn scrolls the editor.
+    wheel(&mut vcx, 0.0, -60.0, Modifiers::none());
+    assert!(view.read_with(&vcx, |v, _| v.scroll_y) > scroll_y + 50.0);
+    assert_eq!(code.read_with(&vcx, |r, _| r.sideways_scroll()), x2);
+}
+
+#[gpui::test]
+fn blocks_are_described_for_assistive_technology(cx: &mut TestAppContext) {
+    let table = "| A | B |\n|---|---|\n| 1 | 2 |";
+    let text = format!("a\n\n{table}\n\nb\n\n{table}\n\n![alt text](missing.png)\n\nc\n");
+    let (view, mut vcx) = live(cx, &text);
+    caret_at(&view, &mut vcx, 0);
+    assert_eq!(kinds(&view, &mut vcx), ["table", "table", "image"]);
+    let described = view.read_with(&vcx, |v, cx| v.blocks_a11y(cx));
+    assert_eq!(described.len(), 3);
+    let roles: Vec<Vec<gpui::Role>> = described
+        .iter()
+        .map(|(_, nodes)| nodes.iter().map(|n| n.role).collect())
+        .collect();
+    assert_eq!(roles[0], [gpui::Role::Table]);
+    assert_eq!(roles[1], [gpui::Role::Table]);
+    // Rows and cells under the table.
+    assert!(!described[0].1[0].children.is_empty());
+    // The same table twice: one view, but distinct node keys.
+    assert_ne!(described[0].1[0].key, described[1].1[0].key);
+    // In order down the page.
+    assert!(described[0].0 < described[1].0 && described[1].0 < described[2].0);
+    // The image by its alt text.
+    fn labels(nodes: &[crate::a11y::document::DocNode], out: &mut Vec<String>) {
+        for n in nodes {
+            out.extend(n.label.clone());
+            labels(&n.children, out);
+        }
+    }
+    let mut image = Vec::new();
+    labels(&described[2].1, &mut image);
+    assert!(image.iter().any(|l| l.contains("alt text")), "{image:?}");
+}
+
+#[gpui::test]
+fn unmeasured_blocks_are_estimated_from_measured_ones(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    for i in 0..60 {
+        text.push_str(&format!("para {i}\n\n```\none\ntwo\nthree\n```\n\n"));
+    }
+    let (view, mut vcx) = live(cx, &text);
+    caret_at(&view, &mut vcx, 0);
+    // Every block is in the layer from the first frame (a short note).
+    let heights = view.read_with(&vcx, |v, _| v.live_block_heights());
+    assert_eq!(heights.len(), 60);
+    // Those far below were never drawn; they take the measured height.
+    let measured = heights[0];
+    assert!((measured - 5.0 * LINE).abs() > 1.0, "{heights:?}");
+    assert!((heights[59] - measured).abs() < 0.5, "{heights:?}");
+    // Scrolling to the end changes the content height by little.
+    let total = view.update_in(&mut vcx, |v, _, _| v.geo().total(0));
+    caret_at(&view, &mut vcx, text.len());
+    let after = view.update_in(&mut vcx, |v, _, _| v.geo().total(0));
+    assert!((after - total).abs() < 1.0, "{total} {after}");
+}
+
+#[gpui::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn first_frame_of_a_short_note(cx: &mut TestAppContext) {
+    use std::time::Instant;
+    let mut text = String::from("$\\newcommand{\\R}{\\mathbb{R}}$ macros.\n\n");
+    let mut i = 0;
+    while text.len() < super::super::live_preview::SMALL_NOTE_BYTES - 400 {
+        text.push_str(&format!(
+            "## Section {i}\n\nSome **bold** text, a [ref][r{i}] and a note[^n{i}] in paragraph {i}.\n\n"
+        ));
+        match i % 4 {
+            0 => text.push_str("```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n"),
+            1 => text.push_str(&format!(
+                "| a | b |\n|---|---|\n| [ref][r{i}] | x[^n{i}] |\n\n"
+            )),
+            2 => text.push_str("$$\n\\R^2\n$$\n\n"),
+            _ => text.push_str("> [!note] Title\n> body text\n\n"),
+        }
+        text.push_str(&format!(
+            "[r{i}]: https://example.com/{i}\n\n[^n{i}]: Note {i}.\n\n"
+        ));
+        i += 1;
+    }
+    let (view, mut vcx) = editor_with(cx, &text, obsidian());
+    view.update(&mut vcx, |v, cx| v.set_profile("obsidian", cx));
+    draw(&mut vcx);
+    let mut frames = Vec::new();
+    for _ in 0..5 {
+        view.update(&mut vcx, |v, cx| v.set_live_preview(true, cx));
+        vcx.run_until_parked();
+        let started = Instant::now();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        frames.push(started.elapsed().as_secs_f64() * 1e3);
+        let blocks = view.read_with(&vcx, |v, _| v.live_block_ids().len());
+        assert_eq!(blocks, i, "every block from the first frame");
+        view.update(&mut vcx, |v, cx| v.set_live_preview(false, cx));
+        draw(&mut vcx);
+    }
+    println!(
+        "note {} bytes, {i} blocks; first Live Preview frame: {:?} ms",
+        text.len(),
+        frames
+            .iter()
+            .map(|f| (f * 100.0).round() / 100.0)
+            .collect::<Vec<_>>()
+    );
+}

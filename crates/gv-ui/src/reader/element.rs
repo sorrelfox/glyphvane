@@ -502,6 +502,11 @@ impl Element for ReaderElement {
     }
 
     fn a11y_role(&self) -> Option<gpui::Role> {
+        // A Live Preview block is described by the editor that hosts it,
+        // among its text (`EditorView::blocks_a11y`).
+        if self.state.borrow().layout == super::ReaderLayout::Block {
+            return None;
+        }
         Some(gpui::Role::Document)
     }
 
@@ -518,7 +523,11 @@ impl Element for ReaderElement {
         builder: &mut gpui::A11ySubtreeBuilder<'_>,
     ) {
         let st = self.state.borrow();
-        let Some(doc) = st.doc.as_ref() else {
+        let Some(doc) = st
+            .doc
+            .as_ref()
+            .filter(|_| st.layout != super::ReaderLayout::Block)
+        else {
             return;
         };
         let placed = st.engine.placed();

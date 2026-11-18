@@ -37,7 +37,7 @@ impl Reader {
         self._load = Some(cx.spawn(async move |this, cx| {
             let doc = cx
                 .background_spawn(async move {
-                    load::load_text(&path, text, &resolver, options, &profile)
+                    load::load_text(&path, text, &resolver, options, &profile, None)
                 })
                 .await;
             this.update(cx, |reader, cx| {

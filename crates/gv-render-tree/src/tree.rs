@@ -1148,6 +1148,21 @@ impl RenderTree {
     pub fn height_estimate(&self, width: f32) -> f32 {
         self.items.iter().map(|it| it.height_estimate(width)).sum()
     }
+
+    /// Keeps only the items whose sources intersect `range` (the footnote
+    /// section goes): a part of a document shown with the rest of the
+    /// document as its context. Nodes stay, so footnote numbers, reference
+    /// definitions and math macros are the whole text's; the kept items
+    /// are spaced as if they were the whole document.
+    pub fn keep_items_in(&mut self, range: Range<usize>) {
+        let keep = self.items_in(range);
+        self.items.truncate(keep.end);
+        self.items.drain(..keep.start);
+        self.section = self.items.len();
+        self.index = OnceLock::new();
+        let n = self.items.len();
+        link(&mut self.items, 0..n, &self.opts.metrics);
+    }
 }
 
 /// Whether two nodes' containers indent them the same way.

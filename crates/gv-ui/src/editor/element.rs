@@ -272,6 +272,7 @@ impl EditorView {
             // Blocks first: images on their own line are blocks, not
             // inline widgets.
             let span = self.live_span(lines.clone());
+            self.live_first_pass();
             self.refresh_live_blocks(span, columns.text_w, cx);
             let sizes = super::live_widgets::Sizes {
                 line: line_px,
@@ -1336,6 +1337,8 @@ pub(crate) struct Prepaint {
     frame: Frame,
     /// The views of the Live Preview blocks on screen, prepainted.
     blocks: Vec<gpui::AnyElement>,
+    /// Those blocks for assistive technology: top and nodes.
+    a11y_blocks: Vec<(f32, Vec<crate::a11y::document::DocNode>)>,
 }
 
 impl Element for EditorElement {
@@ -1366,7 +1369,14 @@ impl Element for EditorElement {
         prepaint: &mut Prepaint,
         builder: &mut gpui::A11ySubtreeBuilder<'_>,
     ) {
-        for (i, (row, _)) in prepaint.frame.rows.iter().enumerate() {
+        // Live Preview blocks among the rows, in order of their tops.
+        let mut blocks = std::mem::take(&mut prepaint.a11y_blocks)
+            .into_iter()
+            .peekable();
+        for (i, (row, origin)) in prepaint.frame.rows.iter().enumerate() {
+            while let Some((_, nodes)) = blocks.next_if(|(top, _)| *top <= f32::from(origin.y)) {
+                crate::a11y::document::push(&nodes, builder);
+            }
             let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
             let text = row.text.to_string();
             let lengths: Vec<u8> = text
@@ -1377,6 +1387,9 @@ impl Element for EditorElement {
             run.set_character_lengths(lengths);
             let id = builder.synthetic_node_id(i);
             builder.push_child(id, run);
+        }
+        for (_, nodes) in blocks {
+            crate::a11y::document::push(&nodes, builder);
         }
     }
 
@@ -1442,12 +1455,18 @@ impl Element for EditorElement {
             self.view
                 .update(cx, |view, cx| view.block_heights(heights, cx));
         }
+        let a11y_blocks = if window.is_a11y_active() && !frame.blocks.is_empty() {
+            self.view.read(cx).blocks_a11y(cx)
+        } else {
+            Vec::new()
+        };
         Prepaint {
             hitbox,
             text_hitbox,
             pointer_hitboxes,
             frame,
             blocks,
+            a11y_blocks,
         }
     }
 
@@ -1706,7 +1725,13 @@ impl EditorElement {
                 if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
                     return;
                 }
-                view.update(cx, |view, cx| view.scroll_wheel(e, cx));
+                view.update(cx, |view, cx| {
+                    // A wide table or code block of Live Preview scrolls
+                    // sideways itself.
+                    if !view.wheel_block(e, cx) {
+                        view.scroll_wheel(e, cx);
+                    }
+                });
                 cx.stop_propagation();
             });
         }

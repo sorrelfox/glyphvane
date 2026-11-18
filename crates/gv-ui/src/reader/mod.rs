@@ -303,6 +303,9 @@ pub struct Reader {
     _settings: Subscription,
     /// *Load once* approvals (shared with the Bases view's covers).
     _load_once: Subscription,
+    /// A Live Preview block's view: the part of the text it shows, the
+    /// rest being its context ([`Reader::open_block`]).
+    crop: Option<std::ops::Range<usize>>,
 }
 
 impl std::fmt::Debug for Reader {
@@ -357,6 +360,7 @@ impl Reader {
                 this.sync_remote(cx);
             }),
             _load_once: cx.observe_global::<remote::LoadOnce>(|this, cx| this.sync_remote(cx)),
+            crop: None,
         }
     }
 
@@ -601,10 +605,13 @@ impl Reader {
         self.statuses_from = index_key(self.index.as_ref());
         let options = self.build_options();
         let profile = Arc::clone(&self.profile);
+        let crop = self.crop.clone();
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    Ok(load::load_text(&path, text, &resolver, options, &profile))
+                    Ok(load::load_text(
+                        &path, text, &resolver, options, &profile, crop,
+                    ))
                 })
                 .await;
             this.update(cx, |reader, cx| reader.finish_load(revision, result, cx))
@@ -884,6 +891,68 @@ impl Reader {
         Some(st.engine.total() as f32)
     }
 
+    /// Shows `crop` of `text` (a Live Preview block's source, with the
+    /// note's context around it: reference and footnote definitions, the
+    /// formulas defining macros), built like [`Self::open_text`]; only the
+    /// items of `crop` are laid out.
+    pub(crate) fn open_block(
+        &mut self,
+        path: PathBuf,
+        text: Arc<str>,
+        crop: std::ops::Range<usize>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.crop = Some(crop);
+        self.open_text(path, text, None, cx);
+    }
+
+    /// The structure of the items shown, for assistive technology
+    /// ([`crate::a11y::document`]): what a Live Preview block's host
+    /// describes in its place.
+    pub(crate) fn a11y_nodes(&self) -> Vec<crate::a11y::document::DocNode> {
+        let st = self.state.borrow();
+        let Some(doc) = st.doc.as_ref() else {
+            return Vec::new();
+        };
+        crate::a11y::document::describe(&doc.tree, 0..doc.tree.items().len())
+    }
+
+    /// Where the link under window point `position` starts in the shown
+    /// text, as of the last frame (`None` off a link, and for links of an
+    /// embedded note, which are not in this text).
+    pub(crate) fn link_start_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<usize> {
+        let st = self.state.borrow();
+        st.link_at(position)
+            .or_else(|| st.image_at(position))
+            .and_then(|hit| hit.range)
+            .map(|r| r.start)
+    }
+
+    /// A wheel turn at window point `position`, `dx`/`dy` px: a table, code
+    /// block or diagram there that overflows its column scrolls sideways
+    /// (horizontal turns, or Shift held), as in the Reading view. Returns
+    /// whether it did.
+    pub(crate) fn wheel_sideways(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        (dx, dy): (f32, f32),
+        shift: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let dx = if shift && dx == 0.0 { dy } else { dx };
+        if dx == 0.0 || !(shift || dx.abs() > dy.abs()) {
+            return false;
+        }
+        let mut st = self.state.borrow_mut();
+        let Some(code) = st.code_at(position).filter(|c| c.overflow > 0.0) else {
+            return false;
+        };
+        st.scroll_code(code, -dx);
+        drop(st);
+        cx.notify();
+        true
+    }
+
     /// The source offset in the shown text under window point `position`,
     /// as of the last frame.
     pub(crate) fn source_offset_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<usize> {
@@ -943,6 +1012,37 @@ impl Reader {
             .filter(|c| matches!(c.kind, state::ControlKind::Details { .. }))
             .map(|c| c.bounds.center())
             .collect()
+    }
+
+    /// What the shown items refer to: link destinations, footnote numbers
+    /// and the number of math macros in force for each display formula,
+    /// in order; and the number of items shown.
+    pub(crate) fn shown_references(&self) -> (Vec<String>, Vec<u32>, Vec<usize>, usize) {
+        let st = self.state.borrow();
+        let Some(doc) = &st.doc else {
+            return Default::default();
+        };
+        let tree = &doc.tree;
+        let (mut links, mut notes, mut macros) = (Vec::new(), Vec::new(), Vec::new());
+        let mut seen = std::collections::HashSet::new();
+        for (ix, item) in tree.items().iter().enumerate() {
+            if let Some(content) = tree.item_inline(ix) {
+                links.extend(content.links.iter().map(|l| l.destination.to_string()));
+                notes.extend(content.footnotes.iter().map(|f| f.number));
+            }
+            if seen.insert(item.node)
+                && let Some(gv_render_tree::NodeKind::Math(_)) = tree.node_of(ix).map(|n| &n.kind)
+            {
+                macros.push(tree.math_macros(item.node, 0).len());
+            }
+        }
+        (links, notes, macros, tree.items().len())
+    }
+
+    /// How far the tables and code blocks shown are scrolled sideways, in
+    /// all.
+    pub(crate) fn sideways_scroll(&self) -> f32 {
+        self.state.borrow().hscroll.values().sum()
     }
 
     /// The type of the document shown.
@@ -1092,7 +1192,9 @@ impl Render for Reader {
                     .right(px(find_spacing::INSET_RIGHT))
                     .child(bar)
             });
-        let link_tip = (self.status == LoadStatus::Ready)
+        // A Live Preview block's links get the editor's tooltips.
+        let link_tip = (self.status == LoadStatus::Ready
+            && self.state.borrow().layout != ReaderLayout::Block)
             .then(|| self.link_tooltip(window, cx))
             .flatten();
         match &self.status {
@@ -1122,5 +1224,17 @@ impl Render for Reader {
             }
             LoadStatus::Loading | LoadStatus::Empty => root.children(popover),
         }
+    }
+}
+
+#[cfg(test)]
+impl Reader {
+    /// The content height and where the last item painted ends (px below
+    /// the top of the view).
+    pub(crate) fn height_and_last_bottom(&self) -> (f32, f32) {
+        let st = self.state.borrow();
+        let top = f32::from(st.geometry.bounds.top());
+        let bottom = st.geometry.items.last().map_or(0.0, |g| g.bottom - top);
+        (st.engine.total() as f32, bottom)
     }
 }

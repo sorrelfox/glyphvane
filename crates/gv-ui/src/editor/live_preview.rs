@@ -60,6 +60,10 @@ pub(super) const MARGIN_LINES: usize = 80;
 /// How long the text rests before the whole document is decorated again.
 pub(super) const FULL_DELAY: Duration = Duration::from_millis(150);
 
+/// Notes at most this long get their whole-document pass before their
+/// first frame ([`EditorView::live_first_pass`]).
+pub(super) const SMALL_NOTE_BYTES: usize = 64 * 1024;
+
 /// Leaves kept in the cache at most (the entries a whole-document pass did
 /// not use go at the next one).
 const CACHE_CAP: usize = 200_000;
@@ -1149,6 +1153,42 @@ impl EditorView {
         self.schedule_live_full(&tree, &text, cx);
     }
 
+    /// A short note's first whole-document pass, before its first frame
+    /// in Live Preview: every block is in the block layer from the start
+    /// (at estimated heights), so the content height does not grow while
+    /// scrolling into text the window pass has not seen. Longer notes wait
+    /// for the background pass.
+    pub(super) fn live_first_pass(&mut self) {
+        if self.live.full.is_some() || self.live.blocks.full.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let text = doc.editor.snapshot();
+        if text.len() > SMALL_NOTE_BYTES {
+            return;
+        }
+        let revision = text.revision();
+        let (tree, parsed) = doc.syntax.shown();
+        if parsed.revision() != revision || tree.is_interim() {
+            return;
+        }
+        let tree = tree.clone();
+        let leaves = decorate(&tree, &text, None, &self.live.cache, self.live.options);
+        let context = super::live_context::NoteContext::compute(&tree, &text, true);
+        let blocks = super::live_blocks::find_blocks(&tree, &text, None, Some(&context));
+        self.live.blocks.full = Some((revision, Arc::new(blocks)));
+        self.live.blocks.context = Some((revision, Arc::new(context)));
+        self.live.full = Some(Full {
+            revision,
+            leaves,
+            applied: false,
+            pending: VecDeque::new(),
+            pending_for: None,
+        });
+    }
+
     /// Decorates the whole document on the background executor once the
     /// text has rested, unless that is done or running for this text.
     fn schedule_live_full(
@@ -1173,11 +1213,13 @@ impl EditorView {
         let options = self.live.options;
         self.live._job = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FULL_DELAY).await;
-            let (leaves, blocks) = cx
+            let (leaves, blocks, context) = cx
                 .background_spawn(async move {
                     let leaves = decorate(&tree, &text, None, &cache, options);
-                    let blocks = super::live_blocks::find_blocks(&tree, &text, None);
-                    (leaves, blocks)
+                    let context = super::live_context::NoteContext::compute(&tree, &text, true);
+                    let blocks =
+                        super::live_blocks::find_blocks(&tree, &text, None, Some(&context));
+                    (leaves, blocks, Arc::new(context))
                 })
                 .await;
             this.update(cx, |view, cx| {
@@ -1187,6 +1229,7 @@ impl EditorView {
                 view.live.job_for = None;
                 view.live._job = None;
                 view.live.blocks.full = Some((revision, Arc::new(blocks)));
+                view.live.blocks.context = Some((revision, context));
                 view.live.full = Some(Full {
                     revision,
                     leaves,

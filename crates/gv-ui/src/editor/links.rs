@@ -81,9 +81,13 @@ impl EditorView {
         window: &Window,
         cx: &gpui::App,
     ) -> Option<SourceLink> {
-        // A Live Preview block hides its source.
-        if self.block_view_at(position).is_some() {
-            return None;
+        // A Live Preview block: the link its view shows there, in the
+        // block's source.
+        if let Some((id, reader)) = self.block_view_at(position) {
+            let start = reader.read(cx).link_start_at(position)?;
+            let offset = self.block_source_start(id)?
+                + start.checked_sub(self.live.blocks.prefix_len(id))?;
+            return self.link_at_offset(offset);
         }
         let offset = self.offset_at(position, window, cx)?;
         self.link_at_offset(offset)
