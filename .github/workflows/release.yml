@@ -27,6 +27,9 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  # GitHub stops a runner that uses more than about 12 GB; one merman rustc
+  # alone takes 6-7 GB, so at most two compile jobs run at once.
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
   # Pinned packaging tools (ADR-020). Keep in step with xtask/src/package/.
@@ -85,7 +88,7 @@ jobs:
     env:
       # The full GUI build needs about 8 GB per job at the peak (one rustc
       # for the diagram engine plus GPUI's large crates); 3 jobs fit 16 GB.
-      CARGO_BUILD_JOBS: 3
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v7
         with:
@@ -265,7 +268,7 @@ jobs:
       # SignPath reads the uploaded workflow artifact through the API.
       actions: read
     env:
-      CARGO_BUILD_JOBS: 3
+      CARGO_BUILD_JOBS: 2
       SIGNPATH_ENABLED: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
     defaults:
       run:

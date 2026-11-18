@@ -146,14 +146,14 @@ jobs:
             formats: deb,rpm,tar.gz,appimage
             runtime: runtime-x86_64
             runtime-sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
-            jobs: 3
+            jobs: 2
           - name: linux-aarch64
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             formats: deb,rpm,tar.gz,appimage
             runtime: runtime-aarch64
             runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
-            jobs: 3
+            jobs: 2
           - name: macos-arm64
             os: macos-15
             target: aarch64-apple-darwin
@@ -168,12 +168,12 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             formats: zip,msi
-            jobs: 3
+            jobs: 2
           - name: windows-arm64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             formats: zip,msi
-            jobs: 3
+            jobs: 2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:

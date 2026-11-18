@@ -352,14 +352,11 @@ mod unix {
         // An instance that crashed leaves its socket behind.
         drop(UnixListener::bind(endpoint.socket()).expect("bind"));
         assert!(endpoint.socket().exists());
-        let stale = fs::metadata(endpoint.socket()).expect("socket").ino();
 
+        // The new primary binds in its place, so a request is delivered.
+        // (The inode cannot tell old from new: file systems reuse it.)
         let (handler, received) = channel_handler();
         let _guard = primary(endpoint.clone(), root.path()).serve(handler);
-        assert_ne!(
-            fs::metadata(endpoint.socket()).expect("socket").ino(),
-            stale
-        );
         let second = request(root.path(), "b.md", false);
         assert!(matches!(
             claim(endpoint_in(root.path()), &second, TIMEOUT),

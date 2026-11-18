@@ -532,7 +532,12 @@ mod tests {
         let locations = settings::locations(cli.config_dir.as_deref());
         assert_eq!(
             locations.map(|l| l.settings_file()),
-            Some(PathBuf::from("/tmp/gv-root/config/settings.toml"))
+            Some(
+                std::path::absolute("/tmp/gv-root")
+                    .expect("absolute path")
+                    .join("config")
+                    .join("settings.toml")
+            )
         );
         assert_eq!(cli.paths, ["a.md"]);
     }

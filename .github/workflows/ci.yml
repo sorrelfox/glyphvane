@@ -18,6 +18,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # GitHub stops a runner that uses more than about 12 GB; one merman rustc
+  # alone takes 6-7 GB, so at most two compile jobs run at once.
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
 
@@ -119,7 +122,7 @@ jobs:
       actions: read
       pull-requests: read
     env:
-      CARGO_BUILD_JOBS: 3
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v7
         with:
