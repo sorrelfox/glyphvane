@@ -511,7 +511,11 @@ impl ReparseTask {
                     self.old_valid = base.advance(&mut self.old);
                 }
                 let at_old_line = self.old_valid && self.old.start == q;
-                if at_old_line && self.seam.is_none() {
+                // As for convergence, neither line may be the first line
+                // of its text: byte-0 rules (the BOM, front matter) make
+                // the old line 0 differ from the same bytes further down,
+                // and the other way round.
+                if at_old_line && self.seam.is_none() && self.pos > 0 && q > 0 {
                     self.seam = Some((self.lines.len(), self.old.clone(), state));
                 }
                 if at_old_line

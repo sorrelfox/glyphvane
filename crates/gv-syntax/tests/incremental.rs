@@ -801,3 +801,38 @@ fn snapshots_are_independent() {
         });
     });
 }
+
+/// A BOM is only a BOM at byte 0. Inserting a line before it (or deleting
+/// the line before a U+FEFF) moves those bytes across byte 0: the interim
+/// tree of a paused reparse must not splice the old first line in at
+/// another offset, or an old later line in at byte 0.
+#[test]
+fn bom_moves_off_and_onto_byte_zero() {
+    let docs = [
+        "\u{feff}---\na\n---\n\nHello world.\n",
+        "\u{feff}---\na\n---\nHello world.\n",
+        "\u{feff}# Title\n\npara\n",
+    ];
+    for options in [ParseOptions::default(), extended(), gfm()] {
+        for doc in docs {
+            for ins in ["$$\n", "x", "\n", "> "] {
+                let (inserted, change) = apply(doc, 0, 0, ins);
+                let (back, undo) = apply(&inserted, 0, ins.len(), "");
+                for (old, new, change) in
+                    [(doc, &inserted, change), (inserted.as_str(), &back, undo)]
+                {
+                    let tree = SyntaxTree::parse_with(old, options);
+                    let mut task = tree.begin_reparse(new.as_str(), change);
+                    let interim = task.interim(new.as_str());
+                    interim
+                        .validate(new.as_str())
+                        .unwrap_or_else(|e| panic!("interim of {old:?} -> {new:?}: {e}"));
+                    for mode in [Mode::Direct, Mode::Sliced(1)] {
+                        check_edit(&tree, old, new, change, mode)
+                            .unwrap_or_else(|e| panic!("{old:?} -> {new:?}: {e}"));
+                    }
+                }
+            }
+        }
+    }
+}
