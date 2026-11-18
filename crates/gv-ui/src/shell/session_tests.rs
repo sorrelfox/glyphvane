@@ -33,6 +33,7 @@ fn tab(path: &str) -> TabState {
         split_ratio: None,
         folds: Vec::new(),
         reading_folds: Vec::new(),
+        split_reading_folds: Vec::new(),
     }
 }
 
@@ -606,6 +607,7 @@ fn panels_folders_dividers_and_folds_survive_json() {
         line: "<details>".into(),
         nth: 2,
         open: true,
+        at: Some([2, 3]),
     }];
     session.windows[0].base = Some(SidebarBase {
         file: Some("Books.base".into()),
@@ -770,6 +772,7 @@ fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
         line: "Question?".into(),
         nth: 0,
         open: true,
+        at: Some([0, 1]),
     }];
     let stored = Session {
         windows: vec![WindowState {
@@ -826,6 +829,79 @@ fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
     let saved = &memory.last().windows[0].tabs[0].reading_folds;
     assert_eq!(saved.len(), 1);
     assert!(!saved[0].open, "{saved:?}");
+}
+
+#[gpui::test]
+fn split_preview_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
+    use crate::reader::fold_state::{FoldKind, ReadingFold};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir(dir.path().join(".obsidian")).expect("marker");
+    std::fs::write(dir.path().join(".obsidian/app.json"), "{}").expect("app.json");
+    let a = dir.path().join("a.md");
+    std::fs::write(&a, "# A\n\n> [!faq]- Question?\n> The answer.\n").expect("write");
+    let folds = vec![ReadingFold {
+        kind: FoldKind::Callout,
+        line: "Question?".into(),
+        nth: 0,
+        open: true,
+        at: Some([0, 1]),
+    }];
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: a.clone(),
+                mode: ViewMode::Split,
+                split_reading_folds: folds.clone(),
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        draw(&mut vcx);
+        let shown = workspace.read_with(&vcx, |ws, cx| {
+            ws.active_tab()
+                .split_reader(cx)
+                .map(|r| r.read(cx).reading_folds())
+                .unwrap_or_default()
+        });
+        if shown == folds {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{shown:?}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    vcx.update(|_, cx| save_now(cx));
+    let saved = &memory.last().windows[0].tabs[0];
+    assert_eq!(saved.split_reading_folds, folds);
+    assert!(
+        saved.reading_folds.is_empty(),
+        "the panes fold on their own"
+    );
+}
+
+#[test]
+fn a_session_without_split_folds_still_reads() {
+    let json = r#"{"path":"/n/a.md","reading_folds":[{"kind":"callout","line":"Q","open":true}]}"#;
+    let tab: TabState = serde_json::from_str(json).expect("reads");
+    assert_eq!(tab.reading_folds.len(), 1);
+    assert!(tab.split_reading_folds.is_empty());
+    let back = serde_json::to_string(&tab).expect("json");
+    assert!(!back.contains("split_reading_folds"), "{back}");
 }
 
 #[gpui::test]

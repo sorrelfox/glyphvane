@@ -86,8 +86,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    UniformListScrollHandle, Window, div, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, UniformListScrollHandle, Window, div, px,
 };
 use gv_bases::{CompiledBase, EvalContext, Incomplete, IndexData, VaultData, ViewKind, ViewResult};
 use gv_vault::Fragment;
@@ -281,6 +281,7 @@ pub struct BasesView {
     _load: Option<Task<()>>,
     _eval: Option<Task<()>>,
     _index: Option<Task<()>>,
+    _load_once: Subscription,
 }
 
 impl std::fmt::Debug for BasesView {
@@ -409,6 +410,9 @@ impl BasesView {
             _load: None,
             _eval: None,
             _index: None,
+            _load_once: cx.observe_global::<crate::reader::remote::LoadOnce>(|this, cx| {
+                this.approvals_changed(cx);
+            }),
         }
     }
 

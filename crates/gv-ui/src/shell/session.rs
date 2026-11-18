@@ -258,6 +258,10 @@ pub struct TabState {
     /// closed), by block kind, first source line and repeat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reading_folds: Vec<ReadingFold>,
+    /// The Split view's preview folds, kept apart from the Reading
+    /// view's (each pane folds on its own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_reading_folds: Vec<ReadingFold>,
 }
 
 /// A place in a tab's history.
@@ -371,6 +375,9 @@ impl TabState {
         if !folds.is_empty() {
             tab.restored_folds = Some((self.path.clone(), folds));
         }
+        if !self.split_reading_folds.is_empty() {
+            tab.restored_split_folds = Some((self.path.clone(), self.split_reading_folds));
+        }
         if !self.reading_folds.is_empty() {
             tab.restored_reading_folds = Some((self.path, self.reading_folds));
         }
@@ -412,6 +419,7 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             split_ratio,
             folds,
             reading_folds: tab.reading_folds(cx),
+            split_reading_folds: tab.split_reading_folds(cx),
         });
     }
     WindowState {

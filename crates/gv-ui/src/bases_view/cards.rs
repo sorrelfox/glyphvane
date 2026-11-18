@@ -23,13 +23,13 @@
 //! - A click on a card opens its file (Mod-click a new tab, a middle
 //!   click a background tab).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FontWeight, Global, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ObjectFit, ParentElement as _, RenderImage, SharedString,
+    AnyElement, ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ObjectFit, ParentElement as _, RenderImage, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, canvas, div, img, list,
     px,
 };
@@ -41,7 +41,7 @@ use super::{BasesView, Colors};
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::metrics::{radius, text};
 use crate::reader::Disposition;
-use crate::reader::remote::{Decision, Policy, RemoteShown};
+use crate::reader::remote::{Decision, LoadOnce, Policy, RemoteShown};
 
 /// A card without `cardSize`.
 pub(crate) const DEFAULT_CARD: f32 = 200.0;
@@ -72,18 +72,6 @@ pub(crate) enum CoverShown {
         message: SharedString,
         host: SharedString,
     },
-}
-
-/// *Load once* approvals of remote covers in this session: (base, site).
-/// Never written anywhere.
-#[derive(Default)]
-struct Approvals(HashSet<(PathBuf, String)>);
-
-impl Global for Approvals {}
-
-fn approved(cx: &App, doc: &std::path::Path, host: &str) -> bool {
-    cx.try_global::<Approvals>()
-        .is_some_and(|a| a.0.contains(&(doc.to_path_buf(), host.to_owned())))
 }
 
 /// Covers loaded or loading, by path or URL.
@@ -216,7 +204,7 @@ impl BasesView {
                     return shown;
                 };
                 let doc = self.approval_doc();
-                match policy.decide(&host, approved(cx, &doc, &host)) {
+                match policy.decide(&host, LoadOnce::approved(cx, &doc, &host)) {
                     Decision::Load { private_ok } => {
                         let fetcher = crate::reader::remote::shared_fetcher(cx);
                         let url = url.to_string();
@@ -291,11 +279,34 @@ impl BasesView {
     /// session, and fetched now.
     pub(crate) fn load_once(&mut self, host: &str, cx: &mut Context<'_, Self>) {
         let doc = self.approval_doc();
-        cx.default_global::<Approvals>()
-            .0
-            .insert((doc, host.to_owned()));
+        LoadOnce::approve(cx, &doc, &[host.to_owned()]);
         self.covers.forget_host(host);
         cx.notify();
+    }
+
+    /// What the cover at `url` shows, by name (tests outside this module).
+    #[cfg(test)]
+    pub(crate) fn cover_state(&mut self, url: &str, cx: &mut Context<'_, Self>) -> &'static str {
+        match self.cover_shown(&Cover::Url(url.into()), (200.0, 200.0), cx) {
+            CoverShown::Pending => "pending",
+            CoverShown::Image(_) => "image",
+            CoverShown::Color(_) => "color",
+            CoverShown::Message(_) => "message",
+            CoverShown::Waiting { .. } => "waiting",
+        }
+    }
+
+    /// *Load once* approvals changed (here or in a Reading view): covers
+    /// waiting for a site now approved for this base load.
+    pub(crate) fn approvals_changed(&mut self, cx: &mut Context<'_, Self>) {
+        let doc = self.approval_doc();
+        let before = self.covers.shown.len();
+        self.covers.shown.retain(|_, shown| {
+            !matches!(shown, CoverShown::Waiting { host, .. } if LoadOnce::approved(cx, &doc, host))
+        });
+        if self.covers.shown.len() != before {
+            cx.notify();
+        }
     }
 
     /// A waiting cover's line and its *Load once* button.

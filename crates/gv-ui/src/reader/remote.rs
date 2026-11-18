@@ -265,8 +265,6 @@ pub struct RemoteSession {
     cache_dir: Option<PathBuf>,
     /// Connect directly whatever the environment says (tests).
     direct: bool,
-    /// *Load once*: (note, site).
-    approved: HashSet<(PathBuf, String)>,
     /// Fetches started, for tests.
     started: usize,
 }
@@ -311,10 +309,31 @@ impl RemoteSession {
         s.fetcher = Some(Arc::clone(&f));
         f
     }
+}
 
-    fn approved(cx: &App, doc: &Path, host: &str) -> bool {
+/// This session's *Load once* approvals: (document, site). One store for
+/// the app, shared by the Reading view and the Bases view's covers, so a
+/// site approved in a note's infobar also loads the covers of a base
+/// embedded in that note, and the other way round. Never written
+/// anywhere. Views observe this global to load what was just approved.
+#[derive(Default)]
+pub(crate) struct LoadOnce(HashSet<(PathBuf, String)>);
+
+impl Global for LoadOnce {}
+
+impl LoadOnce {
+    /// Whether the user chose *Load once* for `host` in `doc`.
+    pub(crate) fn approved(cx: &App, doc: &Path, host: &str) -> bool {
         cx.try_global::<Self>()
-            .is_some_and(|s| s.approved.contains(&(doc.to_path_buf(), host.to_owned())))
+            .is_some_and(|s| s.0.contains(&(doc.to_path_buf(), host.to_owned())))
+    }
+
+    /// *Load once* for `hosts` in `doc`, for the rest of the session.
+    pub(crate) fn approve(cx: &mut App, doc: &Path, hosts: &[String]) {
+        let s = cx.default_global::<Self>();
+        for host in hosts {
+            s.0.insert((doc.to_path_buf(), host.clone()));
+        }
     }
 }
 
@@ -422,7 +441,7 @@ impl Reader {
                 );
                 continue;
             };
-            let approved = RemoteSession::approved(cx, &path, &host);
+            let approved = LoadOnce::approved(cx, &path, &host);
             let decision = policy.decide(&host, approved);
             if !matches!(decision, Decision::Load { .. }) {
                 self.remote.cancel(url);
@@ -645,10 +664,7 @@ impl Reader {
                 let Some(doc) = self.path.clone() else {
                     return;
                 };
-                let s = cx.default_global::<RemoteSession>();
-                for host in &hosts {
-                    s.approved.insert((doc.clone(), host.clone()));
-                }
+                LoadOnce::approve(cx, &doc, &hosts);
             }
             NoticeAction::RemoteAlwaysAllow => add_sites(cx, ALLOW_KEY, &hosts),
             NoticeAction::RemoteBlock => add_sites(cx, BLOCK_KEY, &hosts),

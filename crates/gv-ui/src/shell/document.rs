@@ -196,10 +196,15 @@ impl Workspace {
             .clone()
             .unwrap_or_else(|| PathBuf::from(tab.label.name.as_ref()));
         let ratio = tab.split_ratio;
+        let folds = tab
+            .restored_split_folds
+            .as_ref()
+            .filter(|(p, _)| *p == path)
+            .map(|(_, folds)| folds.clone());
         let snapshot = self.vault.as_ref().map(|v| v.read(cx).snapshot());
         let profile = self.tab_profile(index, cx).compiled;
         let split = cx.new(|cx| {
-            let mut split = SplitView::new(editor, path, snapshot, cx);
+            let mut split = SplitView::new(editor, path.clone(), snapshot, cx);
             if let Some(ratio) = ratio {
                 split.set_ratio(ratio, cx);
             }
@@ -210,6 +215,9 @@ impl Workspace {
         let reader = split.read(cx).reader().clone();
         let delay = super::link_preview::hover_delay(cx);
         reader.update(cx, |r, cx| {
+            if let Some(folds) = folds {
+                r.restore_reading_folds(&path, folds, cx);
+            }
             r.set_profile(profile, cx);
             r.set_hover_previews(Some(delay));
         });

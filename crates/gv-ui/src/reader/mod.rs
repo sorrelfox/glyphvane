@@ -300,6 +300,8 @@ pub struct Reader {
     content_given: bool,
     _content_poll: Option<Task<()>>,
     _settings: Subscription,
+    /// *Load once* approvals (shared with the Bases view's covers).
+    _load_once: Subscription,
 }
 
 impl std::fmt::Debug for Reader {
@@ -353,6 +355,7 @@ impl Reader {
                 this.sync_typography(cx);
                 this.sync_remote(cx);
             }),
+            _load_once: cx.observe_global::<remote::LoadOnce>(|this, cx| this.sync_remote(cx)),
         }
     }
 

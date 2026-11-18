@@ -264,6 +264,7 @@ mod tests {
                     split_ratio: Some(0.4),
                     folds: vec![[10, 20]],
                     reading_folds: Vec::new(),
+                    split_reading_folds: Vec::new(),
                 }],
                 active_tab: 0,
                 sidebar_open: true,

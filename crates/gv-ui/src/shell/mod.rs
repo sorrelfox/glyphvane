@@ -421,6 +421,9 @@ pub struct Tab {
     /// A restored tab's Reading-view folds, for its file, until its
     /// Reading view has shown that file.
     restored_reading_folds: Option<(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
+    /// A restored tab's Split-preview folds, for its file, until its
+    /// Split view's preview has shown that file.
+    restored_split_folds: Option<(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
     /// The conflict-marker warning was dismissed; it comes back once the
     /// markers have gone and come back ([`infobar`]).
     markers_dismissed: std::cell::Cell<bool>,
@@ -453,6 +456,7 @@ impl Tab {
             split_ratio: None,
             restored_folds: None,
             restored_reading_folds: None,
+            restored_split_folds: None,
             markers_dismissed: std::cell::Cell::new(false),
         }
     }
@@ -477,8 +481,33 @@ impl Tab {
     /// them: the Reading view's once it shows the file, else those
     /// restored and not applied yet.
     fn reading_folds(&self, cx: &App) -> Vec<crate::reader::fold_state::ReadingFold> {
-        let path = self.path.as_deref();
-        if let Some(reader) = &self.reader {
+        Self::folds_of(
+            self.reader.as_ref(),
+            self.restored_reading_folds.as_ref(),
+            self.path.as_deref(),
+            cx,
+        )
+    }
+
+    /// The Split view preview's folds of the tab's file, as the session
+    /// keeps them: the preview's once it shows the file, else those
+    /// restored and not applied yet.
+    fn split_reading_folds(&self, cx: &App) -> Vec<crate::reader::fold_state::ReadingFold> {
+        Self::folds_of(
+            self.split_reader(cx).as_ref(),
+            self.restored_split_folds.as_ref(),
+            self.path.as_deref(),
+            cx,
+        )
+    }
+
+    fn folds_of(
+        reader: Option<&Entity<Reader>>,
+        restored: Option<&(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
+        path: Option<&Path>,
+        cx: &App,
+    ) -> Vec<crate::reader::fold_state::ReadingFold> {
+        if let Some(reader) = reader {
             let reader = reader.read(cx);
             if *reader.status() == LoadStatus::Ready
                 && reader.path().is_some()
@@ -487,7 +516,7 @@ impl Tab {
                 return reader.reading_folds();
             }
         }
-        match &self.restored_reading_folds {
+        match restored {
             Some((p, folds)) if Some(p.as_path()) == path => folds.clone(),
             _ => Vec::new(),
         }

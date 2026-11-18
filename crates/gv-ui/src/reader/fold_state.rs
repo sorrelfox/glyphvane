@@ -5,11 +5,21 @@
 //! FR-VAULT-14): each callout or `<details>` the reader opened or closed,
 //! named by what it is, the first line of its rendered source (the
 //! callout's title text, the `<details>` block's first line) and how many
-//! with the same line come before it. Block ids change when the text is read again; these names survive
-//! edits elsewhere in the note, and a fold whose block is gone or renamed
-//! is dropped.
+//! with the same line come before it. Block ids change when the text is
+//! read again; these names survive edits elsewhere in the note.
+//!
+//! A fold also keeps its place among the blocks of its kind and how many
+//! there were. When its name is gone (the callout's title was renamed),
+//! it goes to the block at the same place, but only when that is
+//! unambiguous: as many blocks of the kind as when it was saved, and the
+//! block there neither matched by name nor named by another saved fold.
+//! Otherwise (blocks added and removed, or no place saved by an older
+//! version) the fold is dropped. One case still guesses wrong: a block
+//! deleted and another of the same kind added between the two sessions,
+//! with the renamed one in between; then a callout opens or closes
+//! differently, nothing else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::Context;
@@ -41,6 +51,10 @@ pub struct ReadingFold {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub nth: usize,
     pub open: bool,
+    /// Its place among the blocks of its kind and how many there were:
+    /// `[place, count]`. Absent in sessions of older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[usize; 2]>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -49,9 +63,26 @@ fn is_zero(n: &usize) -> bool {
 
 type Key = (FoldKind, String, usize);
 
+/// A foldable block: its id, name, and place among the blocks of its kind.
+struct Named {
+    id: BlockId,
+    key: Key,
+    place: usize,
+}
+
+/// How many blocks of each kind `named` has.
+fn counts(named: &[Named]) -> HashMap<FoldKind, usize> {
+    let mut counts = HashMap::new();
+    for n in named {
+        *counts.entry(n.key.0).or_default() += 1;
+    }
+    counts
+}
+
 /// The foldable blocks of `tree`, by name.
-fn names(tree: &RenderTree, text: &str) -> Vec<(BlockId, Key)> {
+fn names(tree: &RenderTree, text: &str) -> Vec<Named> {
     let mut seen: HashMap<(FoldKind, String), usize> = HashMap::new();
+    let mut places: HashMap<FoldKind, usize> = HashMap::new();
     tree.nodes()
         .iter()
         .filter_map(|node| {
@@ -72,7 +103,14 @@ fn names(tree: &RenderTree, text: &str) -> Vec<(BlockId, Key)> {
             let count = seen.entry((kind, line.clone())).or_default();
             let nth = *count;
             *count += 1;
-            Some((node.id, (kind, line, nth)))
+            let place = places.entry(kind).or_default();
+            let at = *place;
+            *place += 1;
+            Some(Named {
+                id: node.id,
+                key: (kind, line, nth),
+                place: at,
+            })
         })
         .collect()
 }
@@ -94,16 +132,57 @@ impl State {
         let Some((_, folds)) = self.pending_folds.take() else {
             return;
         };
-        let by_name: HashMap<Key, BlockId> = names(&doc.tree, &doc.text)
-            .into_iter()
-            .map(|(id, key)| (key, id))
-            .collect();
-        for fold in folds {
-            if let Some(&block) = by_name.get(&(fold.kind, fold.line, fold.nth)) {
-                self.cache.folds.insert(block, fold.open);
-            }
+        let named = names(&doc.tree, &doc.text);
+        for (block, open) in match_folds(&named, folds) {
+            self.cache.folds.insert(block, open);
         }
     }
+}
+
+/// The blocks of `named` that `folds` apply to, and whether each is open:
+/// by name, else (a renamed block) by an unambiguous place.
+fn match_folds(named: &[Named], folds: Vec<ReadingFold>) -> Vec<(BlockId, bool)> {
+    let by_name: HashMap<&Key, BlockId> = named.iter().map(|n| (&n.key, n.id)).collect();
+    let saved: HashSet<Key> = folds
+        .iter()
+        .map(|f| (f.kind, f.line.clone(), f.nth))
+        .collect();
+    let mut out = Vec::new();
+    let mut used = HashSet::new();
+    let mut unnamed = Vec::new();
+    for fold in folds {
+        match by_name.get(&(fold.kind, fold.line.clone(), fold.nth)) {
+            Some(&block) => {
+                used.insert(block);
+                out.push((block, fold.open));
+            }
+            None => unnamed.push(fold),
+        }
+    }
+    if unnamed.is_empty() {
+        return out;
+    }
+    let counts = counts(named);
+    for fold in unnamed {
+        let Some([place, count]) = fold.at else {
+            continue;
+        };
+        if counts.get(&fold.kind) != Some(&count) {
+            continue;
+        }
+        let Some(block) = named
+            .iter()
+            .find(|n| n.key.0 == fold.kind && n.place == place)
+        else {
+            continue;
+        };
+        if used.contains(&block.id) || saved.contains(&block.key) {
+            continue;
+        }
+        used.insert(block.id);
+        out.push((block.id, fold.open));
+    }
+    out
 }
 
 impl Reader {
@@ -117,15 +196,19 @@ impl Reader {
         if st.cache.folds.is_empty() {
             return Vec::new();
         }
-        names(&doc.tree, &doc.text)
+        let named = names(&doc.tree, &doc.text);
+        let counts = counts(&named);
+        named
             .into_iter()
-            .filter_map(|(id, (kind, line, nth))| {
-                let open = *st.cache.folds.get(&id)?;
+            .filter_map(|n| {
+                let open = *st.cache.folds.get(&n.id)?;
+                let (kind, line, nth) = n.key;
                 Some(ReadingFold {
                     kind,
                     line,
                     nth,
                     open,
+                    at: Some([n.place, counts.get(&kind).copied().unwrap_or_default()]),
                 })
             })
             .collect()
@@ -173,13 +256,74 @@ mod tests {
             line: "> [!note]- Later".into(),
             nth: 0,
             open: true,
+            at: Some([1, 3]),
         };
         let json = serde_json::to_string(&fold).expect("json");
         assert_eq!(
             json,
-            r#"{"kind":"callout","line":"> [!note]- Later","open":true}"#
+            r#"{"kind":"callout","line":"> [!note]- Later","open":true,"at":[1,3]}"#
         );
         let back: ReadingFold = serde_json::from_str(&json).expect("back");
         assert_eq!(back, fold);
+        // Sessions of older versions have no place.
+        let old: ReadingFold =
+            serde_json::from_str(r#"{"kind":"callout","line":"X","open":true}"#).expect("old");
+        assert_eq!(old.at, None);
+    }
+
+    fn named(lines: &[&str]) -> Vec<Named> {
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let nth = seen.entry((*line).to_owned()).or_default();
+                let key = (FoldKind::Callout, (*line).to_owned(), *nth);
+                *nth += 1;
+                Named {
+                    id: BlockId(i as u64 + 1),
+                    key,
+                    place: i,
+                }
+            })
+            .collect()
+    }
+
+    fn fold(line: &str, at: Option<[usize; 2]>) -> ReadingFold {
+        ReadingFold {
+            kind: FoldKind::Callout,
+            line: line.into(),
+            nth: 0,
+            open: true,
+            at,
+        }
+    }
+
+    #[test]
+    fn a_renamed_callout_keeps_its_fold_by_place() {
+        let now = named(&["A", "Renamed", "C"]);
+        let got = match_folds(&now, vec![fold("B", Some([1, 3]))]);
+        assert_eq!(got, vec![(BlockId(2), true)]);
+    }
+
+    #[test]
+    fn a_place_is_used_only_when_unambiguous() {
+        // Blocks were added or removed: the count differs.
+        let now = named(&["A", "Renamed", "C", "D"]);
+        assert!(match_folds(&now, vec![fold("B", Some([1, 3]))]).is_empty());
+        // The block there is another saved fold's.
+        let now = named(&["A", "C", "X"]);
+        let got = match_folds(&now, vec![fold("B", Some([1, 3])), fold("C", Some([2, 3]))]);
+        assert_eq!(got, vec![(BlockId(2), true)]);
+        // The block there matched by name.
+        let now = named(&["A", "B2", "C"]);
+        let got = match_folds(
+            &now,
+            vec![fold("B2", Some([0, 3])), fold("Old", Some([1, 3]))],
+        );
+        assert_eq!(got, vec![(BlockId(2), true)]);
+        // An older session without places: no guess.
+        let now = named(&["A", "Renamed", "C"]);
+        assert!(match_folds(&now, vec![fold("B", None)]).is_empty());
     }
 }

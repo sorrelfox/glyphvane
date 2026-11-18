@@ -211,6 +211,7 @@ fn callout_folds_are_named_for_the_session_and_come_back_after_an_edit(cx: &mut 
             line: "Question?".into(),
             nth: 0,
             open: true,
+            at: Some([0, 1]),
         }]
     );
 
@@ -230,4 +231,24 @@ fn callout_folds_are_named_for_the_session_and_come_back_after_an_edit(cx: &mut 
         painted(&reader, &mut vcx)
     );
     assert_eq!(reader.read_with(&vcx, |r, _| r.reading_folds()), folds);
+
+    // The callout's title was renamed: its fold comes back by its place.
+    std::fs::write(&path, path_text.replace("Question?", "Renamed?")).expect("write");
+    state(&reader, &mut vcx).borrow_mut().cache.folds.clear();
+    reader.update(&mut vcx, |r, cx| {
+        r.open(path.clone(), None, cx);
+        r.restore_reading_folds(&path, folds.clone(), cx);
+    });
+    settle(&mut vcx);
+    assert!(
+        painted(&reader, &mut vcx)
+            .iter()
+            .any(|t| t == "The answer."),
+        "{:?}",
+        painted(&reader, &mut vcx)
+    );
+    let renamed = reader.read_with(&vcx, |r, _| r.reading_folds());
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0].line, "Renamed?");
+    assert!(renamed[0].open);
 }

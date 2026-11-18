@@ -351,3 +351,58 @@ fn vault_settings_files_only_tighten(cx: &mut TestAppContext) {
         assert_eq!(Policy::of_app(cx).mode, gv_settings::RemoteContent::Block);
     });
 }
+
+const SHELF: &str = "views:\n  - type: cards\n    name: Shelf\n    image: note.cover\n";
+
+/// A base embedded in the note of `t` (its covers approve for that note).
+fn embedded_base(t: &mut Setup) -> Entity<crate::bases_view::BasesView> {
+    let path = t
+        .reader
+        .read_with(&t.vcx, |r, _| r.path.clone())
+        .expect("a note");
+    let root = path.parent().map(Path::to_path_buf);
+    let name: Arc<str> = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .expect("a file name")
+        .into();
+    t.vcx.update(|_, cx| {
+        crate::bases_view::BasesView::embedded(Arc::from(SHELF), Some(name), None, root, cx)
+    })
+}
+
+#[gpui::test]
+fn load_once_in_the_infobar_also_loads_an_embedded_bases_covers(cx: &mut TestAppContext) {
+    let server = Server::start();
+    let mut t = setup(cx, &server, None);
+    let base = embedded_base(&mut t);
+    let cover = server.url("/cover.png");
+    let state = |t: &mut Setup| base.update(&mut t.vcx, |b, cx| b.cover_state(&cover, cx));
+    assert_eq!(state(&mut t), "waiting");
+    t.click(NoticeAction::RemoteLoadOnce);
+    // The note's image and, once asked again, the base's cover load.
+    assert_eq!(t.images_ready(), 1);
+    assert_ne!(state(&mut t), "waiting");
+    settle(&mut t.vcx);
+    t.vcx.run_until_parked();
+    assert_eq!(state(&mut t), "image");
+    assert_eq!(server.hits(), 2);
+    assert!(t.list(ALLOW).is_empty(), "nothing is written");
+}
+
+#[gpui::test]
+fn load_once_on_a_bases_cover_also_loads_the_notes_images(cx: &mut TestAppContext) {
+    let server = Server::start();
+    let mut t = setup(cx, &server, None);
+    let base = embedded_base(&mut t);
+    assert!(t.notice().is_some());
+    assert_eq!(server.hits(), 0);
+    base.update(&mut t.vcx, |b, cx| b.load_once("127.0.0.1", cx));
+    settle(&mut t.vcx);
+    t.vcx.run_until_parked();
+    // The note's image was fetched without its infobar being answered.
+    assert_eq!(server.hits(), 1);
+    assert_eq!(t.images_ready(), 1);
+    assert!(t.notice().is_none());
+    assert!(t.list(ALLOW).is_empty(), "nothing is written");
+}
