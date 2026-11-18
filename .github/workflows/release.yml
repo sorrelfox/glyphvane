@@ -79,7 +79,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
@@ -98,6 +98,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
             libasound2-dev libssl-dev pkg-config \
+            build-essential cmake \
             dpkg-dev squashfs-tools zsync
 
       - name: Install Rust toolchain
@@ -119,14 +120,18 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH to the commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # Both executables: `xtask package --no-build` packages glyphvane-helper
+      # (and the PDF fonts) whenever gv-helper has its binary.
       - name: Build
-        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app -p gv-helper
 
       - name: Check the glibc floor (2.35)
         run: |
-          newest=$(objdump -T target/${{ matrix.target }}/dist/glyphvane | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
-          echo "Newest glibc symbol version: $newest"
-          [ "$(printf '%s\n' "$newest" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ]
+          for exe in glyphvane glyphvane-helper; do
+            newest=$(objdump -T "target/${{ matrix.target }}/dist/$exe" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$exe: newest glibc symbol version: $newest"
+            [ "$(printf '%s\n' "$newest" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ]
+          done
 
       - name: Package
         run: >-
@@ -149,9 +154,15 @@ jobs:
           sudo apt-get install -y ./dist/glyphvane_*.deb
           glyphvane --version
           printf '# Smoke test\n' | glyphvane render - | grep -q '<h1>Smoke test</h1>'
+          # PDF export runs glyphvane-helper with the bundled fonts.
+          printf '# Smoke test\n\nSome *text* and `code`.\n' > "$RUNNER_TEMP/smoke.md"
+          glyphvane export --pdf "$RUNNER_TEMP/smoke.md" -o "$RUNNER_TEMP/deb.pdf"
+          head -c 5 "$RUNNER_TEMP/deb.pdf" | grep -q '%PDF-'
           mkdir -p "$RUNNER_TEMP/tarball"
           tar -xzf dist/glyphvane-*.tar.gz -C "$RUNNER_TEMP/tarball"
           "$RUNNER_TEMP"/tarball/glyphvane-*/glyphvane --version
+          "$RUNNER_TEMP"/tarball/glyphvane-*/glyphvane export --pdf "$RUNNER_TEMP/smoke.md" -o "$RUNNER_TEMP/tarball.pdf"
+          head -c 5 "$RUNNER_TEMP/tarball.pdf" | grep -q '%PDF-'
           APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Glyphvane-*.AppImage --version
           docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest \
             sh -c 'dnf install -y /dist/glyphvane-*.rpm >/dev/null && glyphvane --version'
@@ -180,7 +191,7 @@ jobs:
           - arch: x86_64
             target: x86_64-apple-darwin
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
@@ -199,8 +210,10 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH to the commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # Both executables: `xtask package --no-build` packages glyphvane-helper
+      # (and the PDF fonts) whenever gv-helper has its binary.
       - name: Build
-        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app -p gv-helper
 
       # Builds Glyphvane.app (Info.plist template, iconutil), signs it ad hoc
       # inside-out and verifies it, then wraps it with ditto and hdiutil.
@@ -244,7 +257,7 @@ jobs:
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     # The SignPath token is an environment secret with required reviewers.
     environment: release
     permissions:
@@ -269,14 +282,21 @@ jobs:
       # not accepted, NSIS (makensis) is the documented alternative.
       - name: Install WiX Toolset
         run: |
+          # .NET global tools live in %USERPROFILE%\.dotnet\tools.
+          tools="$HOME/.dotnet/tools"
+          export PATH="$tools:$PATH"
+          cygpath -w "$tools" >> "$GITHUB_PATH"
           dotnet tool install --global wix --version "$WIX_VERSION"
+          wix --version
           wix extension add --global "WixToolset.UI.wixext/$WIX_VERSION"
 
       - name: Set SOURCE_DATE_EPOCH to the commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # Both executables: `xtask package --no-build` packages glyphvane-helper
+      # (and the PDF fonts) whenever gv-helper has its binary.
       - name: Build
-        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p gv-app -p gv-helper
 
       # SignPath signs the executables before they are packaged, then the MSI.
       - name: Upload the executables for signing

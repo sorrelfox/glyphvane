@@ -140,8 +140,9 @@ jobs:
         with:
           key: dist
 
+      # Both executables, as the release builds them.
       - name: Build (dist profile)
-        run: cargo build --locked --profile dist -p gv-app
+        run: cargo build --locked --profile dist -p gv-app -p gv-helper
 
       - name: Fetch the base branch's size report
         if: github.event_name == 'pull_request'

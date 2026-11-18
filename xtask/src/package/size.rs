@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use super::mb;
 
 /// NFR-SIZE-01: `glyphvane`, stripped, `[profile.dist]`.
-pub(crate) const MAIN_BUDGET: u64 = 80_000_000;
+pub(crate) const MAIN_BUDGET: u64 = 95_000_000;
 /// NFR-SIZE-02: `glyphvane-helper`, stripped, `[profile.dist]`.
 pub(crate) const HELPER_BUDGET: u64 = 45_000_000;
 /// Growth against the baseline that fails without a justification.

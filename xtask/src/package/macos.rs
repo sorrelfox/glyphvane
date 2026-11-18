@@ -185,14 +185,28 @@ pub(super) fn dmg(ctx: &Ctx, app: &Path) -> Result<PathBuf> {
         ctx.version,
         arch_name(ctx)
     ));
-    run_checked(
-        Command::new("hdiutil")
-            .args(["create", "-volname", "Glyphvane", "-srcfolder"])
-            .arg(&stage)
-            .args(["-fs", "HFS+", "-format", "UDZO", "-ov"])
-            .arg(&out),
-        "hdiutil create",
-    )?;
+    // `hdiutil create` fails now and then with "Resource busy" on build
+    // machines (a scanner still holds the staged files); try a few times.
+    let mut attempt = 1;
+    loop {
+        let result = run_checked(
+            Command::new("hdiutil")
+                .args(["create", "-volname", "Glyphvane", "-srcfolder"])
+                .arg(&stage)
+                .args(["-fs", "HFS+", "-format", "UDZO", "-ov"])
+                .arg(&out),
+            "hdiutil create",
+        );
+        match result {
+            Ok(()) => break,
+            Err(err) if attempt < 4 => {
+                eprintln!("warning: attempt {attempt} failed, trying again: {err:#}");
+                std::thread::sleep(std::time::Duration::from_secs(10 * attempt));
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
     Ok(out)
 }
 

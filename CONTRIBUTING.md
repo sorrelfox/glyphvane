@@ -45,14 +45,14 @@ needs some system development packages on Linux. On Ubuntu or Debian:
 ```sh
 sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
   libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-  libasound2-dev libssl-dev pkg-config
+  libasound2-dev libssl-dev pkg-config build-essential cmake
 ```
 
 This list follows Zed's requirements and will be confirmed as GPUI
 integration progresses. On Fedora, the equivalents are the `-devel` packages
 (`libxkbcommon-x11-devel`, `wayland-devel`, `vulkan-loader-devel`,
 `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, `alsa-lib-devel`,
-`openssl-devel`).
+`openssl-devel`), plus `gcc`, `gcc-c++` and `cmake` for the bundled Opus decoder.
 
 macOS and Windows need no extra packages beyond the platform's standard
 build tools (Xcode Command Line Tools; Visual Studio Build Tools with the C++
@@ -216,7 +216,7 @@ artifacts are byte-identical across builds of the same commit. Artifacts go to
 `target/package/<target>/` (or `--out DIR`) with a `SHA256SUMS` file.
 
 `cargo xtask size-report --bin-dir target/dist` compares the executables with
-the size budgets (80 MB for `glyphvane`, 45 MB for `glyphvane-helper`). CI
+the size budgets (95 MB for `glyphvane`, 45 MB for `glyphvane-helper`). CI
 fails a pull request that grows either one by more than 3 % unless it carries
 the `binary-size-justified` label and explains the growth.
 

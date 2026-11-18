@@ -162,11 +162,7 @@ pub(super) fn deb(ctx: &Ctx) -> Result<PathBuf> {
         // answer computed from the binaries' ELF dependencies.
         let mut depends = Vec::new();
         for exe in std::iter::once(&ctx.main_exe).chain(ctx.helper_exe.as_ref()) {
-            for dep in fallback_depends(exe)? {
-                if !depends.contains(&dep) {
-                    depends.push(dep);
-                }
-            }
+            depends = merge_depends(depends, fallback_depends(exe)?);
         }
         let line = depends.join(", ");
         eprintln!("note: dpkg-shlibdeps is unusable here; Depends from the ELF headers: {line}");
@@ -271,6 +267,27 @@ fn depends_from_readelf(text: &str) -> Result<Vec<String>> {
         }
     }
     Ok(deps)
+}
+
+/// Adds `more` to `deps` without duplicates. The executables may need
+/// different glibc versions; only the highest `libc6` floor is kept.
+fn merge_depends(mut deps: Vec<String>, more: Vec<String>) -> Vec<String> {
+    const LIBC: &str = "libc6 (>= ";
+    let floor = |d: &str| d.strip_prefix(LIBC)?.strip_suffix(')').map(version_key);
+    for dep in more {
+        if let Some(new) = floor(&dep)
+            && let Some(old) = deps.iter_mut().find(|d| d.starts_with(LIBC))
+        {
+            if floor(old).is_some_and(|o| new > o) {
+                *old = dep;
+            }
+            continue;
+        }
+        if !deps.contains(&dep) {
+            deps.push(dep);
+        }
+    }
+    deps
 }
 
 /// `libxcb-<ext>.so.<n>` is packaged as `libxcb-<ext><n>`.
@@ -548,5 +565,23 @@ mod tests {
             ["libc6 (>= 2.35)"]
         );
         assert!(depends_from_readelf(" 0x1 (NEEDED) Shared library: [libfoo.so.3]\n").is_err());
+    }
+
+    #[test]
+    fn merges_depends_keeping_the_highest_glibc() {
+        let main = vec!["libc6 (>= 2.35)".to_owned(), "libxcb1 (>= 1.14)".to_owned()];
+        let helper = vec![
+            "libgcc-s1 (>= 3.0)".to_owned(),
+            "libc6 (>= 2.39)".to_owned(),
+        ];
+        assert_eq!(
+            merge_depends(merge_depends(Vec::new(), main), helper),
+            ["libc6 (>= 2.39)", "libxcb1 (>= 1.14)", "libgcc-s1 (>= 3.0)"]
+        );
+        let older = vec!["libc6 (>= 2.17)".to_owned(), "libxcb1 (>= 1.14)".to_owned()];
+        assert_eq!(
+            merge_depends(vec!["libc6 (>= 2.35)".to_owned()], older),
+            ["libc6 (>= 2.35)", "libxcb1 (>= 1.14)"]
+        );
     }
 }

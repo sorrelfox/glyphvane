@@ -325,9 +325,14 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     };
     let main_exe = exe(MAIN_BIN);
     if !main_exe.is_file() {
+        let helper = if meta.helper_is_bin {
+            format!(" -p {HELPER_PACKAGE}")
+        } else {
+            String::new()
+        };
         bail!(
             "{} not found; build it first (drop --no-build, or run \
-             `cargo build --locked --profile {} --target {target} -p gv-app`)",
+             `cargo build --locked --profile {} --target {target} -p gv-app{helper}`)",
             main_exe.display(),
             opts.profile
         );
@@ -336,8 +341,10 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         let helper = exe(HELPER_BIN);
         if !helper.is_file() {
             bail!(
-                "{} not found; build -p {HELPER_PACKAGE} too",
-                helper.display()
+                "{} not found; build -p {HELPER_PACKAGE} too (`cargo build --locked \
+                 --profile {} --target {target} -p gv-app -p {HELPER_PACKAGE}`)",
+                helper.display(),
+                opts.profile
             );
         }
         Some(helper)
@@ -489,10 +496,13 @@ fn build(root: &Path, target: &str, profile: &str, with_helper: bool) -> Result<
         "-p",
         "gv-app",
     ]);
+    let mut packages = String::from("-p gv-app");
     if with_helper {
         cmd.args(["-p", HELPER_PACKAGE]);
+        packages.push_str(" -p ");
+        packages.push_str(HELPER_PACKAGE);
     }
-    eprintln!("==> cargo build --locked --profile {profile} --target {target} -p gv-app");
+    eprintln!("==> cargo build --locked --profile {profile} --target {target} {packages}");
     let status = cmd
         .current_dir(root)
         .status()

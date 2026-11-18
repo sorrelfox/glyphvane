@@ -47,9 +47,11 @@
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <!-- Per-user components use an HKCU value as their key path (ICE38) and
-         remove the folders they create (ICE64). -->
+         remove the folders they create (ICE64). A component with files and a
+         registry key path cannot have a generated GUID (WIX0230), so those
+         have fixed ones; like the UpgradeCode, they must never change. -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-      <Component Id="MainExe">
+      <Component Id="MainExe" Guid="67220992-D86F-4915-8901-794B96B3D8AC">
         <File Id="GlyphvaneExe" Source="$(var.BinDir)\glyphvane.exe" />
         <RegistryValue Root="HKCU" Key="Software\Glyphvane\Components" Name="MainExe" Type="integer" Value="1" KeyPath="yes" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
@@ -57,12 +59,12 @@
       </Component>
 <?ifdef IncludeHelper?>
       <!-- The helper sits next to the main executable; the app finds it there. -->
-      <Component Id="HelperExe">
-        <File Id="HelperExe" Source="$(var.BinDir)\glyphvane-helper.exe" />
+      <Component Id="HelperExe" Guid="54CB38D8-DDEF-4AEA-AC53-4237DA900878">
+        <File Id="HelperExeFile" Source="$(var.BinDir)\glyphvane-helper.exe" />
         <RegistryValue Root="HKCU" Key="Software\Glyphvane\Components" Name="HelperExe" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <!-- The PDF export's fonts; the helper finds them in share\glyphvane\fonts. -->
-      <Component Id="PdfFonts" Directory="FontsDir">
+      <Component Id="PdfFonts" Directory="FontsDir" Guid="1AC6DB0B-0406-4645-8304-B76C199406E2">
         <File Id="InterFont" Source="$(var.ThirdPartyDir)\inter\InterVariable.ttf" />
         <File Id="InterItalicFont" Source="$(var.ThirdPartyDir)\inter\InterVariable-Italic.ttf" />
         <File Id="InterLicence" Source="$(var.ThirdPartyDir)\inter\LICENSE" Name="Inter-OFL.txt" />
@@ -75,7 +77,7 @@
         <RemoveFolder Id="RemoveShareDir" Directory="ShareDir" On="uninstall" />
       </Component>
 <?endif?>
-      <Component Id="Documents">
+      <Component Id="Documents" Guid="CD922F8D-413F-4ACB-8BF1-3775AA4B80D0">
         <File Id="LicenseTxt" Source="$(var.LicenseFile)" Name="LICENSE.txt" />
         <File Id="NoticesTxt" Source="$(var.NoticesFile)" Name="THIRD-PARTY-NOTICES.txt" />
         <RegistryValue Root="HKCU" Key="Software\Glyphvane\Components" Name="Documents" Type="integer" Value="1" KeyPath="yes" />
