@@ -101,6 +101,21 @@ impl SortOrder {
         Self::ModifiedOldest,
     ];
 
+    /// How the session stores it.
+    pub fn saved_id(self) -> &'static str {
+        match self {
+            Self::NameAscending => "name",
+            Self::NameDescending => "name-reverse",
+            Self::ModifiedNewest => "modified",
+            Self::ModifiedOldest => "modified-reverse",
+        }
+    }
+
+    /// The order the session stored as `id`.
+    pub fn from_saved_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|o| o.saved_id() == id)
+    }
+
     /// What the sort menu calls it.
     pub fn label(self) -> &'static str {
         match self {

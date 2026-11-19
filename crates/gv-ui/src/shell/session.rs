@@ -74,6 +74,7 @@ use serde::{Deserialize, Serialize};
 
 use super::history::HISTORY_LIMIT;
 use super::panels::SidebarPanel;
+use super::tree::SortOrder;
 use super::{FileLabel, History, HistoryEntry, ViewMode, Workspace, most_recent_window};
 use crate::chrome::WindowChrome;
 use crate::file_viewer::PdfPlace;
@@ -171,6 +172,10 @@ pub struct WindowState {
     /// The folder the window was opened on: its vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<PathBuf>,
+    /// The Files panel's sort order ([`SortOrder::saved_id`]); by name
+    /// when missing or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_sort: Option<String>,
     /// The sidebar base in the right panel, once shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<SidebarBase>,
@@ -464,6 +469,8 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             .filter(|v| v.opened_as_folder())
             .map(|v| v.root().to_path_buf())
             .filter(|p| storable(p)),
+        files_sort: (workspace.files_sort != SortOrder::default())
+            .then(|| workspace.files_sort.saved_id().to_owned()),
         base: workspace.sidebar_base_state(cx),
     }
 }

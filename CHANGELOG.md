@@ -39,6 +39,7 @@ Conventional Commits, and versions follow Semantic Versioning.
 - New note (Ctrl+N) and notes created from the quick switcher go to the
   vault's default location for new notes (Obsidian's `newFileLocation`:
   the vault folder, the current note's folder, or a chosen folder).
+- The Files panel's sort order is kept with the session.
 
 ## [1.2.0] - 2026-11-19
 

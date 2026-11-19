@@ -766,6 +766,8 @@ pub struct Workspace {
     vault: Option<Entity<WindowVault>>,
     /// The Files panel, created with the sidebar.
     files: Option<Entity<FilesPanel>>,
+    /// The Files panel's sort order, kept with the session.
+    files_sort: tree::SortOrder,
     _files_events: Option<Subscription>,
     _vault_changed: Option<Subscription>,
     _content_updates: Option<Subscription>,
@@ -947,6 +949,7 @@ impl Workspace {
             panel_open: false,
             vault: None,
             files: None,
+            files_sort: tree::SortOrder::default(),
             _files_events: None,
             _vault_changed: None,
             _content_updates: None,
@@ -1016,6 +1019,13 @@ impl Workspace {
         if let Some(folder) = state.vault {
             let vault = cx.new(|cx| WindowVault::for_folder(&folder, cx));
             this.set_vault(vault, cx);
+        }
+        if let Some(sort) = state
+            .files_sort
+            .as_deref()
+            .and_then(tree::SortOrder::from_saved_id)
+        {
+            this.set_files_sort(sort, cx);
         }
         this.tabs_changed(window, cx);
         // The sidebar's panel comes back with the sidebar (a hidden
@@ -2039,7 +2049,12 @@ impl Workspace {
         }
         self.ensure_vault(cx);
         let (vault, active) = (self.vault.clone(), self.active_tab().path.clone());
-        let files = cx.new(|cx| FilesPanel::new(vault, active, cx));
+        let sort = self.files_sort;
+        let files = cx.new(|cx| {
+            let mut panel = FilesPanel::new(vault, active, cx);
+            panel.set_sort(sort, cx);
+            panel
+        });
         self._files_events = Some(cx.subscribe_in(
             &files,
             window,
@@ -2056,6 +2071,15 @@ impl Workspace {
             },
         ));
         self.files = Some(files);
+    }
+
+    /// The Files panel's sort order, kept with the session.
+    fn set_files_sort(&mut self, sort: tree::SortOrder, cx: &mut Context<'_, Self>) {
+        self.files_sort = sort;
+        if let Some(files) = &self.files {
+            files.update(cx, |f, cx| f.set_sort(sort, cx));
+        }
+        self.session_changed(cx);
     }
 
     fn mode(&self) -> ViewMode {

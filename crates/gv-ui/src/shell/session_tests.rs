@@ -73,6 +73,7 @@ fn sample() -> Session {
             sidebar_open: true,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -151,6 +152,7 @@ fn files_that_are_gone_are_skipped() {
         sidebar_open: true,
         panel_open: false,
         sidebar_panel: None,
+        files_sort: None,
         vault: None,
         base: None,
     };
@@ -559,6 +561,7 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 sidebar_open: false,
                 panel_open: true,
                 sidebar_panel: None,
+                files_sort: None,
                 vault: None,
                 base: None,
             },
@@ -572,6 +575,7 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
                 sidebar_open: false,
                 panel_open: false,
                 sidebar_panel: None,
+                files_sort: None,
                 vault: None,
                 base: None,
             },
@@ -604,6 +608,7 @@ fn closing_one_of_two_windows_drops_it_but_the_last_stays(cx: &mut TestAppContex
 fn panels_folders_dividers_and_folds_survive_json() {
     let mut session = sample();
     session.windows[0].sidebar_panel = Some("tags".into());
+    session.windows[0].files_sort = Some("modified".into());
     session.windows[0].vault = Some(PathBuf::from("/n"));
     session.windows[0].tabs[1].split_ratio = Some(0.3);
     session.windows[0].tabs[1].folds = vec![[0, 40], [60, 90]];
@@ -625,7 +630,10 @@ fn panels_folders_dividers_and_folds_survive_json() {
     // An older session has none of them.
     let text = serde_json::to_string(&sample()).expect("serializes");
     assert!(
-        !text.contains("sidebar_panel") && !text.contains("folds") && !text.contains("base"),
+        !text.contains("sidebar_panel")
+            && !text.contains("files_sort")
+            && !text.contains("folds")
+            && !text.contains("base"),
         "{text}"
     );
 }
@@ -639,6 +647,7 @@ fn a_window_opened_on_a_folder_stays_without_its_files() {
         sidebar_open: true,
         panel_open: false,
         sidebar_panel: None,
+        files_sort: None,
         vault: Some(PathBuf::from("/n")),
         base: None,
     };
@@ -690,6 +699,7 @@ fn folders_panels_dividers_and_folds_come_back(cx: &mut TestAppContext, cx2: &mu
     vcx.update(|window, cx| {
         workspace.update(cx, |ws, cx| {
             ws.show_sidebar_panel(SidebarPanel::Tags, false, window, cx);
+            ws.set_files_sort(SortOrder::ModifiedNewest, cx);
         });
     });
     draw(&mut vcx);
@@ -699,6 +709,7 @@ fn folders_panels_dividers_and_folds_come_back(cx: &mut TestAppContext, cx2: &mu
     let w = &saved.windows[0];
     assert_eq!(w.vault.as_deref(), Some(folder.as_path()));
     assert_eq!(w.sidebar_panel.as_deref(), Some("tags"));
+    assert_eq!(w.files_sort.as_deref(), Some("modified"));
     assert!(w.sidebar_open);
     let t = &w.tabs[0];
     assert_eq!(t.mode, ViewMode::Split);
@@ -722,6 +733,14 @@ fn folders_panels_dividers_and_folds_come_back(cx: &mut TestAppContext, cx2: &mu
     let (root, panel) = workspace.read_with(&vcx, |ws, cx| (ws.vault_root(cx), ws.panels.sidebar));
     assert_eq!(root.as_deref(), Some(folder.as_path()));
     assert_eq!(panel, SidebarPanel::Tags);
+    let sort = workspace.read_with(&vcx, |ws, cx| {
+        (ws.files_sort, ws.files.as_ref().map(|f| f.read(cx).sort()))
+    });
+    assert_eq!(
+        sort,
+        (SortOrder::ModifiedNewest, Some(SortOrder::ModifiedNewest)),
+        "the Files panel's order comes back"
+    );
     let split = workspace
         .read_with(&vcx, |ws, _| ws.active_tab().split().cloned())
         .expect("a Split view");
@@ -746,6 +765,7 @@ fn a_folder_window_without_files_comes_back_with_its_vault(cx: &mut TestAppConte
             sidebar_open: true,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: Some(dir.path().to_path_buf()),
             base: None,
         }],
@@ -791,6 +811,7 @@ fn reading_view_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -865,6 +886,7 @@ fn split_preview_folds_come_back_with_the_tab(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -944,6 +966,7 @@ fn live_preview_comes_back_with_the_session(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -988,6 +1011,7 @@ fn a_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -1040,6 +1064,7 @@ fn a_sniffed_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -1151,6 +1176,7 @@ fn a_pdf_tab_comes_back_at_its_page(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -1219,6 +1245,7 @@ fn a_tab_viewer_mode_comes_back(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],
@@ -1278,6 +1305,7 @@ fn a_pdf_in_the_history_comes_back_at_its_page(cx: &mut TestAppContext) {
             sidebar_open: false,
             panel_open: false,
             sidebar_panel: None,
+            files_sort: None,
             vault: None,
             base: None,
         }],

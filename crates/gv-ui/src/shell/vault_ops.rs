@@ -783,6 +783,7 @@ impl Workspace {
             return;
         };
         let current = files.read(cx).sort();
+        let workspace = cx.entity().downgrade();
         let items = SortOrder::ALL
             .iter()
             .map(|order| GotoItem {
@@ -808,7 +809,9 @@ impl Workspace {
                 if let GotoEvent::Confirm(Choice::Item(i)) = event
                     && let Some(order) = SortOrder::ALL.get(i)
                 {
-                    files.update(cx, |f, cx| f.set_sort(*order, cx));
+                    workspace
+                        .update(cx, |ws, cx| ws.set_files_sort(*order, cx))
+                        .ok();
                 }
             }),
         };
