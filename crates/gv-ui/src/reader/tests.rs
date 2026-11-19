@@ -243,6 +243,32 @@ fn a_missing_file_shows_why(cx: &mut TestAppContext) {
     ));
 }
 
+#[gpui::test]
+fn a_line_asked_for_while_loading_is_dropped_by_another_file(cx: &mut TestAppContext) {
+    let dir = temp(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
+    let (a, b) = (dir.path().join("a.md"), dir.path().join("b.md"));
+    let (window, workspace) = open(cx, &a);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let pending = |vcx: &mut VisualTestContext| reader.read_with(vcx, |r, _| r.code_line);
+    reader.update(&mut vcx, |r, cx| {
+        r.open(a.clone(), None, cx);
+        r.scroll_to_code_line(3.0, cx);
+    });
+    assert_eq!(pending(&mut vcx), Some(3.0));
+    // The same file again (a reload) keeps it.
+    reader.update(&mut vcx, |r, cx| r.open(a.clone(), None, cx));
+    assert_eq!(pending(&mut vcx), Some(3.0));
+    reader.update(&mut vcx, |r, cx| r.open(b.clone(), None, cx));
+    assert_eq!(pending(&mut vcx), None);
+    reader.update(&mut vcx, |r, cx| {
+        r.scroll_to_code_line(2.0, cx);
+        r.open_text(a.clone(), "# A\n".into(), None, cx);
+    });
+    assert_eq!(pending(&mut vcx), None);
+    draw(&mut vcx);
+}
+
 fn long_doc(paragraphs: usize) -> String {
     let mut s = String::from("# Long\n\n");
     for i in 0..paragraphs {

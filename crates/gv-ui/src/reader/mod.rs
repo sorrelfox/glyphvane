@@ -605,6 +605,10 @@ impl Reader {
             st.timing.navigation = taken_navigation(&path, target.as_ref());
             st.revision
         };
+        if self.path.as_deref() != Some(path.as_path()) {
+            // A line asked for in the file that was loading is not this one's.
+            self.code_line = None;
+        }
         self.path = Some(path.clone());
         self.status = LoadStatus::Loading;
         self.target = target;
@@ -642,6 +646,10 @@ impl Reader {
             st.timing.navigation = None;
             st.revision
         };
+        if self.path.as_deref() != Some(path.as_path()) {
+            // A line asked for in the file that was loading is not this one's.
+            self.code_line = None;
+        }
         self.path = Some(path.clone());
         self.status = LoadStatus::Loading;
         self.target = target;
