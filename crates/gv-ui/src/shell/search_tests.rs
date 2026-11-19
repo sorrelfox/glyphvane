@@ -196,3 +196,84 @@ fn the_switcher_button_shows_the_search_panel(cx: &mut TestAppContext) {
     f.until_results();
     assert!(f.vcx.debug_bounds("search-line-0-0").is_some());
 }
+
+#[gpui::test]
+fn an_opened_result_highlights_its_match_until_esc_an_edit_or_another_search(
+    cx: &mut TestAppContext,
+) {
+    let mut f = fixture(cx);
+    f.vcx.dispatch_action(commands::Vault);
+    draw(&mut f.vcx);
+    f.vcx.simulate_input("needle");
+    draw(&mut f.vcx);
+    f.until_results();
+    let panel = f.panel();
+    let open_first = |f: &mut Fixture| {
+        f.vcx
+            .update(|window, cx| panel.update(cx, |p, cx| p.focus_field(window, cx)));
+        f.vcx.dispatch_action(search_panel::OpenSelected);
+        draw(&mut f.vcx);
+        let opened = f.active_path().expect("a file");
+        let text = std::fs::read_to_string(&opened).expect("read");
+        let at = text.find("needle").expect("the match");
+        at..at + "needle".len()
+    };
+
+    // The Reading view: the match is highlighted, and Esc drops it.
+    let hit = open_first(&mut f);
+    let reader = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().reader().cloned())
+        .expect("reader");
+    assert_eq!(
+        reader.read_with(&f.vcx, |r, _| r.search_hit()),
+        Some(vec![hit.clone()])
+    );
+    f.vcx
+        .update(|window, cx| reader.read(cx).focus_handle(cx).focus(window, cx));
+    f.vcx.dispatch_action(crate::find::CloseFind);
+    draw(&mut f.vcx);
+    assert_eq!(reader.read_with(&f.vcx, |r, _| r.search_hit()), None);
+
+    // Another search drops it too.
+    open_first(&mut f);
+    assert!(reader.read_with(&f.vcx, |r, _| r.search_hit()).is_some());
+    f.vcx
+        .update(|window, cx| panel.update(cx, |p, cx| p.set_query("needle.", window, cx)));
+    draw(&mut f.vcx);
+    assert_eq!(reader.read_with(&f.vcx, |r, _| r.search_hit()), None);
+    f.vcx
+        .update(|window, cx| panel.update(cx, |p, cx| p.set_query("needle", window, cx)));
+    f.until_results();
+
+    // The Source view: highlighted too, until an edit.
+    f.workspace
+        .update(&mut f.vcx, |ws, cx| ws.set_mode(super::ViewMode::Edit, cx));
+    draw(&mut f.vcx);
+    let hit = open_first(&mut f);
+    draw(&mut f.vcx);
+    let editor = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("editor");
+    assert_eq!(
+        editor.read_with(&f.vcx, |e, _| e.search_hit()),
+        Some(vec![hit.clone()])
+    );
+    f.vcx
+        .update(|window, cx| editor.read(cx).focus_handle(cx).focus(window, cx));
+    f.vcx.dispatch_action(crate::editor::Cancel);
+    draw(&mut f.vcx);
+    assert_eq!(editor.read_with(&f.vcx, |e, _| e.search_hit()), None);
+    open_first(&mut f);
+    assert_eq!(
+        editor.read_with(&f.vcx, |e, _| e.search_hit()),
+        Some(vec![hit])
+    );
+    f.vcx
+        .update(|window, cx| editor.read(cx).focus_handle(cx).focus(window, cx));
+    f.vcx.simulate_input("x");
+    draw(&mut f.vcx);
+    assert_eq!(editor.read_with(&f.vcx, |e, _| e.search_hit()), None);
+    drop(f.dir);
+}

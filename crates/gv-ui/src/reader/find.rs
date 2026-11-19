@@ -32,6 +32,10 @@
 //!   in the tab) is searched again with the same query; a refresh of link
 //!   statuses changes neither item texts nor item indices, so the matches
 //!   stay valid.
+//! - **Search hits**: a note opened from a result of the Search panel
+//!   shows that result's matches as the current match is shown
+//!   ([`SearchHit`]) until the next click in the view, Esc, find in page,
+//!   another search, or another document.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,9 +45,9 @@ use gpui::{AppContext as _, Context, Entity, Subscription, Task, Window, WindowT
 use gv_inline::Bias;
 use gv_render_tree::{FindIndex, FindMatch, Finder, RenderTree};
 
-use super::Reader;
 use super::items::{code_inset, fit_item, is_code, table_frame, text_top};
 use super::state::State;
+use super::{LoadStatus, Reader};
 use crate::find::{CloseFind, Find, FindBar, FindBarEvent, FindNext, FindPrevious, FindStatus};
 use crate::inline::Token;
 
@@ -116,6 +120,37 @@ impl FindMarks {
             total: self.matches.len(),
             more: self.more,
         }
+    }
+}
+
+/// The matches of a Search panel result the note was opened at, painted
+/// as the current find match is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchHit {
+    /// The note they are in.
+    pub path: std::path::PathBuf,
+    /// Byte ranges of its source.
+    pub ranges: Vec<Range<usize>>,
+    /// The document they are for ([`State::doc_version`]); `None` until
+    /// the note asked for is installed.
+    pub version: Option<u64>,
+}
+
+impl SearchHit {
+    /// The highlights of an item covering `item` of the source, in
+    /// offsets from `node_start`.
+    pub fn highlights(&self, item: &Range<usize>, node_start: usize) -> Vec<(Range<usize>, Token)> {
+        self.ranges
+            .iter()
+            .filter(|r| r.start < item.end && r.end > item.start)
+            .map(|r| {
+                let (a, b) = (r.start.max(item.start), r.end.min(item.end));
+                (
+                    a.saturating_sub(node_start)..b.saturating_sub(node_start),
+                    CURRENT_MATCH,
+                )
+            })
+            .collect()
     }
 }
 
@@ -203,6 +238,57 @@ impl Reader {
         self.find.bar.as_ref()
     }
 
+    /// Highlights `ranges` of the note at `path` (a Search panel result's
+    /// matches), now when the view shows it, else once it is loaded.
+    pub fn show_search_hit(
+        &mut self,
+        path: &std::path::Path,
+        ranges: Vec<Range<usize>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut st = self.state.borrow_mut();
+        if ranges.is_empty() {
+            st.search_hit = None;
+            return;
+        }
+        let shown = self.status == LoadStatus::Ready
+            && self.path.as_deref() == Some(path)
+            && st.doc.as_ref().is_some_and(|d| d.path == path);
+        st.search_hit = Some(SearchHit {
+            path: path.to_path_buf(),
+            ranges,
+            version: shown.then_some(st.doc_version),
+        });
+        drop(st);
+        cx.notify();
+    }
+
+    /// Drops the highlight of a Search panel result. Returns whether there
+    /// was one.
+    pub fn clear_search_hit(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let mut st = self.state.borrow_mut();
+        let version = st.doc_version;
+        let shown = st
+            .search_hit
+            .take()
+            .is_some_and(|h| h.version == Some(version));
+        drop(st);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// The ranges of the Search panel result highlighted now.
+    #[cfg(test)]
+    pub(crate) fn search_hit(&self) -> Option<Vec<Range<usize>>> {
+        let st = self.state.borrow();
+        st.search_hit
+            .as_ref()
+            .filter(|h| h.version == Some(st.doc_version))
+            .map(|h| h.ranges.clone())
+    }
+
     /// Whether the find popover is open.
     pub fn is_find_open(&self) -> bool {
         self.find.open
@@ -255,6 +341,7 @@ impl Reader {
     /// selection when that is one line of text, and focuses the field with
     /// its text selected.
     pub(super) fn open_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.state.borrow_mut().search_hit = None;
         let bar = self.ensure_bar(window, cx);
         let prefill = self
             .selected_text()
@@ -280,7 +367,10 @@ impl Reader {
     /// stay for the next time.
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.find.open {
-            cx.propagate();
+            // Esc drops a search result's highlight first.
+            if !self.clear_search_hit(cx) {
+                cx.propagate();
+            }
             return;
         }
         self.find.open = false;
@@ -642,5 +732,21 @@ mod tests {
             marks.highlights(2, start(2)),
             [(0..1, CURRENT_MATCH), (2..3, MATCH)]
         );
+    }
+
+    #[test]
+    fn a_search_hit_highlights_the_items_it_covers() {
+        let t = tree("x a\n\nb\n\na a\n");
+        // The `a` of the first paragraph and the first `a` of the third.
+        let hit = SearchHit {
+            path: "n.md".into(),
+            ranges: vec![2..3, 8..9],
+            version: Some(1),
+        };
+        let item = |ix: usize| t.items()[ix].source.clone();
+        let start = |ix: usize| t.node_of(ix).expect("node").source.start;
+        assert_eq!(hit.highlights(&item(0), start(0)), [(2..3, CURRENT_MATCH)]);
+        assert!(hit.highlights(&item(1), start(1)).is_empty());
+        assert_eq!(hit.highlights(&item(2), start(2)), [(0..1, CURRENT_MATCH)]);
     }
 }

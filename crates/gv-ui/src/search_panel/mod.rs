@@ -159,12 +159,16 @@ pub struct SearchScope {
 /// What the panel asks of its window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchPanelEvent {
-    /// Open the note at `path`, scrolled to the block holding `offset`.
+    /// Open the note at `path`, scrolled to the block holding `offset`,
+    /// with the matches at `hits` (byte ranges of the note) highlighted.
     Open {
         path: PathBuf,
         offset: Option<usize>,
+        hits: Vec<Range<usize>>,
         disposition: Disposition,
     },
+    /// The query or a toggle changed: another search starts.
+    QueryChanged,
     /// Give the keyboard back to the document.
     Dismiss,
 }
@@ -252,7 +256,10 @@ impl SearchPanel {
                 &input,
                 window,
                 |this, _, event: &InputEvent, _, cx| match event {
-                    InputEvent::Change => this.run(cx),
+                    InputEvent::Change => {
+                        cx.emit(SearchPanelEvent::QueryChanged);
+                        this.run(cx);
+                    }
                     InputEvent::Focus | InputEvent::Blur => cx.notify(),
                     // Enter is the panel's (`OpenSelected`).
                     InputEvent::PressEnter { .. } => {}
@@ -313,6 +320,7 @@ impl SearchPanel {
         self.input.update(cx, |input, cx| {
             input.set_value(query.to_owned(), window, cx)
         });
+        cx.emit(SearchPanelEvent::QueryChanged);
         self.run(cx);
     }
 
@@ -336,6 +344,7 @@ impl SearchPanel {
             SearchToggle::MatchCase => self.match_case = !self.match_case,
             SearchToggle::Regex => self.regex = !self.regex,
         }
+        cx.emit(SearchPanelEvent::QueryChanged);
         self.run(cx);
         cx.notify();
     }
@@ -523,23 +532,30 @@ impl SearchPanel {
         let Some(root) = self.scope.as_ref().map(|s| s.root.clone()) else {
             return;
         };
-        let (file, offset) = match row {
+        let (file, snippet) = match row {
             Row::File(f) => (f, None),
             Row::Match(f, s) => (
                 f,
-                self.results
-                    .files()
-                    .get(f)
-                    .and_then(|r| r.snippets.get(s))
-                    .map(|s| s.range.start),
+                self.results.files().get(f).and_then(|r| r.snippets.get(s)),
             ),
         };
+        let offset = snippet.map(|s| s.range.start);
+        // The matches of the line, as byte ranges of the note.
+        let hits = snippet
+            .map(|s| {
+                s.highlights
+                    .iter()
+                    .map(|h| s.range.start + h.start..s.range.start + h.end)
+                    .collect()
+            })
+            .unwrap_or_default();
         let Some(result) = self.results.files().get(file) else {
             return;
         };
         cx.emit(SearchPanelEvent::Open {
             path: result.path.to_fs_path(&root),
             offset,
+            hits,
             disposition,
         });
     }

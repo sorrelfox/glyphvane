@@ -13,6 +13,9 @@ the sidebar. If you have selected text on one line, it becomes the query.
 - Click a match to open the note there. **Ctrl+click** opens it in a new tab,
   **Ctrl+Alt+Shift+click** in a new window, a middle click in a background
   tab.
+- In this window, the note opens with the matches of that line highlighted,
+  in the Reading view and in the editor. The highlight goes when you click in
+  the note, press **Esc**, edit the text, or start another search.
 - From the keyboard: **Up** and **Down** move, **Enter** opens, **Ctrl+Enter**
   opens in a new tab, **Left** and **Right** fold and unfold a note's matches,
   and **Esc** returns to the document.

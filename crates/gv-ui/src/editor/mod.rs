@@ -824,6 +824,7 @@ impl EditorView {
         self.stats.reset();
         self.spell.reset();
         self.reset_find();
+        self.attach_search_hit();
         self.autocomplete.clear();
         self.status = EditorStatus::Ready;
         self.scroll_y = 0.0;
@@ -1321,7 +1322,7 @@ impl EditorView {
 
     /// Esc: closes the find popover first.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.close_find(window, cx) {
+        if self.close_find(window, cx) || self.clear_search_hit(cx) {
             return;
         }
         self.with_editor(window, cx, |editor, _| {

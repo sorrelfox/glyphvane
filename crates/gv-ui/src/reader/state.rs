@@ -19,7 +19,7 @@ use gv_syntax::BlockId;
 
 use super::bench::Bench;
 use super::engine::Engine;
-use super::find::FindMarks;
+use super::find::{FindMarks, SearchHit};
 use super::items::{DocItems, ItemCache};
 use super::live::SyncRequest;
 use super::load::Loaded;
@@ -366,6 +366,8 @@ pub(crate) struct State {
     pub doc_version: u64,
     /// Find in page: the matches to paint.
     pub find: FindMarks,
+    /// The Search panel result the note was opened at.
+    pub search_hit: Option<SearchHit>,
     pub layout: ReaderLayout,
     /// The source offset whose block gets the caret band (the Split view's
     /// preview: the editor's caret).
@@ -424,6 +426,7 @@ impl State {
             stale: Vec::new(),
             doc_version: 0,
             find: FindMarks::default(),
+            search_hit: None,
             layout: ReaderLayout::Column,
             band: None,
             sync: None,
@@ -474,6 +477,13 @@ impl State {
         self.geometry = Geometry::default();
         self.stale.clear();
         self.doc_version += 1;
+        // A Search panel result waiting for its note.
+        if let Some(hit) = &mut self.search_hit
+            && hit.version.is_none()
+            && self.doc.as_ref().is_some_and(|d| d.path == hit.path)
+        {
+            hit.version = Some(self.doc_version);
+        }
         self.apply_pending_folds();
     }
 

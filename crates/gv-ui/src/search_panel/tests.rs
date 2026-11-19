@@ -303,6 +303,13 @@ fn regex_errors_and_the_regex_toggle(cx: &mut TestAppContext) {
 fn keys_walk_the_results_and_open_them(cx: &mut TestAppContext) {
     let mut p = panel(cx, NOTES);
     p.search("pears");
+    // A new query tells the window that another search starts.
+    assert!(
+        p.events
+            .borrow_mut()
+            .drain(..)
+            .any(|e| e == SearchPanelEvent::QueryChanged)
+    );
     p.focus_field();
     assert!(
         p.vcx
@@ -316,10 +323,19 @@ fn keys_walk_the_results_and_open_them(cx: &mut TestAppContext) {
         [
             SearchPanelEvent::Open {
                 path,
-                offset: Some(_),
+                offset: Some(offset),
+                hits,
                 disposition: Disposition::InPlace,
             },
-        ] => assert!(path.ends_with("Pears.md")),
+        ] => {
+            assert!(path.ends_with("Pears.md"));
+            // The matches of the line, as byte ranges of the note.
+            let text = NOTES[1].1;
+            assert!(!hits.is_empty() && hits[0].start >= *offset, "{hits:?}");
+            for hit in hits {
+                assert!(text[hit.clone()].eq_ignore_ascii_case("pears"), "{hit:?}");
+            }
+        }
         other => panic!("{other:?}"),
     }
     // Down twice, Up once, Mod+Enter: the note's row, in a new tab.
@@ -334,8 +350,9 @@ fn keys_walk_the_results_and_open_them(cx: &mut TestAppContext) {
         [SearchPanelEvent::Open {
             offset: None,
             disposition: Disposition::NewTab,
+            hits,
             ..
-        }]
+        }] if hits.is_empty()
     ));
     p.vcx.dispatch_action(Collapse);
     p.draw();

@@ -672,6 +672,7 @@ impl Element for ReaderElement {
             geometry,
             hover,
             find: marks,
+            search_hit,
             doc_version,
             sync,
             band,
@@ -697,6 +698,10 @@ impl Element for ReaderElement {
         geometry.area = area;
         // Find matches are painted while they belong to this document.
         let marks = (marks.version == *doc_version && !marks.matches.is_empty()).then_some(&*marks);
+        // So is the Search panel result the note was opened at.
+        let search_hit = search_hit
+            .as_ref()
+            .filter(|h| h.version == Some(*doc_version));
 
         {
             // A new limit: the tables and diagrams that grew, or could, are
@@ -766,9 +771,13 @@ impl Element for ReaderElement {
                 let b = r.end.saturating_sub(node.source.start);
                 (b > a).then_some(a..b)
             });
-            let highlights = marks
+            let mut highlights = marks
                 .map(|m| m.highlights(p.ix, node.source.start))
                 .unwrap_or_default();
+            if let Some(hit) = search_hit {
+                highlights.extend(hit.highlights(&item.source, node.source.start));
+                highlights.sort_by_key(|(r, _)| r.start);
+            }
 
             // What is behind the item's content, bottom up: the page, the
             // caret band and the boxes around it (its fades end in it).
@@ -2242,6 +2251,8 @@ impl ReaderElement {
                 match e.button {
                     MouseButton::Left => {
                         focus.focus(window, cx);
+                        // A click ends a search result's highlight.
+                        st.search_hit = None;
                         // Mod+Alt+Shift: a link to a new window, not a
                         // selection extended with Shift.
                         let extend = e.modifiers.shift

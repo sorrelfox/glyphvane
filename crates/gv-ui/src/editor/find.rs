@@ -37,6 +37,10 @@
 //! - **Highlights**: matches on the rows on screen get an `accent.tint`
 //!   background under the selections, the current one `accent.line` over
 //!   them (as in the Reading view).
+//! - **Search hits**: a note opened from a result of the Search panel
+//!   shows that result's matches as the current match is shown
+//!   ([`SearchHit`]) until the next edit, click, Esc, find, or another
+//!   search.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -116,6 +120,16 @@ impl FindMarks {
     }
 }
 
+/// The matches of a Search panel result the note was opened at, painted
+/// as the current find match is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchHit {
+    /// Byte ranges of the text.
+    pub ranges: Vec<Range<usize>>,
+    /// The text revision they are for; `None` until the text is loaded.
+    pub revision: Option<Revision>,
+}
+
 /// Where a search puts the current match.
 #[derive(Debug, Clone, Copy)]
 struct Place {
@@ -131,6 +145,8 @@ pub(crate) struct FindState {
     bar: Option<Entity<FindBar>>,
     open: bool,
     pub(crate) marks: FindMarks,
+    /// The Search panel result the note was opened at.
+    search_hit: Option<SearchHit>,
     /// Bumped per search; a search that sees a newer value stops.
     generation: Arc<AtomicU64>,
     /// The revision the latest search is for.
@@ -139,6 +155,28 @@ pub(crate) struct FindState {
     after_edit: Option<Place>,
     task: Option<Task<()>>,
     _events: Option<Subscription>,
+}
+
+impl FindState {
+    /// The Search panel result's ranges that touch `range` of revision
+    /// `revision`, as current matches.
+    pub(crate) fn search_hit_touching(
+        &self,
+        revision: Revision,
+        range: &Range<usize>,
+    ) -> Vec<(Range<usize>, bool)> {
+        self.search_hit
+            .as_ref()
+            .filter(|h| h.revision == Some(revision))
+            .map(|h| {
+                h.ranges
+                    .iter()
+                    .filter(|r| r.end >= range.start && r.start <= range.end)
+                    .map(|r| (r.clone(), true))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Debug for FindState {
@@ -166,6 +204,66 @@ impl EditorView {
     #[cfg(test)]
     pub(crate) fn find_marks(&self) -> &FindMarks {
         &self.find.marks
+    }
+
+    /// Highlights `ranges` of the text (a Search panel result's matches),
+    /// now when the text is loaded, else once it is.
+    pub fn show_search_hit(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<'_, Self>) {
+        self.find.search_hit = (!ranges.is_empty()).then_some(SearchHit {
+            ranges,
+            revision: None,
+        });
+        self.attach_search_hit();
+        cx.notify();
+    }
+
+    /// Drops the highlight of a Search panel result. Returns whether one
+    /// was shown.
+    pub fn clear_search_hit(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let revision = self.doc.as_ref().map(|d| d.editor.text().revision());
+        let shown = self
+            .find
+            .search_hit
+            .take()
+            .is_some_and(|h| h.revision.is_some() && h.revision == revision);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// Ties a waiting Search panel result to the loaded text, when its
+    /// ranges are in it.
+    pub(super) fn attach_search_hit(&mut self) {
+        let Some(text) = self.doc.as_ref().map(|d| d.editor.text()) else {
+            return;
+        };
+        let Some(hit) = &mut self.find.search_hit else {
+            return;
+        };
+        if hit.revision.is_some() {
+            return;
+        }
+        if hit
+            .ranges
+            .iter()
+            .all(|r| text.check_range(r.clone()).is_ok())
+        {
+            hit.revision = Some(text.revision());
+        } else {
+            self.find.search_hit = None;
+        }
+    }
+
+    /// The ranges of the Search panel result highlighted now.
+    #[cfg(test)]
+    pub(crate) fn search_hit(&self) -> Option<Vec<Range<usize>>> {
+        let revision = self.doc.as_ref()?.editor.text().revision();
+        self.find
+            .search_hit
+            .as_ref()
+            .filter(|h| h.revision == Some(revision))
+            .map(|h| h.ranges.clone())
     }
 
     /// A new document: matches of the old one no longer apply.
@@ -282,6 +380,7 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.find.search_hit = None;
         let bar = self.ensure_find_bar(window, cx);
         let prefill = self.editor().and_then(|editor| {
             if editor.selections().len() != 1 {

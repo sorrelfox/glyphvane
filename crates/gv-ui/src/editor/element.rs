@@ -424,7 +424,9 @@ impl EditorView {
                 .map(|s| (s.range(), s.head()))
                 .collect()
         };
-        let found = find.marks.touching(text.revision(), visible.clone());
+        let mut found = find.marks.touching(text.revision(), visible.clone());
+        // A Search panel result the note was opened at, as the current match.
+        found.extend(find.search_hit_touching(text.revision(), &visible));
         let misspelled = spell.visible(&doc.editor, visible.clone());
         let marked = doc.editor.marked_ranges();
         let replace = tabs.replace_snapshot();
@@ -1206,6 +1208,8 @@ impl EditorView {
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.focus.focus(window, cx);
+        // A click ends a search result's highlight.
+        self.clear_search_hit(cx);
         if let Some(bar) = self.scrollbar
             && bar.track.contains(&e.position)
         {

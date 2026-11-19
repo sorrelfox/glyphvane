@@ -9,11 +9,19 @@
 //! field, filled with the selection of the document on screen when that is
 //! one line, or with the tag a click in the Reading view asked for. A
 //! tag of the Tags panel shows it with that tag's search too.
+//!
+//! A note opened from a matched line shows that line's matches highlighted
+//! as the current match of find in page is, in the Reading view and in the
+//! Source view, until the next edit, click or Esc there, or another
+//! search.
+
+use std::ops::Range;
+use std::path::Path;
 
 use gpui::{AppContext as _, Context, Div, Entity, InteractiveElement as _, Stateful, Window};
 
 use super::panels::SidebarPanel;
-use super::{OpenTarget, Workspace};
+use super::{OpenTarget, ViewMode, Workspace};
 use crate::keymap::actions::search as commands;
 use crate::reader::{Disposition, ScrollTarget};
 use crate::search_panel::{SearchPanel, SearchPanelEvent, SearchScope};
@@ -68,10 +76,11 @@ impl Workspace {
             SearchPanelEvent::Open {
                 path,
                 offset,
+                hits,
                 disposition,
             } => {
                 let scroll = offset.map(ScrollTarget::Offset);
-                match disposition {
+                let index = match disposition {
                     Disposition::InPlace => {
                         let shown = self
                             .tabs
@@ -79,19 +88,94 @@ impl Workspace {
                             .position(|t| t.path.as_deref() == Some(path.as_path()));
                         let index = shown.unwrap_or(self.active);
                         self.activate_tab(index, window, cx);
-                        self.navigate(index, path, scroll, window, cx);
+                        self.navigate(index, path.clone(), scroll, window, cx);
+                        Some(index)
                     }
                     Disposition::NewTab | Disposition::Background => {
                         let scroll = scroll.or(Some(ScrollTarget::Offset(0)));
                         let activate = disposition == Disposition::NewTab;
-                        self.insert_tab(OpenTarget::new(path), scroll, activate, window, cx);
+                        self.insert_tab(
+                            OpenTarget::new(path.clone()),
+                            scroll,
+                            activate,
+                            window,
+                            cx,
+                        );
+                        self.tabs
+                            .iter()
+                            .rposition(|t| t.path.as_deref() == Some(path.as_path()))
                     }
                     Disposition::NewWindow => {
-                        self.open_link_target(self.active, path, scroll, disposition, window, cx);
+                        self.open_link_target(
+                            self.active,
+                            path.clone(),
+                            scroll,
+                            disposition,
+                            window,
+                            cx,
+                        );
+                        None
                     }
+                };
+                if let Some(index) = index {
+                    self.show_search_hit(index, &path, hits, cx);
                 }
             }
+            SearchPanelEvent::QueryChanged => self.clear_search_hits(cx),
             SearchPanelEvent::Dismiss => self.focus_document(window, cx),
+        }
+    }
+
+    /// Highlights `hits` (byte ranges of the note at `path`, a Search
+    /// panel result's matches) in the views of tab `index`; in Edit mode
+    /// the Source view scrolls to them, as the Reading view does. The
+    /// highlight of an earlier result goes.
+    fn show_search_hit(
+        &mut self,
+        index: usize,
+        path: &Path,
+        hits: Vec<Range<usize>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.clear_search_hits(cx);
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let Some(first) = hits.first().map(|r| r.start) else {
+            return;
+        };
+        let edit = tab.mode == ViewMode::Edit;
+        let readers = [tab.reader.clone(), tab.split_reader(cx)];
+        let editor = tab.editor.clone();
+        for reader in readers.into_iter().flatten() {
+            let hits = hits.clone();
+            reader.update(cx, |r, cx| r.show_search_hit(path, hits, cx));
+        }
+        if let Some(editor) = editor {
+            editor.update(cx, |e, cx| {
+                e.show_search_hit(hits, cx);
+                if edit {
+                    e.scroll_to_offset(first, cx);
+                }
+            });
+        }
+    }
+
+    /// Drops the highlights of Search panel results in every tab: another
+    /// search started.
+    fn clear_search_hits(&mut self, cx: &mut Context<'_, Self>) {
+        let mut readers = Vec::new();
+        let mut editors = Vec::new();
+        for tab in &self.tabs {
+            readers.extend(tab.reader.clone());
+            readers.extend(tab.split_reader(cx));
+            editors.extend(tab.editor.clone());
+        }
+        for reader in readers {
+            reader.update(cx, |r, cx| r.clear_search_hit(cx));
+        }
+        for editor in editors {
+            editor.update(cx, |e, cx| e.clear_search_hit(cx));
         }
     }
 

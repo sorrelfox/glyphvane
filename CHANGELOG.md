@@ -43,6 +43,10 @@ Conventional Commits, and versions follow Semantic Versioning.
 - The Files panel sorts by created time (new to old, or old to new), as
   Obsidian does; where the file system keeps no creation time, the
   modified time stands in.
+- A note opened from a Search panel result shows the matches of that
+  line highlighted, in the Reading view and in the editor (which scrolls
+  to them in Edit mode), until the next click, Esc, edit or search.
+
 ### Documentation
 
 - A sample vault (`docs/sample-vault`) tours the features with one short
