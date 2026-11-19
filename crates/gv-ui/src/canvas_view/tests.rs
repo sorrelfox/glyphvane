@@ -4,8 +4,8 @@
 //! The Canvas view in headless GPUI windows: loading and drawing a fixture
 //! canvas, culling, pan and zoom, keyboard navigation, opening cards,
 //! problems, reduced motion, the minimap, `view.zoom_to_fit`, what
-//! assistive technology is told, PDF first pages, group backgrounds and
-//! the problems chip by keyboard.
+//! assistive technology is told, PDF first pages, group backgrounds, the
+//! problems chip by keyboard, and HTML and live blocks in cards.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -1403,5 +1403,92 @@ fn card_code_is_highlighted_and_diagrams_drawn_off_the_frame(cx: &mut TestAppCon
             .fold(0.0, f32::max);
         assert!(drawn.widest_box() > 160.0, "{}", drawn.widest_box());
         assert!(widest > 0.0 && widest < 160.0 - 24.0, "{widest}");
+    });
+}
+
+#[gpui::test]
+fn card_html_and_live_blocks_are_drawn_without_jobs(cx: &mut TestAppContext) {
+    use super::cards::Block;
+    use crate::reader::{code_highlight, diagram};
+
+    let board = r#"{"nodes":[
+        {"id":"t","type":"text","x":0,"y":0,"width":240,"height":300,
+         "text":"<div>\n<i>canvas html</i>\n</div>\n\n```base\nviews:\n  - type: table\n```"},
+        {"id":"f","type":"file","x":300,"y":0,"width":240,"height":300,"file":"q.md"}]}"#;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("live.canvas"), board).expect("write");
+    std::fs::write(
+        dir.path().join("q.md"),
+        "<details>\n<summary>More</summary>\n\nInside.\n\n</details>\n\n```query\nfoo\n```\n",
+    )
+    .expect("write");
+    let (window, view) = open(cx, &dir.path().join("live.canvas"), dir.path());
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    view.update(&mut vcx, |v, cx| {
+        v.set_transform(
+            Transform {
+                zoom: 1.0,
+                pan: gv_canvas::Point::new(20.0, 20.0),
+            },
+            cx,
+        );
+    });
+    let jobs = (
+        code_highlight::tests::jobs_run(),
+        diagram::tests::jobs_run(),
+    );
+    for _ in 0..4 {
+        draw_guarded(&mut vcx);
+    }
+    assert_eq!(
+        (
+            code_highlight::tests::jobs_run(),
+            diagram::tests::jobs_run()
+        ),
+        jobs,
+        "nothing to run"
+    );
+    let (t, f) = (node(&view, &mut vcx, "t"), node(&view, &mut vcx, "f"));
+    view.read_with(&vcx, |v, _| {
+        let card = v.cards.built.get(&t).expect("the text card was built");
+        let html = card
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Code { block, label, .. } => Some((block.clone(), label.clone())),
+                _ => None,
+            })
+            .expect("the HTML block");
+        assert_eq!(html.1.as_deref(), Some("html"));
+        assert_eq!(
+            html.0.borrow().paragraph().text(),
+            "<div>\n<i>canvas html</i>\n</div>"
+        );
+        assert!(html.0.borrow().bounds().is_some(), "laid out and painted");
+        assert!(
+            card.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Live { title, .. } if title.as_ref() == "Base"))
+        );
+        let note = v.cards.built.get(&f).expect("the note preview was built");
+        assert!(
+            note.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Live { title, .. } if title.as_ref() == "Query: foo"))
+        );
+        assert!(note.blocks.iter().any(|b| matches!(
+            b,
+            Block::Text {
+                marker: Some(super::Marker::Disclosure { open: false }),
+                ..
+            }
+        )));
+        assert!(
+            note.blocks.iter().all(|b| !matches!(
+                b,
+                Block::Text { block, .. } if block.borrow().paragraph().text() == "Inside."
+            )),
+            "a closed <details> hides its content"
+        );
     });
 }

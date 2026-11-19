@@ -58,7 +58,7 @@
 //!
 //! The whole surface: card, group and edge styling, the issues chip and
 //! list, the zoom readout, the minimap, the loading, empty and error
-//! states.
+//! states, and the cards' placeholders for live blocks.
 
 mod a11y;
 mod cards;
@@ -167,6 +167,10 @@ const LINE_PX: f32 = 20.0;
 /// box at its 16 px text), and its corner radius as a part of the side.
 const TASK_BOX_EM: f32 = crate::metrics::size::CHECKBOX / 16.0;
 const TASK_BOX_RADIUS: f32 = crate::metrics::radius::SMALL_CONTROL / crate::metrics::size::CHECKBOX;
+/// Room for a `<details>` summary's triangle before its text, in body ems.
+const DISCLOSURE_EM: f32 = 1.2;
+/// An HTML block's label and a live block's note, in body ems.
+const LABEL_EM: f32 = 0.85;
 /// Zoom factor per pixel of Ctrl-wheel scrolling (`exp(k * px)`).
 const ZOOM_PER_PX: f64 = 0.002;
 /// Factor of one zoom command.
@@ -1053,17 +1057,23 @@ impl CanvasView {
                     marker,
                 } => {
                     let gap = if i == 0 { 0.0 } else { gap * k };
+                    let size = built.body_size;
+                    // A summary's triangle goes before its text.
+                    let lead = if matches!(marker, Some(Marker::Disclosure { .. })) {
+                        size * DISCLOSURE_EM
+                    } else {
+                        0.0
+                    };
                     let mut row = div()
                         .relative()
                         .flex_none()
                         .pt(px(gap))
-                        .pl(px(indent * k))
+                        .pl(px(indent * k + lead))
                         .child(InlineParagraph::new(
                             block.clone(),
                             self.cards.text.clone(),
                             palette.clone(),
                         ));
-                    let size = built.body_size;
                     match marker {
                         Some(Marker::Text(m)) => {
                             row = row.child(
@@ -1102,17 +1112,92 @@ impl CanvasView {
                             };
                             row = row.child(checkbox);
                         }
+                        // Read-only: a card shows a `<details>` as written.
+                        Some(Marker::Disclosure { open }) => {
+                            let line = built.body_line * k;
+                            let icon = if *open {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            };
+                            row = row.child(
+                                div()
+                                    .absolute()
+                                    .top(px(gap + (line - size) / 2.0))
+                                    .left(px(indent * k))
+                                    .text_color(colors.label)
+                                    .child(icon.sized(size)),
+                            );
+                        }
                         None => {}
                     }
                     column = column.child(row);
                 }
-                Block::Code { block, indent, gap } => {
+                Block::Code {
+                    block,
+                    indent,
+                    gap,
+                    label,
+                } => {
                     let gap = if i == 0 { 0.0 } else { gap * k };
-                    column = column.child(code_box(*indent, gap).child(InlineParagraph::new(
+                    let mut code = code_box(*indent, gap).flex().flex_col();
+                    if let Some(label) = label {
+                        code = code.child(
+                            div()
+                                .text_size(px(built.body_size * LABEL_EM))
+                                .text_color(colors.muted)
+                                .child(label.clone()),
+                        );
+                    }
+                    column = column.child(code.child(InlineParagraph::new(
                         block.clone(),
                         self.cards.text.clone(),
                         palette.clone(),
                     )));
+                }
+                Block::Live {
+                    icon,
+                    title,
+                    note,
+                    indent,
+                    gap,
+                } => {
+                    let gap = if i == 0 { 0.0 } else { gap * k };
+                    let size = built.body_size;
+                    column = column.child(
+                        div()
+                            .flex_none()
+                            .mt(px(gap))
+                            .ml(px(indent * k))
+                            .p(px(code_pad))
+                            .flex()
+                            .flex_col()
+                            .gap(px(size * 0.3))
+                            .rounded(px(size * 0.3))
+                            .border_1()
+                            .border_color(colors.card_border)
+                            .text_size(px(size))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(size * 0.4))
+                                    .text_color(colors.text)
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(colors.label)
+                                            .child(icon.sized(size)),
+                                    )
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(size * LABEL_EM))
+                                    .text_color(colors.muted)
+                                    .child(note.clone()),
+                            ),
+                    );
                 }
                 Block::Diagram { block, indent, gap } => {
                     let gap = if i == 0 { 0.0 } else { gap * k };

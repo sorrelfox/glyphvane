@@ -16,11 +16,17 @@ A canvas is a board of cards connected by arrows.
 - **Text cards** render their Markdown as the Reading view does: formulas
   are typeset, code blocks are highlighted and Mermaid diagrams are drawn.
   A diagram shows its source until it is drawn, or when it cannot be drawn.
+  HTML shows as in the Reading view: a `<details>` element shows its
+  summary, and its content only when it has `open` (a card cannot open
+  it); other HTML blocks show their source, marked *html*. Bases, search
+  queries (` ```query `) and embedded canvases, PDFs, audio, video and web
+  pages show a small card naming them, such as *Base: Tasks.base*; open the
+  note to see them. A folded callout (`> [!note]-`) shows only its title.
   Images inside the text are not drawn.
 - **File cards** show the file: the first blocks of a note (or the heading or
-  block the card points to), an image, the first page of a PDF, or the shapes
-  of another canvas. Other files show as a plain card. Missing files, and
-  files outside the vault, say so.
+  block the card points to), drawn like a text card, an image, the first
+  page of a PDF, or the shapes of another canvas. Other files show as a
+  plain card. Missing files, and files outside the vault, say so.
 - **Link cards** show their web address. Nothing is downloaded.
 - **Groups**, with their label and an optional background image (only local
   images).

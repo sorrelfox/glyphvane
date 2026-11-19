@@ -12,9 +12,26 @@
 //!   the Reading view (same highlighter, same theme tokens) and Mermaid
 //!   diagrams are drawn by its diagram engine, both off the UI thread
 //!   ([`Job`]): until a result lands, and when a diagram cannot be drawn,
-//!   the block shows as plain monospaced text, as HTML blocks always do;
-//!   front matter is not shown (as in Obsidian's embeds); images and link
-//!   status icons inside the text are not drawn (their boxes stay blank).
+//!   the block shows as plain monospaced text; front matter is not shown
+//!   (as in Obsidian's embeds); images and link status icons inside the
+//!   text are not drawn (their boxes stay blank).
+//! - **HTML** goes the Reading view's way, with only what it supports: a
+//!   `<details>` element shows its summary with a disclosure triangle
+//!   (read-only) and hides its content unless it has `open`, as a closed
+//!   foldable callout hides its body; any other HTML block shows its
+//!   source as code-like text under an *html* label, never run or loaded
+//!   (the same lines the Reading view draws, through
+//!   [`code_paragraph`](crate::reader::code_paragraph)); `<audio>`,
+//!   `<video>` and `<iframe>` blocks are live blocks (below); a
+//!   `<picture>` is an image, not drawn. Nothing here needs a job.
+//! - **Live blocks** (` ```base ` and ` ```query ` fences, base, canvas
+//!   and media embeds, HTML media): a placeholder card, built with the
+//!   block, that names the kind and what it shows (`Base: Tasks.base`,
+//!   the query's first line) and says to open the note. The Reading view
+//!   fills these in from the vault (a hosted bases table, a vault-wide
+//!   search, a file read), too much for every card of a canvas; nothing
+//!   is read or run for them. Not designed: built plainly from the card's
+//!   tokens, flagged.
 //! - **File cards**: read off the UI thread when first shown. A note shows
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
@@ -54,13 +71,14 @@ use gv_inline::{Align, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
 use gv_model::DocModel;
 use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{
-    CodeBlock, FrameKind, ItemKind, ListMarker, NodeKind, RenderOptions, RenderTree, Sources,
-    StyleTable, TextRole, Variant,
+    CodeBlock, FrameKind, Item, ItemId, ItemKind, ListMarker, LiveBlock, LiveKind, NodeKind,
+    RenderOptions, RenderTree, Sources, StyleTable, TextRole, Variant,
 };
 use gv_syntax::{ParseOptions, SyntaxTree};
 
 use super::Doc;
 use crate::export::PdfEngine;
+use crate::icons::Icon;
 use crate::inline::{BoxContent, FontFamilies, FontTable, InlineBlock, InlineText, font_of};
 use crate::reader::code_highlight::{self, LineSpans};
 use crate::reader::diagram::{CancelSlot, Request};
@@ -178,6 +196,9 @@ pub(crate) enum Marker {
     Text(SharedString),
     /// A task item's checkbox (read-only).
     Task { checked: bool },
+    /// A `<details>` summary's disclosure triangle (read-only): open or
+    /// closed.
+    Disclosure { open: bool },
 }
 
 /// One block of built Markdown, top to bottom.
@@ -193,16 +214,27 @@ pub(crate) enum Block {
     },
     /// Code-like text in the mono family: a code block's lines
     /// (highlighted once its result is in), a diagram's source while it is
-    /// drawn or when it cannot be, an HTML or live block's text.
+    /// drawn or when it cannot be, an HTML block's source. `label` is shown
+    /// above it (*html* on an HTML block's first chunk).
     Code {
         block: Rc<RefCell<InlineBlock>>,
         indent: f32,
         gap: f32,
+        label: Option<SharedString>,
     },
     /// A drawn Mermaid diagram: one box at the build's scale, fitted to the
     /// card's width by the view ([`InlineBlock::fit_boxes`]).
     Diagram {
         block: Rc<RefCell<InlineBlock>>,
+        indent: f32,
+        gap: f32,
+    },
+    /// A live block's placeholder card: the kind's icon, a title naming
+    /// the kind and what it shows, and a note saying where to see it.
+    Live {
+        icon: Icon,
+        title: SharedString,
+        note: SharedString,
         indent: f32,
         gap: f32,
     },
@@ -602,6 +634,9 @@ fn build_blocks(
         let Some(node) = tree.node_of(ix) else {
             continue;
         };
+        if folded(&tree, item) {
+            continue;
+        }
         let indent = item.content_x(&metrics);
         let gap = item.gap_before;
         match (&item.kind, &node.kind) {
@@ -621,6 +656,12 @@ fn build_blocks(
                         None => continue,
                     },
                 };
+                let disclosure = match node.kind {
+                    NodeKind::Details { .. } => Some(Marker::Disclosure {
+                        open: open_by_default(&tree, item.id.block),
+                    }),
+                    _ => None,
+                };
                 let marker = (item.opens > 0)
                     .then(|| item.context.last())
                     .flatten()
@@ -632,7 +673,8 @@ fn build_blocks(
                             Some(Marker::Text(SharedString::from(marker.text())))
                         }
                         _ => None,
-                    });
+                    })
+                    .or(disclosure);
                 out.push(Block::Text {
                     block: Rc::new(RefCell::new(block)),
                     indent,
@@ -654,6 +696,27 @@ fn build_blocks(
                     )),
                     indent,
                     gap,
+                    label: None,
+                });
+            }
+            // Raw HTML: its source, as the Reading view shows it.
+            (ItemKind::Html { chunk, lines, .. }, NodeKind::Html { code, .. }) => {
+                let lines = lines.start as usize..lines.end as usize;
+                out.push(Block::Code {
+                    block: code_block(crate::reader::code_paragraph(code, lines, styles, None)),
+                    indent,
+                    gap,
+                    label: (*chunk == 0).then(|| SharedString::from("html")),
+                });
+            }
+            (ItemKind::Live { .. }, NodeKind::Live(live)) => {
+                let (icon, title, note) = live_placeholder(live);
+                out.push(Block::Live {
+                    icon,
+                    title,
+                    note,
+                    indent,
+                    gap,
                 });
             }
             (ItemKind::Diagram { .. }, NodeKind::Diagram(code)) => {
@@ -672,6 +735,7 @@ fn build_blocks(
                         )),
                         indent,
                         gap,
+                        label: None,
                     },
                 };
                 out.push(block);
@@ -696,6 +760,7 @@ fn build_blocks(
                     block: code_block(plain_code(&text, styles)),
                     indent,
                     gap,
+                    label: None,
                 });
             }
             (ItemKind::ThematicBreak, _) => out.push(Block::Rule { gap }),
@@ -703,6 +768,71 @@ fn build_blocks(
         }
     }
     out
+}
+
+/// Whether the `<details>` or foldable callout whose first row is block
+/// `block` of `tree` is open as written (the Reading view's state before
+/// the reader folds anything).
+fn open_by_default(tree: &RenderTree, block: gv_syntax::BlockId) -> bool {
+    tree.index_of(ItemId { block, chunk: 0 })
+        .and_then(|ix| tree.node_of(ix))
+        .is_some_and(|n| match n.kind {
+            NodeKind::Details { open, .. } => open,
+            NodeKind::CalloutTitle { fold, .. } => fold != gv_syntax::CalloutFold::Closed,
+            _ => false,
+        })
+}
+
+/// Whether `item` is inside a closed `<details>` or a closed callout.
+fn folded(tree: &RenderTree, item: &Item) -> bool {
+    item.context
+        .iter()
+        .any(|f| matches!(f.kind, FrameKind::Details) && !open_by_default(tree, f.id))
+}
+
+/// A live block's placeholder: the kind's icon (the Reading view's), its
+/// title and its note.
+fn live_placeholder(live: &LiveBlock) -> (Icon, SharedString, SharedString) {
+    let (icon, kind) = match live.kind {
+        LiveKind::Canvas => (Icon::Canvas, "Canvas"),
+        LiveKind::Base => (Icon::Base, "Base"),
+        LiveKind::Query => (Icon::Search, "Query"),
+        LiveKind::Audio => (Icon::AudioFile, "Audio"),
+        LiveKind::Video => (Icon::VideoFile, "Video"),
+        LiveKind::Pdf => (Icon::PdfFile, "PDF"),
+        LiveKind::Frame => (Icon::WebPage, "Embedded page"),
+    };
+    let name = match (&live.target, live.kind) {
+        (Some(t), k) if k.is_media() => live
+            .html
+            .as_ref()
+            .and_then(|h| h.title.as_deref())
+            .unwrap_or_else(|| t.rsplit('/').next().unwrap_or(t))
+            .to_owned(),
+        (Some(t), _) => {
+            let name = t.rsplit('/').next().unwrap_or(t);
+            match &live.anchor {
+                Some(view) => format!("{name} \u{203a} {view}"),
+                None => name.to_owned(),
+            }
+        }
+        (None, LiveKind::Query) => live
+            .fence_text()
+            .and_then(|t| t.lines().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or("")
+            .to_owned(),
+        (None, _) => String::new(),
+    };
+    let title = if name.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind}: {name}")
+    };
+    let note = match live.kind {
+        LiveKind::Query => "Open the note to see the results",
+        _ => "Open the note to see it",
+    };
+    (icon, title.into(), note.into())
 }
 
 /// Image extensions the media engine decodes.
@@ -1379,6 +1509,142 @@ mod tests {
             1,
             "the diagram; the code is cached"
         );
+    }
+
+    /// The plain text of the text blocks.
+    fn texts(blocks: &[Block]) -> Vec<String> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { block, .. } => Some(block.borrow().paragraph().text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn html_blocks_show_as_the_reading_view_shows_them() {
+        let p = obsidian();
+        let text = "<div class=\"note\">\n<b>Raw</b> <script>alert(1)</script>\n</div>\n\n\
+            <details>\n<summary>Shut</summary>\n\nHidden body.\n\n</details>\n\n\
+            <details open>\n<summary>Open</summary>\n\nShown body.\n\n</details>\n\n\
+            > [!note]- Folded\n> Callout body.\n\nAfter.\n";
+        let parsed = Parsed::new(text.into(), &p);
+        let mut work = Work::default();
+        let mut pending = Vec::new();
+        let blocks = build_blocks(
+            &parsed,
+            RenderOptions::for_profile(&p),
+            &mut work,
+            &mut pending,
+        );
+        // Raw HTML: its source as code-like text, labelled, never run.
+        let html: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code { block, label, .. } => {
+                    Some((block.borrow().paragraph().text().to_string(), label.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            html,
+            [(
+                "<div class=\"note\">\n<b>Raw</b> <script>alert(1)</script>\n</div>".to_owned(),
+                Some(SharedString::from("html"))
+            )],
+            "{blocks:?}"
+        );
+        // `<details>`: the summary with its triangle; the body only when
+        // open, as written; a closed callout's body is folded too.
+        let texts = texts(&blocks);
+        assert!(texts.iter().any(|t| t == "Shut"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Open"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Shown body."), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "After."), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .all(|t| !t.contains("Hidden body") && !t.contains("Callout body")),
+            "{texts:?}"
+        );
+        let triangles: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text {
+                    marker: Some(m @ Marker::Disclosure { .. }),
+                    ..
+                } => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            triangles,
+            [
+                Marker::Disclosure { open: false },
+                Marker::Disclosure { open: true }
+            ]
+        );
+        assert!(pending.is_empty() && work.requests.is_empty(), "no jobs");
+    }
+
+    /// The placeholders of the live blocks: (icon, title, note).
+    fn lives(blocks: &[Block]) -> Vec<(Icon, String, String)> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Live {
+                    icon, title, note, ..
+                } => Some((*icon, title.to_string(), note.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn live_blocks_show_a_placeholder_and_run_nothing() {
+        let p = obsidian();
+        let text = "```base\nviews:\n  - type: table\n    name: All\n```\n\n\
+            ```query\n\n  tag:#card-query\n```\n\n\
+            ![[Boards/Tasks.base#Open]]\n\n\
+            ![[Plan.canvas]]\n\n\
+            <video src=\"clip.mp4\" title=\"Demo clip\">\n</video>\n";
+        let parsed = Parsed::new(text.into(), &p);
+        let mut work = Work::default();
+        let mut pending = Vec::new();
+        let blocks = build_blocks(
+            &parsed,
+            RenderOptions::for_profile(&p),
+            &mut work,
+            &mut pending,
+        );
+        let see = "Open the note to see it".to_owned();
+        assert_eq!(
+            lives(&blocks),
+            [
+                (Icon::Base, "Base".to_owned(), see.clone()),
+                (
+                    Icon::Search,
+                    "Query: tag:#card-query".to_owned(),
+                    "Open the note to see the results".to_owned()
+                ),
+                (
+                    Icon::Base,
+                    "Base: Tasks.base \u{203a} Open".to_owned(),
+                    see.clone()
+                ),
+                (Icon::Canvas, "Canvas: Plan.canvas".to_owned(), see.clone()),
+                (Icon::VideoFile, "Video: Demo clip".to_owned(), see),
+            ],
+            "{blocks:?}"
+        );
+        // Nothing shows the fences' text, and nothing is asked for.
+        assert!(
+            blocks.iter().all(|b| !matches!(b, Block::Code { .. })),
+            "{blocks:?}"
+        );
+        assert!(pending.is_empty() && work.requests.is_empty(), "no jobs");
     }
 
     #[test]
