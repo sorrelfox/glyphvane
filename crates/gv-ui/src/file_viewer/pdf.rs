@@ -104,16 +104,16 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Entity, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, InteractiveElement as _,
-    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    ParentElement as _, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, Window,
-    canvas, div, img, point, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Entity, FocusHandle, Focusable, FontWeight, Hsla, ImageSource,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, ParentElement as _, Pixels, Point, Render, RenderImage, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    Task, Window, canvas, div, img, point, px,
 };
 use gv_render_tree::Finder;
 use serde::{Deserialize, Serialize};
@@ -168,6 +168,20 @@ pub(crate) const DOCUMENT_CONTEXT: &str = "PdfDocument";
 
 /// At most this many matches are kept (as in the Reading view).
 pub(crate) const MAX_MATCHES: usize = 10_000;
+
+/// How long Ctrl+C waits for the text of the pages it copies: later, the
+/// clipboard is left as it is (it may hold something copied since).
+const COPY_WAIT: Duration = Duration::from_secs(3);
+
+/// A Ctrl+C waiting for the text of the pages the selection runs over.
+#[derive(Debug, Clone, Copy)]
+struct PendingCopy {
+    /// When Ctrl+C was pressed.
+    asked: Instant,
+    window: AnyWindowHandle,
+    /// Whether that window was the active one then.
+    active: bool,
+}
 
 /// How opaque the match and selection highlights over a page are: the
 /// page is an image, so a highlight lets it show through (not designed).
@@ -435,7 +449,7 @@ pub struct PdfViewer {
     find: PdfFind,
     selection: Option<PdfSelection>,
     /// Ctrl+C waits for the text of pages the selection runs over.
-    copy_pending: bool,
+    copy_pending: Option<PendingCopy>,
     /// The left button went down on a page and has not come up.
     dragging: bool,
     /// Where the pointer was last while dragging, window px.
@@ -536,7 +550,7 @@ impl PdfViewer {
             text_cancel: Arc::new(AtomicBool::new(false)),
             find: PdfFind::default(),
             selection: None,
-            copy_pending: false,
+            copy_pending: None,
             dragging: false,
             pointer: None,
             autoscroll: None,
@@ -1044,9 +1058,26 @@ impl PdfViewer {
                 self.text_failed.insert(page, why.into());
             }
         }
-        if self.copy_pending && !self.selection_waiting() {
-            self.copy_pending = false;
-            if let Some(text) = self.selected_text() {
+        if self
+            .copy_pending
+            .is_some_and(|p| p.asked.elapsed() > COPY_WAIT)
+        {
+            self.copy_pending = None;
+        }
+        if let Some(pending) = self.copy_pending
+            && !self.selection_waiting()
+        {
+            self.copy_pending = None;
+            // Not when the window went to the background or the focus left
+            // the viewer meanwhile: something else may be copied by now.
+            let focus = self.focus.clone();
+            let still = cx
+                .update_window(pending.window, |_, window, cx| {
+                    (!pending.active || window.is_window_active())
+                        && focus.contains_focused(window, cx)
+                })
+                .unwrap_or(false);
+            if still && let Some(text) = self.selected_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }
@@ -1457,7 +1488,7 @@ impl PdfViewer {
         self.dragging = false;
         self.pointer = None;
         self.autoscroll = None;
-        self.copy_pending = false;
+        self.copy_pending = None;
         let Some((page, at)) = self.page_point(event.position) else {
             self.selection = None;
             cx.notify();
@@ -1601,10 +1632,15 @@ impl PdfViewer {
     }
 
     /// Ctrl+C: copies the selected text.
-    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<'_, Self>) {
+    fn copy(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.selection_waiting() {
-            // Once the pages' text is read ([`Self::text_landed`]).
-            self.copy_pending = true;
+            // Once the pages' text is read ([`Self::text_landed`]), if
+            // that is soon enough.
+            self.copy_pending = Some(PendingCopy {
+                asked: Instant::now(),
+                window: window.window_handle(),
+                active: window.is_window_active(),
+            });
             self.read_selection(cx);
             return;
         }
@@ -1614,10 +1650,18 @@ impl PdfViewer {
         }
     }
 
+    /// Makes a Ctrl+C that waits as old as [`COPY_WAIT`] (tests).
+    #[cfg(test)]
+    pub(crate) fn age_pending_copy(&mut self) {
+        if let Some(p) = &mut self.copy_pending {
+            p.asked = Instant::now().checked_sub(COPY_WAIT * 2).unwrap_or(p.asked);
+        }
+    }
+
     /// Ctrl+A: selects the text of the page shown.
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<'_, Self>) {
         let page = self.current_page();
-        self.copy_pending = false;
+        self.copy_pending = None;
         self.selection = Some(PdfSelection {
             anchor: Mark {
                 page,

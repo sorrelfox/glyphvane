@@ -408,8 +408,9 @@ impl Hay {
     }
 
     /// The matches of `finder` that start on the page (of `len`
-    /// characters), at most `max`: the characters on the page, and those
-    /// on the next page (from its start).
+    /// characters) or at its end, at most `max`: the characters on the
+    /// page (none for one that starts at the end), and those on the next
+    /// page (from its start).
     fn matches(&self, finder: &Finder, len: usize, max: usize) -> Vec<(Range<usize>, usize)> {
         let mut out = Vec::new();
         for r in finder.find_iter(&self.text) {
@@ -430,10 +431,13 @@ impl Hay {
             if on_next {
                 break;
             }
-            if start >= len {
-                // At the page end.
+            if start >= len && !ends_next {
+                // Only the page end.
                 continue;
             }
+            // A match from the page end on into the next page starts
+            // there: nothing of it on this page (the next page's own
+            // search does not see the page end before it).
             out.push(if ends_next {
                 (start..len, end + 1)
             } else {
@@ -678,6 +682,31 @@ mod tests {
         pages[1] = None;
         assert!(search(&pages, &query("two three"), 10).0.is_empty());
         assert_eq!(search(&pages, &query("of"), 10).0.len(), 1);
+    }
+
+    #[test]
+    fn a_match_starting_at_the_page_end_is_found_once() {
+        let pages = read(&[&["hello"], &["world"]]);
+        // The page end reads as the space the query starts with: the
+        // match has nothing on page 1 and runs on to page 2.
+        let (found, _) = search(&pages, &query(" world"), 10);
+        assert_eq!(
+            found,
+            [PdfMatch {
+                page: 0,
+                chars: 5..5,
+                spill: 5
+            }]
+        );
+        // The page end alone is no match.
+        assert!(search(&pages, &query(" "), 10).0.is_empty());
+        let mut later = Vec::new();
+        let mut partial = pages.clone();
+        partial[1] = None;
+        rematch(&mut later, &partial, 0, &query(" world"), 10);
+        assert!(later.is_empty());
+        rematch(&mut later, &pages, 1, &query(" world"), 10);
+        assert_eq!(later, found);
     }
 
     #[test]

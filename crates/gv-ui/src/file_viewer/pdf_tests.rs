@@ -1311,3 +1311,27 @@ fn copying_text_not_read_yet_waits_for_it(cx: &mut TestAppContext) {
     let copied = vcx.read_from_clipboard().and_then(|c| c.text());
     assert_eq!(copied.as_deref(), Some("Hello world"));
 }
+
+#[gpui::test]
+fn a_copy_whose_text_comes_too_late_or_after_the_focus_left_is_dropped(cx: &mut TestAppContext) {
+    let (_dir, _engine, mut vcx, _viewer, pdf) = open_text(cx, &["Hello world", "Page two"]);
+    vcx.update(|window, cx| pdf.read(cx).focus_handle(cx).focus(window, cx));
+    draw(&mut vcx);
+    // The text comes after the wait is over: the clipboard is left alone.
+    vcx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::SelectAll), cx);
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::Copy), cx);
+    });
+    pdf.update(&mut vcx, |p, _| p.age_pending_copy());
+    draw(&mut vcx);
+    assert_eq!(vcx.read_from_clipboard().and_then(|c| c.text()), None);
+    // The focus left the viewer before the text came: nothing either.
+    press(&pdf, &mut vcx, "end");
+    vcx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::SelectAll), cx);
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::Copy), cx);
+        window.blur(cx);
+    });
+    draw(&mut vcx);
+    assert_eq!(vcx.read_from_clipboard().and_then(|c| c.text()), None);
+}
