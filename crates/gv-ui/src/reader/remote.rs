@@ -36,12 +36,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use gpui::{App, Context, Global, Task};
 use gv_media::remote::{FetchError, FetchOptions, FetcherConfig, ProxyMode, RemoteFetcher};
 use gv_media::{CancelFlag, MediaError, Probe};
-use gv_render_tree::{LinkTarget, Sources};
 use gv_settings::{RemoteContent, WorkspaceTrust};
 
 use super::Reader;
-use super::links::Resolver;
-use super::media::{ImageSizes, ImageTarget};
+use super::media::ImageTarget;
 use crate::files::notice::{Notice, NoticeAction};
 use crate::settings::{AppSettings, Target};
 
@@ -488,7 +486,7 @@ impl Reader {
         }
         self.remote.waiting = waiting.into_iter().collect();
         if !hidden.is_empty() {
-            self.refresh_images(&hidden);
+            self.refresh_images(&hidden, false, cx);
         }
         let stale = self.state.borrow_mut().cache.set_remote(shown);
         if !stale.is_empty() {
@@ -573,11 +571,9 @@ impl Reader {
                         },
                     );
                 }
-                if !self.refresh_images(&dests) {
-                    // Not in a paragraph (a `<picture>`): built again; the
-                    // image comes from the cache.
-                    self.rebuild(cx);
-                }
+                // Not in a paragraph (a `<picture>`): built again; the
+                // image comes from the cache.
+                self.refresh_images(&dests, true, cx);
             }
             Err(FetchError::Cancelled) => {}
             Err(e) => {
@@ -588,36 +584,23 @@ impl Reader {
     }
 
     /// Asks the render tree for the sizes of the images at `dests` again
-    /// (their targets changed). Returns whether any item changed.
-    pub(super) fn refresh_images(&mut self, dests: &HashSet<String>) -> bool {
-        let Some(path) = self.path.clone() else {
-            return false;
-        };
-        let mut st = self.state.borrow_mut();
-        let Some(doc) = st.doc.as_mut() else {
-            return false;
-        };
-        let resolver = Resolver::statuses(&path, self.index.as_ref(), doc.profile);
-        let sizes = ImageSizes {
-            resolver: resolver.for_images(),
-            targets: &doc.images,
-        };
-        let sources = Sources {
-            links: &resolver,
-            images: &sizes,
-        };
-        let which = |t: &LinkTarget<'_>| {
-            t.image && dests.contains(&*gv_render_tree::image_key(t.destination, t.from))
-        };
-        let changed = Arc::make_mut(&mut doc.tree)
-            .refresh_where(&doc.syntax, &*doc.text, sources, &which)
-            .changed;
-        if changed.is_empty() {
-            return false;
-        }
-        st.cache.forget(changed.iter().copied());
-        st.stale.extend(changed);
-        true
+    /// (their targets changed), off the UI thread (a block in a note
+    /// embed builds the embed again, which reads the embedded note). With
+    /// `rebuild_unchanged`, the document is built again when no item
+    /// changed.
+    pub(super) fn refresh_images(
+        &mut self,
+        dests: &HashSet<String>,
+        rebuild_unchanged: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.run_tree_job(
+            super::embed_texts::TreeJob::Images {
+                dests: dests.clone(),
+                rebuild_unchanged,
+            },
+            cx,
+        );
     }
 
     /// The infobar for the sites whose images wait for approval, unless

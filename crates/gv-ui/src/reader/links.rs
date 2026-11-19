@@ -249,6 +249,32 @@ impl Resolver {
         res
     }
 
+    /// The note a note embed shows, or what it shows without one.
+    fn embed_target(&self, destination: &str, from: Option<&str>) -> Result<VaultPath, EmbedFetch> {
+        let res = self.resolve_embed(destination, from);
+        if res.status == Status::Pending {
+            return Err(EmbedFetch::Pending);
+        }
+        match (res.target_path, res.target_kind) {
+            (Some(target), Some(TargetKind::File))
+                if res.status.is_resolved()
+                    && target
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md")) =>
+            {
+                Ok(target)
+            }
+            _ => Err(EmbedFetch::Unavailable),
+        }
+    }
+
+    /// The file of the note a note embed (`![[destination]]`, inside the
+    /// embedded note `from`) shows, if it shows one.
+    pub fn embed_file(&self, destination: &str, from: Option<&str>) -> Option<PathBuf> {
+        let target = self.embed_target(destination, from).ok()?;
+        Some(target.to_fs_path(self.index.root()))
+    }
+
     /// Whether the status of `link` can change when the index does. URLs
     /// are classified by their text alone, except web URLs this vault maps
     /// to its own files; local paths, fragments, `file:` and `obsidian:`
@@ -273,9 +299,6 @@ impl Resolver {
     }
 }
 
-/// The largest note a note embed reads (the render tree's budget).
-const EMBED_MAX_BYTES: u64 = 2 << 20;
-
 impl LinkStatusSource for Resolver {
     fn status(&self, link: &LinkTarget<'_>) -> LinkStatus {
         let res = self.resolve_from(
@@ -290,29 +313,17 @@ impl LinkStatusSource for Resolver {
         }
     }
 
-    /// A note embed's note, read from the disk: resolved from the
-    /// document, or from the embedding note `from` inside an embed.
+    /// A note embed's note: resolved from the document, or from the
+    /// embedding note `from` inside an embed; its unsaved buffer, else the
+    /// file ([`super::embed_texts::text`]: reads the disk, so trees are
+    /// built off the UI thread).
     fn embed(&self, destination: &str, from: Option<&str>) -> EmbedFetch {
-        let res = self.resolve_embed(destination, from);
-        if res.status == Status::Pending {
-            return EmbedFetch::Pending;
-        }
-        let (Some(target), Some(TargetKind::File)) = (res.target_path.as_ref(), res.target_kind)
-        else {
-            return EmbedFetch::Unavailable;
+        let target = match self.embed_target(destination, from) {
+            Ok(target) => target,
+            Err(fetch) => return fetch,
         };
-        if !res.status.is_resolved()
-            || !target
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-        {
-            return EmbedFetch::Unavailable;
-        }
         let path = target.to_fs_path(self.index.root());
-        if std::fs::metadata(&path).map_or(true, |m| m.len() > EMBED_MAX_BYTES) {
-            return EmbedFetch::Unavailable;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Some(text) = super::embed_texts::text(&path) else {
             return EmbedFetch::Unavailable;
         };
         let title = target
@@ -325,7 +336,7 @@ impl LinkStatusSource for Resolver {
         EmbedFetch::Note {
             key: target.as_str().into(),
             title: title.into(),
-            text: text.into(),
+            text,
         }
     }
 

@@ -60,6 +60,7 @@ pub(crate) mod code_highlight;
 pub(crate) mod diagram;
 mod edited;
 mod element;
+pub(crate) mod embed_texts;
 pub(crate) mod embeds;
 mod engine;
 pub(crate) mod expanded;
@@ -294,6 +295,13 @@ pub struct Reader {
     fill: bool,
     _load: Option<Task<()>>,
     _refresh: Option<Task<()>>,
+    /// Checks for changes of embedded notes ([`embed_texts`]).
+    _embed_watch: Option<Task<()>>,
+    /// The last change of a note the view checked ([`embed_texts`]).
+    embeds_seen: u64,
+    /// Jobs started on the render tree off the UI thread
+    /// ([`embed_texts::TreeJob`]).
+    tree_jobs: u64,
     /// Remote images: the fetches, failures and sites waiting.
     remote: remote::RemoteImages,
     /// The tooltip of the link under the pointer.
@@ -354,6 +362,9 @@ impl Reader {
             fill: false,
             _load: None,
             _refresh: None,
+            _embed_watch: None,
+            embeds_seen: 0,
+            tree_jobs: 0,
             remote: remote::RemoteImages::default(),
             link_tip: link_tip::LinkTip::default(),
             content: None,
@@ -653,6 +664,7 @@ impl Reader {
                 }
                 drop(st);
                 self.status = LoadStatus::Ready;
+                self.watch_embeds(cx);
                 // The index may have changed while the document loaded.
                 if index_key(self.index.as_ref()) != self.statuses_from {
                     self.refresh_statuses(cx);

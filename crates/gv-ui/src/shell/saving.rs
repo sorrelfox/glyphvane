@@ -867,7 +867,23 @@ impl Workspace {
                     tab.notice = Some(Notice::sync_conflict(&copy, service));
                 }
             }
-            WatchEvent::IndexUpdated { index, .. } | WatchEvent::IndexBuilt { index, .. } => {
+            WatchEvent::IndexUpdated { index, changes, .. } => {
+                // Note embeds read changed notes again.
+                for change in &changes {
+                    let paths = match change {
+                        gv_vault::Change::Upsert { path, .. }
+                        | gv_vault::Change::Remove { path } => [Some(path), None],
+                        gv_vault::Change::Rename { from, to } => [Some(from), Some(to)],
+                    };
+                    for path in paths.into_iter().flatten() {
+                        crate::reader::embed_texts::changed(&path.to_fs_path(index.root()));
+                    }
+                }
+                if let Some(vault) = self.vault.clone() {
+                    vault.update(cx, |v, cx| v.publish(index, cx));
+                }
+            }
+            WatchEvent::IndexBuilt { index, .. } => {
                 if let Some(vault) = self.vault.clone() {
                     vault.update(cx, |v, cx| v.publish(index, cx));
                 }

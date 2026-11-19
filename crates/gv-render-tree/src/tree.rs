@@ -879,6 +879,67 @@ impl RenderTree {
         report
     }
 
+    /// Builds again, in place, every outermost note embed holding a note
+    /// embed (itself or a nested one) whose line's link `which` selects
+    /// (its destination is what is between the brackets of `![[…]]`,
+    /// `from` the embedding note inside an embed), for example the embeds
+    /// of a note whose text changed: the embedded notes are asked again
+    /// ([`LinkStatusSource::embed`]).
+    /// `None` when a selected embed cannot be built in place (its number
+    /// of nodes or items would change): build the document again.
+    ///
+    /// [`LinkStatusSource::embed`]: crate::LinkStatusSource::embed
+    pub fn rebuild_embeds_where<S: TextSource + ?Sized>(
+        &mut self,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        which: &dyn Fn(&LinkTarget<'_>) -> bool,
+    ) -> Option<UpdateReport> {
+        let mut report = UpdateReport::default();
+        let mut done = std::collections::HashSet::new();
+        // An embed's own line (the first node of its frame) links to the
+        // embedded note.
+        let selected: Vec<usize> = (0..self.nodes.len())
+            .filter(|&k| {
+                let n = &self.nodes[k];
+                let line = n.context.iter().any(|f| {
+                    f.id == n.id && matches!(f.kind, crate::node::FrameKind::Embed { .. })
+                });
+                line && n.inline().and_then(|c| c.links.first()).is_some_and(|l| {
+                    which(&LinkTarget {
+                        kind: l.kind,
+                        image: false,
+                        destination: &l.destination,
+                        title: l.title.as_deref(),
+                        range: n.to_document(l.source.start)..n.to_document(l.source.end),
+                        block: n.id,
+                        from: l.from.as_deref(),
+                    })
+                })
+            })
+            .collect();
+        for k in selected {
+            let Some(embed) = self.nodes[k]
+                .context
+                .iter()
+                .find(|f| matches!(f.kind, crate::node::FrameKind::Embed { .. }))
+                .map(|f| f.id)
+            else {
+                continue;
+            };
+            if !done.insert(embed) {
+                continue;
+            }
+            let nodes = self.rebuild_embed(k, tree, text, sources)?;
+            report.nodes_built += nodes.len();
+            for j in nodes {
+                self.push_changed(j, &mut report.changed);
+            }
+        }
+        Some(report)
+    }
+
     /// Rebuilds node `k` in place, or (a node inside a note embed) the
     /// embed it is in, unless that was rebuilt already (`embeds`); the
     /// rebuilt nodes and their items go to `report`.

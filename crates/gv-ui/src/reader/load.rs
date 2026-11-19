@@ -313,3 +313,44 @@ pub(crate) fn refresh(doc: &mut Loaded, links: &Resolver) -> Vec<gv_render_tree:
         .refresh_where(&doc.syntax, &*doc.text, sources, &which)
         .changed
 }
+
+/// Re-asks the sizes of the images at `dests` ([`gv_render_tree::image_key`]:
+/// their targets changed), building again in place the blocks (or note
+/// embeds) whose images changed.
+pub(crate) fn refresh_images(
+    doc: &mut Loaded,
+    links: &Resolver,
+    dests: &std::collections::HashSet<String>,
+) -> UpdateReport {
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &doc.images,
+    };
+    let sources = Sources {
+        links,
+        images: &sizes,
+    };
+    let which = |t: &LinkTarget<'_>| {
+        t.image && dests.contains(&*gv_render_tree::image_key(t.destination, t.from))
+    };
+    Arc::make_mut(&mut doc.tree).refresh_where(&doc.syntax, &*doc.text, sources, &which)
+}
+
+/// Builds again in place the note embeds whose line's link `which`
+/// selects (their notes changed). `None`: the document has to be built
+/// again.
+pub(crate) fn rebuild_embeds(
+    doc: &mut Loaded,
+    links: &Resolver,
+    which: &dyn Fn(&LinkTarget<'_>) -> bool,
+) -> Option<UpdateReport> {
+    let sizes = ImageSizes {
+        resolver: links.for_images(),
+        targets: &doc.images,
+    };
+    let sources = Sources {
+        links,
+        images: &sizes,
+    };
+    Arc::make_mut(&mut doc.tree).rebuild_embeds_where(&doc.syntax, &*doc.text, sources, which)
+}

@@ -833,7 +833,7 @@ impl Reader {
         }
         // Sizes that changed lay their items out again; the items whose
         // image kept its size are drawn again for the new pixels.
-        self.refresh_images(&dests);
+        self.refresh_images(&dests, false, cx);
         let mut st = self.state.borrow_mut();
         let ids: Vec<ItemId> = st.doc.as_ref().map_or_else(Vec::new, |doc| {
             (0..doc.tree.items().len())

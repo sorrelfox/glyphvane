@@ -991,6 +991,52 @@ fn embedded_images_refresh_in_place() {
 }
 
 #[test]
+fn embeds_of_a_changed_note_rebuild_in_place() {
+    let mut vault = Vault::default();
+    vault.notes.insert("N", "Old text.\n\nMore.\n");
+    vault.notes.insert("M", "Inner ![[N]]\n\n![[N]]\n");
+    let mut d = ob_with("See ![[N]] here.\n\n![[N]]\n\n![[M]]\n\nAfter\n", &vault);
+    let ids: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    vault.notes.insert("N", "New text.\n\nMore.\n");
+    let sources = Sources {
+        links: &vault,
+        images: &Images,
+    };
+    // Nothing selected: nothing built.
+    let report = d
+        .render
+        .rebuild_embeds_where(&d.tree, d.text.as_str(), sources, &|_| false)
+        .expect("in place");
+    assert!(report.changed.is_empty());
+    // The embeds of N, nested ones too (inside M), are built again.
+    let report = d
+        .render
+        .rebuild_embeds_where(&d.tree, d.text.as_str(), sources, &|t| t.destination == "N")
+        .expect("in place");
+    assert!(!report.changed.is_empty());
+    let texts: Vec<String> = (0..d.render.items().len())
+        .map(|ix| d.render.item_text(ix).text.to_string())
+        .collect();
+    assert_eq!(texts.iter().filter(|t| *t == "New text.").count(), 2);
+    assert!(!texts.iter().any(|t| t == "Old text."));
+    let after: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    assert_eq!(ids, after);
+    // One more block: built again by the caller.
+    vault.notes.insert("N", "New text.\n\nMore.\n\nAnd more.\n");
+    let sources = Sources {
+        links: &vault,
+        images: &Images,
+    };
+    assert!(
+        d.render
+            .rebuild_embeds_where(&d.tree, d.text.as_str(), sources, &|t| {
+                t.destination == "N"
+            })
+            .is_none()
+    );
+}
+
+#[test]
 fn embedded_html_blocks_know_their_note() {
     let mut vault = Vault::default();
     vault

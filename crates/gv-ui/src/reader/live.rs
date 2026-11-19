@@ -234,6 +234,7 @@ impl Reader {
             }
         }
         self.live.shown = Some(stamp);
+        self.watch_embeds(cx);
         self.status = LoadStatus::Ready;
         if self.typography_stale() {
             self.rebuild(cx);

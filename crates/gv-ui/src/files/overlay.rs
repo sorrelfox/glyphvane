@@ -7,7 +7,8 @@
 //! batch of edits ([`dirty`]) and reports it clean again after a save, a
 //! reload, a discard or when the document closes ([`clean`]). Every
 //! window's content index whose vault holds the file gets the text, so
-//! unsaved headings and links count until the buffer is saved.
+//! unsaved headings and links count until the buffer is saved, and note
+//! embeds of the file show it ([`unsaved`]).
 //!
 //! The registry is process-wide: workers run on the background executor
 //! without an app context, and a file may be open in one window while
@@ -76,6 +77,14 @@ pub(crate) fn dirty(path: &Path, text: &TextSnapshot) {
         }
     }
     hub.dirty.insert(path.to_path_buf(), text.clone());
+    drop(hub);
+    // Embeds of the note show the buffer.
+    crate::reader::embed_texts::changed(path);
+}
+
+/// The unsaved text of the document at `path`, if it has one.
+pub(crate) fn unsaved(path: &Path) -> Option<TextSnapshot> {
+    hub().dirty.get(path).cloned()
 }
 
 /// The document at `path` matches the disk again, or closed.
@@ -90,6 +99,9 @@ pub(crate) fn clean(path: &Path) {
             handle.clear_overlay(vp);
         }
     }
+    drop(hub);
+    // Embeds of the note show the file again.
+    crate::reader::embed_texts::changed(path);
 }
 
 #[cfg(test)]
