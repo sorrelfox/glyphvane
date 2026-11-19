@@ -371,7 +371,7 @@ fn vault_path_of(path: &Path, root: &Path) -> Option<VaultPath> {
 }
 
 /// Why an embed's target cannot be shown.
-pub(super) fn target_notice(target: &str, status: Status) -> Arc<str> {
+pub(crate) fn target_notice(target: &str, status: Status) -> Arc<str> {
     match status {
         Status::OutsideRoot => format!("\u{201c}{target}\u{201d} is outside the vault.").into(),
         Status::Blocked => format!("\u{201c}{target}\u{201d} is blocked.").into(),
@@ -379,8 +379,40 @@ pub(super) fn target_notice(target: &str, status: Status) -> Arc<str> {
     }
 }
 
+/// The search a query block's text stands for: its non-empty lines,
+/// joined; why when it is not a valid query.
+pub(crate) fn query_of(text: &str) -> Result<Query, String> {
+    let words: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    Query::new(&words.join(" "), false).map_err(|e| format!("Invalid query: {e}"))
+}
+
+/// Runs `query` over the vault's `content` (files read below `root`) as a
+/// query block does (blocking: the low-priority pool).
+pub(crate) fn search(
+    query: &Query,
+    content: ContentSnapshot,
+    root: &Path,
+    cancel: &CancelToken,
+) -> QueryShown {
+    let source = VaultSource::new(
+        content.clone(),
+        Arc::new(DiskSource::new(root, content.options())),
+    );
+    let options = SearchOptions {
+        max_files: QUERY_SCAN_LIMIT,
+        max_snippets_per_file: QUERY_SNIPPETS,
+        ..SearchOptions::default()
+    };
+    let (files, summary) = gv_search::search_all(query, &source, &options, cancel);
+    QueryShown::new(files, summary.limit_reached)
+}
+
 /// Reads a canvas or base file (blocking: the background executor).
-fn read_file(path: &Path) -> Result<Arc<str>, String> {
+pub(crate) fn read_file(path: &Path) -> Result<Arc<str>, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("Cannot read the file: {e}"))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err("The file is too large to show here.".to_owned());
@@ -637,15 +669,10 @@ impl Reader {
         cx: &mut Context<'_, Self>,
     ) {
         let key = block.key;
-        let words: Vec<&str> = text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        let query = match Query::new(&words.join(" "), false) {
+        let query = match query_of(text) {
             Ok(q) => q,
-            Err(e) => {
-                self.land(key, Shown::Notice(format!("Invalid query: {e}").into()), cx);
+            Err(why) => {
+                self.land(key, Shown::Notice(why.into()), cx);
                 return;
             }
         };
@@ -664,18 +691,7 @@ impl Reader {
             let shown = cx
                 .background_executor()
                 .spawn_with_priority(gpui::Priority::Low, async move {
-                    let source = VaultSource::new(
-                        content.clone(),
-                        Arc::new(DiskSource::new(&root, content.options())),
-                    );
-                    let options = SearchOptions {
-                        max_files: QUERY_SCAN_LIMIT,
-                        max_snippets_per_file: QUERY_SNIPPETS,
-                        ..SearchOptions::default()
-                    };
-                    let (files, summary) =
-                        gv_search::search_all(&query, &source, &options, &CancelToken::new());
-                    QueryShown::new(files, summary.limit_reached)
+                    search(&query, content, &root, &CancelToken::new())
                 })
                 .await;
             reader

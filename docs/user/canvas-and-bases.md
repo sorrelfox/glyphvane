@@ -18,11 +18,15 @@ A canvas is a board of cards connected by arrows.
   A diagram shows its source until it is drawn, or when it cannot be drawn.
   HTML shows as in the Reading view: a `<details>` element shows its
   summary, and its content only when it has `open` (a card cannot open
-  it); other HTML blocks show their source, marked *html*. Bases, search
-  queries (` ```query `) and embedded canvases, PDFs, audio, video and web
-  pages show a small card naming them, such as *Base: Tasks.base*; open the
-  note to see them. A folded callout (`> [!note]-`) shows only its title.
-  Images inside the text are not drawn.
+  it); other HTML blocks show their source, marked *html*. A search query
+  (` ```query `) lists its first five notes and how many more there are; a
+  base (` ```base ` or an embedded `.base` file) shows the first rows and
+  columns of its view; embedded PDFs, audio, video and web pages show a
+  card saying what they are (nothing is played or loaded). They fill in once
+  the vault is indexed and follow its changes. Zoomed out, and for embedded
+  canvases, a small card names them instead, such as *Base: Tasks.base*. A
+  folded callout (`> [!note]-`) shows only its title. Images inside the
+  text are not drawn.
 - **File cards** show the file: the first blocks of a note (or the heading or
   block the card points to), drawn like a text card, an image, the first
   page of a PDF, or the shapes of another canvas. Other files show as a
@@ -45,6 +49,7 @@ left lists them.
 | Click a card | Select it |
 | Click a file card | Open the file (**Ctrl+click** for a new tab, middle click for a background tab) |
 | Click a link card | Open the web address |
+| Click a note or row in a query or base, or a media card | Open it (**Ctrl+click** for a new tab) |
 
 | Key | What it does |
 |---|---|

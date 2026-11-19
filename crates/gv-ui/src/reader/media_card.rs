@@ -576,7 +576,7 @@ fn read_pdf(path: &Path, len: u64) -> Result<Vec<u8>, String> {
 }
 
 /// The size of the file at `path` (blocking: the background executor).
-fn size_of(path: &Path) -> Result<u64, String> {
+pub(crate) fn size_of(path: &Path) -> Result<u64, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("Cannot read the file: {e}"))?;
     if !meta.is_file() {
         return Err("Not a file.".to_owned());

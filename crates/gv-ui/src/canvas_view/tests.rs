@@ -1492,3 +1492,268 @@ fn card_html_and_live_blocks_are_drawn_without_jobs(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// A vault with notes for live blocks in cards: seven notes that match
+/// `zebra` and have the `cardtag` tag, a note with a video and a canvas
+/// embed, the video and the canvas.
+fn live_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".obsidian")).expect("folder");
+    std::fs::write(root.join(".obsidian/app.json"), "{}").expect("write");
+    for i in 1..=7 {
+        std::fs::write(
+            root.join(format!("N{i}.md")),
+            format!("#cardtag\n\nA zebra, number {i}.\n"),
+        )
+        .expect("write");
+    }
+    std::fs::write(root.join("Media.md"), "![[clip.mp4]]\n\n![[Plan.canvas]]\n").expect("write");
+    std::fs::write(root.join("clip.mp4"), [0u8; 2048]).expect("write");
+    std::fs::write(root.join("Plan.canvas"), SUB).expect("write");
+    let board = r#"{"nodes":[
+        {"id":"q","type":"text","x":0,"y":0,"width":400,"height":540,
+         "text":"```query\nzebra\n```"},
+        {"id":"b","type":"text","x":450,"y":0,"width":500,"height":300,
+         "text":"```base\nfilters: 'file.hasTag(\"cardtag\")'\nviews:\n  - type: table\n    name: All\n```"},
+        {"id":"m","type":"file","x":450,"y":350,"width":500,"height":250,"file":"Media.md"}]}"#;
+    std::fs::write(root.join("live.canvas"), board).expect("write");
+    dir
+}
+
+/// The vault index and content index of the vault at `root`.
+fn vault_snapshot(root: &Path) -> (gv_vault::PathIndex, gv_vault::content::ContentSnapshot) {
+    use gv_vault::content::{ContentOptions, ContentSnapshot, DiskSource};
+    let paths = gv_vault::PathIndex::build(root, gv_vault::IndexConfig::default())
+        .expect("index")
+        .0;
+    let options = ContentOptions::for_profile(gv_profile::ProfileId::Obsidian);
+    let source = DiskSource::new(root, &options);
+    let content = ContentSnapshot::build(paths.clone(), options, &source, &AtomicBool::new(false))
+        .expect("content");
+    (paths, content)
+}
+
+/// Shows the canvas at `zoom` with the world's origin 20 px in, drawn
+/// once without running anything in between.
+fn show_at(view: &Entity<CanvasView>, vcx: &mut VisualTestContext, zoom: f64) {
+    view.update(vcx, |v, cx| {
+        v.fitted = true;
+        v.set_transform(
+            Transform {
+                zoom,
+                pan: gv_canvas::Point::new(20.0, 20.0),
+            },
+            cx,
+        );
+    });
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+#[gpui::test]
+fn card_live_blocks_show_results_off_the_frame_and_open_them(cx: &mut TestAppContext) {
+    use super::cards::Block;
+    use super::live::{CARD_BASE_ROWS, Open, Shown};
+    use gv_render_tree::LiveKind;
+
+    let dir = live_vault();
+    let root = dir.path().to_path_buf();
+    let (window, view) = open(cx, &root.join("live.canvas"), &root);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    vcx.run_until_parked();
+    let (index, content) = vault_snapshot(&root);
+    view.update(&mut vcx, |v, cx| {
+        v.set_index(Some(index.clone()), cx);
+        v.set_content(Some(content.clone()), cx);
+    });
+    let (q, b, m) = (
+        node(&view, &mut vcx, "q"),
+        node(&view, &mut vcx, "b"),
+        node(&view, &mut vcx, "m"),
+    );
+
+    // Zoomed out, cards keep the placeholders and nothing is run (what
+    // the window's first frame, at 100 %, asked for is forgotten).
+    show_at(&view, &mut vcx, 0.32);
+    view.update(&mut vcx, |v, _| v.cards.live.clear());
+    show_at(&view, &mut vcx, 0.32);
+    draw(&mut vcx);
+    view.read_with(&vcx, |v, _| {
+        let built = v.cards.built.get(&q).expect("the query card was built");
+        assert!(
+            built
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Live { live: Some(_), .. })),
+            "{:?}",
+            built.blocks
+        );
+        assert_eq!(v.cards.live.len(), 0, "nothing asked for");
+    });
+
+    // Readable: asked for while drawn, filled in off the frame.
+    show_at(&view, &mut vcx, 1.0);
+    view.read_with(&vcx, |v, _| {
+        let asked = v.cards.live.of_node(q);
+        assert!(
+            matches!(asked.as_slice(), [(LiveKind::Query, Shown::Pending)]),
+            "{asked:?}"
+        );
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let hits = view.read_with(&vcx, |v, _| {
+        let query = v.cards.live.of_node(q);
+        let [(LiveKind::Query, Shown::Query(results))] = query.as_slice() else {
+            panic!("{query:?}");
+        };
+        assert_eq!(results.matched, 7);
+        let base = v.cards.live.of_node(b);
+        let [(LiveKind::Base, Shown::Base(table))] = base.as_slice() else {
+            panic!("{base:?}");
+        };
+        assert_eq!(table.rows.len(), CARD_BASE_ROWS);
+        assert_eq!(table.more, 7 - CARD_BASE_ROWS);
+        assert_eq!(table.count, "7 results");
+        // A file card's note: the video's card; its canvas embed stays a
+        // placeholder (never asked for).
+        let media = v.cards.live.of_node(m);
+        let [(LiveKind::Video, Shown::Media(card, open))] = media.as_slice() else {
+            panic!("{media:?}");
+        };
+        assert_eq!(card.title, "clip.mp4");
+        assert!(card.detail.starts_with("MP4 video"), "{}", card.detail);
+        assert_eq!(open, &Some(Open::File(root.join("clip.mp4"))));
+        let note = v.cards.built.get(&m).expect("the note preview was built");
+        assert!(note.blocks.iter().any(|b| matches!(
+            b,
+            Block::Live { live: None, title, .. } if title.as_ref() == "Canvas: Plan.canvas"
+        )));
+        v.live_hits.borrow().clone()
+    });
+    // Five notes (the rest counted), six rows, the media card.
+    let count = |n: usize| hits.iter().filter(|h| h.node == n).count();
+    assert_eq!((count(q), count(b), count(m)), (5, CARD_BASE_ROWS, 1));
+
+    // A click on a note opens it; Mod opens it in a new tab.
+    let seen = events(&view, &mut vcx);
+    let first = hits.iter().find(|h| h.node == q).expect("a note").clone();
+    let Open::File(path) = &first.open else {
+        panic!("{first:?}");
+    };
+    assert!(path.starts_with(&root) && path.extension().is_some_and(|e| e == "md"));
+    vcx.simulate_click(first.bounds.center(), mod_key());
+    vcx.run_until_parked();
+    assert_eq!(
+        seen.borrow().as_slice(),
+        [CanvasEvent::OpenFile {
+            path: path.clone(),
+            fragment: None,
+            disposition: Disposition::NewTab,
+        }]
+    );
+    // So does a click on a base's row and on the media card.
+    let row = hits.iter().find(|h| h.node == b).expect("a row").clone();
+    vcx.simulate_click(row.bounds.center(), Modifiers::none());
+    let card = hits.iter().find(|h| h.node == m).expect("the card").clone();
+    vcx.simulate_click(card.bounds.center(), Modifiers::none());
+    vcx.run_until_parked();
+    {
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(matches!(
+            &seen[1],
+            CanvasEvent::OpenFile { path, disposition: Disposition::InPlace, .. }
+                if path.starts_with(&root) && path.extension().is_some_and(|e| e == "md")
+        ));
+        assert_eq!(
+            seen[2],
+            CanvasEvent::OpenFile {
+                path: root.join("clip.mp4"),
+                fragment: None,
+                disposition: Disposition::InPlace,
+            }
+        );
+    }
+    // Elsewhere in the card, a click selects it and opens nothing.
+    let below = window_point(&view, &mut vcx, 200.0, 530.0);
+    vcx.simulate_click(below, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(seen.borrow().len(), 3);
+    assert_eq!(view.read_with(&vcx, |v, _| v.selected()), Some(q));
+
+    // The vault changes: a new snapshot runs the query and the base again,
+    // the results shown meanwhile staying.
+    std::fs::write(root.join("N8.md"), "#cardtag\n\nOne more zebra.\n").expect("write");
+    let (index, content) = vault_snapshot(&root);
+    view.update(&mut vcx, |v, cx| {
+        v.set_content(None, cx);
+        v.set_index(Some(index), cx);
+        v.set_content(Some(content), cx);
+    });
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(&vcx, |v, _| {
+        let query = v.cards.live.of_node(q);
+        assert!(
+            matches!(query.as_slice(), [(_, Shown::Query(r))] if r.matched == 7),
+            "{query:?}"
+        );
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    view.read_with(&vcx, |v, _| {
+        let query = v.cards.live.of_node(q);
+        assert!(
+            matches!(query.as_slice(), [(_, Shown::Query(r))] if r.matched == 8),
+            "{query:?}"
+        );
+        let base = v.cards.live.of_node(b);
+        assert!(
+            matches!(base.as_slice(), [(_, Shown::Base(t))] if t.count == "8 results"),
+            "{base:?}"
+        );
+    });
+}
+
+#[gpui::test]
+fn card_queries_and_bases_wait_for_the_vault(cx: &mut TestAppContext) {
+    use super::live::Shown;
+
+    let dir = live_vault();
+    let root = dir.path().to_path_buf();
+    let (window, view) = open(cx, &root.join("live.canvas"), &root);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    vcx.run_until_parked();
+    show_at(&view, &mut vcx, 1.0);
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let (q, b) = (node(&view, &mut vcx, "q"), node(&view, &mut vcx, "b"));
+    view.read_with(&vcx, |v, _| {
+        for n in [q, b] {
+            let shown = v.cards.live.of_node(n);
+            assert!(
+                matches!(shown.as_slice(), [(_, Shown::Notice(why))] if why.contains("indexed")),
+                "{shown:?}"
+            );
+        }
+    });
+    // The first snapshot fills them in.
+    let (_, content) = vault_snapshot(&root);
+    view.update(&mut vcx, |v, cx| v.set_content(Some(content), cx));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    view.read_with(&vcx, |v, _| {
+        assert!(matches!(
+            v.cards.live.of_node(q).as_slice(),
+            [(_, Shown::Query(r))] if r.matched == 7
+        ));
+        assert!(matches!(
+            v.cards.live.of_node(b).as_slice(),
+            [(_, Shown::Base(_))]
+        ));
+    });
+}

@@ -1410,6 +1410,7 @@ impl Workspace {
             let content = content.clone();
             reader.update(cx, |r, cx| r.set_content(content, cx));
         }
+        self.push_canvas_content(cx);
     }
 
     /// The Reading view of tab `index`, made and loading on first use.

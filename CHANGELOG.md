@@ -12,6 +12,12 @@ Conventional Commits, and versions follow Semantic Versioning.
   two columns are read column by column, so find, selection and copying
   follow the reading order.
 
+### Reading
+
+- Canvas cards show query results, base tables and media cards instead of
+  placeholders, filled in off the UI thread and kept up to date with the
+  vault; a click on a result opens it. Embedded canvases stay placeholders.
+
 ## [1.2.0] - 2026-11-19
 
 ### PDF

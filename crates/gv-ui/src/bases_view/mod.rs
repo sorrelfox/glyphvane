@@ -100,6 +100,7 @@ use crate::metrics::text;
 use crate::reader::{Disposition, LinkRequest};
 use crate::theme::Theme;
 use cards::Covers;
+pub(crate) use cells::cell_text;
 pub use panel::BasesPanel;
 use table::Line;
 

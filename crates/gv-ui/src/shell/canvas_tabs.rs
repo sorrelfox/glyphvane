@@ -71,6 +71,16 @@ impl Workspace {
         .detach();
         self.tabs[index].canvas = Some(canvas.clone());
         self.track_file(&path, None, cx);
+        if let Some(vault) = &self.vault {
+            let (index, content) = {
+                let v = vault.read(cx);
+                (v.snapshot(), v.content())
+            };
+            canvas.update(cx, |c, cx| {
+                c.set_index(Some(index), cx);
+                c.set_content(content, cx);
+            });
+        }
         Some(canvas)
     }
 
@@ -127,6 +137,30 @@ impl Workspace {
         for canvas in self.tabs.iter().filter_map(|t| t.canvas.clone()) {
             let root = root.clone();
             canvas.update(cx, |c, cx| c.set_vault_root(root, cx));
+        }
+    }
+
+    /// The cards' live blocks (queries, bases, embeds) use the vault's
+    /// path index and content index: every Canvas view gets each new
+    /// snapshot.
+    pub(super) fn push_canvas_content(&self, cx: &mut Context<'_, Self>) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        let canvases: Vec<_> = self.tabs.iter().filter_map(|t| t.canvas.clone()).collect();
+        if canvases.is_empty() {
+            return;
+        }
+        let (index, content) = {
+            let v = vault.read(cx);
+            (v.snapshot(), v.content())
+        };
+        for canvas in canvases {
+            let (index, content) = (index.clone(), content.clone());
+            canvas.update(cx, |c, cx| {
+                c.set_index(Some(index), cx);
+                c.set_content(content, cx);
+            });
         }
     }
 

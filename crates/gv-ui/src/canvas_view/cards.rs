@@ -25,13 +25,14 @@
 //!   `<video>` and `<iframe>` blocks are live blocks (below); a
 //!   `<picture>` is an image, not drawn. Nothing here needs a job.
 //! - **Live blocks** (` ```base ` and ` ```query ` fences, base, canvas
-//!   and media embeds, HTML media): a placeholder card, built with the
-//!   block, that names the kind and what it shows (`Base: Tasks.base`,
-//!   the query's first line) and says to open the note. The Reading view
-//!   fills these in from the vault (a hosted bases table, a vault-wide
-//!   search, a file read), too much for every card of a canvas; nothing
-//!   is read or run for them. Not designed: built plainly from the card's
-//!   tokens, flagged.
+//!   and media embeds, HTML media): a box, built with the block, that
+//!   names the kind and what it shows (`Base: Tasks.base`, the query's
+//!   first line). Queries, bases and media are filled in from the vault
+//!   off the UI thread when the card is drawn large enough to read
+//!   ([`super::live`]); until then, and for embedded canvases (never drawn
+//!   inside a card), it is a placeholder that says to open the note.
+//!   Building the block runs nothing. Not designed: built plainly from the
+//!   card's tokens, flagged.
 //! - **File cards**: read off the UI thread when first shown. A note shows
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
@@ -77,6 +78,7 @@ use gv_render_tree::{
 use gv_syntax::{ParseOptions, SyntaxTree};
 
 use super::Doc;
+use super::live::LiveCards;
 use crate::export::PdfEngine;
 use crate::icons::Icon;
 use crate::inline::{BoxContent, FontFamilies, FontTable, InlineBlock, InlineText, font_of};
@@ -229,12 +231,15 @@ pub(crate) enum Block {
         indent: f32,
         gap: f32,
     },
-    /// A live block's placeholder card: the kind's icon, a title naming
-    /// the kind and what it shows, and a note saying where to see it.
+    /// A live block: the kind's icon, a title naming the kind and what it
+    /// shows, and the placeholder's note saying where to see it. `live` is
+    /// the block when the card fills it in ([`super::live`]); `None` keeps
+    /// the placeholder (an embedded canvas).
     Live {
         icon: Icon,
         title: SharedString,
         note: SharedString,
+        live: Option<Arc<LiveBlock>>,
         indent: f32,
         gap: f32,
     },
@@ -378,6 +383,8 @@ pub(crate) struct Cards {
     work: Work,
     /// The nodes whose built Markdown waits for a job's result.
     waiting: HashMap<Wait, Vec<usize>>,
+    /// Live blocks' content, by node and block.
+    pub live: LiveCards,
     /// Builds made (for tests and the culling check).
     pub builds: u64,
 }
@@ -403,6 +410,7 @@ impl Cards {
             backgrounds: HashMap::new(),
             work: Work::default(),
             waiting: HashMap::new(),
+            live: LiveCards::default(),
             builds: 0,
         }
     }
@@ -415,6 +423,7 @@ impl Cards {
         self.backgrounds.clear();
         self.work.clear();
         self.waiting.clear();
+        self.live.clear();
     }
 
     /// The jobs to start.
@@ -715,6 +724,7 @@ fn build_blocks(
                     icon,
                     title,
                     note,
+                    live: (live.kind != LiveKind::Canvas).then(|| Arc::clone(live)),
                     indent,
                     gap,
                 });
@@ -833,6 +843,26 @@ fn live_placeholder(live: &LiveBlock) -> (Icon, SharedString, SharedString) {
         _ => "Open the note to see it",
     };
     (icon, title.into(), note.into())
+}
+
+/// The live blocks of `text` as a card builds them (tests).
+#[cfg(test)]
+pub(crate) fn live_blocks_of(text: &str) -> Vec<Arc<LiveBlock>> {
+    let profile = gv_profile::compile_builtin(ProfileId::Obsidian);
+    let parsed = Parsed::new(text.into(), &profile);
+    let mut work = Work::default();
+    build_blocks(
+        &parsed,
+        RenderOptions::for_profile(&profile),
+        &mut work,
+        &mut Vec::new(),
+    )
+    .into_iter()
+    .filter_map(|b| match b {
+        Block::Live { live, .. } => live,
+        _ => None,
+    })
+    .collect()
 }
 
 /// Image extensions the media engine decodes.
@@ -1638,6 +1668,24 @@ mod tests {
                 (Icon::VideoFile, "Video: Demo clip".to_owned(), see),
             ],
             "{blocks:?}"
+        );
+        // Every block but the embedded canvas is filled in by the view.
+        let filled: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Live { live, .. } => Some(live.as_ref().map(|l| l.kind)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            filled,
+            [
+                Some(LiveKind::Base),
+                Some(LiveKind::Query),
+                Some(LiveKind::Base),
+                None,
+                Some(LiveKind::Video)
+            ]
         );
         // Nothing shows the fences' text, and nothing is asked for.
         assert!(

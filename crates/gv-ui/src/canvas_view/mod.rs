@@ -27,8 +27,9 @@
 //!   canvas about its centre while it has the focus.
 //! - A click selects a node; a click on a file card opens its file (Mod
 //!   for a new tab, middle click for a background tab) and on a link card
-//!   follows its URL through the window's link policy. Nothing is ever
-//!   moved or written.
+//!   follows its URL through the window's link policy. A click on a live
+//!   block's note, row or media card in a card opens it ([`live`]).
+//!   Nothing is ever moved or written.
 //! - Keys ([`key_bindings`]): Tab and Shift+Tab walk the cards in reading
 //!   order and then, when the file has problems, the problems chip (Enter
 //!   or Space opens its list); Tab past the last stop and Shift+Tab before
@@ -58,10 +59,12 @@
 //!
 //! The whole surface: card, group and edge styling, the issues chip and
 //! list, the zoom readout, the minimap, the loading, empty and error
-//! states, and the cards' placeholders for live blocks.
+//! states, and the cards' live blocks (their placeholders, query results,
+//! base tables and media cards).
 
 mod a11y;
 mod cards;
+mod live;
 mod minimap;
 mod paint;
 #[cfg(test)]
@@ -309,6 +312,8 @@ pub struct CanvasView {
     painted: Rc<Cell<usize>>,
     /// Group background images painted in the last frame.
     backgrounds_painted: Rc<Cell<usize>>,
+    /// The clickable parts of the cards' live blocks in the last frame.
+    live_hits: live::Hits,
     nodes_drawn: usize,
     /// PDF cards waiting for their first page (node, file). The helper
     /// draws one page at a time, so the view asks for one at a time
@@ -380,6 +385,7 @@ impl CanvasView {
             cards: Cards::new(&families),
             painted: Rc::new(Cell::new(0)),
             backgrounds_painted: Rc::new(Cell::new(0)),
+            live_hits: live::Hits::default(),
             nodes_drawn: 0,
             pdf_queue: VecDeque::new(),
             pdf_busy: false,
@@ -725,7 +731,12 @@ impl CanvasView {
                 if disposition == Disposition::InPlace {
                     self.selected = Some(n);
                 }
-                self.open_node(n, disposition, cx);
+                // A query's note, a base's row, a media card: as in the
+                // Reading view.
+                match self.live_hit(n, at) {
+                    Some(open) => self.open_live(&open, disposition, cx),
+                    None => self.open_node(n, disposition, cx),
+                }
             }
             Some(ItemId::Edge(_)) | None => {
                 if disposition == Disposition::InPlace {
@@ -1159,44 +1170,30 @@ impl CanvasView {
                     icon,
                     title,
                     note,
+                    live: filled,
                     indent,
                     gap,
                 } => {
                     let gap = if i == 0 { 0.0 } else { gap * k };
                     let size = built.body_size;
+                    // Zoomed out, the placeholder stays and nothing runs.
+                    let shown = filled
+                        .as_ref()
+                        .filter(|_| size * k >= live::MIN_TEXT_PX)
+                        .map(|b| self.cards.live.shown(node, b));
+                    let look = live::Look {
+                        icon: *icon,
+                        title,
+                        note,
+                        size,
+                        pad: code_pad,
+                        colors,
+                    };
+                    let root = self.root();
                     column = column.child(
-                        div()
-                            .flex_none()
+                        live::live_box(&look, shown.as_ref(), node, &root, &self.live_hits)
                             .mt(px(gap))
-                            .ml(px(indent * k))
-                            .p(px(code_pad))
-                            .flex()
-                            .flex_col()
-                            .gap(px(size * 0.3))
-                            .rounded(px(size * 0.3))
-                            .border_1()
-                            .border_color(colors.card_border)
-                            .text_size(px(size))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(size * 0.4))
-                                    .text_color(colors.text)
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(colors.label)
-                                            .child(icon.sized(size)),
-                                    )
-                                    .child(title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(size * LABEL_EM))
-                                    .text_color(colors.muted)
-                                    .child(note.clone()),
-                            ),
+                            .ml(px(indent * k)),
                     );
                 }
                 Block::Diagram { block, indent, gap } => {
@@ -1331,6 +1328,7 @@ impl CanvasView {
         let mut to_load = Vec::new();
         let mut backgrounds = Vec::new();
         self.nodes_drawn = 0;
+        self.live_hits.borrow_mut().clear();
         for &item in visible {
             match item {
                 ItemId::Edge(e) => {
@@ -1466,6 +1464,7 @@ impl CanvasView {
             self.load_backgrounds(backgrounds, cx);
         }
         self.start_jobs(cx);
+        self.fetch_live(cx);
         // Groups' and edges' labels sit under the cards, as their shapes do.
         labels.extend(nodes);
         labels
