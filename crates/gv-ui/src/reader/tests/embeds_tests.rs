@@ -609,6 +609,45 @@ fn pdf_embeds_show_their_page(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_pdf_embed_is_drawn_again_sharper_when_zoomed_in(cx: &mut TestAppContext) {
+    use crate::file_viewer::pdf_tests::FakePdf;
+
+    let doc = "![[Paper.pdf#page=2&height=100]]\n\nAfter.\n";
+    let dir = vault(&[("Doc.md", doc), ("Paper.pdf", "%PDF-1.7\n")]);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 2]));
+    let mut v = View::open_with(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+        Some(Arc::clone(&engine) as Arc<dyn crate::export::PdfEngine>),
+    );
+    let prefix = "![[Paper.pdf";
+    v.wait_live(prefix, "the page", |s| matches!(s, Shown::PdfPage(_)));
+    let fitted = |e: &FakePdf| e.fitted.lock().expect("lock").clone();
+    assert_eq!(fitted(&engine), [(1, 1600, 200)]);
+    // The test window has a scale factor of 2. At 150 %: drawn again for
+    // three device pixels per px.
+    v.vcx.update(|_, cx| crate::zoom::set(cx, 150));
+    let shown = v.wait_live(
+        prefix,
+        "the sharper page",
+        |s| matches!(s, Shown::PdfPage(p) if p.scale > 2.5),
+    );
+    let Shown::PdfPage(page) = shown else {
+        unreachable!()
+    };
+    assert!((page.scale - 3.0).abs() < 0.01, "{}", page.scale);
+    assert_eq!(fitted(&engine), [(1, 1600, 200), (1, 2400, 300)]);
+    // Zoomed out again: the sharper page stays.
+    for percent in [100, 50] {
+        v.vcx.update(|_, cx| crate::zoom::set(cx, percent));
+        v.settle();
+    }
+    assert_eq!(fitted(&engine).len(), 2);
+    assert!(matches!(v.live(prefix).0, Shown::PdfPage(_)));
+}
+
+#[gpui::test]
 fn html_audio_resolves_next_to_the_note_and_network_paths_are_blocked(cx: &mut TestAppContext) {
     // Audio and video are HTML blocks when the start tag ends its line.
     let doc = "<audio controls src=\"rec/memo.ogg\">\n</audio>\n\n\

@@ -1008,6 +1008,55 @@ fn embedded_images_refresh_in_place() {
 }
 
 #[test]
+fn images_in_inline_footnotes_refresh_in_place() {
+    let pending = SizedImages(ImageSize::Pending);
+    let mut d = build_with(
+        "Text^[see ![p](p.png) here] and more.\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources {
+            links: &Vault::default(),
+            images: &pending,
+        },
+    );
+    let section = d.render.footnote_section_start();
+    let def = d.render.items().len() - 1;
+    assert!(def > section);
+    let size = |rt: &RenderTree| {
+        rt.item_inline(def)
+            .and_then(|c| c.images.first())
+            .map(|i| i.size)
+            .expect("an image in the definition")
+    };
+    assert_eq!(size(&d.render), ImageSize::Pending);
+    let ids: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    let known = SizedImages(ImageSize::Known {
+        width: 20.0,
+        height: 10.0,
+    });
+    let report = d.render.refresh_where(
+        &d.tree,
+        d.text.as_str(),
+        Sources {
+            links: &Vault::default(),
+            images: &known,
+        },
+        &|t| t.image,
+    );
+    // The definition in the footnote section takes the new size, in place.
+    assert_eq!(
+        size(&d.render),
+        ImageSize::Known {
+            width: 20.0,
+            height: 10.0
+        }
+    );
+    assert!(report.changed.contains(&ids[def]));
+    let after: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    assert_eq!(ids, after);
+}
+
+#[test]
 fn embeds_of_a_changed_note_rebuild_in_place() {
     let mut vault = Vault::default();
     vault.notes.insert("N", "Old text.\n\nMore.\n");

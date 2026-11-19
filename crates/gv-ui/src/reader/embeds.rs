@@ -220,6 +220,19 @@ struct Entry {
     /// change.
     text: Option<Arc<str>>,
     _events: Option<Subscription>,
+    /// Cancels the query running for it.
+    cancel: Option<CancelToken>,
+    /// Laid out or drawn in this frame.
+    seen: bool,
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        // A block that goes (another document) stops its query.
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+    }
 }
 
 /// The live blocks of the shown document and their content.
@@ -250,7 +263,10 @@ impl LiveBlocks {
             height: None,
             text: None,
             _events: None,
+            cancel: None,
+            seen: true,
         });
+        e.seen = true;
         e.items.insert(item);
         if e.stale && !e.asked {
             e.stale = false;
@@ -276,6 +292,7 @@ impl LiveBlocks {
             return Vec::new();
         };
         e.asked = false;
+        e.cancel = None;
         e.shown = shown;
         e.items.iter().copied().collect()
     }
@@ -284,7 +301,54 @@ impl LiveBlocks {
     pub fn unchanged(&mut self, key: LiveKey) {
         if let Some(e) = self.entries.get_mut(&key) {
             e.asked = false;
+            e.cancel = None;
         }
+    }
+
+    /// Asks for `key` again at the end of the frame, what it shows staying
+    /// meanwhile (a PDF page drawn for a smaller zoom).
+    pub fn ask_again(&mut self, key: LiveKey) {
+        if let Some(e) = self.entries.get_mut(&key)
+            && !e.asked
+        {
+            e.asked = true;
+            e.stale = false;
+            self.requests.push(Arc::clone(&e.block));
+        }
+    }
+
+    /// A query runs for `key`, stopped by `cancel` when the block leaves
+    /// the view ([`LiveBlocks::end_frame`]) or the document.
+    pub fn running(&mut self, key: LiveKey, cancel: CancelToken) {
+        if let Some(e) = self.entries.get_mut(&key) {
+            e.cancel = Some(cancel);
+        }
+    }
+
+    /// Block `key` is laid out or drawn in this frame.
+    pub fn see(&mut self, key: LiveKey) {
+        if let Some(e) = self.entries.get_mut(&key) {
+            e.seen = true;
+        }
+    }
+
+    /// Ends a frame: the queries of blocks not laid out or drawn in it
+    /// stop; they run again when the blocks show. Returns their items,
+    /// to lay out again then.
+    pub fn end_frame(&mut self) -> Vec<ItemId> {
+        let mut items = Vec::new();
+        for e in self.entries.values_mut() {
+            if !e.seen
+                && let Some(cancel) = e.cancel.take()
+            {
+                cancel.cancel();
+                e.asked = false;
+                e.stale = true;
+                items.extend(e.items.iter().copied());
+            }
+            e.seen = false;
+        }
+        items
     }
 
     /// Keeps the base view's event subscription and file text with `key`.
@@ -688,13 +752,24 @@ impl Reader {
             return;
         };
         let revision = self.state.borrow().revision;
+        let cancel = CancelToken::new();
+        self.state
+            .borrow_mut()
+            .cache
+            .live
+            .running(key, cancel.clone());
         cx.spawn(async move |reader, cx| {
+            let job = cancel.clone();
             let shown = cx
                 .background_executor()
                 .spawn_with_priority(gpui::Priority::Low, async move {
-                    search(&query, content, &root, &CancelToken::new())
+                    search(&query, content, &root, &job)
                 })
                 .await;
+            if cancel.is_cancelled() {
+                // Left the view or the document: asked again when shown.
+                return;
+            }
             reader
                 .update(cx, |reader, cx| {
                     if reader.state.borrow().revision != revision {
@@ -767,4 +842,62 @@ pub(crate) fn open_request(
         from: block.host.clone(),
         at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The live block of a query fence, and its item.
+    fn query_block() -> (Arc<LiveBlock>, ItemId) {
+        let text = "```query\napple\n```\n";
+        let profile = gv_syntax::ProfileId::Obsidian;
+        let tree = gv_syntax::parse_with(text, gv_syntax::ParseOptions::builtin(profile));
+        let model = gv_model::DocModel::build(&tree, text);
+        let rt = RenderTree::build(
+            &tree,
+            &model,
+            text,
+            gv_render_tree::RenderOptions::builtin(profile),
+            gv_render_tree::Sources::default(),
+        );
+        (0..rt.items().len())
+            .find_map(|ix| match &rt.node_of(ix)?.kind {
+                NodeKind::Live(l) => Some((Arc::clone(l), rt.items()[ix].id)),
+                _ => None,
+            })
+            .expect("a live block")
+    }
+
+    #[test]
+    fn queries_stop_when_their_block_leaves_the_view_or_the_document() {
+        let (block, item) = query_block();
+        let mut live = LiveBlocks::default();
+        live.shown(&block, item);
+        assert_eq!(live.take_requests().len(), 1);
+        let cancel = CancelToken::new();
+        live.running(block.key, cancel.clone());
+        // Laid out in the frame: it runs on.
+        live.see(block.key);
+        assert!(live.end_frame().is_empty());
+        assert!(!cancel.is_cancelled());
+        // Not laid out in a frame: stopped, its item laid out again, and
+        // asked for again when it shows.
+        assert_eq!(live.end_frame(), [item]);
+        assert!(cancel.is_cancelled());
+        live.shown(&block, item);
+        assert_eq!(live.take_requests().len(), 1);
+        // A query that ended is not stopped.
+        let done = CancelToken::new();
+        live.running(block.key, done.clone());
+        live.landed(block.key, Shown::Notice("done".into()));
+        assert!(live.end_frame().is_empty());
+        assert!(!done.is_cancelled());
+        // Another document: the running query stops.
+        let other = CancelToken::new();
+        live.shown(&block, item);
+        live.running(block.key, other.clone());
+        live.clear();
+        assert!(other.is_cancelled());
+    }
 }

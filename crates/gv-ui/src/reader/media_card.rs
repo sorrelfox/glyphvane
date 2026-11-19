@@ -60,8 +60,16 @@ pub(crate) const PDF_EMBED_HEIGHT: f32 = 480.0;
 /// The tallest page area `#height=N` may ask for, px.
 const PDF_EMBED_MAX_HEIGHT: f32 = 4000.0;
 
-/// The widest page image drawn for an embed, device pixels.
+/// The widest page image drawn for an embed, device pixels, at a scale
+/// of 2 ([`pdf_scale`]).
 const PDF_EMBED_WIDTH: u32 = 1600;
+
+/// The device pixels a PDF embed's page is drawn with per px at 100 %:
+/// the view's zoom times the window's scale factor, and at least 2, so
+/// the page stays sharp when zoomed in.
+pub(crate) fn pdf_scale(zoom: f32, window_scale: f32) -> f32 {
+    (zoom * window_scale).max(2.0)
+}
 
 /// A PDF embed's page, drawn.
 pub(crate) struct PdfPageShown {
@@ -73,6 +81,8 @@ pub(crate) struct PdfPageShown {
     pub page: u32,
     /// The page area's height at 100 %, px.
     pub height: f32,
+    /// The device pixels per px it was drawn for ([`pdf_scale`]).
+    pub scale: f32,
     pub image: Arc<RenderImage>,
     /// The image's size, pixels.
     pub size: (u32, u32),
@@ -455,8 +465,9 @@ impl Reader {
     /// Shows the page `anchor` names of the PDF at `path` (`len` bytes)
     /// under `card`: the card at once, the page once the engine has drawn
     /// it, or the card saying why it could not. A page already shown for
-    /// the same file, page and height stays, and so does the card of a page
-    /// that could not be drawn from the same file.
+    /// the same file, page and height stays (drawn again, in its place,
+    /// when the view zoomed in past its scale), and so does the card of a
+    /// page that could not be drawn from the same file.
     #[allow(clippy::too_many_arguments)]
     fn show_pdf_page(
         &mut self,
@@ -470,45 +481,64 @@ impl Reader {
     ) {
         let page = anchor.page.unwrap_or(1).saturating_sub(1);
         let height = pdf_embed_height(anchor);
-        {
-            let mut st = self.state.borrow_mut();
-            let same = matches!(
-                st.cache.live.get(key),
+        let scale = {
+            let st = self.state.borrow();
+            let zoom = st
+                .doc
+                .as_ref()
+                .map_or(1.0, |d| d.tree.options().styles.zoom());
+            pdf_scale(zoom, st.cache.view.scale)
+        };
+        let shown_page = |shown: Option<&Shown>| {
+            matches!(
+                shown,
                 Some(Shown::PdfPage(p)) if p.path == path
                     && p.len == len
                     && p.page == page
                     && (p.height - height).abs() < 0.5
-            ) || matches!(
-                st.cache.live.get(key),
-                Some(Shown::Media(c)) if c.failed_page.as_ref().is_some_and(
-                    |(p, l, n)| *p == path && *l == len && *n == page
-                )
-            );
+            )
+        };
+        let sharper = {
+            let mut st = self.state.borrow_mut();
+            let shown = st.cache.live.get(key);
+            let sharp = matches!(shown, Some(Shown::PdfPage(p)) if p.scale >= scale - 0.01);
+            let same = (shown_page(shown) && sharp)
+                || matches!(
+                    st.cache.live.get(key),
+                    Some(Shown::Media(c)) if c.failed_page.as_ref().is_some_and(
+                        |(p, l, n)| *p == path && *l == len && *n == page
+                    )
+                );
             if same {
                 st.cache.live.unchanged(key);
                 return;
             }
-        }
+            shown_page(shown)
+        };
         let Some(engine) = crate::export::pdf_engine(cx) else {
             self.land(key, Shown::Media(card), cx);
             return;
         };
-        self.land(key, Shown::Media(Arc::clone(&card)), cx);
+        if !sharper {
+            // The page drawn for a smaller zoom stays until this one lands.
+            self.land(key, Shown::Media(Arc::clone(&card)), cx);
+        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let max_height = ((height * 2.0) as u32).clamp(64, gv_helper_max_side());
+        let max_height = ((height * scale) as u32).clamp(64, gv_helper_max_side());
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let max_width =
+            ((PDF_EMBED_WIDTH as f32 * scale / 2.0) as u32).clamp(64, gv_helper_max_side());
         let file = path.clone();
         cx.spawn(async move |reader, cx| {
             let drawn = cx
                 .background_spawn(async move {
                     let bytes = read_pdf(&file, len)?;
                     let raster = engine
-                        .page(
-                            &bytes,
-                            page,
-                            PDF_EMBED_WIDTH,
-                            max_height,
-                            &AtomicBool::new(false),
-                        )
+                        .page(&bytes, page, max_width, max_height, &AtomicBool::new(false))
                         .map_err(|e| e.to_string())?;
                     crate::export::dialog::raster_image(raster)
                         .ok_or_else(|| "the page image is empty".to_owned())
@@ -528,6 +558,7 @@ impl Reader {
                                 len,
                                 page,
                                 height,
+                                scale,
                                 image,
                                 size: (w, h),
                             })),

@@ -1337,6 +1337,9 @@ impl ItemCache {
     pub fn block(&mut self, tree: &RenderTree, ix: usize) -> Option<Rc<RefCell<InlineBlock>>> {
         let item = tree.items().get(ix)?;
         let tick = self.tick;
+        if let Some(NodeKind::Live(live)) = tree.node_of(ix).map(|n| &n.kind) {
+            self.live.see(live.key);
+        }
         if let Some(c) = self.items.get_mut(&item.id) {
             c.used = tick;
             return c.block.clone();
@@ -1749,6 +1752,9 @@ impl ItemCache {
     /// least recently used half goes.
     pub fn end_frame(&mut self) {
         self.tick += 1;
+        // Queries of blocks out of view stop; laid out again when they show.
+        let stopped = self.live.end_frame();
+        self.forget(stopped);
         if self.items.len() <= CACHE_CAP {
             return;
         }

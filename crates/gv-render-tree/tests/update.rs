@@ -484,3 +484,82 @@ fn refresh_where_asks_only_what_it_selects() {
     assert_eq!(last.links[0].status, LinkStatus::External);
     common::check(&d);
 }
+
+#[test]
+fn refresh_where_rebuilds_a_picture_in_place() {
+    let md = "Before\n\n<picture>\n  <source media=\"(prefers-color-scheme: dark)\" srcset=\"https://e.org/d.png\">\n  <img alt=\"Logo\" src=\"https://e.org/l.png\">\n</picture>\n\nAfter\n";
+    let card = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 360.0,
+        height: 64.0,
+    };
+    let mut d = common::build_with(
+        md,
+        ParseOptions::default(),
+        RenderOptions::default(),
+        Sources {
+            links: &gv_render_tree::AllPending,
+            images: &card,
+        },
+    );
+    let ids: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    let picture = |d: &common::Doc| {
+        d.render
+            .nodes()
+            .iter()
+            .find_map(|n| match &n.kind {
+                NodeKind::Picture(p) => Some((p.size(false), p.size(true))),
+                _ => None,
+            })
+            .expect("a picture")
+    };
+    // The dark source landed: only the picture is built again.
+    let landed = |t: &LinkTarget<'_>| {
+        if t.destination.ends_with("d.png") {
+            ImageSize::Known {
+                width: 100.0,
+                height: 50.0,
+            }
+        } else {
+            card(t)
+        }
+    };
+    let report = d.render.refresh_where(
+        &d.tree,
+        d.text.as_str(),
+        Sources {
+            links: &gv_render_tree::AllPending,
+            images: &landed,
+        },
+        &|t| t.image && t.destination.ends_with("d.png"),
+    );
+    assert_eq!(report.nodes_built, 1);
+    assert_eq!(report.changed, [ids[1]]);
+    assert_eq!(
+        picture(&d).1,
+        ImageSize::Known {
+            width: 100.0,
+            height: 50.0
+        }
+    );
+    assert_eq!(
+        picture(&d).0,
+        ImageSize::Known {
+            width: 360.0,
+            height: 64.0
+        }
+    );
+    let after: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    assert_eq!(ids, after);
+    // Nothing changed: nothing built.
+    let report = d.render.refresh_where(
+        &d.tree,
+        d.text.as_str(),
+        Sources {
+            links: &gv_render_tree::AllPending,
+            images: &landed,
+        },
+        &|t| t.image,
+    );
+    assert_eq!(report.nodes_built, 0);
+    common::check(&d);
+}

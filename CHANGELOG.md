@@ -75,9 +75,18 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A heading written over several lines (setext) can be renamed.
 - Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
   the view.
+- An image inside an inline footnote (`^[…]`) takes its size in the
+  footnote section when the size is known after the note is shown.
+- Without a vault, an image that changes on disk shows its new version
+  even while the Reading view is idle.
+- A PDF embed's page is drawn again, sharper, after zooming in.
 - The Bookmarks panel follows changes to Obsidian's `bookmarks.json`.
 - Two Glyphvane windows of separate processes saving the same note at the
   same moment both keep their version in the file history.
+- Performance: a remote image in a `<picture>` takes its place without
+  building the whole document again.
+- Performance: a query block stops its search when it leaves the view or
+  another document opens.
 - Performance: `[[##` and `[[^^` autocomplete gather the vault's headings
   and block IDs once per index update instead of on every key.
 - Performance: a PDF page the viewer stopped waiting for no longer

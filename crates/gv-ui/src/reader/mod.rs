@@ -338,6 +338,9 @@ pub struct Reader {
     /// view reads the vault's content index itself.
     content_given: bool,
     _content_poll: Option<Task<()>>,
+    /// Checks the image files drawn between frames
+    /// ([`Reader::watch_images`]).
+    _image_poll: Option<Task<()>>,
     _settings: Subscription,
     /// *Load once* approvals (shared with the Bases view's covers).
     _load_once: Subscription,
@@ -396,6 +399,7 @@ impl Reader {
             content: None,
             content_given: false,
             _content_poll: None,
+            _image_poll: None,
             _settings: cx.observe_global::<AppSettings>(|this, cx| {
                 this.sync_typography(cx);
                 this.sync_remote(cx);

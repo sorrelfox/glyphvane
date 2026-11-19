@@ -215,12 +215,11 @@ fn cached(path: &Path) -> (bool, usize) {
 #[derive(Debug, Clone)]
 pub(super) enum TreeJob {
     /// The sizes of the images at these destinations
-    /// ([`gv_render_tree::image_key`]); with `rebuild_unchanged`, the
-    /// document is built again when no item changed (an image outside a
-    /// paragraph).
+    /// ([`gv_render_tree::image_key`]); with `redraw_unchanged`, the items
+    /// showing them are drawn again when no size changed (new pixels).
     Images {
         dests: HashSet<String>,
-        rebuild_unchanged: bool,
+        redraw_unchanged: bool,
     },
     /// The embeds of the notes at these paths (absolute).
     Embeds(HashSet<PathBuf>),
@@ -388,16 +387,22 @@ impl Reader {
             return;
         };
         if report.changed.is_empty() {
-            if matches!(
-                job,
-                TreeJob::Images {
-                    rebuild_unchanged: true,
-                    ..
-                }
-            ) {
-                // Not in a paragraph (a `<picture>`): built again; the
-                // image comes from the cache.
-                self.rebuild(cx);
+            if let TreeJob::Images {
+                dests,
+                redraw_unchanged: true,
+            } = &job
+            {
+                // The same sizes: the items showing the images are drawn
+                // again for the new pixels.
+                let mut st = self.state.borrow_mut();
+                let ids = st
+                    .doc
+                    .as_ref()
+                    .map_or_else(Vec::new, |d| super::media::items_showing(&d.tree, dests));
+                st.cache.forget(ids.iter().copied());
+                st.stale.extend(ids);
+                drop(st);
+                cx.notify();
             }
             return;
         }

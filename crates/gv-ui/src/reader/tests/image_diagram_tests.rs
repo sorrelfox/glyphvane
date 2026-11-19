@@ -234,6 +234,56 @@ fn an_image_that_changes_on_disk_gets_its_new_size(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn an_idle_view_without_a_vault_notices_a_changed_image(cx: &mut TestAppContext) {
+    let doc = "![pic](pic.png)\n";
+    let (dir, file) = folder(doc, &[("pic.png", png(40, 20))]);
+    let (window, workspace) = open(cx, &file);
+    let mut vcx = drawn(window, cx);
+    let st = state(&reader(&workspace, &mut vcx), &mut vcx);
+    settle(&mut vcx);
+    let size = |st: &Rc<RefCell<State>>| {
+        st.borrow()
+            .doc
+            .as_ref()
+            .expect("loaded")
+            .tree
+            .nodes()
+            .iter()
+            .filter_map(|n| n.inline())
+            .flat_map(|c| c.images.iter())
+            .map(|i| i.size)
+            .next()
+            .expect("an image")
+    };
+    assert_eq!(
+        size(&st),
+        gv_render_tree::ImageSize::Known {
+            width: 40.0,
+            height: 20.0
+        }
+    );
+    let path = dir.path().join("pic.png");
+    std::fs::write(&path, png(80, 20)).expect("write");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(later))
+        .expect("touch");
+    // No frame: the view's own check finds the change.
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_secs(3));
+    vcx.run_until_parked();
+    assert_eq!(
+        size(&st),
+        gv_render_tree::ImageSize::Known {
+            width: 80.0,
+            height: 20.0
+        }
+    );
+}
+
 /// The first diagram item: its index and the box's window bounds.
 fn diagram_box(st: &State) -> (usize, Bounds<Pixels>, f32) {
     let doc = st.doc.as_ref().expect("loaded");

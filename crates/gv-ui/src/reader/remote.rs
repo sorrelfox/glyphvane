@@ -571,8 +571,7 @@ impl Reader {
                         },
                     );
                 }
-                // Not in a paragraph (a `<picture>`): built again; the
-                // image comes from the cache.
+                // Drawn again even where the size stays.
                 self.refresh_images(&dests, true, cx);
             }
             Err(FetchError::Cancelled) => {}
@@ -586,18 +585,18 @@ impl Reader {
     /// Asks the render tree for the sizes of the images at `dests` again
     /// (their targets changed), off the UI thread (a block in a note
     /// embed builds the embed again, which reads the embedded note). With
-    /// `rebuild_unchanged`, the document is built again when no item
-    /// changed.
+    /// `redraw_unchanged`, the items showing them are drawn again when no
+    /// size changed.
     pub(super) fn refresh_images(
         &mut self,
         dests: &HashSet<String>,
-        rebuild_unchanged: bool,
+        redraw_unchanged: bool,
         cx: &mut Context<'_, Self>,
     ) {
         self.run_tree_job(
             super::embed_texts::TreeJob::Images {
                 dests: dests.clone(),
-                rebuild_unchanged,
+                redraw_unchanged,
             },
             cx,
         );

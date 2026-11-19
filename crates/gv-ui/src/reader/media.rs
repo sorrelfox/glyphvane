@@ -477,6 +477,9 @@ pub(crate) struct Images {
     /// next check starts in `stamps`.
     polled: Option<std::time::Instant>,
     poll_from: usize,
+    /// The view was asked to check the files between frames
+    /// ([`Reader::watch_images`]).
+    watched: bool,
 }
 
 /// How often the image files drawn are checked for changes on disk while
@@ -487,6 +490,9 @@ const POLL_EVERY: std::time::Duration = if cfg!(test) {
     std::time::Duration::from_secs(2)
 };
 const POLL_FILES: usize = 64;
+/// How often the image files drawn are checked between frames
+/// ([`Reader::watch_images`]).
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn image_bytes(image: &RenderImage) -> usize {
     (0..image.frame_count())
@@ -597,6 +603,14 @@ impl Images {
             self.poll_files();
         }
         std::mem::take(&mut self.changed)
+    }
+
+    /// Whether image files were drawn and nobody checks them between
+    /// frames yet: the view starts checking ([`Reader::watch_images`]).
+    pub fn wants_watch(&mut self) -> bool {
+        let wants = !self.watched && !self.stamps.is_empty();
+        self.watched |= wants;
+        wants
     }
 
     /// `stat`s the next [`POLL_FILES`] image files drawn; those whose
@@ -743,6 +757,7 @@ impl Images {
         self.bytes = 0;
         self.stamps.clear();
         self.changed.clear();
+        self.watched = false;
     }
 
     /// Images decoded and kept.
@@ -765,6 +780,47 @@ impl Images {
 }
 
 impl Reader {
+    /// Checks the image files drawn for changes every [`WATCH_EVERY`]
+    /// between frames too, so an idle view shows a changed file. In a
+    /// vault the index's updates draw the view again, which checks them.
+    pub(crate) fn watch_images(&mut self, cx: &mut gpui::Context<'_, Self>) {
+        if self.index.is_some() || self._image_poll.is_some() {
+            return;
+        }
+        self._image_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_EVERY).await;
+                let go_on = this.update(cx, |r, cx| r.poll_images(cx)).unwrap_or(false);
+                if !go_on {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// One check of [`Reader::watch_images`]: false when it stops (a
+    /// vault's index draws the view again, or no image file is drawn).
+    fn poll_images(&mut self, cx: &mut gpui::Context<'_, Self>) -> bool {
+        let changed = {
+            let mut st = self.state.borrow_mut();
+            let images = &mut st.cache.images;
+            if self.index.is_some() || images.stamps.is_empty() {
+                images.watched = false;
+                None
+            } else {
+                Some(images.take_changed_files())
+            }
+        };
+        let Some(changed) = changed else {
+            self._image_poll = None;
+            return false;
+        };
+        if !changed.is_empty() {
+            self.reprobe_images(changed, cx);
+        }
+        true
+    }
+
     /// Image files that changed on disk: probed again off the UI thread;
     /// the images whose size changed get boxes of the new size.
     pub(crate) fn reprobe_images(&mut self, paths: Vec<PathBuf>, cx: &mut gpui::Context<'_, Self>) {
@@ -835,26 +891,45 @@ impl Reader {
         // image kept its size are drawn again for the new pixels.
         self.refresh_images(&dests, false, cx);
         let mut st = self.state.borrow_mut();
-        let ids: Vec<ItemId> = st.doc.as_ref().map_or_else(Vec::new, |doc| {
-            (0..doc.tree.items().len())
-                .filter(|&ix| {
-                    doc.tree.item_inline(ix).is_some_and(|c| {
-                        c.images.iter().any(|i| {
-                            dests.contains(&*gv_render_tree::image_key(
-                                &i.destination,
-                                i.from.as_deref(),
-                            ))
-                        })
-                    })
-                })
-                .map(|ix| doc.tree.items()[ix].id)
-                .collect()
-        });
+        let ids: Vec<ItemId> = st
+            .doc
+            .as_ref()
+            .map_or_else(Vec::new, |doc| items_showing(&doc.tree, &dests));
         st.cache.forget(ids.iter().copied());
         st.stale.extend(ids);
         drop(st);
         cx.notify();
     }
+}
+
+/// The items of `tree` that show an image at one of `dests`
+/// ([`gv_render_tree::image_key`]): inline images, and the image a
+/// `<picture>` picks in either scheme.
+pub(super) fn items_showing(
+    tree: &gv_render_tree::RenderTree,
+    dests: &std::collections::HashSet<String>,
+) -> Vec<ItemId> {
+    let shows =
+        |dest: &str, from: Option<&str>| dests.contains(&*gv_render_tree::image_key(dest, from));
+    tree.items()
+        .iter()
+        .enumerate()
+        .filter(|&(ix, item)| {
+            let inline = tree.item_inline(ix).is_some_and(|c| {
+                c.images
+                    .iter()
+                    .any(|i| shows(&i.destination, i.from.as_deref()))
+            });
+            inline
+                || tree.nodes().get(item.node).is_some_and(|n| {
+                    matches!(&n.kind, gv_render_tree::NodeKind::Picture(p)
+                    if [false, true].into_iter().any(|dark| {
+                        p.pick(dark).is_some_and(|u| shows(u, p.from.as_deref()))
+                    }))
+                })
+        })
+        .map(|(_, item)| item.id)
+        .collect()
 }
 
 #[cfg(test)]

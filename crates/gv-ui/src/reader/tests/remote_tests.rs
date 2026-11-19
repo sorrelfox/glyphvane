@@ -89,7 +89,12 @@ struct Setup {
 
 fn setup(cx: &mut TestAppContext, server: &Server, mode: Option<&str>) -> Setup {
     let doc = format!("# Remote\n\n![logo]({})\n", server.url("/logo.png"));
-    let dir = temp(&[("doc.md", &doc)]);
+    setup_doc(cx, &doc, mode)
+}
+
+/// A window on a note with the text `doc`, as [`setup`].
+fn setup_doc(cx: &mut TestAppContext, doc: &str, mode: Option<&str>) -> Setup {
+    let dir = temp(&[("doc.md", doc)]);
     let file = dir.path().join("doc.md");
     let cache = tempfile::tempdir().expect("cache dir");
     let (window, workspace) = open(cx, &file);
@@ -218,6 +223,47 @@ fn ask_waits_then_load_once_fetches_in_the_background(cx: &mut TestAppContext) {
     // Load once writes nothing.
     assert!(t.list(ALLOW).is_empty());
     assert_eq!(cx.update(|cx| RemoteSession::started(cx)), 1);
+}
+
+#[gpui::test]
+fn a_loaded_picture_source_does_not_build_the_document_again(cx: &mut TestAppContext) {
+    let server = Server::start();
+    let doc = format!(
+        "# Remote\n\nText.\n\n<picture>\n  <source media=\"(prefers-color-scheme: dark)\" \
+         srcset=\"{}\">\n  <img alt=\"Logo\" src=\"{}\">\n</picture>\n",
+        server.url("/dark.png"),
+        server.url("/light.png")
+    );
+    let mut t = setup_doc(cx, &doc, None);
+    let version = |t: &mut Setup| state(&t.reader, &mut t.vcx).borrow().doc_version;
+    let before = version(&mut t);
+    assert_eq!(t.images_ready(), 0);
+    t.click(NoticeAction::RemoteLoadOnce);
+    assert!(server.hits() >= 1);
+    // The picture takes the image's size in place: the rest of the
+    // document is not built again.
+    assert_eq!(t.images_ready(), 1);
+    assert_eq!(version(&mut t), before);
+    let st = state(&t.reader, &mut t.vcx);
+    let s = st.borrow();
+    let size = s
+        .doc
+        .as_ref()
+        .expect("loaded")
+        .tree
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.kind {
+            gv_render_tree::NodeKind::Picture(p) => Some(p.size(false)),
+            _ => None,
+        });
+    assert_eq!(
+        size,
+        Some(gv_render_tree::ImageSize::Known {
+            width: 40.0,
+            height: 20.0
+        })
+    );
 }
 
 #[gpui::test]

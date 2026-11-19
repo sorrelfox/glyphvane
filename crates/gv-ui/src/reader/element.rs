@@ -1264,6 +1264,15 @@ impl Element for ReaderElement {
                                 && node.source.end <= r.end
                                 && !node.source.is_empty()
                         });
+                        let shown = cache.live.get(live.key).cloned();
+                        if let Some(super::embeds::Shown::PdfPage(p)) = &shown
+                            && p.scale
+                                < super::media_card::pdf_scale(zoom, window.scale_factor()) - 0.01
+                        {
+                            // Zoomed in past the page's scale: drawn again,
+                            // sharper.
+                            cache.live.ask_again(live.key);
+                        }
                         let mut live_out = LiveOut {
                             out: &mut out,
                             geometry,
@@ -1277,7 +1286,7 @@ impl Element for ReaderElement {
                                 selected: selected_here,
                             },
                             live,
-                            cache.live.get(live.key).cloned(),
+                            shown,
                             &LiveStyle {
                                 palette,
                                 body_font: &body_font,
@@ -1885,11 +1894,19 @@ impl Element for ReaderElement {
             start_images(self.reader.clone(), images, cx);
         }
         let changed = cache.images.take_changed_files();
-        if !changed.is_empty() {
+        let watch = cache.images.wants_watch();
+        if !changed.is_empty() || watch {
             let reader = self.reader.clone();
             cx.spawn(async move |cx| {
                 reader
-                    .update(cx, |r, cx| r.reprobe_images(changed, cx))
+                    .update(cx, |r, cx| {
+                        if watch {
+                            r.watch_images(cx);
+                        }
+                        if !changed.is_empty() {
+                            r.reprobe_images(changed, cx);
+                        }
+                    })
                     .ok();
             })
             .detach();

@@ -416,77 +416,84 @@ impl RenderTree {
         sources: Sources<'_>,
         refs: &RefMap,
     ) -> Vec<Section> {
+        index
+            .inline
+            .iter()
+            .filter_map(|note| self.inline_note(note, index, tree, text, sources, refs))
+            .collect()
+    }
+
+    /// The definition of inline footnote `note` for the footnote section.
+    fn inline_note<S: TextSource + ?Sized>(
+        &self,
+        note: &crate::footnote::InlineNote,
+        index: &FootnoteIndex,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        refs: &RefMap,
+    ) -> Option<Section> {
         let opts = tree.options().inline();
-        let mut out = Vec::with_capacity(index.inline.len());
-        for note in &index.inline {
-            let parsed = if note.cell {
-                let Some(cell) = note.segments.first() else {
-                    continue;
-                };
-                gv_syntax::inline::parse_table_cell(
-                    text,
-                    cell.clone(),
-                    refs,
-                    gv_syntax::inline::InlineOptions {
-                        block_ids: false,
-                        ..opts
-                    },
-                )
-            } else {
-                gv_syntax::inline::parse_inlines_with(
-                    text,
-                    gv_syntax::inline::InlineInput {
-                        segments: &note.segments,
-                    },
-                    refs,
-                    opts,
-                )
-            };
-            let id = BlockId(INLINE_NOTE_IDS - u64::from(note.number));
-            let cx = crate::inline::InlineCx {
-                styles: &self.opts.styles,
-                metrics: &self.opts.metrics,
-                sources,
-                block: id,
-                footnotes: Some(index),
-                soft_breaks: self.opts.soft_breaks,
-                alt_sizes: self.opts.alt_sizes,
-                emoji: self.opts.emoji,
-                title: None,
-                embed: None,
-            };
-            let base = note.source.start;
-            let Some(content) =
-                crate::inline::build_inline_note(&parsed, note.source.start, base, &cx)
-            else {
-                continue;
-            };
-            let label: Arc<str> = Arc::from(note.label.as_str());
-            let context = Context::from(vec![crate::node::Frame {
-                id,
-                kind: crate::node::FrameKind::Footnote {
-                    number: note.number,
-                    label: Arc::clone(&label),
+        let parsed = if note.cell {
+            let cell = note.segments.first()?;
+            gv_syntax::inline::parse_table_cell(
+                text,
+                cell.clone(),
+                refs,
+                gv_syntax::inline::InlineOptions {
+                    block_ids: false,
+                    ..opts
                 },
-            }]);
-            out.push(Section {
-                label,
-                number: Some(note.number),
+            )
+        } else {
+            gv_syntax::inline::parse_inlines_with(
+                text,
+                gv_syntax::inline::InlineInput {
+                    segments: &note.segments,
+                },
+                refs,
+                opts,
+            )
+        };
+        let id = BlockId(INLINE_NOTE_IDS - u64::from(note.number));
+        let cx = crate::inline::InlineCx {
+            styles: &self.opts.styles,
+            metrics: &self.opts.metrics,
+            sources,
+            block: id,
+            footnotes: Some(index),
+            soft_breaks: self.opts.soft_breaks,
+            alt_sizes: self.opts.alt_sizes,
+            emoji: self.opts.emoji,
+            title: None,
+            embed: None,
+        };
+        let base = note.source.start;
+        let content = crate::inline::build_inline_note(&parsed, note.source.start, base, &cx)?;
+        let label: Arc<str> = Arc::from(note.label.as_str());
+        let context = Context::from(vec![crate::node::Frame {
+            id,
+            kind: crate::node::FrameKind::Footnote {
+                number: note.number,
+                label: Arc::clone(&label),
+            },
+        }]);
+        Some(Section {
+            label,
+            number: Some(note.number),
+            id,
+            range: note.source.clone(),
+            nodes: vec![BlockNode {
                 id,
-                range: note.source.clone(),
-                nodes: vec![BlockNode {
-                    id,
-                    kind: NodeKind::Paragraph(Arc::new(content)),
-                    source: note.source.clone(),
-                    context,
-                    block: note.block_range.clone(),
-                    top: note.source.clone(),
-                    lookups: None,
-                    table: false,
-                }],
-            });
-        }
-        out
+                kind: NodeKind::Paragraph(Arc::new(content)),
+                source: note.source.clone(),
+                context,
+                block: note.block_range.clone(),
+                top: note.source.clone(),
+                lookups: None,
+                table: false,
+            }],
+        })
     }
 
     /// The document's footnote numbers, if it defines footnotes.
@@ -845,6 +852,27 @@ impl RenderTree {
     ) -> UpdateReport {
         let mut stale = Vec::new();
         for (k, n) in self.nodes.iter().enumerate() {
+            if let NodeKind::Picture(p) = &n.kind {
+                // The images a `<picture>` picks in a light and a dark scheme.
+                let changed = [false, true].into_iter().any(|dark| {
+                    p.pick(dark).is_some_and(|url| {
+                        let target = LinkTarget {
+                            kind: gv_model::LinkKind::Inline,
+                            image: true,
+                            destination: url,
+                            title: None,
+                            range: n.block.clone(),
+                            block: n.id,
+                            from: p.from.as_deref(),
+                        };
+                        which(&target) && sources.images.size(&target) != p.sizes[usize::from(dark)]
+                    })
+                });
+                if changed {
+                    stale.push(k);
+                }
+                continue;
+            }
             for c in n.inlines() {
                 let link_changed = || {
                     c.links.iter().any(|l| {
@@ -1128,6 +1156,20 @@ impl RenderTree {
         sources: Sources<'_>,
     ) -> bool {
         let refs = self.refs.clone().unwrap_or_else(|| tree.ref_map(text));
+        let id = self.nodes[k].id;
+        if k >= self.section_node()
+            && let Some(index) = self.footnotes.clone()
+            && let Some(note) = index
+                .inline
+                .iter()
+                .find(|n| BlockId(INLINE_NOTE_IDS - u64::from(n.number)) == id)
+        {
+            // An inline footnote's definition: built again from the note.
+            return self
+                .inline_note(note, &index, tree, text, sources, &refs)
+                .and_then(|mut s| s.nodes.pop())
+                .is_some_and(|node| self.replace_node(k, node));
+        }
         let old = &self.nodes[k];
         let mut finder = LeafFinder {
             id: old.id,
@@ -1173,6 +1215,12 @@ impl RenderTree {
         {
             anchor.clone_from(old_anchor);
         }
+        self.replace_node(k, node)
+    }
+
+    /// Puts `node` in place of node `k` (same id and context), its items
+    /// re-estimated. False if its item count would change.
+    fn replace_node(&mut self, k: usize, node: BlockNode) -> bool {
         let ia = self.items.partition_point(|it| it.node < k);
         let ib = self.items.partition_point(|it| it.node <= k);
         let mut items = Vec::new();
