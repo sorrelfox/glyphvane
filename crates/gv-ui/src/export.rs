@@ -242,6 +242,39 @@ pub trait PdfEngine: Send + Sync {
         let _ = (pdf, page, max_width, max_height, cancel);
         Err(PdfError::Failed("previews are not available".to_owned()))
     }
+
+    /// Reads `pdf` for drawing page by page (the PDF viewer), keeping it
+    /// as `key` (the same bytes, the same key); returns each page's size
+    /// in PDF points (width, height). Engines without a raster say so.
+    fn open_document(
+        &self,
+        key: u64,
+        pdf: &[u8],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<(f32, f32)>, PdfError> {
+        let _ = (key, pdf, cancel);
+        Err(PdfError::Failed(
+            "the PDF engine is not available".to_owned(),
+        ))
+    }
+
+    /// Page `page` (from 0) of the PDF `pdf`, kept as `key`, drawn at
+    /// `scale` pixels per PDF point (smaller when the image would pass the
+    /// engine's caps). The engine reads `pdf` again when it no longer
+    /// holds it.
+    fn render_page(
+        &self,
+        key: u64,
+        pdf: &[u8],
+        page: u32,
+        scale: f32,
+        cancel: &AtomicBool,
+    ) -> Result<PageRaster, PdfError> {
+        let _ = (key, pdf, page, scale, cancel);
+        Err(PdfError::Failed(
+            "the PDF engine is not available".to_owned(),
+        ))
+    }
 }
 
 /// A drawn PDF page: straight-alpha RGBA rows, top first.

@@ -15,13 +15,26 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// The protocol's version. Bump it whenever a type of this module changes.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The largest frame, in bytes, in either direction.
 pub const MAX_FRAME: u32 = 256 << 20;
 
 /// The largest side of a drawn page ([`Job::Page`]), in pixels.
 pub const MAX_PAGE_SIDE: u32 = 4096;
+
+/// The largest side of a page drawn at a scale ([`Job::Render`]), in
+/// pixels: hayro's sizes are `u16`, and wrap silently above 65,535.
+pub const MAX_RENDER_SIDE: u32 = 16_384;
+
+/// The most pixels of one page drawn at a scale ([`Job::Render`]): a
+/// larger request is drawn smaller, keeping its proportions.
+pub const MAX_RENDER_PIXELS: u64 = 24 << 20;
+
+/// The most pixels an image of a page may have once decoded: hayro
+/// decodes images at full size, so a page with a larger one is refused
+/// before it is drawn.
+pub const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 
 /// The version both sides announce.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -75,6 +88,13 @@ pub enum Job {
     Pdf(PdfJob),
     /// Draw a page of a PDF.
     Page(PageJob),
+    /// Read a PDF and keep it for [`Job::Render`]: the answer is its page
+    /// sizes ([`Output::Document`]).
+    Open(OpenJob),
+    /// Draw a page of the PDF [`Job::Open`] kept, at a scale. A helper
+    /// that does not hold that PDF (a new one, or another PDF opened
+    /// since) answers [`Output::NoDocument`]: open it again.
+    Render(RenderJob),
     /// Misbehave on purpose, for the tests of the parent's limits.
     Fault(Fault),
 }
@@ -113,8 +133,48 @@ pub struct PdfJob {
 pub enum Output {
     Pdf(PdfOutput),
     Page(PageImage),
+    /// The pages of a PDF [`Job::Open`] read.
+    Document(DocInfo),
+    /// The helper does not hold the PDF a [`Job::Render`] names.
+    NoDocument,
     /// The answer of a [`Job::Fault`] that returned.
     Done,
+}
+
+/// A PDF to keep for drawing page by page ([`Job::Open`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenJob {
+    /// The parent's name for this PDF (the same bytes, the same key).
+    pub key: u64,
+    pub pdf: Vec<u8>,
+}
+
+/// A page of the kept PDF to draw ([`Job::Render`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RenderJob {
+    /// The key of the PDF ([`OpenJob::key`]).
+    pub key: u64,
+    /// The page, from 0.
+    pub page: u32,
+    /// Pixels per PDF point (1/72 inch).
+    pub scale: f32,
+    /// The most pixels of the image (at most [`MAX_RENDER_PIXELS`]): a
+    /// larger page is drawn at a smaller scale.
+    pub max_pixels: u64,
+}
+
+/// The size of a page as shown (its crop box, rotated), in PDF points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// What [`Job::Open`] read.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DocInfo {
+    /// Every page's size, in order.
+    pub pages: Vec<PageSize>,
 }
 
 /// A compiled PDF.

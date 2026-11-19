@@ -122,6 +122,7 @@ impl GotoPopover {
             GotoKind::Line { count, .. } => {
                 format!("Line number (1 to {count}), or line:column").into()
             }
+            GotoKind::Page { count, .. } => format!("Page number (1 to {count})").into(),
             GotoKind::List { placeholder, .. } => placeholder.clone(),
         };
         self.request = Some(request);
@@ -158,6 +159,10 @@ impl GotoPopover {
             GotoKind::Line { .. } => {
                 let (line, column) = parse_line_target(&self.query)?;
                 Some(Choice::Line(line, column))
+            }
+            GotoKind::Page { count, .. } => {
+                let page = self.query.trim().parse::<usize>().ok()?;
+                Some(Choice::Line(page.clamp(1, (*count).max(1)), None))
             }
             GotoKind::List { .. } => self
                 .rows
@@ -393,6 +398,16 @@ impl GotoPopover {
                 };
                 body.child(note(text, "goto-line-note"))
             }
+            GotoKind::Page { current, count } => {
+                let text: SharedString = match self.query.trim().parse::<usize>() {
+                    Ok(page) => format!("Go to page {}", page.clamp(1, (*count).max(1))).into(),
+                    Err(_) if self.query.trim().is_empty() => {
+                        format!("Current page {current} of {count}").into()
+                    }
+                    Err(_) => "Type a page number".into(),
+                };
+                body.child(note(text, "goto-line-note"))
+            }
             GotoKind::List { empty, .. } if self.rows.is_empty() => {
                 body.child(note(empty.clone(), "goto-empty"))
             }
@@ -429,7 +444,7 @@ impl Render for GotoPopover {
             .max(px(0.0));
         let title = request.title.clone();
         let (action, is_list) = match &request.kind {
-            GotoKind::Line { .. } => (SharedString::from("go"), false),
+            GotoKind::Line { .. } | GotoKind::Page { .. } => (SharedString::from("go"), false),
             GotoKind::List { action, .. } => (action.clone(), true),
         };
         let input_row = div()

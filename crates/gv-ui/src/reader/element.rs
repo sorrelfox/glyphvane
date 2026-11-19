@@ -98,6 +98,12 @@ enum Op {
         bounds: Bounds<Pixels>,
         padding: f32,
     },
+    /// An image (a PDF embed's page) drawn in `bounds`, clipped to `clip`.
+    Image {
+        bounds: Bounds<Pixels>,
+        clip: Bounds<Pixels>,
+        image: Arc<gpui::RenderImage>,
+    },
 }
 
 impl Op {
@@ -153,6 +159,21 @@ impl Op {
             } => {
                 let theme = crate::appearance::Appearance::theme(cx);
                 crate::canvas_view::paint_preview(window, doc, *bounds, *padding, theme);
+            }
+            Self::Image {
+                bounds,
+                clip,
+                image,
+            } => {
+                // An image the atlas cannot take draws nothing.
+                let _ = window.paint_image(
+                    *clip,
+                    *bounds,
+                    Corners::default(),
+                    Arc::clone(image),
+                    0,
+                    false,
+                );
             }
         }
     }
@@ -2881,6 +2902,7 @@ fn paint_live(
         Some(Shown::Media(m) | Shown::Audio(m, _)) => {
             (Some(m.action.to_owned()), Token::AccentDefault)
         }
+        Some(Shown::PdfPage(p)) => (Some(p.card.action.to_owned()), Token::AccentDefault),
         _ => (None, Token::TextTertiary),
     };
     let count_w = count.as_ref().map_or(0.0, |c| {
@@ -2905,6 +2927,7 @@ fn paint_live(
     let title_x = x + pad + icon_size + CALLOUT_ICON_GAP * s.zoom;
     let title_text = match &shown {
         Some(Shown::Media(m) | Shown::Audio(m, _)) => m.title.clone(),
+        Some(Shown::PdfPage(p)) => p.card.title.clone(),
         _ => live_title(live),
     };
     let title = fit_text(&title_text, x + w - pad - count_w - title_x, s.body.size);
@@ -2944,7 +2967,7 @@ fn paint_live(
     if live.kind.is_media() {
         // The whole card follows its action.
         match &shown {
-            Some(Shown::Media(_)) => control(o, area, None),
+            Some(Shown::Media(_) | Shown::PdfPage(_)) => control(o, area, None),
             // The player takes the body; the header opens the file.
             Some(Shown::Audio(..)) => control(o, bounds_of(x, y, w, head), None),
             _ => {}
@@ -2992,6 +3015,26 @@ fn paint_live(
                 s.body_font,
                 Token::TextSecondary,
             );
+        }
+        Shown::PdfPage(p) => {
+            // The page, fitted in the body and centred.
+            let room_w = (w - 2.0 * pad).max(1.0);
+            let room_h = (h - head - pad).max(1.0);
+            #[allow(clippy::cast_precision_loss)]
+            let (iw, ih) = (p.size.0.max(1) as f32, p.size.1.max(1) as f32);
+            let fit = (room_w / iw).min(room_h / ih);
+            let (dw, dh) = (iw * fit, ih * fit);
+            let bounds = bounds_of(
+                x + pad + (room_w - dw) / 2.0,
+                y + head + (room_h - dh) / 2.0,
+                dw,
+                dh,
+            );
+            o.out.under.push(Op::Image {
+                bounds,
+                clip: body,
+                image: Arc::clone(&p.image),
+            });
         }
         Shown::Notice(why) => {
             text_line(

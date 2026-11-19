@@ -75,7 +75,7 @@ mod links;
 mod live;
 mod load;
 pub(crate) mod media;
-mod media_card;
+pub(crate) mod media_card;
 pub(crate) mod remote;
 pub mod startup;
 mod state;

@@ -358,3 +358,66 @@ fn a_viewer_tab_takes_the_keyboard(cx: &mut TestAppContext) {
     shown(&workspace, &mut vcx);
     assert!(focused(&workspace, &mut vcx), "a viewer opened from a note");
 }
+
+/// A link to a PDF opens the PDF viewer in a tab at the page its
+/// `#page=N` names; another such link to the same PDF moves that tab to
+/// its page. A PDF has no Source view.
+#[gpui::test]
+fn a_pdf_link_opens_the_pdf_viewer_at_its_page(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+
+    use crate::file_viewer::pdf_tests::FakePdf;
+
+    let dir = temp(&[
+        ("note.md", b"# Note\n\n[p](paper.pdf#page=3)\n"),
+        ("paper.pdf", b"%PDF-1.7\n%%EOF\n"),
+    ]);
+    let note = dir.path().join("note.md");
+    let (window, workspace) = open(cx, &note);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 6]));
+    vcx.update(|_, cx| {
+        crate::export::set_pdf_engine(cx, Some(engine as Arc<dyn crate::export::PdfEngine>));
+    });
+    draw(&mut vcx);
+    let follow = |destination: &str, vcx: &mut VisualTestContext| {
+        let link = LinkAt {
+            file: note.clone(),
+            kind: LinkKind::Inline,
+            image: false,
+            destination: destination.into(),
+            range: None,
+            construct: None,
+            profile: gv_vault::ProfileId::CommonMark,
+        };
+        vcx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.follow_link_at(ws.active, link, Disposition::InPlace, false, window, cx);
+            });
+        });
+        draw(vcx);
+    };
+    follow("paper.pdf#page=3", &mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "paper.pdf");
+    let viewer = viewer(&workspace, &mut vcx);
+    until(&mut vcx, "the PDF", |vcx| {
+        viewer.read_with(vcx, |v, _| v.pdf().is_some())
+    });
+    let page = |vcx: &mut VisualTestContext| {
+        viewer.read_with(vcx, |v, cx| v.pdf().map(|p| p.read(cx).current_page()))
+    };
+    until(&mut vcx, "page 3", |vcx| page(vcx) == Some(2));
+    workspace.read_with(&vcx, |ws, cx| {
+        assert!(!ws.mode_available(ViewMode::Edit, cx));
+        assert!(!ws.mode_available(ViewMode::Split, cx));
+        assert!(ws.active_notice(cx).is_none(), "no question");
+    });
+    // The same PDF, another page: the same tab moves there.
+    follow("paper.pdf#page=5", &mut vcx);
+    until(&mut vcx, "page 5", |vcx| page(vcx) == Some(4));
+    assert_eq!(
+        workspace.read_with(&vcx, |ws, _| ws.tabs.len()),
+        1,
+        "the same tab"
+    );
+}

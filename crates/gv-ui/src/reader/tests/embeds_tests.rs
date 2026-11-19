@@ -49,6 +49,16 @@ struct View {
 
 impl View {
     fn open(cx: &mut TestAppContext, file: &Path, profile: gv_profile::ProfileId) -> Self {
+        Self::open_with(cx, file, profile, None)
+    }
+
+    /// [`View::open`] with `pdf` as the PDF engine.
+    fn open_with(
+        cx: &mut TestAppContext,
+        file: &Path,
+        profile: gv_profile::ProfileId,
+        pdf: Option<Arc<dyn crate::export::PdfEngine>>,
+    ) -> Self {
         let file = file.to_path_buf();
         let followed = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&followed);
@@ -60,6 +70,7 @@ impl View {
                 channels: 2,
             });
             crate::audio::set_engine(cx, crate::audio::AudioEngine::new(backend));
+            crate::export::set_pdf_engine(cx, pdf);
             let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(600.0)));
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -513,6 +524,82 @@ fn media_embeds_are_cards_that_open_outside(cx: &mut TestAppContext) {
         .expect("text");
     assert!(text.contains("Talk.mp3"), "{text:?}");
     assert!(text.contains("<iframe"), "{text:?}");
+}
+
+/// A PDF embed shows the page its `#page=N` names, as high as
+/// `#height=N` says, drawn by the PDF engine; a click opens the PDF
+/// viewer at that page; a page the engine cannot draw leaves the card,
+/// saying why.
+#[gpui::test]
+fn pdf_embeds_show_their_page(cx: &mut TestAppContext) {
+    use crate::file_viewer::pdf_tests::FakePdf;
+    use crate::reader::media_card::PDF_EMBED_HEIGHT;
+
+    let doc =
+        "![[Paper.pdf#page=9]]\n\n![[Paper.pdf#page=3&height=100]]\n\n![[Paper.pdf]]\n\nAfter.\n";
+    let dir = vault(&[("Doc.md", doc), ("Paper.pdf", "%PDF-1.7\n")]);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 4]));
+    let mut v = View::open_with(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+        Some(Arc::clone(&engine) as Arc<dyn crate::export::PdfEngine>),
+    );
+    let shown = v.wait_live("![[Paper.pdf#page=3", "the page", |s| {
+        matches!(s, Shown::PdfPage(_))
+    });
+    let Shown::PdfPage(third) = shown else {
+        unreachable!()
+    };
+    assert_eq!(third.page, 2);
+    assert!((third.height - 100.0).abs() < f32::EPSILON);
+    assert_eq!(third.card.action, "Open in PDF viewer");
+    let (_, (top, bottom), _) = v.live("![[Paper.pdf#page=3");
+    assert!(bottom - top >= 100.0, "{top} {bottom}");
+    // Without an anchor: the first page, at the default height.
+    let Shown::PdfPage(first) = v.wait_live("![[Paper.pdf]]", "the first page", |s| {
+        matches!(s, Shown::PdfPage(_))
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(first.page, 0);
+    assert!((first.height - PDF_EMBED_HEIGHT).abs() < f32::EPSILON);
+    // The engine drew pages fitted to the embeds' boxes.
+    let fitted = engine.fitted.lock().expect("lock").clone();
+    assert!(fitted.contains(&(2, 1600, 200)), "{fitted:?}");
+    // No page 9: the card says why.
+    let shown = v.wait_live("![[Paper.pdf#page=9", "the card", |s| {
+        s.card().is_some_and(|c| c.detail.contains("no page 9"))
+    });
+    assert!(matches!(shown, Shown::Media(_)), "{shown:?}");
+
+    // A click opens the PDF viewer at the page.
+    v.vcx.simulate_click(
+        point(px(450.0), px((top + bottom) / 2.0)),
+        Modifiers::none(),
+    );
+    v.settle();
+    let followed = v.followed();
+    assert_eq!(followed.len(), 1, "{followed:?}");
+    assert_eq!(&*followed[0].destination, "Paper.pdf#page=3");
+
+    // Drawn again, nothing changed: the page is kept, not drawn again.
+    // (A page that could not be drawn is asked for again.)
+    let drawn = |e: &FakePdf| {
+        e.fitted
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|f| f.0 != 8)
+            .count()
+    };
+    let before = drawn(&engine);
+    v.reader.update(&mut v.vcx, |r, cx| {
+        r.refresh_live_targets();
+        cx.notify();
+    });
+    v.settle();
+    assert_eq!(drawn(&engine), before);
 }
 
 #[gpui::test]

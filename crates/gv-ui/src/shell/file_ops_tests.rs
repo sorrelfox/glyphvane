@@ -358,8 +358,9 @@ fn cancelling_open_file_changes_nothing(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn other_files_open_with_the_default_app_after_confirmation(cx: &mut TestAppContext) {
-    let mut f = fixture(cx, &[("a.md", NOTE), ("report.pdf", "%PDF")], Some("a.md"));
-    let pdf = f.path("report.pdf");
+    // A PDF opens in the built-in viewer; a word-processor file does not.
+    let mut f = fixture(cx, &[("a.md", NOTE), ("report.docx", "PK")], Some("a.md"));
+    let pdf = f.path("report.docx");
     f.answer(Ok(Some(vec![pdf.clone()])));
     f.dispatch(file_commands::Open);
     assert_eq!(f.topic(), Some(Topic::Confirm));
@@ -784,7 +785,7 @@ fn in_the_file_tree_the_commands_act_on_the_selected_row(cx: &mut TestAppContext
 fn links_that_leave_glyphvane_ask_first(cx: &mut TestAppContext) {
     let mut f = fixture(
         cx,
-        &[("a.md", NOTE), ("doc.pdf", "%PDF"), ("page.html", "<p>")],
+        &[("a.md", NOTE), ("doc.docx", "PK"), ("page.html", "<p>")],
         Some("a.md"),
     );
     // Web links go straight to the browser.
@@ -802,10 +803,10 @@ fn links_that_leave_glyphvane_ask_first(cx: &mut TestAppContext) {
     assert_eq!(f.launched()[1], Launched::Url("ssh://host.example".into()));
 
     // A file Glyphvane does not show.
-    f.follow("doc.pdf");
+    f.follow("doc.docx");
     assert_eq!(f.topic(), Some(Topic::Confirm));
-    f.press(&NoticeAction::OpenExternally(f.path("doc.pdf")));
-    assert_eq!(f.launched()[2], Launched::Open(f.path("doc.pdf")));
+    f.press(&NoticeAction::OpenExternally(f.path("doc.docx")));
+    assert_eq!(f.launched()[2], Launched::Open(f.path("doc.docx")));
 
     // A web page names the browser.
     f.follow("page.html");

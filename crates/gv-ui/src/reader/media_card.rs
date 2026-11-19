@@ -10,10 +10,17 @@
 //! card's title line, created when the block is first drawn and kept with
 //! it; the file is read only on the first play or seek, so a note with
 //! many embeds decodes none of them up front. A file the player cannot
-//! play falls back to the card. Nothing else is played, rasterized or
-//! loaded yet: the PDF engine is not in the helper process. A card says what the file or page is and offers to open it outside the
-//! app, through the same link handling as a click on a link (the window
-//! asks before opening a file with its default app, and hands web
+//! play falls back to the card.
+//!
+//! A PDF of the vault shows the page its `#page=N` names (the first
+//! without one) under the card's title line, [`PDF_EMBED_HEIGHT`] px high
+//! or as `#height=N` says, drawn by the PDF engine the application
+//! installs (the helper process, as in the PDF viewer); the card shows
+//! while the page is drawn, and stays, saying why, when it cannot be. A
+//! click opens the PDF viewer at that page. Nothing else is played,
+//! rasterized or loaded. A card says what the file or page is and offers
+//! to open it, through the same link handling as a click on a link (the
+//! window asks before opening a file with its default app, and hands web
 //! addresses to the browser under the external hand-off rules).
 //!
 //! | Source | Title | Line | Action |
@@ -27,13 +34,15 @@
 //! a size: the card says they are blocked.
 //!
 //! Not designed: built with the live block's box, header and line
-//! (flagged). The card's poster and a PDF page preview come with their
-//! engines.
+//! (flagged), the PDF page centred in the box. The card's poster comes
+//! with its engine. A PDF embed shows one page: there is no page
+//! navigation inside the embed (the PDF viewer has it).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use gpui::{AppContext as _, Context};
+use gpui::{AppContext as _, Context, RenderImage};
 
 use crate::audio::{AudioPlayerEvent, AudioPlayerView};
 use crate::metrics::size::icon_button;
@@ -44,6 +53,49 @@ use gv_vault::{Status, TargetKind};
 use super::embeds::Shown;
 use super::links::{Resolver, resolver_kind};
 use super::{Disposition, LinkRequest, Reader};
+
+/// The height of a PDF embed's page area without `#height=N`, px.
+pub(crate) const PDF_EMBED_HEIGHT: f32 = 480.0;
+
+/// The tallest page area `#height=N` may ask for, px.
+const PDF_EMBED_MAX_HEIGHT: f32 = 4000.0;
+
+/// The widest page image drawn for an embed, device pixels.
+const PDF_EMBED_WIDTH: u32 = 1600;
+
+/// A PDF embed's page, drawn.
+pub(crate) struct PdfPageShown {
+    pub card: Arc<MediaCard>,
+    /// The file, its length and the page (from 0) drawn, to keep it when
+    /// nothing changed.
+    pub path: PathBuf,
+    pub len: u64,
+    pub page: u32,
+    /// The page area's height at 100 %, px.
+    pub height: f32,
+    pub image: Arc<RenderImage>,
+    /// The image's size, pixels.
+    pub size: (u32, u32),
+}
+
+impl std::fmt::Debug for PdfPageShown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfPageShown")
+            .field("title", &self.card.title)
+            .field("page", &self.page)
+            .field("height", &self.height)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The height of a PDF embed's page area for `anchor`, px at 100 %.
+pub(crate) fn pdf_embed_height(anchor: PdfAnchor) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    anchor
+        .height
+        .map_or(PDF_EMBED_HEIGHT, |h| (h as f32).min(PDF_EMBED_MAX_HEIGHT))
+}
 
 /// The height of an audio card's player row, px (its 24 px buttons, its
 /// 2 px padding above and below and its hairline focus ring).
@@ -173,7 +225,13 @@ pub(crate) fn local_card(
         } else {
             "Open externally"
         },
-        open: Some(open),
+        open: Some(match pdf_anchor(anchor).page {
+            // The PDF viewer opens at the page.
+            Some(page) if kind == LiveKind::Pdf => {
+                (format!("{}#page={page}", open.0).into(), open.1)
+            }
+            _ => open,
+        }),
     }
 }
 
@@ -361,10 +419,11 @@ impl Reader {
                         reader.state.borrow_mut().cache.live.unchanged(key);
                         return;
                     }
-                    let card = match size {
-                        Ok(size) => {
-                            Arc::new(local_card(kind, &name, Some(size), anchor.as_deref(), open))
-                        }
+                    let (card, len) = match size {
+                        Ok(size) => (
+                            Arc::new(local_card(kind, &name, Some(size), anchor.as_deref(), open)),
+                            size,
+                        ),
                         Err(why) => {
                             reader.land(key, Shown::Notice(why.into()), cx);
                             return;
@@ -372,6 +431,9 @@ impl Reader {
                     };
                     if kind == LiveKind::Audio {
                         reader.show_player(key, card, path_for_player, cx);
+                    } else if kind == LiveKind::Pdf {
+                        let anchor = pdf_anchor(anchor.as_deref());
+                        reader.show_pdf_page(key, card, path_for_player, len, anchor, revision, cx);
                     } else {
                         reader.land(key, Shown::Media(card), cx);
                     }
@@ -383,6 +445,93 @@ impl Reader {
 }
 
 impl Reader {
+    /// Shows the page `anchor` names of the PDF at `path` (`len` bytes)
+    /// under `card`: the card at once, the page once the engine has drawn
+    /// it, or the card saying why it could not. A page already shown for
+    /// the same file, page and height stays.
+    #[allow(clippy::too_many_arguments)]
+    fn show_pdf_page(
+        &mut self,
+        key: gv_render_tree::LiveKey,
+        card: Arc<MediaCard>,
+        path: PathBuf,
+        len: u64,
+        anchor: PdfAnchor,
+        revision: u64,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let page = anchor.page.unwrap_or(1).saturating_sub(1);
+        let height = pdf_embed_height(anchor);
+        {
+            let mut st = self.state.borrow_mut();
+            let same = matches!(
+                st.cache.live.get(key),
+                Some(Shown::PdfPage(p)) if p.path == path
+                    && p.len == len
+                    && p.page == page
+                    && (p.height - height).abs() < 0.5
+            );
+            if same {
+                st.cache.live.unchanged(key);
+                return;
+            }
+        }
+        let Some(engine) = crate::export::pdf_engine(cx) else {
+            self.land(key, Shown::Media(card), cx);
+            return;
+        };
+        self.land(key, Shown::Media(Arc::clone(&card)), cx);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let max_height = ((height * 2.0) as u32).clamp(64, gv_helper_max_side());
+        let file = path.clone();
+        cx.spawn(async move |reader, cx| {
+            let drawn = cx
+                .background_spawn(async move {
+                    let bytes = read_pdf(&file, len)?;
+                    let raster = engine
+                        .page(
+                            &bytes,
+                            page,
+                            PDF_EMBED_WIDTH,
+                            max_height,
+                            &AtomicBool::new(false),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    crate::export::dialog::raster_image(raster)
+                        .ok_or_else(|| "the page image is empty".to_owned())
+                })
+                .await;
+            reader
+                .update(cx, |reader, cx| {
+                    if reader.state.borrow().revision != revision {
+                        return;
+                    }
+                    match drawn {
+                        Ok((image, w, h)) => reader.land(
+                            key,
+                            Shown::PdfPage(Arc::new(PdfPageShown {
+                                card,
+                                path,
+                                len,
+                                page,
+                                height,
+                                image,
+                                size: (w, h),
+                            })),
+                            cx,
+                        ),
+                        Err(why) => {
+                            let mut card = (*card).clone();
+                            card.detail = format!("{} \u{b7} {why}", card.detail);
+                            reader.land(key, Shown::Media(Arc::new(card)), cx);
+                        }
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     /// Shows `card` with a player of `path` (lazy: nothing is read until
     /// the first play); a file it cannot play goes back to the card.
     fn show_player(
@@ -407,6 +556,23 @@ impl Reader {
             .live
             .keep(key, Some(events), None);
     }
+}
+
+/// The largest side of a page drawn to fit a box (the helper's cap).
+const fn gv_helper_max_side() -> u32 {
+    4096
+}
+
+/// The largest PDF an embed draws a page of, in bytes.
+const PDF_EMBED_MAX_BYTES: u64 = crate::file_viewer::PDF_MAX_BYTES;
+
+/// The bytes of the PDF at `path`, `len` long (blocking: the background
+/// executor).
+fn read_pdf(path: &Path, len: u64) -> Result<Vec<u8>, String> {
+    if len > PDF_EMBED_MAX_BYTES {
+        return Err("too large to draw".to_owned());
+    }
+    std::fs::read(path).map_err(|e| format!("cannot read the file: {e}"))
 }
 
 /// The size of the file at `path` (blocking: the background executor).

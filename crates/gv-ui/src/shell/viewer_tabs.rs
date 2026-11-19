@@ -21,6 +21,8 @@
 //!   it changes on disk (once the tab has a Source view, the Source view
 //!   takes the change and the viewer follows it).
 //! - The viewer's *Open with default app* goes through the same question.
+//! - A PDF opens in the PDF viewer; a link's `#page=N` shows that page,
+//!   in a new tab or in the tab that shows the PDF already.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +32,7 @@ use super::Workspace;
 use crate::file_viewer::{FileViewer, FileViewerEvent};
 use crate::files::notice::Notice;
 use crate::platform::{self, FileClass};
+use crate::reader::ScrollTarget;
 
 /// Whether a tab showing `path` shows it in the built-in viewer: anything
 /// but a note, a canvas or a base.
@@ -37,6 +40,30 @@ pub(crate) fn is_viewer_file(path: &Path) -> bool {
     !platform::is_markdown(path)
         && !super::canvas_tabs::is_canvas(path)
         && !super::bases_tabs::is_base(path)
+}
+
+/// The page (from 0) a link fragment names for a PDF: `#page=N`, also
+/// with other parameters (`#page=3&height=400`).
+pub(crate) fn pdf_page(scroll: &ScrollTarget) -> Option<usize> {
+    let ScrollTarget::Fragment(fragment) = scroll else {
+        return None;
+    };
+    if let gv_vault::FragmentKind::Viewer(params) = &fragment.kind
+        && let Some((_, value)) = params.iter().find(|(k, _)| k.eq_ignore_ascii_case("page"))
+        && let Ok(page) = value.trim().parse::<usize>()
+        && page > 0
+    {
+        return Some(page - 1);
+    }
+    let anchor = crate::reader::media_card::pdf_anchor(Some(fragment.text.as_str()));
+    anchor.page.map(|p| p as usize - 1)
+}
+
+/// The fragment of a link's `destination` (what follows its first `#`),
+/// as a scroll target.
+pub(crate) fn destination_fragment(destination: &str) -> Option<ScrollTarget> {
+    let (_, sub) = destination.split_once('#')?;
+    (!sub.is_empty()).then(|| ScrollTarget::Fragment(gv_vault::Fragment::from_wikilink(sub)))
 }
 
 /// Extensions of files that are never text: no need to look inside before
@@ -63,19 +90,27 @@ impl Workspace {
         &mut self,
         index: usize,
         path: PathBuf,
+        scroll: Option<&ScrollTarget>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Option<Entity<FileViewer>> {
+        let page = scroll.and_then(pdf_page);
         let tab = self.tabs.get(index)?;
         if let Some(viewer) = tab.viewer.clone() {
             if viewer.read(cx).path() != path.as_path() {
                 viewer.update(cx, |v, cx| v.load(path.clone(), cx));
                 self.track_file(&path, None, cx);
             }
+            if let Some(page) = page {
+                viewer.update(cx, |v, cx| v.go_to_page(page, cx));
+            }
             return Some(viewer);
         }
         let root = self.link_vault_root(cx);
         let viewer = FileViewer::open(path.clone(), root, cx);
+        if let Some(page) = page {
+            viewer.update(cx, |v, cx| v.go_to_page(page, cx));
+        }
         cx.subscribe_in(
             &viewer,
             window,

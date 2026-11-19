@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The built-in viewers for linked files that are not notes (FR-VIEW-11;
-//! plan 09 § Special targets): text and code files, and images.
+//! plan 09 § Special targets): text and code files, images and PDFs.
 //!
 //! A [`FileViewer`] takes the place of the Reading view in a tab whose
 //! file is not a note, a canvas or a base. What it shows is decided when
@@ -23,21 +23,33 @@
 //!   highlighter, with its own size caps). Selection, copy and Find work
 //!   as in a note. The tab's Edit mode edits the file in the Source view
 //!   as plain text; [`FileViewer::show_text`] then shows the edited text.
-//! - Anything else, a text file over the cap, or an image that does not
-//!   decode, says why, with *Open with default app* (the window asks
-//!   first, as for any file it does not show).
+//! - **PDF** ([`ViewerKind::Pdf`]): read up to [`PDF_MAX_BYTES`] and handed
+//!   to the PDF engine the application installs (the helper process),
+//!   which says how many pages it has and how large they are; the pages
+//!   then show in a [`PdfViewer`] ([`pdf`]). A `#page=N` link fragment
+//!   shows that page ([`FileViewer::go_to_page`]).
+//! - Anything else, a text file over the cap, an image that does not
+//!   decode, or a PDF the engine cannot read (encrypted, damaged, too
+//!   large, too slow, no engine) says why, with *Open with default app*
+//!   (the window asks first, as for any file it does not show).
 //!
-//! Not designed (flagged): the image toolbar, the zoom readout and the
-//! states.
+//! Not designed (flagged): the image and PDF toolbars, the zoom readout
+//! and the states.
 
+pub mod pdf;
+#[cfg(test)]
+pub(crate) mod pdf_tests;
 #[cfg(test)]
 mod tests;
+
+pub use pdf::{PdfViewer, PdfZoom};
 
 use std::cell::Cell;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -68,6 +80,9 @@ const SNIFF_BYTES: usize = 8 << 10;
 /// The longest side an image is decoded at, in pixels; larger images are
 /// scaled down to it (100 % then shows that).
 pub const IMAGE_MAX_SIDE: u32 = 8192;
+
+/// The largest PDF shown, in bytes (under the helper's frame cap).
+pub const PDF_MAX_BYTES: u64 = 200 << 20;
 
 /// The zoom steps of the image viewer (image pixels to device pixels).
 const ZOOM_STEPS: [f32; 12] = [
@@ -124,6 +139,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 pub enum ViewerKind {
     Text,
     Image,
+    Pdf,
 }
 
 /// Image extensions the media engine decodes here.
@@ -325,6 +341,8 @@ pub fn kind(path: &Path) -> Option<ViewerKind> {
     let ext = extension(path)?;
     if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         Some(ViewerKind::Image)
+    } else if ext == "pdf" {
+        Some(ViewerKind::Pdf)
     } else if TEXT_EXTENSIONS.contains(&ext.as_str()) {
         Some(ViewerKind::Text)
     } else {
@@ -349,7 +367,7 @@ pub fn looks_like_text(bytes: &[u8]) -> bool {
 pub fn sniff_text(path: &Path) -> bool {
     match kind(path) {
         Some(ViewerKind::Text) => return true,
-        Some(ViewerKind::Image) => return false,
+        Some(ViewerKind::Image | ViewerKind::Pdf) => return false,
         None => {}
     }
     let Ok(file) = std::fs::File::open(path) else {
@@ -457,6 +475,10 @@ pub enum ViewerStatus {
         bytes: u64,
     },
     Image(ShownImage),
+    /// The PDF viewer ([`FileViewer::pdf`]), with the PDF's page count.
+    Pdf {
+        pages: usize,
+    },
     /// The file is not shown; the sentence says why.
     NotShown(SharedString),
 }
@@ -478,6 +500,12 @@ enum Loaded {
         bytes: u64,
     },
     Image(ShownImage),
+    Pdf {
+        bytes: Arc<[u8]>,
+        key: u64,
+        sizes: Vec<(f32, f32)>,
+        engine: Arc<dyn crate::export::PdfEngine>,
+    },
     NotShown(String),
 }
 
@@ -496,6 +524,12 @@ pub struct FileViewer {
     /// Where a drag started: the pointer and the scroll offset.
     drag: Option<(Point<Pixels>, Point<Pixels>)>,
     cancel: CancelFlag,
+    /// Stops the PDF engine reading a PDF.
+    pdf_cancel: Arc<AtomicBool>,
+    /// The PDF viewer of a PDF.
+    pdf: Option<gpui::Entity<PdfViewer>>,
+    /// A page (from 0) to show once the PDF is read.
+    pdf_page: Option<usize>,
     _load: Option<Task<()>>,
 }
 
@@ -513,8 +547,9 @@ impl std::fmt::Debug for FileViewer {
 
 impl Focusable for FileViewer {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match (&self.status, &self.reader) {
-            (ViewerStatus::Text { .. }, Some(reader)) => reader.read(cx).focus_handle(cx),
+        match (&self.status, &self.reader, &self.pdf) {
+            (ViewerStatus::Text { .. }, Some(reader), _) => reader.read(cx).focus_handle(cx),
+            (ViewerStatus::Pdf { .. }, _, Some(pdf)) => pdf.read(cx).focus_handle(cx),
             _ => self.focus.clone(),
         }
     }
@@ -536,6 +571,9 @@ impl FileViewer {
                 area: Rc::default(),
                 drag: None,
                 cancel: CancelFlag::new(),
+                pdf_cancel: Arc::new(AtomicBool::new(false)),
+                pdf: None,
+                pdf_page: None,
                 _load: None,
             };
             viewer.load(path, cx);
@@ -561,6 +599,19 @@ impl FileViewer {
         self.zoom
     }
 
+    /// The PDF viewer of a PDF, once it is read.
+    pub fn pdf(&self) -> Option<&gpui::Entity<PdfViewer>> {
+        self.pdf.as_ref()
+    }
+
+    /// Shows page `page` (from 0) of a PDF, now or once it is read.
+    pub fn go_to_page(&mut self, page: usize, cx: &mut Context<'_, Self>) {
+        match (&self.status, &self.pdf) {
+            (ViewerStatus::Pdf { .. }, Some(pdf)) => pdf.update(cx, |v, cx| v.go_to(page, cx)),
+            _ => self.pdf_page = Some(page),
+        }
+    }
+
     /// The vault's folder is known.
     pub fn set_root(&mut self, root: Option<PathBuf>) {
         self.root = root;
@@ -571,6 +622,7 @@ impl FileViewer {
         if path != self.path {
             self.zoom = ImageZoom::Fit;
             self.scroll.set_offset(Point::default());
+            self.pdf = None;
         }
         self.path = path.clone();
         self.cancel.cancel();
@@ -586,9 +638,18 @@ impl FileViewer {
         if matches!(self.status, ViewerStatus::NotShown(_)) {
             self.status = ViewerStatus::Loading;
         }
+        self.pdf_cancel.store(true, Ordering::Release);
+        self.pdf_cancel = Arc::new(AtomicBool::new(false));
+        let pdf = (kind(&path) == Some(ViewerKind::Pdf))
+            .then(|| (crate::export::pdf_engine(cx), Arc::clone(&self.pdf_cancel)));
         self._load = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
-                .background_spawn(async move { load(&path, &root, animate, &cancel) })
+                .background_spawn(async move {
+                    match pdf {
+                        Some((engine, cancel)) => load_pdf(&path, engine, &cancel),
+                        None => load(&path, &root, animate, &cancel),
+                    }
+                })
                 .await;
             this.update(cx, |viewer, cx| viewer.finish(loaded, cx)).ok();
         }));
@@ -629,7 +690,33 @@ impl FileViewer {
                 self.status = ViewerStatus::Text { language, bytes };
             }
             Loaded::Image(image) => self.status = ViewerStatus::Image(image),
-            Loaded::NotShown(why) => self.status = ViewerStatus::NotShown(why.into()),
+            Loaded::Pdf {
+                bytes,
+                key,
+                sizes,
+                engine,
+            } => {
+                // Read again (changed on disk): the same zoom and page.
+                let (zoom, page) = match &self.pdf {
+                    Some(old) => {
+                        let old = old.read(cx);
+                        (old.zoom(), Some(old.current_page()))
+                    }
+                    None => (PdfZoom::FitWidth, None),
+                };
+                let page = self.pdf_page.take().or(page);
+                let pages = sizes.len();
+                let path = self.path.clone();
+                let viewer =
+                    cx.new(|cx| PdfViewer::new(path, bytes, key, sizes, engine, zoom, page, cx));
+                cx.observe(&viewer, |_, _, cx| cx.notify()).detach();
+                self.pdf = Some(viewer);
+                self.status = ViewerStatus::Pdf { pages };
+            }
+            Loaded::NotShown(why) => {
+                self.pdf = None;
+                self.status = ViewerStatus::NotShown(why.into());
+            }
         }
         cx.notify();
     }
@@ -1045,6 +1132,63 @@ fn byte_size(bytes: u64) -> String {
     }
 }
 
+/// The engine's names for PDFs: a new one for every read.
+static NEXT_PDF_KEY: AtomicU64 = AtomicU64::new(1);
+
+/// Reads the PDF at `path` and asks `engine` for its pages (blocking: the
+/// background executor only).
+fn load_pdf(
+    path: &Path,
+    engine: Option<Arc<dyn crate::export::PdfEngine>>,
+    cancel: &AtomicBool,
+) -> Loaded {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return Loaded::NotShown("This is not a file.".into()),
+        Err(err) => return Loaded::NotShown(format!("The file cannot be read: {err}.")),
+    };
+    if meta.len() > PDF_MAX_BYTES {
+        return Loaded::NotShown(format!(
+            "This PDF is too large to show here ({}; at most {}).",
+            byte_size(meta.len()),
+            byte_size(PDF_MAX_BYTES)
+        ));
+    }
+    let Some(engine) = engine else {
+        return Loaded::NotShown("The PDF engine is not available.".into());
+    };
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(err) => return Loaded::NotShown(format!("The file cannot be read: {err}.")),
+    };
+    let key = NEXT_PDF_KEY.fetch_add(1, Ordering::Relaxed);
+    match engine.open_document(key, &data, cancel) {
+        Ok(sizes) if sizes.is_empty() => Loaded::NotShown("The PDF has no pages.".into()),
+        Ok(sizes) => Loaded::Pdf {
+            bytes: data.into(),
+            key,
+            sizes,
+            engine,
+        },
+        Err(crate::export::PdfError::Cancelled) => Loaded::NotShown("Cancelled.".into()),
+        Err(crate::export::PdfError::Failed(why)) => Loaded::NotShown(sentence(&why)),
+    }
+}
+
+/// `why` as a sentence: a capital first letter and a full stop.
+fn sentence(why: &str) -> String {
+    let why = why.trim();
+    let mut chars = why.chars();
+    let mut out: String = match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => return "The PDF cannot be shown.".to_owned(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+
 /// Reads and decodes `path` (blocking: the background executor only).
 fn load(path: &Path, root: &Path, animate: bool, cancel: &CancelFlag) -> Loaded {
     let meta = match std::fs::metadata(path) {
@@ -1126,14 +1270,26 @@ impl Render for FileViewer {
                 None => div().size_full().into_any_element(),
             },
             ViewerStatus::Image(shown) => self.render_image(shown, theme, window, cx),
+            ViewerStatus::Pdf { .. } => match &self.pdf {
+                Some(pdf) => div().size_full().child(pdf.clone()).into_any_element(),
+                None => div().size_full().into_any_element(),
+            },
             ViewerStatus::NotShown(why) => self.render_message(why.clone(), theme, cx),
         };
+        // The keyboard the viewer had while loading goes to the pages.
+        if let (ViewerStatus::Pdf { .. }, Some(pdf)) = (&status, &self.pdf)
+            && self.focus.is_focused(window)
+        {
+            pdf.read(cx).focus_handle(cx).focus(window, cx);
+        }
         let image = matches!(status, ViewerStatus::Image(_));
         // The text viewer is a Reading view (a document of its own); the
         // others are a named group the keyboard reaches with F6.
         let group = !matches!(status, ViewerStatus::Text { .. });
         let label: SharedString = if image {
             format!("Image viewer: {}", self.file_name()).into()
+        } else if matches!(status, ViewerStatus::Pdf { .. }) {
+            format!("PDF viewer: {}", self.file_name()).into()
         } else {
             self.file_name()
         };

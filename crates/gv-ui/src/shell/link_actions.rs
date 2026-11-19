@@ -346,7 +346,9 @@ impl Workspace {
                 return;
             }
             Navigation::OpenFile(path) if super::canvas_tabs::opens_as_tab(&path) => {
-                self.open_link_target(index, path, None, disposition, window, cx);
+                // A PDF's `#page=N`.
+                let scroll = super::viewer_tabs::destination_fragment(&link.destination);
+                self.open_link_target(index, path, scroll, disposition, window, cx);
                 return;
             }
             Navigation::OpenFile(path) => {

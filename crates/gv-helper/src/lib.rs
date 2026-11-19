@@ -26,4 +26,4 @@ pub mod raster;
 pub mod serve;
 
 pub use client::{Helper, HelperConfig, HelperError, locate};
-pub use protocol::{PageImage, PageJob, PdfJob, PdfOutput};
+pub use protocol::{DocInfo, OpenJob, PageImage, PageJob, PageSize, PdfJob, PdfOutput, RenderJob};

@@ -2,8 +2,14 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The helper's side: answers requests on standard input until it ends.
+//!
+//! Requests are answered one at a time, in order. A [`Job::Open`] starts a
+//! session: the PDF and hayro's caches are kept while the next requests
+//! draw pages of it ([`Job::Render`] with its key); any other request ends
+//! the session and is answered as usual. A [`Job::Render`] outside its
+//! session is answered with [`Output::NoDocument`].
 
-use std::io::{self, BufReader, BufWriter, ErrorKind};
+use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::time::Duration;
 
 use crate::protocol::{self, Fault, Hello, Job, Output, Request, Response};
@@ -12,15 +18,58 @@ use crate::protocol::{self, Fault, Hello, Job, Output, Request, Response};
 pub fn serve() -> io::Result<()> {
     let mut input = BufReader::new(io::stdin().lock());
     let mut output = BufWriter::new(io::stdout().lock());
+    serve_on(&mut input, &mut output)
+}
+
+/// Serves requests from `input` until it ends, answering on `output`.
+pub fn serve_on(input: &mut impl Read, output: &mut impl Write) -> io::Result<()> {
+    let mut pending: Option<Request> = None;
     loop {
-        let frame = match protocol::read_frame(&mut input) {
-            Ok(frame) => frame,
-            // The parent closed our input: time to go.
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+        let request = match pending.take() {
+            Some(request) => request,
+            None => match next(input)? {
+                Some(request) => request,
+                // The parent closed our input: time to go.
+                None => return Ok(()),
+            },
         };
-        let response = match protocol::decode::<Request>(&frame)? {
+        let response = match request {
             Request::Hello(_) => Response::Hello(Hello::ours()),
+            Request::Job {
+                id,
+                job: Job::Open(open),
+                ..
+            } => match crate::raster::open(open.pdf) {
+                Ok(pdf) => {
+                    let info = crate::raster::info(&pdf);
+                    protocol::send(
+                        output,
+                        &Response::Done {
+                            id,
+                            result: Ok(Output::Document(info)),
+                        },
+                    )?;
+                    match session(&pdf, open.key, input, output)? {
+                        Some(next) => {
+                            pending = Some(next);
+                            continue;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                Err(message) => Response::Done {
+                    id,
+                    result: Err(message),
+                },
+            },
+            Request::Job {
+                id,
+                job: Job::Render(_),
+                ..
+            } => Response::Done {
+                id,
+                result: Ok(Output::NoDocument),
+            },
             Request::Job {
                 id,
                 max_output,
@@ -31,7 +80,50 @@ pub fn serve() -> io::Result<()> {
                 result: run(job, max_output),
             },
         };
-        protocol::send(&mut output, &response)?;
+        protocol::send(output, &response)?;
+    }
+}
+
+/// The next request; `None` once the input ends.
+fn next(input: &mut impl Read) -> io::Result<Option<Request>> {
+    match protocol::read_frame(input) {
+        Ok(frame) => protocol::decode::<Request>(&frame).map(Some),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Draws pages of `pdf` (kept as `key`) until a request for something
+/// else comes, which is returned; `None` once the input ends.
+fn session(
+    pdf: &hayro::hayro_syntax::Pdf,
+    key: u64,
+    input: &mut impl Read,
+    output: &mut impl Write,
+) -> io::Result<Option<Request>> {
+    let mut session = crate::raster::Session::new(pdf);
+    loop {
+        let Some(request) = next(input)? else {
+            return Ok(None);
+        };
+        match request {
+            Request::Job {
+                id,
+                max_output,
+                job: Job::Render(job),
+                ..
+            } if job.key == key && !session.broken => {
+                let result = session.render(&job).and_then(|image| {
+                    if image.rgba.len() as u64 > max_output {
+                        Err("The page image is too large.".to_owned())
+                    } else {
+                        Ok(Output::Page(image))
+                    }
+                });
+                protocol::send(output, &Response::Done { id, result })?;
+            }
+            other => return Ok(Some(other)),
+        }
     }
 }
 
@@ -50,10 +142,12 @@ fn run(job: Job, max_output: u64) -> Result<Output, String> {
         Job::Page(job) => {
             let image = crate::raster::page(&job)?;
             if image.rgba.len() as u64 > max_output {
-                return Err("the page image is too large".to_owned());
+                return Err("The page image is too large.".to_owned());
             }
             Ok(Output::Page(image))
         }
+        // Answered by `serve_on` and `session`.
+        Job::Open(_) | Job::Render(_) => Ok(Output::NoDocument),
         Job::Fault(Fault::Sleep { ms }) => {
             std::thread::sleep(Duration::from_millis(ms));
             Ok(Output::Done)

@@ -607,11 +607,15 @@ impl Tab {
         use crate::file_viewer::{ViewerKind, ViewerStatus};
         match self.viewer.as_ref().map(|v| v.read(cx).status()) {
             Some(ViewerStatus::Text { .. }) => true,
-            Some(ViewerStatus::Image(_) | ViewerStatus::NotShown(_)) => false,
-            Some(ViewerStatus::Loading) | None => self
-                .path
-                .as_deref()
-                .is_some_and(|p| crate::file_viewer::kind(p) != Some(ViewerKind::Image)),
+            Some(ViewerStatus::Image(_) | ViewerStatus::Pdf { .. } | ViewerStatus::NotShown(_)) => {
+                false
+            }
+            Some(ViewerStatus::Loading) | None => self.path.as_deref().is_some_and(|p| {
+                !matches!(
+                    crate::file_viewer::kind(p),
+                    Some(ViewerKind::Image | ViewerKind::Pdf)
+                )
+            }),
         }
     }
 
@@ -1425,7 +1429,7 @@ impl Workspace {
         if viewer_tabs::is_viewer_file(&path) {
             self.tabs[index].canvas = None;
             self.tabs[index].bases = None;
-            self.ensure_viewer(index, path, window, cx);
+            self.ensure_viewer(index, path, scroll.as_ref(), window, cx);
             return None;
         }
         self.tabs[index].canvas = None;
@@ -1802,7 +1806,8 @@ impl Workspace {
             if let Some(reader) = tab.reader.take() {
                 self.readers.remove(&reader.entity_id());
             }
-            self.make_reader(index, None, window, cx);
+            // A PDF's `#page=N` reaches the built-in viewer.
+            self.make_reader(index, scroll.clone(), window, cx);
         } else {
             match tab.reader.clone() {
                 Some(reader) if same => {

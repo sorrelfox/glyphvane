@@ -92,6 +92,8 @@ pub(crate) enum Shown {
         Arc<super::media_card::MediaCard>,
         Entity<crate::audio::AudioPlayerView>,
     ),
+    /// A PDF of the vault: its card's header over the page drawn.
+    PdfPage(Arc<super::media_card::PdfPageShown>),
     /// It cannot be shown; why.
     Notice(Arc<str>),
 }
@@ -101,6 +103,7 @@ impl Shown {
     pub fn card(&self) -> Option<&Arc<super::media_card::MediaCard>> {
         match self {
             Self::Media(m) | Self::Audio(m, _) => Some(m),
+            Self::PdfPage(p) => Some(&p.card),
             _ => None,
         }
     }
@@ -115,6 +118,7 @@ impl std::fmt::Debug for Shown {
             Self::Query(q) => write!(f, "Query({} files)", q.files.len()),
             Self::Media(m) => write!(f, "Media({:?})", m.title),
             Self::Audio(m, _) => write!(f, "Audio({:?})", m.title),
+            Self::PdfPage(p) => write!(f, "PdfPage({p:?})"),
             Self::Notice(n) => write!(f, "Notice({n:?})"),
         }
     }
@@ -196,6 +200,7 @@ pub(crate) fn box_height(shown: &Shown, reserve: f32, line: f32, zoom: f32) -> f
         Shown::Notice(_) | Shown::Media(_) => head + line + PAD * zoom,
         // The player draws at fixed interface sizes.
         Shown::Audio(..) => head + super::media_card::PLAYER_HEIGHT + PAD * zoom,
+        Shown::PdfPage(p) => head + p.height * zoom + PAD * zoom,
     }
 }
 

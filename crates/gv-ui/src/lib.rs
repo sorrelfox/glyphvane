@@ -97,6 +97,7 @@ pub fn init(cx: &mut App, settings: AppSettings) {
     cx.bind_keys(canvas_view::key_bindings());
     cx.bind_keys(bases_view::key_bindings());
     cx.bind_keys(file_viewer::key_bindings());
+    cx.bind_keys(file_viewer::pdf::key_bindings());
     cx.bind_keys(editor::key_bindings());
     cx.bind_keys(find::key_bindings());
     cx.bind_keys(search_panel::key_bindings());

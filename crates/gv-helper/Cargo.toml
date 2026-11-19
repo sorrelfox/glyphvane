@@ -28,9 +28,10 @@ fontdb = { workspace = true, optional = true }
 typst = { workspace = true, optional = true }
 typst-layout = { workspace = true, optional = true }
 typst-pdf = { workspace = true, optional = true }
-# PDF page raster (previews): the version Typst already pulls in through
-# typst-svg, without its embedded fallback fonts (MIT OR Apache-2.0).
-hayro = { version = "=0.7.1", default-features = false, optional = true }
+# PDF page raster (the PDF viewer, embeds, previews), without its embedded
+# fallback fonts (MIT OR Apache-2.0). Typst pulls in hayro 0.7 through
+# typst-svg; this newer one sits beside it.
+hayro = { version = "=0.9.0", default-features = false, optional = true }
 
 # The helper's address-space limit.
 [target.'cfg(target_os = "linux")'.dependencies]

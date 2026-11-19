@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Glyphvane contributors
 
-//! The Go popovers: Go to line (Ctrl+G), Go to heading (Mod+Shift+O) and
-//! the callout type picker (Insert callout…).
+//! The Go popovers: Go to line (Ctrl+G), Go to page (Ctrl+G in the PDF
+//! viewer), Go to heading (Mod+Shift+O) and the callout type picker
+//! (Insert callout…).
 //!
 //! None of them is designed. They are drawn like the command palette and
 //! the quick switcher (SPEC § Popovers): 540 wide, 84 below the top of the
@@ -120,6 +121,14 @@ pub enum GotoKind {
         /// The caret's line, 1-based.
         current: usize,
         /// The number of lines.
+        count: usize,
+    },
+    /// Go to page (a PDF): a field for a page number; Enter gives
+    /// [`Choice::Line`] with the page, clamped to `1..=count`.
+    Page {
+        /// The page shown, 1-based.
+        current: usize,
+        /// The number of pages.
         count: usize,
     },
     /// A list to pick from.

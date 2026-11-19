@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    self, Hello, Job, Output, PageImage, PageJob, PdfJob, PdfOutput, Request, Response,
+    self, DocInfo, Hello, Job, OpenJob, Output, PageImage, PageJob, PdfJob, PdfOutput, RenderJob,
+    Request, Response,
 };
 
 /// The helper executable's name.
@@ -327,6 +328,38 @@ impl Helper {
             * 4;
         match self.run(Job::Page(job), deadline, max, cancel)? {
             Output::Page(image) => Ok(image),
+            _ => Err(HelperError::Protocol("no page image".into())),
+        }
+    }
+
+    /// Reads `pdf` and keeps it (as `key`) for [`Helper::render`];
+    /// returns its pages.
+    pub fn open(
+        &self,
+        key: u64,
+        pdf: Vec<u8>,
+        deadline: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<DocInfo, HelperError> {
+        match self.run(Job::Open(OpenJob { key, pdf }), deadline, 0, cancel)? {
+            Output::Document(info) => Ok(info),
+            _ => Err(HelperError::Protocol("no page sizes".into())),
+        }
+    }
+
+    /// Draws a page of the PDF [`Helper::open`] kept as `job.key`;
+    /// `None` when the helper does not hold it (it was restarted, or
+    /// another PDF was opened since): open it again.
+    pub fn render(
+        &self,
+        job: RenderJob,
+        deadline: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<Option<PageImage>, HelperError> {
+        let max = job.max_pixels.clamp(1, protocol::MAX_RENDER_PIXELS) * 4;
+        match self.run(Job::Render(job), deadline, max, cancel)? {
+            Output::Page(image) => Ok(Some(image)),
+            Output::NoDocument => Ok(None),
             _ => Err(HelperError::Protocol("no page image".into())),
         }
     }
