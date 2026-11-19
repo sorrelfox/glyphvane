@@ -121,8 +121,9 @@ pub struct SaveOptions {
 pub enum SaveOutcome {
     /// The file already held these bytes; nothing was written.
     Unchanged,
-    /// The file was written.
-    Written(WriteReport),
+    /// The file was written (boxed: the report is large, the other
+    /// variant empty).
+    Written(Box<WriteReport>),
 }
 
 /// Why a save failed. The file on disk is unchanged in every case (see
@@ -374,7 +375,7 @@ impl DocumentFile {
         self.format = format;
         self.status = DecodeStatus::Exact;
         self.fs = report.fs;
-        Ok(SaveOutcome::Written(report))
+        Ok(SaveOutcome::Written(Box::new(report)))
     }
 
     /// Saves to another path ("Save As") and retargets this file to it. If a

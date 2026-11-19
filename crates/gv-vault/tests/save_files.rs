@@ -67,7 +67,7 @@ fn temp_files(dir: &Path) -> Vec<String> {
 
 fn saved(outcome: SaveOutcome) -> gv_vault::files::WriteReport {
     match outcome {
-        SaveOutcome::Written(report) => report,
+        SaveOutcome::Written(report) => *report,
         SaveOutcome::Unchanged => panic!("expected a write"),
     }
 }

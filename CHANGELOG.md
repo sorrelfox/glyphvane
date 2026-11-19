@@ -100,6 +100,9 @@ Conventional Commits, and versions follow Semantic Versioning.
   as links in backlinks or the link checker.
 - Formulas in backlink context lines and search results use the math
   macros (`\newcommand`, `\def`) their note defines before them.
+- Windows: files on ReFS volumes are told apart by their full 128-bit file
+  ID, so renames by other programs and replaced files are recognised
+  there as on NTFS.
 
 ## [1.2.0] - 2026-11-19
 

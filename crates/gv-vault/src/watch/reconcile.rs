@@ -255,7 +255,10 @@ mod tests {
             FileMeta {
                 size,
                 mtime: None,
-                identity: Some(FileIdentity { dev: 1, ino }),
+                identity: Some(FileIdentity {
+                    dev: 1,
+                    ino: u128::from(ino),
+                }),
             },
         ))
     }

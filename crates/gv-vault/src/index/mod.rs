@@ -105,13 +105,14 @@ pub enum SymlinkTarget {
     Broken,
 }
 
-/// The file identity the OS reports (`(dev, inode)` on Unix).
+/// The file identity the OS reports (`(dev, inode)` on Unix; volume serial
+/// number and file ID on Windows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
     /// Device number.
     pub dev: u64,
-    /// Inode number.
-    pub ino: u64,
+    /// Inode number, widened to hold the 128-bit file IDs of Windows.
+    pub ino: u128,
 }
 
 /// File metadata gathered by the walk.

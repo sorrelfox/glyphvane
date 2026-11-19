@@ -217,12 +217,12 @@ fn identity(_path: &Path, m: &fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     Some(FileIdentity {
         dev: m.dev(),
-        ino: m.ino(),
+        ino: u128::from(m.ino()),
     })
 }
 
 /// The identity of the entry at `path`, not following a final symbolic link
-/// (as `m` does not): its volume serial number and file index.
+/// (as `m` does not): its volume serial number and file ID.
 #[cfg(windows)]
 fn identity(path: &Path, _m: &fs::Metadata) -> Option<FileIdentity> {
     crate::files::disk::windows::path_identity(path, false).map(|i| FileIdentity {

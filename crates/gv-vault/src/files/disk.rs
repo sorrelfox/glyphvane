@@ -11,14 +11,16 @@ use std::time::SystemTime;
 use super::hash::ContentHash;
 
 /// The identity of a file independent of its name: device and inode on Unix,
-/// volume serial number and file index on Windows. A save by rename gives
-/// the file a new identity; an in-place write keeps it.
+/// volume serial number and file ID on Windows (the 128-bit ID where the
+/// file system reports one, as ReFS needs: its 64-bit file index is not
+/// unique). A save by rename gives the file a new identity; an in-place write
+/// keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
     /// The device (the volume serial number on Windows).
     pub device: u64,
-    /// The inode (the file index on Windows).
-    pub inode: u64,
+    /// The inode (the file ID on Windows), widened to hold a 128-bit ID.
+    pub inode: u128,
 }
 
 impl FileIdentity {
@@ -32,7 +34,7 @@ impl FileIdentity {
             let _ = path;
             Some(Self {
                 device: meta.dev(),
-                inode: meta.ino(),
+                inode: u128::from(meta.ino()),
             })
         }
         #[cfg(windows)]
@@ -67,8 +69,9 @@ impl FileIdentity {
     }
 }
 
-/// File identity on Windows: `GetFileInformationByHandle`, which the
-/// standard library does not expose on stable.
+/// File identity on Windows: `GetFileInformationByHandleEx` with
+/// `FileIdInfo`, falling back to `GetFileInformationByHandle`; the standard
+/// library exposes neither on stable.
 #[cfg(windows)]
 pub(crate) mod windows {
     use std::fs;
@@ -78,7 +81,8 @@ pub(crate) mod windows {
 
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx,
     };
 
     use super::FileIdentity;
@@ -101,12 +105,47 @@ pub(crate) mod windows {
         file_identity(&file)
     }
 
-    /// The identity of the open `file`.
+    /// The identity of the open `file`: the 128-bit file ID and the 64-bit
+    /// volume serial number (`FileIdInfo`, which ReFS needs because its
+    /// 64-bit file index is not unique), or, where the file system or OS
+    /// does not support that query, the 64-bit file index and the 32-bit
+    /// serial number. A volume answers the same query every time, so the
+    /// identities of one volume stay comparable.
+    pub(crate) fn file_identity(file: &fs::File) -> Option<FileIdentity> {
+        id_info(file).or_else(|| handle_info(file))
+    }
+
+    /// The identity from `GetFileInformationByHandleEx(FileIdInfo)`.
+    #[expect(
+        unsafe_code,
+        reason = "FFI call to GetFileInformationByHandleEx; see the SAFETY comment"
+    )]
+    fn id_info(file: &fs::File) -> Option<FileIdentity> {
+        let mut info = FILE_ID_INFO::default();
+        let size = u32::try_from(std::mem::size_of::<FILE_ID_INFO>()).ok()?;
+        // SAFETY: the handle is valid for the lifetime of `file`, which
+        // outlives the call; `info` is a writable `FILE_ID_INFO`, the type
+        // the `FileIdInfo` class fills, and `size` is its size in bytes.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        (ok != 0).then(|| FileIdentity {
+            device: info.VolumeSerialNumber,
+            inode: u128::from_le_bytes(info.FileId.Identifier),
+        })
+    }
+
+    /// The identity from `GetFileInformationByHandle`.
     #[expect(
         unsafe_code,
         reason = "FFI call to GetFileInformationByHandle; see the SAFETY comment"
     )]
-    pub(crate) fn file_identity(file: &fs::File) -> Option<FileIdentity> {
+    fn handle_info(file: &fs::File) -> Option<FileIdentity> {
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         // SAFETY: the handle is valid for the lifetime of `file`, which
         // outlives the call, and `info` is a writable struct of the type the
@@ -114,7 +153,7 @@ pub(crate) mod windows {
         let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
         (ok != 0).then(|| FileIdentity {
             device: u64::from(info.dwVolumeSerialNumber),
-            inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            inode: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
         })
     }
 }
