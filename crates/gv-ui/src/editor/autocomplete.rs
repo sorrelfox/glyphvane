@@ -386,8 +386,18 @@ impl EditorView {
             this.update(cx, |view, cx| view.accept_completion(n, window, cx))
                 .ok();
         });
+        let this = cx.entity().downgrade();
+        let wheel: autocomplete::RowWheel = Rc::new(move |rows, _, cx: &mut App| {
+            this.update(cx, |view, cx| {
+                if view.autocomplete.scroll(rows) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
         let theme = Appearance::theme(cx);
-        let panel = autocomplete::panel(&open, Appearance::interface_font(cx), theme, &click);
+        let panel =
+            autocomplete::panel(&open, Appearance::interface_font(cx), theme, &click, &wheel);
         Some(
             deferred(anchored().position(origin).child(panel))
                 .with_priority(1)

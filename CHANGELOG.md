@@ -54,6 +54,7 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A `%%…%%` comment that runs over a line break inside a paragraph is
   hidden in the Reading view, and its markers in Live Preview, as on one
   line.
+- The mouse wheel scrolls the autocomplete list.
 
 ## [1.2.0] - 2026-11-19
 

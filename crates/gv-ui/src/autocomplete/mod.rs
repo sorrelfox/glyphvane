@@ -83,8 +83,8 @@ pub(crate) use link::{
     wiki_heading,
 };
 #[cfg(test)]
-pub(crate) use view::LABEL_INSET;
-pub(crate) use view::{RowClick, panel, panel_size, place};
+pub(crate) use view::{LABEL_INSET, VISIBLE_ROWS};
+pub(crate) use view::{RowClick, RowWheel, panel, panel_size, place};
 
 use crate::switcher::model::{self, Entry, Gather, VaultSource};
 
@@ -115,6 +115,8 @@ pub(crate) struct State {
     /// The quick switcher's file entries for the vault, and what they were
     /// built from (root and index generation).
     files: Option<(PathBuf, u64, Arc<Vec<Entry>>)>,
+    /// Wheel rows not scrolled yet (a fraction of a row).
+    wheel: f32,
 }
 
 impl State {
@@ -206,6 +208,7 @@ impl State {
         };
         open.first = selected.saturating_sub(view::VISIBLE_ROWS - 1);
         self.open = Some(open);
+        self.wheel = 0.0;
     }
 
     /// Moves the highlight down (or up), wrapping.
@@ -224,6 +227,28 @@ impl State {
         } else if open.selected >= open.first + view::VISIBLE_ROWS {
             open.first = open.selected + 1 - view::VISIBLE_ROWS;
         }
+    }
+
+    /// Scrolls the rows by `rows` (down when positive) without moving the
+    /// highlight; fractions add up across calls. Whether the rows shown
+    /// changed.
+    pub fn scroll(&mut self, rows: f32) -> bool {
+        let Some(open) = self.open.as_mut() else {
+            return false;
+        };
+        self.wheel += rows;
+        let whole = self.wheel.trunc();
+        self.wheel -= whole;
+        let last = open.items.len().saturating_sub(view::VISIBLE_ROWS);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let first = if whole < 0.0 {
+            open.first.saturating_sub((-whole) as usize)
+        } else {
+            open.first.saturating_add(whole as usize).min(last)
+        };
+        let changed = first != open.first;
+        open.first = first;
+        changed
     }
 
     /// The quick switcher's entries for the vault at `root`: from the

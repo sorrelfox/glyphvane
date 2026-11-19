@@ -21,7 +21,8 @@ use crate::metrics::{HAIRLINE, icon, radius, text};
 use crate::switcher::{hint, label_text, popover_shadow};
 use crate::theme::Theme;
 
-/// Rows shown at once; the list scrolls with the highlight (not designed).
+/// Rows shown at once; the list scrolls with the highlight and the wheel
+/// (not designed).
 pub(crate) const VISIBLE_ROWS: usize = 8;
 /// The list's padding.
 const LIST_PAD: f32 = 4.0;
@@ -99,12 +100,16 @@ fn icon_of(icon: ItemIcon) -> Result<Icon, &'static str> {
 /// Accepts row `n`.
 pub(crate) type RowClick = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// Scrolls the rows by a number of rows (down when positive).
+pub(crate) type RowWheel = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
 /// The popover for `open`.
 pub(crate) fn panel(
     open: &Open,
     font: SharedString,
     theme: &Theme,
     click: &RowClick,
+    wheel: &RowWheel,
 ) -> AnyElement {
     let hover = theme.state.hover;
     let last = (open.first + VISIBLE_ROWS).min(open.items.len());
@@ -205,6 +210,14 @@ pub(crate) fn panel(
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
             window.prevent_default();
+        })
+        .on_scroll({
+            let wheel = wheel.clone();
+            move |e, window, cx| {
+                cx.stop_propagation();
+                let rows = -f32::from(e.delta.pixel_delta(px(MENU_ROW)).y) / MENU_ROW;
+                wheel(rows, window, cx);
+            }
         })
         .child(div().flex().flex_col().p(px(LIST_PAD)).children(rows))
         .child(footer)

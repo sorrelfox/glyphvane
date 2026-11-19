@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui::{ScrollDelta, ScrollEvent};
 use gv_profile::ProfileId;
 use gv_vault::content::{ContentIndexer, ContentOptions};
 use gv_vault::{IndexConfig, PathIndex};
@@ -449,6 +450,62 @@ fn a_click_accepts_and_the_popover_sits_under_the_text(cx: &mut TestAppContext) 
         .expect("the row is drawn");
     press(&mut vcx, row.center(), 1, Modifiers::none());
     assert_eq!(text_of(&view, &mut vcx), format!("Text\n> [!{target}] "));
+}
+
+/// The wheel over the popover scrolls its rows, not the text; the
+/// highlight stays on its row.
+#[gpui::test]
+fn the_wheel_scrolls_the_popover(cx: &mut TestAppContext) {
+    let text = format!("\n{}", "line\n".repeat(200));
+    let (view, mut vcx) = editor_for(cx, &text, ProfileId::Obsidian);
+    vcx.simulate_keystrokes("secondary-home");
+    draw(&mut vcx);
+    type_text(&mut vcx, "> [!");
+    let all = labels(&view, &mut vcx);
+    assert!(all.len() > crate::autocomplete::VISIBLE_ROWS + 3, "{all:?}");
+    let row = |vcx: &mut VisualTestContext, label: &str| {
+        vcx.debug_bounds(Box::leak(
+            format!("autocomplete-row:{label}").into_boxed_str(),
+        ))
+    };
+    let first = row(&mut vcx, &all[0]).expect("the first row is drawn");
+    assert!(row(&mut vcx, &all[crate::autocomplete::VISIBLE_ROWS]).is_none());
+    let top = view.read_with(&vcx, |v, _| v.scroll_y);
+    vcx.simulate_event(ScrollEvent {
+        position: first.center(),
+        delta: ScrollDelta::Lines(point(0.0, -3.0)),
+        ..ScrollEvent::default()
+    });
+    draw(&mut vcx);
+    assert!(
+        row(&mut vcx, &all[0]).is_none(),
+        "scrolled past the first row"
+    );
+    assert!(row(&mut vcx, &all[crate::autocomplete::VISIBLE_ROWS + 2]).is_some());
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.scroll_y),
+        top,
+        "the text stayed"
+    );
+    assert_eq!(rows(&view, &mut vcx).expect("open").1, 0);
+    // Far past the end: the last rows fill the popover.
+    vcx.simulate_event(ScrollEvent {
+        position: first.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-10_000.0))),
+        ..ScrollEvent::default()
+    });
+    draw(&mut vcx);
+    assert!(row(&mut vcx, all.last().expect("rows")).is_some());
+    assert!(
+        row(
+            &mut vcx,
+            &all[all.len() - crate::autocomplete::VISIBLE_ROWS]
+        )
+        .is_some()
+    );
+    // The keys bring the highlight back into view.
+    vcx.simulate_keystrokes("down");
+    assert!(row(&mut vcx, &all[1]).is_some());
 }
 
 #[gpui::test]
