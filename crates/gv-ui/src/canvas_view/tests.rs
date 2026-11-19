@@ -1308,3 +1308,100 @@ fn a_new_view_size_keeps_the_centre(cx: &mut TestAppContext) {
     });
     assert!(near(before, after, 0.5), "{before:?} -> {after:?}");
 }
+
+/// Draws a frame after the background work, every job outside it: a
+/// highlighting or diagram job run while the frame is drawn fails the
+/// test.
+fn draw_guarded(vcx: &mut VisualTestContext) {
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let _frame = crate::reader::code_highlight::tests::FrameGuard::new();
+        window.draw(cx).clear(cx);
+    });
+}
+
+#[gpui::test]
+fn card_code_is_highlighted_and_diagrams_drawn_off_the_frame(cx: &mut TestAppContext) {
+    use super::cards::Block;
+    use crate::inline::BoxContent;
+    use crate::reader::{code_highlight, diagram};
+
+    let board = r#"{"nodes":[{"id":"c","type":"text","x":0,"y":0,"width":160,"height":400,
+        "text":"```rust\nfn canvas_card_code() -> u8 { 7 }\n```\n\n```mermaid\nflowchart LR\n  CanvasCardA --> CanvasCardB --> CanvasCardC\n```"}]}"#;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("code.canvas"), board).expect("write");
+    let (window, view) = open(cx, &dir.path().join("code.canvas"), dir.path());
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let jobs = (
+        code_highlight::tests::jobs_run(),
+        diagram::tests::jobs_run(),
+    );
+    for _ in 0..2 {
+        draw_guarded(&mut vcx);
+    }
+    view.update(&mut vcx, |v, cx| {
+        v.set_transform(
+            Transform {
+                zoom: 1.0,
+                pan: gv_canvas::Point::new(20.0, 20.0),
+            },
+            cx,
+        );
+    });
+    for _ in 0..4 {
+        draw_guarded(&mut vcx);
+    }
+    assert_eq!(
+        (
+            code_highlight::tests::jobs_run(),
+            diagram::tests::jobs_run()
+        ),
+        (jobs.0 + 1, jobs.1 + 1),
+        "one job each, off the frame"
+    );
+    let c = node(&view, &mut vcx, "c");
+    view.read_with(&vcx, |v, _| {
+        let built = v.cards.built.get(&c).expect("the card was built");
+        let keyword = code_highlight::token_of(gv_highlight::TokenClass::Keyword).role();
+        let code = built
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Code { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .expect("the code block");
+        assert!(
+            code.borrow()
+                .paragraph()
+                .items()
+                .iter()
+                .any(|i| i.style().is_some_and(|s| s.color == keyword)),
+            "highlighted with the Reading view's tokens"
+        );
+        let drawn = built
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Diagram { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .expect("the diagram is drawn");
+        let drawn = drawn.borrow();
+        assert!(matches!(
+            drawn.box_content(0),
+            Some(BoxContent::Diagram { .. })
+        ));
+        assert!(drawn.bounds().is_some(), "laid out and painted");
+        // Scaled down to the card's width (less its padding).
+        let widest = drawn
+            .paragraph()
+            .items()
+            .iter()
+            .filter_map(|i| i.inline_box())
+            .map(|b| b.width)
+            .fold(0.0, f32::max);
+        assert!(drawn.widest_box() > 160.0, "{}", drawn.widest_box());
+        assert!(widest > 0.0 && widest < 160.0 - 24.0, "{widest}");
+    });
+}

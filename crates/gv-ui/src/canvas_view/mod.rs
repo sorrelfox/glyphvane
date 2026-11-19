@@ -94,7 +94,7 @@ use crate::icons::Icon;
 use crate::inline::{FontFamilies, InlineParagraph, Palette};
 use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset, ZoomToFit};
 use crate::reader::{Disposition, LinkRequest};
-use cards::{Block, Cards, Marker, Parsed, Preview};
+use cards::{Block, Cards, Job, Marker, Parsed, Preview};
 use minimap::MinimapState;
 use paint::{Colors, screen, world};
 
@@ -967,11 +967,55 @@ impl CanvasView {
         }
     }
 
-    /// The content of a card holding Markdown.
+    /// Starts the highlighting and diagram jobs the cards asked for while
+    /// they were built; as each lands, the cards that wait for it are
+    /// built again.
+    fn start_jobs(&mut self, cx: &mut Context<'_, Self>) {
+        for job in self.cards.take_jobs() {
+            match job {
+                Job::Highlight(key, code) => {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_spawn(async move {
+                            crate::reader::code_highlight::highlight(key, &code);
+                        })
+                        .await;
+                        this.update(cx, |view, cx| {
+                            if view.cards.highlighted(&key) {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                Job::Diagram(request) => {
+                    cx.spawn(async move |this, cx| {
+                        let (request, outcome) = cx
+                            .background_executor()
+                            .spawn_with_priority(gpui::Priority::Low, async move {
+                                let outcome = crate::reader::diagram::run(&request);
+                                (request, outcome)
+                            })
+                            .await;
+                        this.update(cx, |view, cx| {
+                            if view.cards.diagram_landed(&request, outcome) {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+        }
+    }
+
+    /// The content of a card `width` wide (world units) holding Markdown.
     fn markdown(
         &mut self,
         node: usize,
         parsed: &Parsed,
+        width: f64,
         zoom: f64,
         palette: &Arc<Palette>,
         colors: &Colors,
@@ -981,6 +1025,16 @@ impl CanvasView {
         // Lengths built at the bucket's scale, placed at the exact zoom.
         let k = (zoom as f32) / cards::bucket_scale(bucket);
         let pad = (world::CARD_PAD * zoom) as f32;
+        let code_pad = built.body_size * cards::CODE_PAD_EM;
+        let code_box = |indent: f32, gap: f32| {
+            div()
+                .flex_none()
+                .mt(px(gap))
+                .ml(px(indent * k))
+                .p(px(code_pad))
+                .rounded(px(built.body_size * 0.3))
+                .bg(colors.group_fill)
+        };
         let mut column = div()
             .absolute()
             .top_0()
@@ -1052,21 +1106,24 @@ impl CanvasView {
                     }
                     column = column.child(row);
                 }
-                Block::Code { text, indent, gap } => {
+                Block::Code { block, indent, gap } => {
                     let gap = if i == 0 { 0.0 } else { gap * k };
-                    column = column.child(
-                        div()
-                            .flex_none()
-                            .mt(px(gap))
-                            .ml(px(indent * k))
-                            .p(px(built.body_size * 0.4))
-                            .rounded(px(built.body_size * 0.3))
-                            .bg(colors.group_fill)
-                            .font_family(self.cards.mono.clone())
-                            .text_size(px(built.body_size * 0.87))
-                            .text_color(colors.text)
-                            .child(text.clone()),
-                    );
+                    column = column.child(code_box(*indent, gap).child(InlineParagraph::new(
+                        block.clone(),
+                        self.cards.text.clone(),
+                        palette.clone(),
+                    )));
+                }
+                Block::Diagram { block, indent, gap } => {
+                    let gap = if i == 0 { 0.0 } else { gap * k };
+                    // Scaled down to the card's width, never up.
+                    let room = (width * zoom) as f32 - 2.0 * pad - indent * k - 2.0 * code_pad;
+                    block.borrow_mut().fit_boxes(room);
+                    column = column.child(code_box(*indent, gap).child(InlineParagraph::new(
+                        block.clone(),
+                        self.cards.text.clone(),
+                        palette.clone(),
+                    )));
                 }
                 Block::Rule { gap } => {
                     column = column.child(
@@ -1099,7 +1156,7 @@ impl CanvasView {
         match &n.kind {
             NodeKind::Text { text } => {
                 let parsed = self.cards.text_card(node, text);
-                Some(self.markdown(node, &parsed, zoom, palette, colors))
+                Some(self.markdown(node, &parsed, n.rect.width, zoom, palette, colors))
             }
             NodeKind::File { file, .. } => {
                 let name = file.rsplit('/').next().unwrap_or(file).to_owned();
@@ -1110,7 +1167,7 @@ impl CanvasView {
                     }
                     Some(Preview::Pending) => None,
                     Some(Preview::Markdown(parsed)) => {
-                        Some(self.markdown(node, &parsed, zoom, palette, colors))
+                        Some(self.markdown(node, &parsed, n.rect.width, zoom, palette, colors))
                     }
                     Some(Preview::Image(image)) => Some(
                         img(ImageSource::Render(image))
@@ -1323,6 +1380,7 @@ impl CanvasView {
         if !backgrounds.is_empty() {
             self.load_backgrounds(backgrounds, cx);
         }
+        self.start_jobs(cx);
         // Groups' and edges' labels sit under the cards, as their shapes do.
         labels.extend(nodes);
         labels

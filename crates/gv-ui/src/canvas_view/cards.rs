@@ -8,10 +8,13 @@
 //!   [`InlineParagraph`](crate::inline::InlineParagraph)s: paragraphs,
 //!   headings, list items (with their markers; task items with a
 //!   read-only checkbox) and table rows keep their styles, formulas
-//!   (inline and display) are typeset; code, diagram and HTML blocks show
-//!   as plain monospaced text; front matter is not shown (as in Obsidian's
-//!   embeds); images and link status icons inside the text are not drawn
-//!   (their boxes stay blank).
+//!   (inline and display) are typeset; fenced code is highlighted as in
+//!   the Reading view (same highlighter, same theme tokens) and Mermaid
+//!   diagrams are drawn by its diagram engine, both off the UI thread
+//!   ([`Job`]): until a result lands, and when a diagram cannot be drawn,
+//!   the block shows as plain monospaced text, as HTML blocks always do;
+//!   front matter is not shown (as in Obsidian's embeds); images and link
+//!   status icons inside the text are not drawn (their boxes stay blank).
 //! - **File cards**: read off the UI thread when first shown. A note shows
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
@@ -31,7 +34,9 @@
 //!   policy).
 //!
 //! Content is built at a zoom *bucket* (steps of 2^(1/8), about 9 %), so a
-//! zoom gesture builds each card at most once per step.
+//! zoom gesture builds each card at most once per step. Highlighting and
+//! diagrams do not depend on the bucket: a card asks for each once, and is
+//! built again when it lands.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,16 +48,22 @@ use std::time::SystemTime;
 
 use gpui::{RenderImage, SharedString};
 use gv_canvas::Subpath;
+use gv_diagram::{DiagramKey, Outcome, Trust};
+use gv_highlight::HighlightKey;
+use gv_inline::{Align, BoxKind, InlineBox, Paragraph, ParagraphBuilder};
 use gv_model::DocModel;
 use gv_profile::{CompiledProfile, ProfileId};
 use gv_render_tree::{
-    FrameKind, ItemKind, ListMarker, RenderOptions, RenderTree, Sources, StyleTable,
+    CodeBlock, FrameKind, ItemKind, ListMarker, NodeKind, RenderOptions, RenderTree, Sources,
+    StyleTable, TextRole, Variant,
 };
 use gv_syntax::{ParseOptions, SyntaxTree};
 
 use super::Doc;
 use crate::export::PdfEngine;
-use crate::inline::{FontFamilies, FontTable, InlineBlock, InlineText, font_of};
+use crate::inline::{BoxContent, FontFamilies, FontTable, InlineBlock, InlineText, font_of};
+use crate::reader::code_highlight::{self, LineSpans};
+use crate::reader::diagram::{CancelSlot, Request};
 
 /// The most of a note read for its preview.
 const READ_CAP: u64 = 512 * 1024;
@@ -68,6 +79,11 @@ const PDF_CAP: u64 = 64 * 1024 * 1024;
 const PDF_CACHE: usize = 16;
 /// Longest side of a decoded group background, in device pixels.
 const BACKGROUND_FIT: u32 = 2048;
+
+/// Diagrams kept per canvas (the drawn ones are forgotten beyond).
+const DIAGRAMS_CAP: usize = 512;
+/// A code block's padding, in body font sizes.
+pub(crate) const CODE_PAD_EM: f32 = 0.4;
 
 /// Steps of the zoom buckets per doubling.
 const BUCKETS_PER_OCTAVE: f64 = 8.0;
@@ -175,9 +191,18 @@ pub(crate) enum Block {
         gap: f32,
         marker: Option<Marker>,
     },
-    /// Code-like text in the mono family.
+    /// Code-like text in the mono family: a code block's lines
+    /// (highlighted once its result is in), a diagram's source while it is
+    /// drawn or when it cannot be, an HTML or live block's text.
     Code {
-        text: SharedString,
+        block: Rc<RefCell<InlineBlock>>,
+        indent: f32,
+        gap: f32,
+    },
+    /// A drawn Mermaid diagram: one box at the build's scale, fitted to the
+    /// card's width by the view ([`InlineBlock::fit_boxes`]).
+    Diagram {
+        block: Rc<RefCell<InlineBlock>>,
         indent: f32,
         gap: f32,
     },
@@ -196,11 +221,117 @@ pub(crate) struct Built {
     pub body_line: f32,
 }
 
+/// Work the view runs off the UI thread for the cards' blocks
+/// ([`Cards::take_jobs`]); its result goes back through
+/// [`Cards::highlighted`] or [`Cards::diagram_landed`].
+#[derive(Debug)]
+pub(crate) enum Job {
+    /// Highlights a code block's text into the shared cache
+    /// ([`code_highlight::highlight`]).
+    Highlight(HighlightKey, Arc<str>),
+    /// Renders a Mermaid diagram ([`crate::reader::diagram::run`]).
+    Diagram(Request),
+}
+
+/// What a built card waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Wait {
+    Code(HighlightKey),
+    Diagram(DiagramKey),
+}
+
+/// A diagram asked for.
+#[derive(Debug)]
+enum DiagramState {
+    Running(Arc<CancelSlot>),
+    /// `None`: the engine cannot start.
+    Done(Option<Outcome>),
+}
+
+/// The highlighting and diagram jobs of the cards' blocks.
+#[derive(Debug, Default)]
+pub(crate) struct Work {
+    highlights: code_highlight::Jobs,
+    diagrams: HashMap<DiagramKey, DiagramState>,
+    requests: Vec<Job>,
+}
+
+impl Work {
+    /// The highlighting of `code` if it is in the shared cache; else
+    /// `None` (it stays plain), and when it can be highlighted, its job is
+    /// asked for once and its key pushed to `pending`. Never highlights.
+    fn spans(&mut self, code: &CodeBlock, pending: &mut Vec<Wait>) -> Option<LineSpans> {
+        let info = code.info.as_deref().or(code.language.as_deref());
+        let key = info
+            .filter(|_| code.fenced)
+            .and_then(|info| code_highlight::key_for(&code.text, info))?;
+        if let Some(h) = code_highlight::cached(&key) {
+            let lines: Arc<[std::ops::Range<usize>]> =
+                code.lines.iter().map(|l| l.text.clone()).collect();
+            return Some(LineSpans::new(h, lines));
+        }
+        pending.push(Wait::Code(key));
+        if self.highlights.start(key) {
+            self.requests
+                .push(Job::Highlight(key, Arc::from(code.text.as_str())));
+        }
+        None
+    }
+
+    /// The diagram of `code` when it was drawn; else `None` (its source is
+    /// shown), and while it is drawn, its job is asked for once and its
+    /// key pushed to `pending`. Never renders.
+    fn diagram(
+        &mut self,
+        code: &CodeBlock,
+        pending: &mut Vec<Wait>,
+    ) -> Option<Arc<gv_diagram::Diagram>> {
+        let key = DiagramKey::new(&code.text, Trust::Interactive);
+        match self.diagrams.get(&key) {
+            Some(DiagramState::Done(Some(Outcome::Rendered(d)))) => return Some(Arc::clone(d)),
+            Some(DiagramState::Done(_)) => return None,
+            Some(DiagramState::Running(_)) => {}
+            None => {
+                if self.diagrams.len() >= DIAGRAMS_CAP {
+                    self.diagrams
+                        .retain(|_, s| matches!(s, DiagramState::Running(_)));
+                }
+                let slot = Arc::new(CancelSlot::default());
+                self.diagrams
+                    .insert(key, DiagramState::Running(Arc::clone(&slot)));
+                self.requests.push(Job::Diagram(Request {
+                    key,
+                    source: Arc::from(code.text.as_str()),
+                    trust: Trust::Interactive,
+                    slot,
+                }));
+            }
+        }
+        pending.push(Wait::Diagram(key));
+        None
+    }
+
+    /// Cancels the diagrams being drawn and forgets every diagram; the
+    /// highlighting jobs not started yet are dropped.
+    fn clear(&mut self) {
+        for state in self.diagrams.values() {
+            if let DiagramState::Running(slot) = state {
+                slot.cancel();
+            }
+        }
+        self.diagrams.clear();
+        for job in self.requests.drain(..) {
+            if let Job::Highlight(key, _) = job {
+                self.highlights.finish(&key);
+            }
+        }
+    }
+}
+
 /// The cards' content: parsed texts, file previews and built Markdown.
 #[derive(Debug)]
 pub(crate) struct Cards {
     pub text: Rc<RefCell<InlineText>>,
-    pub mono: SharedString,
     profile: Arc<CompiledProfile>,
     options: RenderOptions,
     /// Text cards' parsed Markdown, by node.
@@ -211,8 +342,18 @@ pub(crate) struct Cards {
     pub(super) built: HashMap<usize, Built>,
     /// Groups' background images, by node (absent: not asked for yet).
     backgrounds: HashMap<usize, Background>,
+    /// Highlighting and diagram jobs.
+    work: Work,
+    /// The nodes whose built Markdown waits for a job's result.
+    waiting: HashMap<Wait, Vec<usize>>,
     /// Builds made (for tests and the culling check).
     pub builds: u64,
+}
+
+impl Drop for Cards {
+    fn drop(&mut self) {
+        self.work.clear();
+    }
 }
 
 impl Cards {
@@ -222,13 +363,14 @@ impl Cards {
         let fonts = font_table(&options.styles, families);
         Self {
             text: Rc::new(RefCell::new(InlineText::new(fonts))),
-            mono: families.mono.clone(),
             profile,
             options,
             parsed: HashMap::new(),
             previews: HashMap::new(),
             built: HashMap::new(),
             backgrounds: HashMap::new(),
+            work: Work::default(),
+            waiting: HashMap::new(),
             builds: 0,
         }
     }
@@ -239,6 +381,52 @@ impl Cards {
         self.previews.clear();
         self.built.clear();
         self.backgrounds.clear();
+        self.work.clear();
+        self.waiting.clear();
+    }
+
+    /// The jobs to start.
+    pub fn take_jobs(&mut self) -> Vec<Job> {
+        std::mem::take(&mut self.work.requests)
+    }
+
+    /// Drops the built Markdown of the nodes waiting for `wait`; whether
+    /// there were any (the view draws again).
+    fn landed(&mut self, wait: Wait) -> bool {
+        let nodes = self.waiting.remove(&wait).unwrap_or_default();
+        for node in &nodes {
+            self.built.remove(node);
+        }
+        !nodes.is_empty()
+    }
+
+    /// The highlighting job of `key` ended (its result is in the shared
+    /// cache): whether a card is to be built again.
+    pub fn highlighted(&mut self, key: &HighlightKey) -> bool {
+        self.work.highlights.finish(key);
+        self.landed(Wait::Code(*key))
+    }
+
+    /// A diagram job ended with `outcome` (`None`: the engine cannot
+    /// start): whether a card is to be built again. A job of a canvas
+    /// shown before is ignored.
+    pub fn diagram_landed(&mut self, request: &Request, outcome: Option<Outcome>) -> bool {
+        let ours = matches!(
+            self.work.diagrams.get(&request.key),
+            Some(DiagramState::Running(slot)) if Arc::ptr_eq(slot, &request.slot)
+        );
+        if !ours {
+            return false;
+        }
+        if matches!(outcome, Some(Outcome::Cancelled)) {
+            // Asked for again when its card is built again.
+            self.work.diagrams.remove(&request.key);
+        } else {
+            self.work
+                .diagrams
+                .insert(request.key, DiagramState::Done(outcome));
+        }
+        self.landed(Wait::Diagram(request.key))
     }
 
     /// Group `node`'s background; `None` when it was never asked for.
@@ -307,7 +495,14 @@ impl Cards {
         let options = self.options.clone().zoomed(scale);
         let body = options.styles.role(gv_render_tree::TextRole::Body);
         let (body_size, body_line) = (body.size, body.line_height);
-        let blocks = build_blocks(parsed, options);
+        let mut pending = Vec::new();
+        let blocks = build_blocks(parsed, options, &mut self.work, &mut pending);
+        for wait in pending {
+            let nodes = self.waiting.entry(wait).or_default();
+            if !nodes.contains(&node) {
+                nodes.push(node);
+            }
+        }
         self.builds += 1;
         let b = Built {
             bucket,
@@ -351,8 +546,47 @@ fn cap_at_line(text: &str, cap: usize) -> &str {
     }
 }
 
-/// The blocks of `parsed` built with `options`.
-fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
+/// `text`'s lines as a paragraph of plain code.
+fn plain_code(text: &str, styles: &StyleTable) -> Paragraph {
+    let mut b = ParagraphBuilder::new(styles.paragraph_style(TextRole::Code));
+    let style = styles.run_style(TextRole::Code, Variant::PLAIN);
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            b.hard_break(0..0);
+        }
+        if !line.is_empty() {
+            b.text(line, style, 0..0);
+        }
+    }
+    b.build()
+}
+
+/// Diagram `diagram` drawn at `scale` px per diagram px: one box, centred.
+fn diagram_block(
+    diagram: Arc<gv_diagram::Diagram>,
+    scale: f32,
+    styles: &StyleTable,
+) -> InlineBlock {
+    let style = styles
+        .paragraph_style(TextRole::Body)
+        .with_align(Align::Center);
+    let mut b = ParagraphBuilder::new(style);
+    let (w, h) = (diagram.width * scale, diagram.height * scale);
+    b.inline_box(InlineBox::new(BoxKind::Other, w, h, 0.0), 0..0);
+    let mut block = InlineBlock::new(Arc::new(b.build()));
+    block.set_box_content(0, BoxContent::Diagram { diagram, scale });
+    block
+}
+
+/// The blocks of `parsed` built with `options`. Code is highlighted and
+/// diagrams drawn when `work` has their results; what waits for one is
+/// pushed to `pending`.
+fn build_blocks(
+    parsed: &Parsed,
+    options: RenderOptions,
+    work: &mut Work,
+    pending: &mut Vec<Wait>,
+) -> Vec<Block> {
     let tree = RenderTree::build(
         &parsed.syntax,
         &parsed.model,
@@ -361,6 +595,8 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
         Sources::default(),
     );
     let metrics = tree.options().metrics;
+    let styles = &tree.options().styles;
+    let code_block = |p: Paragraph| Rc::new(RefCell::new(InlineBlock::new(Arc::new(p))));
     let mut out = Vec::new();
     for (ix, item) in tree.items().iter().enumerate() {
         let Some(node) = tree.node_of(ix) else {
@@ -368,12 +604,15 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
         };
         let indent = item.content_x(&metrics);
         let gap = item.gap_before;
-        match item.kind {
-            ItemKind::Paragraph
-            | ItemKind::Heading { .. }
-            | ItemKind::Details
-            | ItemKind::TableRow { .. }
-            | ItemKind::Math { .. } => {
+        match (&item.kind, &node.kind) {
+            (
+                ItemKind::Paragraph
+                | ItemKind::Heading { .. }
+                | ItemKind::Details
+                | ItemKind::TableRow { .. }
+                | ItemKind::Math { .. },
+                _,
+            ) => {
                 // Formulas typeset as the Reading view does.
                 let block = match crate::reader::standalone_block(&tree, ix) {
                     Some(block) => block,
@@ -402,11 +641,48 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
                 });
             }
             // Front matter is not shown, as in Obsidian's embeds.
-            ItemKind::Properties { .. } => {}
-            ItemKind::Code { .. }
-            | ItemKind::Html { .. }
-            | ItemKind::Diagram { .. }
-            | ItemKind::Live { .. } => {
+            (ItemKind::Properties { .. }, _) => {}
+            (ItemKind::Code { lines, .. }, NodeKind::Code(code)) => {
+                let spans = work.spans(code, pending);
+                let lines = lines.start as usize..lines.end as usize;
+                out.push(Block::Code {
+                    block: code_block(crate::reader::code_paragraph(
+                        code,
+                        lines,
+                        styles,
+                        spans.as_ref(),
+                    )),
+                    indent,
+                    gap,
+                });
+            }
+            (ItemKind::Diagram { .. }, NodeKind::Diagram(code)) => {
+                let block = match work.diagram(code, pending) {
+                    Some(d) => Block::Diagram {
+                        block: Rc::new(RefCell::new(diagram_block(d, styles.zoom(), styles))),
+                        indent,
+                        gap,
+                    },
+                    None => Block::Code {
+                        block: code_block(crate::reader::code_paragraph(
+                            code,
+                            0..code.lines.len(),
+                            styles,
+                            None,
+                        )),
+                        indent,
+                        gap,
+                    },
+                };
+                out.push(block);
+            }
+            (
+                ItemKind::Code { .. }
+                | ItemKind::Html { .. }
+                | ItemKind::Diagram { .. }
+                | ItemKind::Live { .. },
+                _,
+            ) => {
                 let src = parsed.text.get(item.source.clone()).unwrap_or_default();
                 let text: String = src
                     .lines()
@@ -417,13 +693,13 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 out.push(Block::Code {
-                    text: text.into(),
+                    block: code_block(plain_code(&text, styles)),
                     indent,
                     gap,
                 });
             }
-            ItemKind::ThematicBreak => out.push(Block::Rule { gap }),
-            ItemKind::EmptyItem | ItemKind::EmptyQuote | ItemKind::Picture => {}
+            (ItemKind::ThematicBreak, _) => out.push(Block::Rule { gap }),
+            (ItemKind::EmptyItem | ItemKind::EmptyQuote | ItemKind::Picture, _) => {}
         }
     }
     out
@@ -710,12 +986,31 @@ mod tests {
         gv_profile::compile_builtin(ProfileId::Obsidian)
     }
 
+    /// `parsed`'s blocks, with no results of jobs.
+    fn blocks_of(parsed: &Parsed, profile: &CompiledProfile) -> Vec<Block> {
+        let mut work = Work::default();
+        build_blocks(
+            parsed,
+            RenderOptions::for_profile(profile),
+            &mut work,
+            &mut Vec::new(),
+        )
+    }
+
+    /// The text of a code block.
+    fn code_text(b: &Block) -> Option<String> {
+        match b {
+            Block::Code { block, .. } => Some(block.borrow().paragraph().text().to_string()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn cards_typeset_math_show_task_boxes_and_hide_front_matter() {
         let profile = obsidian();
         let text = "---\ntitle: Hidden\n---\n# Head\n\nInline $x$.\n\n$$\nh(t) = x^2\n$$\n\n- [ ] open\n- [x] done\n- plain\n";
         let parsed = Parsed::new(text.into(), &profile);
-        let blocks = build_blocks(&parsed, RenderOptions::for_profile(&profile));
+        let blocks = blocks_of(&parsed, &profile);
         // No raw blocks: the front matter is not shown, the formula is.
         assert!(
             blocks.iter().all(|b| !matches!(b, Block::Code { .. })),
@@ -825,7 +1120,7 @@ mod tests {
             "# Head\n\nSome *text*.\n\n- one\n- two\n\n```\ncode\n```\n\n---\n".into(),
             &p,
         );
-        let blocks = build_blocks(&parsed, RenderOptions::for_profile(&p));
+        let blocks = blocks_of(&parsed, &p);
         let texts = blocks
             .iter()
             .filter(|b| matches!(b, Block::Text { .. }))
@@ -842,7 +1137,7 @@ mod tests {
         assert!(
             blocks
                 .iter()
-                .any(|b| matches!(b, Block::Code { text, .. } if text.as_ref() == "code"))
+                .any(|b| code_text(b).as_deref() == Some("code"))
         );
         assert!(blocks.iter().any(|b| matches!(b, Block::Rule { .. })));
     }
@@ -889,6 +1184,201 @@ mod tests {
             assert_eq!(file_path(&root, "out/secret.md"), None);
             assert_eq!(file_path(&root, "out/missing.md"), None);
         }
+    }
+
+    /// The colours of `block`'s text runs.
+    fn run_colours(block: &Rc<RefCell<InlineBlock>>) -> Vec<gv_inline::ColorRole> {
+        block
+            .borrow()
+            .paragraph()
+            .items()
+            .iter()
+            .filter_map(|i| i.style().map(|s| s.color))
+            .collect()
+    }
+
+    fn cards() -> Cards {
+        Cards::new(&FontFamilies {
+            text: "Sans".into(),
+            mono: "Mono".into(),
+        })
+    }
+
+    #[test]
+    fn code_is_highlighted_once_its_job_lands_never_while_built() {
+        let p = obsidian();
+        let mut cards = cards();
+        let parsed = Parsed::new(
+            "Text.\n\n```rust\nfn card_code_highlight() -> u32 { 1 }\n```\n".into(),
+            &p,
+        );
+        let jobs = code_highlight::tests::jobs_run();
+        let built = cards.built(0, &parsed, 0);
+        assert_eq!(
+            code_highlight::tests::jobs_run(),
+            jobs,
+            "built without highlighting"
+        );
+        let plain = p_styles(&cards)
+            .run_style(TextRole::Code, Variant::PLAIN)
+            .color;
+        let code = |built: &Built| {
+            built
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    Block::Code { block, .. } => Some(block.clone()),
+                    _ => None,
+                })
+                .expect("a code block")
+        };
+        let first = code(&built);
+        assert_eq!(
+            first.borrow().paragraph().text(),
+            "fn card_code_highlight() -> u32 { 1 }"
+        );
+        assert!(run_colours(&first).iter().all(|c| *c == plain));
+        // One job, asked for once: the same bucket is not built again, and
+        // another bucket asks for nothing more.
+        cards.built(0, &parsed, 0);
+        cards.built(0, &parsed, 1);
+        assert_eq!(cards.builds, 2);
+        let mut jobs = cards.take_jobs();
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        let Some(Job::Highlight(key, text)) = jobs.pop() else {
+            panic!("a highlighting job");
+        };
+        code_highlight::highlight(key, &text);
+        assert!(cards.highlighted(&key), "the card is built again");
+        let again = cards.built(0, &parsed, 1);
+        assert_eq!(cards.builds, 3);
+        assert!(cards.take_jobs().is_empty());
+        let colours = run_colours(&code(&again));
+        let keyword = code_highlight::token_of(gv_highlight::TokenClass::Keyword).role();
+        assert!(colours.contains(&keyword), "{colours:?}");
+        // Another card with the same code: highlighted at once.
+        let other = cards.built(1, &parsed, 0);
+        assert_eq!(run_colours(&code(&other)), colours);
+        assert!(cards.take_jobs().is_empty());
+    }
+
+    fn p_styles(cards: &Cards) -> StyleTable {
+        cards.options.styles.clone()
+    }
+
+    #[test]
+    fn diagrams_are_drawn_once_their_job_lands_with_the_source_meanwhile() {
+        let p = obsidian();
+        let mut cards = cards();
+        let source = "flowchart LR\n  CardA --> CardB";
+        let parsed = Parsed::new(format!("```mermaid\n{source}\n```\n").into(), &p);
+        let built = cards.built(0, &parsed, 0);
+        assert!(
+            built
+                .blocks
+                .iter()
+                .any(|b| code_text(b).as_deref() == Some(source)),
+            "the source while it is drawn: {:?}",
+            built.blocks
+        );
+        let mut jobs = cards.take_jobs();
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        let Some(Job::Diagram(request)) = jobs.pop() else {
+            panic!("a diagram job");
+        };
+        let outcome = crate::reader::diagram::run(&request);
+        assert!(matches!(outcome, Some(Outcome::Rendered(_))), "{outcome:?}");
+        assert!(cards.diagram_landed(&request, outcome));
+        let built = cards.built(0, &parsed, 0);
+        let diagram = built
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Diagram { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .expect("the diagram is drawn");
+        let block = diagram.borrow();
+        assert!(matches!(
+            block.box_content(0),
+            Some(BoxContent::Diagram { scale, .. }) if (*scale - 1.0).abs() < 1e-6
+        ));
+        assert!(cards.take_jobs().is_empty());
+        drop(block);
+        // A wider bucket draws it bigger, with no new job.
+        let big = cards.built(0, &parsed, 8);
+        assert!(big.blocks.iter().any(|b| matches!(
+            b,
+            Block::Diagram { block, .. }
+                if matches!(block.borrow().box_content(0),
+                    Some(BoxContent::Diagram { scale, .. }) if (*scale - 2.0).abs() < 1e-3)
+        )));
+        assert!(cards.take_jobs().is_empty());
+    }
+
+    #[test]
+    fn a_diagram_that_cannot_be_drawn_keeps_its_source() {
+        let p = obsidian();
+        let mut cards = cards();
+        let parsed = Parsed::new("```mermaid\nnot a diagram at all\n```\n".into(), &p);
+        cards.built(0, &parsed, 0);
+        let Some(Job::Diagram(request)) = cards.take_jobs().pop() else {
+            panic!("a diagram job");
+        };
+        let outcome = crate::reader::diagram::run(&request);
+        assert!(
+            !matches!(outcome, Some(Outcome::Rendered(_))),
+            "{outcome:?}"
+        );
+        assert!(cards.diagram_landed(&request, outcome));
+        let built = cards.built(0, &parsed, 0);
+        assert!(
+            built
+                .blocks
+                .iter()
+                .any(|b| code_text(b).as_deref() == Some("not a diagram at all"))
+        );
+        assert!(
+            !built
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Diagram { .. }))
+        );
+        assert!(cards.take_jobs().is_empty(), "not asked for again");
+    }
+
+    #[test]
+    fn jobs_of_a_canvas_shown_before_are_ignored() {
+        let p = obsidian();
+        let mut cards = cards();
+        let parsed = Parsed::new(
+            "```mermaid\nflowchart TD\n  Old --> Gone\n```\n\n```rust\nlet card_gone = 1;\n```\n"
+                .into(),
+            &p,
+        );
+        cards.built(0, &parsed, 0);
+        let jobs = cards.take_jobs();
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        cards.clear();
+        for job in jobs {
+            match job {
+                Job::Diagram(request) => {
+                    assert!(request.slot.is_cancelled(), "cancelled by the new canvas");
+                    assert!(!cards.diagram_landed(&request, Some(Outcome::Cancelled)));
+                }
+                Job::Highlight(key, text) => {
+                    code_highlight::highlight(key, &text);
+                    assert!(!cards.highlighted(&key), "no card waits for it");
+                }
+            }
+        }
+        // The new canvas asks again.
+        cards.built(0, &parsed, 0);
+        assert_eq!(
+            cards.take_jobs().len(),
+            1,
+            "the diagram; the code is cached"
+        );
     }
 
     #[test]

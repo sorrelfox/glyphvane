@@ -13,9 +13,10 @@ A canvas is a board of cards connected by arrows.
 
 ### What is shown
 
-- **Text cards** render their Markdown. Code, math and diagrams inside a
-  text card show as monospaced text, and images inside the text are not
-  drawn.
+- **Text cards** render their Markdown as the Reading view does: formulas
+  are typeset, code blocks are highlighted and Mermaid diagrams are drawn.
+  A diagram shows its source until it is drawn, or when it cannot be drawn.
+  Images inside the text are not drawn.
 - **File cards** show the file: the first blocks of a note (or the heading or
   block the card points to), an image, the first page of a PDF, or the shapes
   of another canvas. Other files show as a plain card. Missing files, and
