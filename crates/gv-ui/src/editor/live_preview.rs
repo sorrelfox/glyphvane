@@ -1570,6 +1570,11 @@ mod tests {
                 "==", "==", "~~", "~~", "[[", "]]", "[[Note|", "]]", "%%", "%%"
             ]
         );
+        // A comment across a soft line break hides both markers, as on one
+        // line; a caret on either line reveals it.
+        let text = "a %%x\ny%% b\n";
+        assert_eq!(hidden(text, obsidian(), None), ["%%", "%%"]);
+        assert!(hidden(text, obsidian(), Some(7)).is_empty());
     }
 
     #[test]

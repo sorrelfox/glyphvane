@@ -210,7 +210,6 @@ fn parse_with(
         dollars: None,
         bracket_closers: [None; 2],
         comment_fail: 0,
-        comment_line: (0, 0),
         wiki_fail: 0,
         opts,
         special: &SPECIALS[usize::from(opts.strikethrough)
@@ -290,10 +289,8 @@ struct Parser<'a> {
     /// and what it found. Openers come in increasing order, so the
     /// searches never overlap.
     bracket_closers: [Option<(usize, Option<usize>)>; 2],
-    /// `%%` openers before this offset have no closer on their line.
+    /// `%%` openers before this offset have no closer.
     comment_fail: usize,
-    /// The last line end found for a `%%` opener: `(from, end)`.
-    comment_line: (usize, usize),
     /// `[[` openers before this offset have no `]]` on their line.
     wiki_fail: usize,
     opts: InlineOptions,
@@ -1605,8 +1602,8 @@ impl Parser<'_> {
     // -----------------------------------------------------------------------
     // Obsidian
 
-    /// `%%`: an inline comment if a run of exactly two `%` closes it on the
-    /// same line; otherwise text.
+    /// `%%`: an inline comment if a run of exactly two `%` closes it later
+    /// in the content, across soft line breaks (Obsidian); otherwise text.
     fn comment(&mut self) {
         let (b, p) = (self.b, self.pos);
         let mut q = p;
@@ -1617,19 +1614,11 @@ impl Parser<'_> {
             self.pos = q;
             return;
         }
-        let line_end = match self.comment_line {
-            (a, z) if a <= q && q < z => z,
-            _ => {
-                let z = memchr::memchr2(b'\n', b'\r', &b[q..self.end]).map_or(self.end, |i| q + i);
-                self.comment_line = (q, z);
-                z
-            }
-        };
         let mut i = q;
-        while let Some(k) = memchr::memchr(b'%', &b[i..line_end]) {
+        while let Some(k) = memchr::memchr(b'%', &b[i..self.end]) {
             let a = i + k;
             let mut z = a;
-            while z < line_end && b[z] == b'%' {
+            while z < self.end && b[z] == b'%' {
                 z += 1;
             }
             if z - a == 2 {
@@ -1639,7 +1628,7 @@ impl Parser<'_> {
             }
             i = z;
         }
-        self.comment_fail = line_end;
+        self.comment_fail = self.end;
         self.pos = q;
     }
 

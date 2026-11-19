@@ -253,8 +253,14 @@ fn highlights() {
 #[test]
 fn comments() {
     html("a %%hidden%% b\n", "<p>a  b</p>\n");
-    // Inline: both markers on one line; exactly two `%`.
-    html("a %%x\ny%% b\n", "<p>a %%x\ny%% b</p>\n");
+    // Inline: both markers in one paragraph, across soft line breaks (and
+    // in a container); exactly two `%`.
+    html("a %%x\ny%% b\n", "<p>a  b</p>\n");
+    html(
+        "> a %%x\n> y%% b\n",
+        "<blockquote>\n<p>a  b</p>\n</blockquote>\n",
+    );
+    html("a %%x\n\ny%% b\n", "<p>a %%x</p>\n<p>y%% b</p>\n");
     html("a %%%x%%% b\n", "<p>a %%%x%%% b</p>\n");
     // Block: from a line starting with `%%` to the next `%%`, across blank
     // lines.

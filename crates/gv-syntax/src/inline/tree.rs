@@ -75,7 +75,7 @@ pub enum InlineKind {
     /// `![[target#anchor|alias]]`: an embed, shaped like a
     /// [`Wikilink`](Self::Wikilink) with a `![[` marker.
     Embed,
-    /// `%%hidden%%` on one line: a marker,
+    /// `%%hidden%%` within one paragraph (soft line breaks included): a marker,
     /// [`CommentText`](Self::CommentText), a marker.
     Comment,
     /// `#tag`: a `#` marker and a [`TagText`](Self::TagText) token.

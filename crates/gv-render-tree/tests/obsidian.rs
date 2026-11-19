@@ -227,6 +227,9 @@ fn highlights_comments_block_ids_and_tags() {
     // A block id alone is not shown; a block comment neither.
     let d = ob("- a\n\n^list\n\n%%\nhidden\n%%\nEnd\n");
     assert_eq!(outline(&d.render), ["a ", "End "]);
+    // An inline comment across a soft line break is hidden too.
+    let d = ob("A %%one\ntwo%% B\n");
+    assert_eq!(d.render.item_text(0).text, "A  B");
 }
 
 #[test]

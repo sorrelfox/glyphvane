@@ -126,7 +126,7 @@ pub struct InlineOptions {
     pub wikilinks: bool,
     /// `![[…]]` embeds ([`InlineKind::Embed`](super::InlineKind::Embed)).
     pub embeds: bool,
-    /// `%%…%%` inline comments, both markers on one line
+    /// `%%…%%` inline comments, both markers in one paragraph
     /// ([`InlineKind::Comment`](super::InlineKind::Comment)).
     pub comments: bool,
     /// Obsidian `#tag`s ([`InlineKind::Tag`](super::InlineKind::Tag)).
