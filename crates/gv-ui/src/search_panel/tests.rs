@@ -396,3 +396,26 @@ fn without_an_index_the_panel_waits_for_it(cx: &mut TestAppContext) {
     p.draw();
     assert_eq!(p.summary(), "5 results in 3 files");
 }
+
+#[gpui::test]
+fn a_result_line_reads_without_markup_around_its_match(cx: &mut TestAppContext) {
+    let mut p = panel(
+        cx,
+        &[(
+            "Tides.md",
+            "The station logs the water level every six minutes and fits a **harmonic model** to the `record` of [the gauge](g.md).\n",
+        )],
+    );
+    p.search("record");
+    let (line, marks) = p
+        .panel
+        .read_with(&p.vcx, |p, _| p.line(0, 0))
+        .expect("a line");
+    // The match is near the middle of the row, not past its end.
+    assert!(line.starts_with('…'), "{line}");
+    assert_eq!(&line[marks[0].clone()], "record");
+    assert!(line[..marks[0].start].chars().count() < 25, "{line}");
+    // Markup is gone.
+    assert!(!line.contains("**") && !line.contains('`'), "{line}");
+    assert!(line.ends_with("record of the gauge."), "{line}");
+}

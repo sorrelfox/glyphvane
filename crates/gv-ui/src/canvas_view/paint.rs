@@ -67,6 +67,8 @@ pub(crate) struct Colors {
     pub label: Hsla,
     pub muted: Hsla,
     pub accent: Hsla,
+    /// Marks on `accent` (a checked task's tick).
+    pub accent_on: Hsla,
     pub warning: Hsla,
     pub warning_tint: Hsla,
     pub error: Hsla,
@@ -89,6 +91,7 @@ impl Colors {
             label: theme.text.secondary.into(),
             muted: theme.text.tertiary.into(),
             accent: theme.accent.default.into(),
+            accent_on: theme.accent.on.into(),
             warning: theme.status.warning.into(),
             warning_tint: theme.status.warning_tint.into(),
             error: theme.status.error.into(),

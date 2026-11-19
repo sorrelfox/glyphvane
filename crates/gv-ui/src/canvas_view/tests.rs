@@ -1289,3 +1289,22 @@ fn a_minimap_drag_holds_the_map_still_and_ends_on_any_release(cx: &mut TestAppCo
         "{after:?} vs {expected:?}"
     );
 }
+
+#[gpui::test]
+fn a_new_view_size_keeps_the_centre(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    let before = view_centre(&view, &mut vcx);
+    // The sidebar closes: the view gets wider (and the window shorter).
+    let (w, h) = (WIDTH + 240.0, HEIGHT - 100.0);
+    vcx.simulate_resize(size(px(w), px(h)));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let after = view.read_with(&vcx, |v, _| {
+        v.transform().screen_to_world(gv_canvas::Point::new(
+            f64::from(w) / 2.0,
+            f64::from(h) / 2.0,
+        ))
+    });
+    assert!(near(before, after, 0.5), "{before:?} -> {after:?}");
+}

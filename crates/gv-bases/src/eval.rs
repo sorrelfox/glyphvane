@@ -630,6 +630,21 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Value::Number(n))
             }
+            // The whole length in a unit, cut toward zero (`(due -
+            // today()).days`); a month counts as 30.4375 days.
+            Value::Duration(d) => {
+                let unit = match name {
+                    "days" => 86_400_000.0,
+                    "hours" => 3_600_000.0,
+                    "minutes" => 60_000.0,
+                    "seconds" => 1_000.0,
+                    "milliseconds" => 1.0,
+                    _ => {
+                        return Err(EvalError::Type(format!("a duration has no field `{name}`")));
+                    }
+                };
+                Ok(Value::Number((d.approx_ms() / unit).trunc()))
+            }
             Value::String(s) if name == "length" => Ok(Value::Number(s.chars().count() as f64)),
             Value::Url(u) if name == "length" => Ok(Value::Number(u.url.chars().count() as f64)),
             Value::List(items) if name == "length" => Ok(Value::Number(items.len() as f64)),

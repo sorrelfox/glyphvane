@@ -138,16 +138,13 @@ impl WindowVault {
         Self::open(root::detect_root(path), cx)
     }
 
-    /// The vault of a folder the user opened: rooted at that folder.
+    /// The vault of a folder the user opened: rooted at that folder, with
+    /// the profile its own marker means (an Obsidian vault opened as a
+    /// folder is indexed as Obsidian: inline tags, comments, block ids).
     pub fn for_folder(folder: &Path, cx: &mut Context<'_, Self>) -> Self {
         let root = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
-        let mut this = Self::open(
-            RootDetection {
-                root,
-                reason: RootReason::FileFolder,
-            },
-            cx,
-        );
+        let reason = root::marker_in(&root).map_or(RootReason::FileFolder, RootReason::Marker);
+        let mut this = Self::open(RootDetection { root, reason }, cx);
         this.opened_as_folder = true;
         this
     }
@@ -580,6 +577,29 @@ mod tests {
         until(&vault, cx, |s| s.backlink_sources(&b).len() == 1);
         crate::files::overlay::clean(&root.join("A.md"));
         until(&vault, cx, |s| s.backlink_sources(&b).len() == 2);
+    }
+
+    #[gpui::test]
+    fn an_obsidian_vault_opened_as_a_folder_is_indexed_as_obsidian(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir(root.join(".obsidian")).expect("config folder");
+        std::fs::write(root.join("A.md"), "Tide notes. #tides\n").expect("write");
+        let vault = cx.new(|cx| WindowVault::for_folder(root, cx));
+        assert_eq!(
+            vault.read_with(cx, |v, _| v.profile()),
+            gv_vault::ProfileId::Obsidian
+        );
+        // Inline tags are Obsidian's: `tag:` finds them.
+        until(&vault, cx, |s| s.notes_with_tag("tides").len() == 1);
+
+        // A folder without a marker keeps the default.
+        let plain = tempfile::tempdir().expect("temp dir");
+        let vault = cx.new(|cx| WindowVault::for_folder(plain.path(), cx));
+        assert_eq!(
+            vault.read_with(cx, |v, _| v.profile()),
+            gv_vault::ProfileId::Extended
+        );
     }
 
     #[test]

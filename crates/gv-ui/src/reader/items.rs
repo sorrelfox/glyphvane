@@ -763,6 +763,31 @@ fn content_block(
     block
 }
 
+/// The text block of item `ix` of `tree` as the Reading view draws it,
+/// without the view's caches and jobs (canvas cards): paragraphs,
+/// headings, summaries and table rows with their formulas typeset, display
+/// math typeset; `None` for other items.
+pub(crate) fn standalone_block(tree: &RenderTree, ix: usize) -> Option<InlineBlock> {
+    let item = tree.items().get(ix)?;
+    let node = tree.node_of(ix)?;
+    let role = content_role(&item.kind);
+    match (&node.kind, &item.kind) {
+        (NodeKind::Math(code), _) => Some(math_block(tree, item.node, code)),
+        (NodeKind::Table(t), ItemKind::TableRow { row, .. }) => {
+            let content = &t.rows.get(*row as usize)?.content;
+            let first = formulas_before(t, *row as usize);
+            Some(content_block(tree, item.node, first, content, role, None))
+        }
+        (
+            NodeKind::Paragraph(c)
+            | NodeKind::Heading { content: c, .. }
+            | NodeKind::Details { summary: c, .. },
+            _,
+        ) => Some(content_block(tree, item.node, 0, c, role, None)),
+        _ => None,
+    }
+}
+
 /// The text role of an item's inline content.
 fn content_role(kind: &ItemKind) -> TextRole {
     match kind {

@@ -94,7 +94,7 @@ use crate::icons::Icon;
 use crate::inline::{FontFamilies, InlineParagraph, Palette};
 use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset, ZoomToFit};
 use crate::reader::{Disposition, LinkRequest};
-use cards::{Block, Cards, Parsed, Preview};
+use cards::{Block, Cards, Marker, Parsed, Preview};
 use minimap::MinimapState;
 use paint::{Colors, screen, world};
 
@@ -163,6 +163,10 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 
 /// Pixels per wheel line.
 const LINE_PX: f32 = 20.0;
+/// A task checkbox's side in a card, in body ems (the Reading view's 14 px
+/// box at its 16 px text), and its corner radius as a part of the side.
+const TASK_BOX_EM: f32 = crate::metrics::size::CHECKBOX / 16.0;
+const TASK_BOX_RADIUS: f32 = crate::metrics::radius::SMALL_CONTROL / crate::metrics::size::CHECKBOX;
 /// Zoom factor per pixel of Ctrl-wheel scrolling (`exp(k * px)`).
 const ZOOM_PER_PX: f64 = 0.002;
 /// Factor of one zoom command.
@@ -285,6 +289,8 @@ pub struct CanvasView {
     transform: Transform,
     /// The first fit waits for the view's size.
     fitted: bool,
+    /// The view's size at the last render: a new size keeps the centre.
+    shown_size: Option<gv_canvas::Size>,
     frame: Frame,
     selected: Option<usize>,
     drag: Option<Drag>,
@@ -359,6 +365,7 @@ impl CanvasView {
             doc: None,
             transform: Transform::IDENTITY,
             fitted: false,
+            shown_size: None,
             frame: Rc::new(Cell::new(Bounds::default())),
             selected: None,
             drag: None,
@@ -1002,17 +1009,46 @@ impl CanvasView {
                             self.cards.text.clone(),
                             palette.clone(),
                         ));
-                    if let Some(m) = marker {
-                        let size = built.body_size;
-                        row = row.child(
-                            div()
+                    let size = built.body_size;
+                    match marker {
+                        Some(Marker::Text(m)) => {
+                            row = row.child(
+                                div()
+                                    .absolute()
+                                    .top(px(gap))
+                                    .left(px((indent * k - size * 1.4).max(0.0)))
+                                    .text_size(px(size))
+                                    .text_color(colors.label)
+                                    .child(m.clone()),
+                            );
+                        }
+                        // Read-only, drawn like the Reading view's.
+                        Some(Marker::Task { checked }) => {
+                            let side = size * TASK_BOX_EM;
+                            let line = built.body_line * k;
+                            let checkbox = div()
                                 .absolute()
-                                .top(px(gap))
+                                .top(px(gap + (line - side) / 2.0))
                                 .left(px((indent * k - size * 1.4).max(0.0)))
-                                .text_size(px(size))
-                                .text_color(colors.label)
-                                .child(m.clone()),
-                        );
+                                .size(px(side))
+                                .rounded(px(side * TASK_BOX_RADIUS))
+                                .flex()
+                                .items_center()
+                                .justify_center();
+                            let checkbox = if *checked {
+                                checkbox
+                                    .bg(colors.accent)
+                                    .text_color(colors.accent_on)
+                                    .child(Icon::MenuCheck.sized(side))
+                            } else {
+                                checkbox
+                                    .bg(colors.card)
+                                    .border_1()
+                                    .border_color(colors.card_border)
+                            };
+                            row = row.child(checkbox);
+                        }
+                        None => {}
                     }
                     column = column.child(row);
                 }
@@ -1486,6 +1522,18 @@ impl Render for CanvasView {
         let colors = Colors::of(theme);
         let palette = Palette::of(Appearance::current_id(cx));
         let viewport = self.viewport();
+        // A new size (the sidebar closed, the window resized) keeps the
+        // world point at the view's centre where it was.
+        if let Some(old) = self.shown_size.replace(viewport)
+            && self.fitted
+            && old.width > 0.0
+            && old.height > 0.0
+            && viewport.width > 0.0
+            && viewport.height > 0.0
+        {
+            self.transform.pan.x += (viewport.width - old.width) / 2.0;
+            self.transform.pan.y += (viewport.height - old.height) / 2.0;
+        }
         if let Some(doc) = &self.doc
             && !self.fitted
             && viewport.width > 0.0

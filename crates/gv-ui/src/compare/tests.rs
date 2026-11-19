@@ -243,3 +243,52 @@ fn the_header_wraps_clear_of_the_buttons(cx: &mut gpui::TestAppContext) {
         }
     }
 }
+
+/// A long line wraps in its column instead of running past its edge.
+#[gpui::test]
+fn long_lines_wrap_in_their_column(cx: &mut gpui::TestAppContext) {
+    use gpui::{
+        AppContext as _, Bounds, VisualTestContext, WeakEntity, WindowBounds, WindowOptions, point,
+        px, size,
+    };
+
+    use crate::{AppSettings, ThemeChoice};
+
+    cx.update(|cx| crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light))));
+    let long = "word ".repeat(60);
+    let mine = format!("t\n{long}mine\nend\n");
+    let comparison = Comparison::three_way(
+        "t\nbody\nend\n",
+        &mine,
+        "t\ntheirs\nend\n",
+        sides(),
+        LineEnding::Lf,
+    );
+    let (window, _) = cx.update(|cx| {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(800.0), px(600.0)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        gpui::open_window(options, cx, |_, cx| {
+            cx.new(|_| {
+                super::CompareView::new(comparison, "a.md".into(), WeakEntity::new_invalid())
+            })
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..2 {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let left = vcx
+        .debug_bounds("compare-hunk-0-left-text")
+        .expect("the left side");
+    let right = vcx
+        .debug_bounds("compare-hunk-0-right-text")
+        .expect("the right side");
+    let line = px(crate::metrics::text::EDITOR.line);
+    assert!(left.size.height > line * 3.0, "wrapped: {left:?}");
+    assert!(left.right() <= right.left(), "{left:?} {right:?}");
+}

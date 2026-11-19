@@ -367,3 +367,37 @@ fn front_matter_shows_keys_in_their_column(cx: &mut TestAppContext) {
     let origin = block.bounds().expect("placed").origin;
     assert!((f32::from(origin.x) - x0 - m.property_key - m.property_gap).abs() < 0.5);
 }
+
+#[gpui::test]
+fn front_matter_keys_are_drawn_on_the_first_frame_of_a_fresh_block(cx: &mut TestAppContext) {
+    // A view shown again (a hover preview, a Live Preview widget) lays its
+    // blocks out anew and may draw only one frame: the keys must not wait
+    // for a block's earlier paint.
+    let doc = "---\ntitle: Notes\ntags: [links, navigation]\n---\n# Heading\n";
+    let dir = temp(&[("p.md", doc)]);
+    let (window, workspace) = open(cx, &dir.path().join("p.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let st = state(&reader, &mut vcx);
+    let keys = |st: &State| -> Vec<String> {
+        st.geometry
+            .property_keys
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    assert_eq!(keys(&st.borrow()), ["title", "tags"]);
+    {
+        let mut st = st.borrow_mut();
+        let id = st.doc.as_ref().expect("loaded").tree.items()[0].id;
+        st.cache.forget([id]);
+    }
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let st = st.borrow();
+    assert_eq!(keys(&st), ["title", "tags"]);
+    let (first, second) = (
+        st.geometry.property_keys[0].1,
+        st.geometry.property_keys[1].1,
+    );
+    assert!(second > first, "one key per row: {first} {second}");
+}

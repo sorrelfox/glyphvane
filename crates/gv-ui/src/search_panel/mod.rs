@@ -37,6 +37,7 @@
 //! the space between context lines, and the matched text's 2 px radius
 //! (text highlights cannot round their corners; the marks are square).
 
+pub(crate) mod excerpt;
 mod model;
 #[cfg(test)]
 mod tests;
@@ -71,6 +72,22 @@ use crate::theme::Theme;
 pub(crate) use model::grouped as grouped_count;
 pub use model::{Progress, Row};
 use model::{Results, grouped};
+
+/// A context line as shown: text, marks, whether text comes before it.
+struct Shown {
+    text: String,
+    marks: Vec<std::ops::Range<usize>>,
+    clipped_start: bool,
+}
+
+/// The average character width of the interface font, in em, to count the
+/// characters a context row holds.
+const AVERAGE_CHAR_EM: f32 = 0.52;
+/// Characters a row holds before the list has a width (the design's
+/// 232 px panel).
+const DEFAULT_ROW_CHARS: usize = 30;
+/// Characters always kept before a match.
+const MIN_LEAD_CHARS: usize = 8;
 
 /// How long a new index snapshot waits before the query runs again.
 pub const RERUN_DELAY: Duration = Duration::from_millis(400);
@@ -187,6 +204,9 @@ pub struct SearchPanel {
     /// the new one sends its first batch or ends.
     stale: bool,
     list: ListState,
+    /// The list's width at the last frame, read before the list draws its
+    /// rows (they cannot ask the list while it draws).
+    list_width: std::cell::Cell<f32>,
     _search: Option<Task<()>>,
     _rerun: Option<Task<()>>,
     _input_events: Subscription,
@@ -245,6 +265,7 @@ impl SearchPanel {
             generation: 0,
             stale: false,
             list: ListState::new(0, ListAlignment::Top, px(200.0)),
+            list_width: std::cell::Cell::new(0.0),
             _search: None,
             _rerun: None,
             _input_events: events,
@@ -719,7 +740,13 @@ impl SearchPanel {
                 .files()
                 .get(f)
                 .and_then(|file| file.snippets.get(s))
-                .map(|snippet| snippet.text.trim().to_string()),
+                .map(|snippet| {
+                    let options = excerpt::inline_options(self.profile());
+                    excerpt::strip(&snippet.text, &[], options)
+                        .text
+                        .trim()
+                        .to_string()
+                }),
         };
         let frame = body
             .id(ElementId::Name(id))
@@ -822,19 +849,52 @@ impl SearchPanel {
             )
     }
 
-    /// A context line, its matches marked, cut with an ellipsis.
-    fn render_line(&self, f: usize, s: usize, theme: &Theme) -> Div {
-        let Some(snippet) = self
-            .results
-            .files()
-            .get(f)
-            .and_then(|file| file.snippets.get(s))
-        else {
-            return div();
+    /// What a context line shows of `snippet`: its text without inline
+    /// markup, cut at the start so the first match is about centred in the
+    /// row (the list's width at about half an em per character).
+    fn excerpt(&self, snippet: &gv_search::Snippet, profile: gv_vault::ProfileId) -> Shown {
+        let mut m = excerpt::strip(
+            &snippet.text,
+            &snippet.highlights,
+            excerpt::inline_options(profile),
+        );
+        let row = self.list_width.get()
+            - (spacing::LINE_INDENT - size::LIST_ROW_INSET)
+            - list_row::PAD_RIGHT;
+        let chars = if row > 0.0 {
+            (row / (text::UI_SECTION.size * AVERAGE_CHAR_EM)) as usize
+        } else {
+            DEFAULT_ROW_CHARS
         };
+        let first = m
+            .marks
+            .first()
+            .map_or(0, |r| m.text[r.clone()].chars().count());
+        let lead = (chars.saturating_sub(first) / 2).max(MIN_LEAD_CHARS);
+        let cut = excerpt::keep_lead(&mut m, lead);
+        Shown {
+            clipped_start: snippet.clipped_start || cut,
+            text: m.text,
+            marks: m.marks,
+        }
+    }
+
+    /// The profile the vault's notes are read with.
+    fn profile(&self) -> gv_vault::ProfileId {
+        self.scope
+            .as_ref()
+            .and_then(|s| s.content.as_ref())
+            .map_or(gv_vault::ProfileId::Extended, |c| c.options().profile)
+    }
+
+    /// Context line `s` of note `f` as its row shows it, with an ellipsis
+    /// where the line goes on, and its marks.
+    pub(crate) fn line(&self, f: usize, s: usize) -> Option<(String, Vec<Range<usize>>)> {
+        let snippet = self.results.files().get(f)?.snippets.get(s)?;
+        let shown = self.excerpt(snippet, self.profile());
         const ELLIPSIS: &str = "…";
-        let mut line = String::with_capacity(snippet.text.len() + 2 * ELLIPSIS.len());
-        let shift = if snippet.clipped_start {
+        let mut line = String::with_capacity(shown.text.len() + 2 * ELLIPSIS.len());
+        let shift = if shown.clipped_start {
             line.push_str(ELLIPSIS);
             ELLIPSIS.len()
         } else {
@@ -842,7 +902,7 @@ impl SearchPanel {
         };
         // Tabs and stray line breaks would break the one-line row.
         line.extend(
-            snippet
+            shown
                 .text
                 .chars()
                 .map(|c| if c.is_control() { ' ' } else { c }),
@@ -850,18 +910,28 @@ impl SearchPanel {
         if snippet.clipped_end {
             line.push_str(ELLIPSIS);
         }
+        let marks = shown
+            .marks
+            .iter()
+            .map(|r| r.start + shift..r.end + shift)
+            .collect();
+        Some((line, marks))
+    }
+
+    /// A context line, its matches marked, cut with an ellipsis: inline
+    /// markup removed ([`excerpt`]), the start cut so the first match sits
+    /// near the middle of the row.
+    fn render_line(&self, f: usize, s: usize, theme: &Theme) -> Div {
+        let Some((line, marks)) = self.line(f, s) else {
+            return div();
+        };
         let mark = HighlightStyle {
             color: Some(theme.text.primary.into()),
             background_color: Some(theme.accent.tint.into()),
             ..HighlightStyle::default()
         };
-        let highlights: Vec<(Range<usize>, HighlightStyle)> = snippet
-            .highlights
-            .iter()
-            .filter(|r| r.end <= snippet.text.len() && snippet.text.is_char_boundary(r.start))
-            .filter(|r| snippet.text.is_char_boundary(r.end))
-            .map(|r| (r.start + shift..r.end + shift, mark))
-            .collect();
+        let highlights: Vec<(Range<usize>, HighlightStyle)> =
+            marks.into_iter().map(|r| (r, mark)).collect();
         div()
             .h(px(text::UI_SECTION.line))
             .flex()
@@ -883,6 +953,8 @@ impl SearchPanel {
 
 impl Render for SearchPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.list_width
+            .set(f32::from(self.list.viewport_bounds().size.width));
         let theme = Appearance::theme(cx);
         let head = self.render_head(theme, cx);
         let field = self.render_field(window, theme, cx);

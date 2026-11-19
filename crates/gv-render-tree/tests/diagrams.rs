@@ -31,7 +31,7 @@ fn mermaid_fences_are_diagrams_where_the_profile_says() {
     let kinds: Vec<&str> = doc.render.items().iter().map(|i| i.kind.name()).collect();
     assert_eq!(kinds, ["paragraph", "code", "code"]);
 
-    for profile in [ProfileId::GfmFile, ProfileId::Extended] {
+    for profile in [ProfileId::GfmFile, ProfileId::Obsidian, ProfileId::Extended] {
         assert!(RenderOptions::builtin(profile).mermaid, "{profile}");
         let doc = build_in(DOC, profile, Sources::default());
         let kinds: Vec<&str> = doc.render.items().iter().map(|i| i.kind.name()).collect();

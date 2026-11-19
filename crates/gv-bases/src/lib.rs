@@ -64,6 +64,7 @@
 //! | Date | `date`, `time`, `format` (Moment.js tokens), `relative`, `year`, `month`, `day`; fields `year` … `millisecond` |
 //! | File | `asLink`, `hasLink`, `hasProperty`, `hasTag`, `inFolder` |
 //! | Link | `asFile`, `linksTo`; fields of the linked file |
+//! | Duration | fields `days`, `hours`, `minutes`, `seconds`, `milliseconds` (the whole length in that unit) |
 //! | Object | `keys`, `values` |
 //!
 //! Anything else is an [`EvalError::UnsupportedFunction`] in the cell

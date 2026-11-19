@@ -382,6 +382,20 @@ fn dates() {
     assert_eq!(ev("started == '2025-03-01'"), Value::Bool(true));
     assert_eq!(ev("(today() - started).toString()"), s("9 days"));
     assert_eq!(ev("today() - started > duration('1w')"), Value::Bool(true));
+    // Duration fields: the whole length in the unit.
+    assert_eq!(ev("(today() - started).days"), n(9.0));
+    assert_eq!(ev("(started - today()).days"), n(-9.0));
+    assert_eq!(ev("(now() - today()).hours"), n(12.0));
+    assert_eq!(ev("duration('90m').hours"), n(1.0));
+    assert_eq!(ev("duration('90m').minutes"), n(90.0));
+    assert_eq!(
+        ev("duration('2s').seconds * 1000"),
+        ev("duration('2s').milliseconds")
+    );
+    assert!(matches!(
+        eval_on("duration('1d').weekdays", None),
+        Err(EvalError::Type(_))
+    ));
     assert_eq!(ev("(now() + duration('1d') * 2).day"), n(12.0));
     assert_eq!(ev("started.year"), n(2025.0));
     assert_eq!(ev("started.month()"), n(3.0));

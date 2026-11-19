@@ -464,3 +464,36 @@ fn a_hub_with_15k_backlinks_stays_responsive(cx: &mut TestAppContext) {
     assert!(query < Duration::from_secs(2), "{query:?}");
     assert!(frame < Duration::from_millis(500), "{frame:?}");
 }
+
+#[gpui::test]
+fn the_backlinks_section_grows_to_its_wrapped_lines(cx: &mut TestAppContext) {
+    // Context lines that wrap: the section is as tall as they are, not as
+    // one line each.
+    let long = "A long context line that wraps over several lines in the narrow \
+                panel, with [[Hub]] in the middle of it and more words after the \
+                link so that it wraps again.\n";
+    let files = vec![
+        ("Hub.md", "Hub.\n"),
+        ("A.md", long),
+        ("B.md", long),
+        ("C.md", long),
+        ("D.md", long),
+    ];
+    let mut f = fixture(cx, &files, Some("Hub.md"));
+    f.until("backlinks", |p| p.settled() && p.backlink_count() == 4);
+    draw(&mut f.vcx);
+    let list = f.vcx.debug_bounds("backlinks-list").expect("the list");
+    let first = f.vcx.debug_bounds("backlink-line-0-0").expect("a line");
+    assert!(
+        first.size.height > px(2.0 * crate::metrics::text::UI_SECTION.line),
+        "the lines wrap: {first:?}"
+    );
+    let last = f
+        .vcx
+        .debug_bounds("backlink-line-3-0")
+        .expect("the last line is drawn");
+    assert!(
+        last.bottom() <= list.bottom() + px(0.5),
+        "{last:?} in {list:?}"
+    );
+}

@@ -108,6 +108,7 @@ const OBSIDIAN: ProfileDef = ProfileDef {
         footnotes: true,
         footnote_indent: 2,
         inline_footnotes: true,
+        mermaid: true,
         math: Math::Obsidian,
         slugs: Slugs::HeadingText,
         // Verify.

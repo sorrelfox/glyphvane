@@ -321,6 +321,8 @@ pub(crate) struct Geometry {
     /// Where hosted views (embedded bases) are: pointer input there is
     /// theirs.
     pub hosts: Vec<Bounds<Pixels>>,
+    /// The front matter keys drawn, with the window y of their baselines.
+    pub property_keys: Vec<(String, f32)>,
 }
 
 /// Frame timings, for the log and the debug benchmark.

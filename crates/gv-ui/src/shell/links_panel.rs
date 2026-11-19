@@ -34,6 +34,7 @@
 //! button, the empty states, the count shown for a folded source, the
 //! selected row, and what the status bar's findings do on a click.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -230,6 +231,11 @@ pub(super) struct LinksPanel {
     out_rows: Vec<Row>,
     backlinks_list: ListState,
     outgoing_list: ListState,
+    /// The heights the two lists were last given (backlinks, outgoing),
+    /// and whether their rows changed since: their measured heights are
+    /// checked again on the next frame ([`Self::render_list`]).
+    list_heights: [Cell<f32>; 2],
+    remeasured: Cell<bool>,
     /// Increases with each query; late answers to older ones are dropped.
     job: u64,
     _query: Option<Task<()>>,
@@ -272,6 +278,8 @@ impl LinksPanel {
             out_rows: Vec::new(),
             backlinks_list: ListState::new(0, ListAlignment::Top, px(200.0)),
             outgoing_list: ListState::new(0, ListAlignment::Top, px(200.0)),
+            list_heights: [Cell::new(0.0), Cell::new(0.0)],
+            remeasured: Cell::new(false),
             job: 0,
             _query: None,
             _mentions: None,
@@ -567,6 +575,7 @@ impl LinksPanel {
             *slot = snippets;
         }
         self.backlinks_list.remeasure();
+        self.remeasured.set(true);
         cx.notify();
         true
     }
@@ -662,6 +671,9 @@ impl LinksPanel {
                 Phase::NoVault => out_rows.push(Row::Message("Not in an indexed folder")),
                 Phase::Indexing => out_rows.push(Row::Message("Indexing…")),
             }
+        }
+        if rows != self.rows || out_rows != self.out_rows {
+            self.remeasured.set(true);
         }
         if rows != self.rows {
             self.backlinks_list.reset(rows.len());
@@ -1210,14 +1222,23 @@ impl LinksPanel {
     }
 
     /// A section's list, as tall as its rows (estimated before they are
-    /// measured) and shorter when the panel runs out of room.
-    fn render_list(&self, outgoing: bool, cx: &mut Context<'_, Self>) -> Div {
+    /// measured, then as the list measured them: context lines wrap) and
+    /// shorter when the panel runs out of room.
+    fn render_list(&self, outgoing: bool, window: &mut Window, cx: &mut Context<'_, Self>) -> Div {
         let (rows, state, id) = if outgoing {
             (&self.out_rows, self.outgoing_list.clone(), "outgoing-list")
         } else {
             (&self.rows, self.backlinks_list.clone(), "backlinks-list")
         };
-        let height: f32 = rows.iter().map(|r| r.estimate()).sum();
+        let estimate: f32 = rows.iter().map(|r| r.estimate()).sum();
+        let height = measured_height(&state, rows.len()).unwrap_or(estimate);
+        // The list measures rows as it draws them: look again next frame
+        // while the height moves or the rows changed.
+        let last = &self.list_heights[usize::from(outgoing)];
+        if (last.get() - height).abs() > 0.5 || self.remeasured.get() {
+            last.set(height);
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
         div()
             .debug_selector(move || id.into())
             .h(px(height))
@@ -1234,13 +1255,29 @@ impl LinksPanel {
     }
 }
 
+/// The height of a list's `count` rows as the list measured them: exact
+/// once it has measured the last row, else at least what it knows to be
+/// below its view. `None` before it measured any.
+fn measured_height(state: &ListState, count: usize) -> Option<f32> {
+    let view = state.viewport_bounds();
+    let scrolled = -f32::from(state.scroll_px_offset_for_scrollbar().y);
+    if let Some(last) = count
+        .checked_sub(1)
+        .and_then(|ix| state.bounds_for_item(ix))
+    {
+        return Some(f32::from(last.bottom() - view.top()) + scrolled);
+    }
+    let below = f32::from(state.max_offset_for_scrollbar().y);
+    (below > 0.0).then(|| f32::from(view.size.height) + below)
+}
+
 impl Render for LinksPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
         let count =
             (self.phase == Phase::Ready && self.findings.is_some()).then_some(self.backlinks.count);
         let findings = self.findings.filter(|_| self.phase == Phase::Ready);
-        div()
+        let panel = div()
             .id("links-panel")
             .role(gpui::Role::Group)
             .aria_label("Links")
@@ -1275,7 +1312,7 @@ impl Render for LinksPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_backlinks(cx))),
             )
             .when(self.backlinks_open, |panel| {
-                panel.child(self.render_list(false, cx))
+                panel.child(self.render_list(false, window, cx))
             })
             .child(
                 section_head(
@@ -1293,8 +1330,11 @@ impl Render for LinksPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_outgoing(cx))),
             )
             .when(self.outgoing_open, |panel| {
-                panel.child(self.render_list(true, cx))
-            })
+                panel.child(self.render_list(true, window, cx))
+            });
+        // Both lists saw that their rows changed.
+        self.remeasured.set(false);
+        panel
     }
 }
 

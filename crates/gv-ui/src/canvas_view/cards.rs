@@ -6,10 +6,12 @@
 //! - **Text cards**: their Markdown through the Reading view's pipeline
 //!   (parse, model, render tree in the Obsidian profile) and drawn as
 //!   [`InlineParagraph`](crate::inline::InlineParagraph)s: paragraphs,
-//!   headings, list items (with their markers) and table rows keep their
-//!   styles; code, math, diagram and front matter blocks show as plain
-//!   monospaced text; images and link status icons inside the text are not
-//!   drawn (their boxes stay blank).
+//!   headings, list items (with their markers; task items with a
+//!   read-only checkbox) and table rows keep their styles, formulas
+//!   (inline and display) are typeset; code, diagram and HTML blocks show
+//!   as plain monospaced text; front matter is not shown (as in Obsidian's
+//!   embeds); images and link status icons inside the text are not drawn
+//!   (their boxes stay blank).
 //! - **File cards**: read off the UI thread when first shown. A note shows
 //!   its first blocks (the section of `subpath` when given: `#Heading`,
 //!   `#Parent#Child` or `#^block`), an image is decoded through the media
@@ -43,7 +45,9 @@ use gpui::{RenderImage, SharedString};
 use gv_canvas::Subpath;
 use gv_model::DocModel;
 use gv_profile::{CompiledProfile, ProfileId};
-use gv_render_tree::{FrameKind, ItemKind, RenderOptions, RenderTree, Sources, StyleTable};
+use gv_render_tree::{
+    FrameKind, ItemKind, ListMarker, RenderOptions, RenderTree, Sources, StyleTable,
+};
 use gv_syntax::{ParseOptions, SyntaxTree};
 
 use super::Doc;
@@ -151,6 +155,15 @@ impl From<Loaded> for Preview {
     }
 }
 
+/// A list item's marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Marker {
+    /// A bullet or a number, as text.
+    Text(SharedString),
+    /// A task item's checkbox (read-only).
+    Task { checked: bool },
+}
+
 /// One block of built Markdown, top to bottom.
 #[derive(Debug, Clone)]
 pub(crate) enum Block {
@@ -160,7 +173,7 @@ pub(crate) enum Block {
         block: Rc<RefCell<InlineBlock>>,
         indent: f32,
         gap: f32,
-        marker: Option<SharedString>,
+        marker: Option<Marker>,
     },
     /// Code-like text in the mono family.
     Code {
@@ -179,6 +192,8 @@ pub(crate) struct Built {
     pub blocks: Rc<Vec<Block>>,
     /// Body font size at the bucket's scale (code blocks use it).
     pub body_size: f32,
+    /// Body line height at the bucket's scale (markers are centred in it).
+    pub body_line: f32,
 }
 
 /// The cards' content: parsed texts, file previews and built Markdown.
@@ -290,13 +305,15 @@ impl Cards {
         }
         let scale = bucket_scale(bucket);
         let options = self.options.clone().zoomed(scale);
-        let body_size = options.styles.role(gv_render_tree::TextRole::Body).size;
+        let body = options.styles.role(gv_render_tree::TextRole::Body);
+        let (body_size, body_line) = (body.size, body.line_height);
         let blocks = build_blocks(parsed, options);
         self.builds += 1;
         let b = Built {
             bucket,
             blocks: Rc::new(blocks),
             body_size,
+            body_line,
         };
         self.built.insert(node, b.clone());
         b
@@ -355,28 +372,39 @@ fn build_blocks(parsed: &Parsed, options: RenderOptions) -> Vec<Block> {
             ItemKind::Paragraph
             | ItemKind::Heading { .. }
             | ItemKind::Details
-            | ItemKind::TableRow { .. } => {
-                let Some(content) = node.inline() else {
-                    continue;
+            | ItemKind::TableRow { .. }
+            | ItemKind::Math { .. } => {
+                // Formulas typeset as the Reading view does.
+                let block = match crate::reader::standalone_block(&tree, ix) {
+                    Some(block) => block,
+                    None => match node.inline() {
+                        Some(content) => InlineBlock::new(content.paragraph.clone()),
+                        None => continue,
+                    },
                 };
                 let marker = (item.opens > 0)
                     .then(|| item.context.last())
                     .flatten()
                     .and_then(|f| match &f.kind {
-                        FrameKind::Item { marker } => Some(SharedString::from(marker.text())),
+                        FrameKind::Item {
+                            marker: ListMarker::Task { checked, .. },
+                        } => Some(Marker::Task { checked: *checked }),
+                        FrameKind::Item { marker } => {
+                            Some(Marker::Text(SharedString::from(marker.text())))
+                        }
                         _ => None,
                     });
                 out.push(Block::Text {
-                    block: Rc::new(RefCell::new(InlineBlock::new(content.paragraph.clone()))),
+                    block: Rc::new(RefCell::new(block)),
                     indent,
                     gap,
                     marker,
                 });
             }
+            // Front matter is not shown, as in Obsidian's embeds.
+            ItemKind::Properties { .. } => {}
             ItemKind::Code { .. }
             | ItemKind::Html { .. }
-            | ItemKind::Properties { .. }
-            | ItemKind::Math { .. }
             | ItemKind::Diagram { .. }
             | ItemKind::Live { .. } => {
                 let src = parsed.text.get(item.source.clone()).unwrap_or_default();
@@ -680,6 +708,58 @@ mod tests {
 
     fn obsidian() -> CompiledProfile {
         gv_profile::compile_builtin(ProfileId::Obsidian)
+    }
+
+    #[test]
+    fn cards_typeset_math_show_task_boxes_and_hide_front_matter() {
+        let profile = obsidian();
+        let text = "---\ntitle: Hidden\n---\n# Head\n\nInline $x$.\n\n$$\nh(t) = x^2\n$$\n\n- [ ] open\n- [x] done\n- plain\n";
+        let parsed = Parsed::new(text.into(), &profile);
+        let blocks = build_blocks(&parsed, RenderOptions::for_profile(&profile));
+        // No raw blocks: the front matter is not shown, the formula is.
+        assert!(
+            blocks.iter().all(|b| !matches!(b, Block::Code { .. })),
+            "{blocks:?}"
+        );
+        let math = |b: &Block| match b {
+            Block::Text { block, .. } => {
+                let block = block.borrow();
+                block.paragraph().items().iter().any(|i| {
+                    i.inline_box().is_some_and(|ib| {
+                        matches!(
+                            block.box_content(ib.id),
+                            Some(crate::inline::BoxContent::Math { .. })
+                        )
+                    })
+                })
+            }
+            _ => false,
+        };
+        assert_eq!(blocks.iter().filter(|b| math(b)).count(), 2, "{blocks:?}");
+        let texts: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { block, .. } => Some(block.borrow().paragraph().text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().all(|t| !t.contains("Hidden")), "{texts:?}");
+        let markers: Vec<Option<Marker>> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { marker, .. } => Some(marker.clone()),
+                _ => None,
+            })
+            .filter(Option::is_some)
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                Some(Marker::Task { checked: false }),
+                Some(Marker::Task { checked: true }),
+                Some(Marker::Text("\u{2022}".into())),
+            ]
+        );
     }
 
     #[test]

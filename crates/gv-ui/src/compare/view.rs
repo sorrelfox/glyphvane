@@ -147,7 +147,8 @@ fn button(
         .child(label)
 }
 
-/// Lines of text in the editor's font.
+/// Lines of text in the editor's font, long ones wrapped in their column
+/// (as the Source view wraps them).
 fn text_lines(lines: &[&str], color: Color) -> Div {
     let shown = lines.len().min(MAX_SIDE_LINES);
     div()
@@ -164,7 +165,7 @@ fn text_lines(lines: &[&str], color: Color) -> Div {
             } else {
                 line.replace('\t', "    ").into()
             };
-            div().whitespace_nowrap().child(line)
+            div().min_w_0().child(line)
         }))
         .when(lines.len() > shown, |d| {
             d.child(format!("… {} more lines", lines.len() - shown))
@@ -319,6 +320,7 @@ impl CompareView {
                 .id(SharedString::from(format!(
                     "compare-hunk-{index}-{which}-text"
                 )))
+                .debug_selector(move || format!("compare-hunk-{index}-{which}-text"))
                 .role(Role::Group)
                 .aria_label(name.clone())
                 .aria_description(if on {

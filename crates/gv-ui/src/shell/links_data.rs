@@ -10,10 +10,13 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::SharedString;
+use gv_syntax::inline::InlineOptions;
 use gv_vault::VaultPath;
 use gv_vault::content::{Backlink, ContentSnapshot, FileSource, Mention, file_stem};
 use gv_vault::keys::fold_key;
 use gv_vault::resolve::Status;
+
+use crate::search_panel::excerpt;
 
 /// Characters kept before the link in a context line; more are cut at a
 /// word with "…".
@@ -239,6 +242,7 @@ pub(super) fn snippets(
     groups: &[(VaultPath, Vec<Range<usize>>)],
     link_text: bool,
 ) -> Vec<Vec<Option<Snippet>>> {
+    let options = excerpt::inline_options(snapshot.options().profile);
     groups
         .iter()
         .map(|(path, spans)| {
@@ -247,27 +251,49 @@ pub(super) fn snippets(
                 .iter()
                 .map(|span| {
                     let text = text.as_deref()?;
-                    snippet(text, span.clone(), link_text)
+                    snippet(text, span.clone(), link_text, options)
                 })
                 .collect()
         })
         .collect()
 }
 
-/// The context line of `span` in `text`: its line without block markers,
-/// shortened around the span, with the span shown as its link text.
-pub(super) fn snippet(text: &str, span: Range<usize>, link_text: bool) -> Option<Snippet> {
+/// The context line of `span` in `text`: its line without block markers
+/// and inline markup (as the profile of `options` reads it), shortened
+/// around the span, with the span shown as its link text.
+pub(super) fn snippet(
+    text: &str,
+    span: Range<usize>,
+    link_text: bool,
+    options: InlineOptions,
+) -> Option<Snippet> {
     let construct = text.get(span.clone())?;
     let line_start = text[..span.start].rfind('\n').map_or(0, |i| i + 1);
     let line_end = text[span.end..]
         .find('\n')
         .map_or(text.len(), |i| i + span.end);
     let before = strip_block_markers(&text[line_start..span.start]);
-    let after = text[span.end..line_end].trim_end();
-    let shown = if link_text {
-        link_label(construct)
-    } else {
-        construct.to_string()
+    let content = span.start - before.len();
+    let line = text[content..line_end].trim_end();
+    let mark = span.start - content..span.end - content;
+    let stripped = excerpt::strip(line, std::slice::from_ref(&mark), options);
+    let (before, shown, after) = match stripped.marks.first() {
+        Some(m) if link_text || &stripped.text[m.clone()] == construct => (
+            stripped.text[..m.start].to_string(),
+            stripped.text[m.clone()].to_string(),
+            stripped.text[m.end..].to_string(),
+        ),
+        // The span is not one piece of text (a mention across markup):
+        // the line as written.
+        _ => (
+            before,
+            if link_text {
+                link_label(construct)
+            } else {
+                construct.to_string()
+            },
+            text[span.end..line_end].trim_end().to_string(),
+        ),
     };
     let shown = shown.replace(['\n', '\t'], " ");
     let before = shorten_start(&before.replace('\t', " "), CONTEXT_BEFORE);
@@ -337,38 +363,7 @@ fn shorten_end(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-/// A link construct as its text reads: `[[Note|shown]]` is "shown",
-/// `[[Note#Part]]` "Note > Part", `[text](url)` "text", `<url>` "url".
-pub(super) fn link_label(construct: &str) -> String {
-    let s = construct.trim();
-    let s = s.strip_prefix('!').unwrap_or(s);
-    if let Some(inner) = s.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
-        if let Some((_, alias)) = inner.split_once('|') {
-            return alias.trim().to_string();
-        }
-        return match inner.split_once('#') {
-            Some(("", fragment)) => fragment.trim_start_matches('^').trim().to_string(),
-            Some((name, fragment)) => format!(
-                "{} > {}",
-                name.trim(),
-                fragment.trim_start_matches('^').trim()
-            ),
-            None => inner.trim().to_string(),
-        };
-    }
-    if let Some(rest) = s.strip_prefix('[')
-        && let Some(close) = rest.find(']')
-    {
-        let text = &rest[..close];
-        if !text.is_empty() {
-            return text.to_string();
-        }
-    }
-    if let Some(inner) = s.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
-        return inner.to_string();
-    }
-    s.to_string()
-}
+pub(super) use crate::search_panel::excerpt::link_label;
 
 /// The link the Link action writes in `source` for the words `shown`
 /// mentioning `target`: a wikilink where the profile has them (with the
@@ -461,6 +456,28 @@ mod tests {
         VaultPath::new(s).expect("path")
     }
 
+    fn obsidian() -> gv_syntax::inline::InlineOptions {
+        excerpt::inline_options(gv_vault::ProfileId::Obsidian)
+    }
+
+    #[test]
+    fn a_snippet_reads_without_markup() {
+        let text =
+            "The curve within $\\pm 4$ cm, see **[[Sensor calibration]]** and [[Hub]]. #tides\n";
+        let start = text.find("[[Hub").expect("link");
+        let s = snippet(text, start..start + 7, true, obsidian()).expect("snippet");
+        assert_eq!(
+            s.text.as_ref(),
+            "The curve within \\pm 4 cm, see Sensor calibration and Hub. #tides"
+        );
+        assert_eq!(&s.text[s.highlight.clone()], "Hub");
+        // A mention marks its words.
+        let at = text.find("curve").expect("word");
+        let s = snippet(text, at..at + 5, false, obsidian()).expect("snippet");
+        assert_eq!(&s.text[s.highlight.clone()], "curve");
+        assert!(!s.text.contains("**"), "{}", s.text);
+    }
+
     #[test]
     fn links_read_as_their_text() {
         assert_eq!(link_label("[[Note]]"), "Note");
@@ -476,13 +493,13 @@ mod tests {
         let text = "# Title\n\n- [ ] Then read [[Following links|Following links]] to see.\n";
         let start = text.find("[[").expect("link");
         let end = text.find("]]").expect("end") + 2;
-        let s = snippet(text, start..end, true).expect("snippet");
+        let s = snippet(text, start..end, true, obsidian()).expect("snippet");
         assert_eq!(s.text.as_ref(), "Then read Following links to see.");
         assert_eq!(&s.text[s.highlight.clone()], "Following links");
 
         let quoted = "> 1. see [x](y.md)";
         let start = quoted.find('[').expect("link");
-        let s = snippet(quoted, start..quoted.len(), true).expect("snippet");
+        let s = snippet(quoted, start..quoted.len(), true, obsidian()).expect("snippet");
         assert_eq!(s.text.as_ref(), "see x");
     }
 
@@ -492,7 +509,7 @@ mod tests {
         let after = " tail".repeat(60);
         let text = format!("{before}[[Hub]]{after}");
         let start = before.len();
-        let s = snippet(&text, start..start + 7, true).expect("snippet");
+        let s = snippet(&text, start..start + 7, true, obsidian()).expect("snippet");
         assert!(s.text.starts_with('…'), "{}", s.text);
         assert!(s.text.ends_with('…'), "{}", s.text);
         assert_eq!(&s.text[s.highlight.clone()], "Hub");

@@ -1546,9 +1546,8 @@ impl Element for ReaderElement {
                     let left = left + key_column;
                     if let Some(block) = &block {
                         let tw = text_width(item, column, &m, false);
-                        let first = text
-                            .borrow_mut()
-                            .layout(&mut block.borrow_mut(), tw, &ts)
+                        let layout = text.borrow_mut().layout(&mut block.borrow_mut(), tw, &ts);
+                        let first = layout
                             .lines()
                             .first()
                             .map(|l| (l.baseline, l.top, l.height));
@@ -1557,37 +1556,40 @@ impl Element for ReaderElement {
                             gv_render_tree::NodeKind::Properties { props, .. },
                         ) = (&item.kind, &node.kind)
                         {
-                            let b = block.borrow();
-                            if let Some(layout) = b.layout() {
-                                let range = lines.start as usize..lines.end as usize;
-                                let spec = styles.role(TextRole::Properties);
-                                let key_font = font(TextRole::Properties);
-                                for (piece, prop) in
-                                    super::items::property_rows(props, range, layout.paragraph())
-                                {
-                                    let Some(line) = layout.lines().iter().find(|l| {
-                                        l.frags.clone().any(|k| layout.fragments()[k].item >= piece)
-                                    }) else {
-                                        continue;
-                                    };
-                                    let key = shape(
-                                        window,
-                                        &prop.key,
-                                        key_font.clone(),
-                                        spec.size,
-                                        color(Token::TextSecondary),
-                                    );
-                                    out.over.push(Op::Text {
-                                        origin: origin_for_baseline(
-                                            &key,
-                                            left - key_column,
-                                            content_top + line.baseline,
-                                            spec.line_height,
-                                        ),
-                                        line: Box::new(key),
-                                        line_height: px(spec.line_height),
-                                    });
-                                }
+                            // The keys go by the layout about to be painted:
+                            // the block's last paint is missing on a frame
+                            // that shows it for the first time.
+                            let range = lines.start as usize..lines.end as usize;
+                            let spec = styles.role(TextRole::Properties);
+                            let key_font = font(TextRole::Properties);
+                            for (piece, prop) in
+                                super::items::property_rows(props, range, layout.paragraph())
+                            {
+                                let Some(line) = layout.lines().iter().find(|l| {
+                                    l.frags.clone().any(|k| layout.fragments()[k].item >= piece)
+                                }) else {
+                                    continue;
+                                };
+                                let key = shape(
+                                    window,
+                                    &prop.key,
+                                    key_font.clone(),
+                                    spec.size,
+                                    color(Token::TextSecondary),
+                                );
+                                geometry
+                                    .property_keys
+                                    .push((prop.key.to_string(), content_top + line.baseline));
+                                out.over.push(Op::Text {
+                                    origin: origin_for_baseline(
+                                        &key,
+                                        left - key_column,
+                                        content_top + line.baseline,
+                                        spec.line_height,
+                                    ),
+                                    line: Box::new(key),
+                                    line_height: px(spec.line_height),
+                                });
                             }
                         }
                         if let Some((baseline, top, height)) = first {
