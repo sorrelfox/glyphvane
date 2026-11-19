@@ -115,6 +115,9 @@ pub(crate) struct State {
     /// The quick switcher's file entries for the vault, and what they were
     /// built from (root and index generation).
     files: Option<(PathBuf, u64, Arc<Vec<Entry>>)>,
+    /// The vault's headings or block ids (`[[##`, `[[^^`), and what they
+    /// were built from (root, content generation, block ids or headings).
+    sections: Option<(PathBuf, u64, bool, Arc<Vec<Entry>>)>,
     /// Wheel rows not scrolled yet (a fraction of a row).
     wheel: f32,
 }
@@ -309,5 +312,27 @@ impl State {
         );
         self.files = Some((root.to_path_buf(), generation, files.clone()));
         files
+    }
+
+    /// The headings (or block ids, `blocks`) of every note of the vault
+    /// at `root`, as the quick switcher lists them: built again only when
+    /// the content index changes, not on every key typed.
+    pub fn sections(
+        &mut self,
+        root: &Path,
+        content: &ContentSnapshot,
+        blocks: bool,
+    ) -> Arc<Vec<Entry>> {
+        let generation = content.generation();
+        if let Some((r, g, b, entries)) = &self.sections
+            && r == root
+            && *g == generation
+            && *b == blocks
+        {
+            return entries.clone();
+        }
+        let entries = Arc::new(model::sections(content, root, blocks));
+        self.sections = Some((root.to_path_buf(), generation, blocks, entries.clone()));
+        entries
     }
 }

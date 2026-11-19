@@ -200,6 +200,22 @@ fn headings_of_a_note_this_note_and_the_vault(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn vault_headings_are_gathered_once_per_index_generation() {
+    let v = vault(&[("Home.md", "# Top\n"), ("Projects/Plan.md", PLAN)]);
+    let snapshot = v._indexer.handle().snapshot().expect("indexed");
+    let mut state = crate::autocomplete::State::default();
+    let headings = state.sections(&v.root, &snapshot, false);
+    assert!(headings.iter().any(|e| &*e.label == "Intro"));
+    // Another key typed against the same index: the same list.
+    let again = state.sections(&v.root, &snapshot, false);
+    assert!(std::sync::Arc::ptr_eq(&headings, &again));
+    // Block ids are a list of their own.
+    let blocks = state.sections(&v.root, &snapshot, true);
+    assert!(blocks.iter().any(|e| &*e.label == "^abc123"));
+    assert!(!std::sync::Arc::ptr_eq(&headings, &blocks));
+}
+
 #[gpui::test]
 fn blocks_get_an_id_in_the_same_undo_step(cx: &mut TestAppContext) {
     let v = vault(&[

@@ -75,6 +75,8 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A heading written over several lines (setext) can be renamed.
 - Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
   the view.
+- Performance: `[[##` and `[[^^` autocomplete gather the vault's headings
+  and block IDs once per index update instead of on every key.
 
 ## [1.2.0] - 2026-11-19
 

@@ -178,6 +178,9 @@ pub(crate) struct Sources<'a> {
     pub index: Option<&'a PathIndex>,
     /// The vault's files and aliases, as the quick switcher lists them.
     pub files: &'a [Entry],
+    /// The vault's headings or block ids, as the quick switcher lists
+    /// them (for `[[##` and `[[^^` only).
+    pub sections: &'a [Entry],
     /// The document, vault-relative.
     pub source: Option<&'a VaultPath>,
     pub params: &'a ProfileParams,
@@ -419,11 +422,8 @@ fn note_blocks(path: &VaultPath, query: &str, s: &Sources<'_>) -> Vec<Item> {
 
 /// Headings or block ids across the vault.
 fn vault_sections(query: &str, s: &Sources<'_>, blocks: bool) -> Vec<Item> {
-    let (Some(content), Some(root)) = (s.content, s.root) else {
-        return Vec::new();
-    };
-    let entries = model::sections(content, root, blocks);
-    model::rank(&entries, query)
+    let entries = s.sections;
+    model::rank(entries, query)
         .into_iter()
         .filter_map(|i| {
             let entry = &entries[i];

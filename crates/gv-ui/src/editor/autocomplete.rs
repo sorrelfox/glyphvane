@@ -244,11 +244,21 @@ impl EditorView {
             }
             _ => Arc::default(),
         };
+        let sections = match (&trigger.kind, vault.root.as_deref(), vault.content.as_ref()) {
+            (Kind::WikiHeading(Scope::Vault), Some(root), Some(content)) => {
+                self.autocomplete.sections(root, content, false)
+            }
+            (Kind::WikiBlock(Scope::Vault), Some(root), Some(content)) => {
+                self.autocomplete.sections(root, content, true)
+            }
+            _ => Arc::default(),
+        };
         let sources = Sources {
             content: vault.content.as_ref(),
             root: vault.root.as_deref(),
             index: vault.index.as_ref(),
             files: &files,
+            sections: &sections,
             source: vault.source.as_ref(),
             params: &vault.params,
             profile: self.links.profile(),
