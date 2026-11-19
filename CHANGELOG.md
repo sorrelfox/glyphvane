@@ -3,6 +3,61 @@
 All notable changes to Glyphvane are listed here. The format follows
 Conventional Commits, and versions follow Semantic Versioning.
 
+## [1.2.0] - 2026-11-19
+
+### PDF
+
+- A built-in PDF viewer: pages drawn in the separate helper process, fit
+  width, fit page or a zoom from 25 to 400 %, Go to page (Ctrl+G), and PDF
+  embeds in notes.
+- Find in a PDF (Ctrl+F, F3 and Shift+F3), with matches highlighted on the
+  page; select text by dragging, double-click for a word, triple-click for a
+  line, Shift+click to extend, and Ctrl+C to copy.
+- A PDF tab reopens at its page, position and zoom after a restart, and Back
+  and Forward return to where a PDF was left.
+
+### Reading
+
+- Note embeds show formatted, followable links, block content, footnotes,
+  HTML, remote images and folds; they load off the UI thread.
+- Inline math is typeset in search results and in backlink and mention
+  snippets.
+- Emoji shortcodes show in the Reading view and in exports, in profiles that
+  support them.
+- Canvas cards highlight code, draw diagrams, follow the Reading view for
+  HTML blocks and show a placeholder for bases, queries and media.
+
+### Commands and settings
+
+- View > Viewer mode switches the current tab, and the choice is kept with
+  the session. Fold to heading levels 4 to 6 work.
+- "Confirm web links" asks once per site before opening a web link. Open link
+  in split and the high-contrast setting are hidden until they exist.
+- Help > Documentation opens the new user guide.
+
+### Accessibility
+
+- The editor reports its caret and selection to screen readers, and the
+  Reading view and Live Preview text can be read past the visible screen.
+
+### Fixes
+
+- Scrolling to the end of a document no longer overshoots.
+- Search finds inline tags in folder vaults, and its excerpts no longer show
+  Markdown markup; backlink snippets, canvas cards, the compare view and
+  Bases durations are fixed.
+- In the Flatpak, the default-app setting explains how to set it and the
+  update check is hidden.
+
+### Packaging
+
+- Third-party notices are generated from the dependency tree and checked
+  before packaging; they include FreeType.
+- The Flatpak can be installed from Glyphvane's own signed repository
+  (`flatpak install https://sorrelfox.github.io/glyphvane/glyphvane.flatpakref`)
+  and updated with `flatpak update`; the `.flatpak` bundle updates from it
+  too.
+
 ## [1.1.0] - 2026-11-18
 
 ### Live Preview

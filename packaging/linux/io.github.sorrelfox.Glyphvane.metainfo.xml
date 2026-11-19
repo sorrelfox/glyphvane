@@ -102,6 +102,13 @@
   <content_rating type="oars-1.1"/>
   <!-- Add an entry for every release, newest first. -->
   <releases>
+    <release version="1.2.0" date="2026-11-19">
+      <description>
+        <p>A built-in PDF viewer with find, text selection and copying, which reopens where you left off.</p>
+        <p>Richer note embeds, typeset math in search results and backlinks, emoji in the Reading view, and highlighted code and diagrams in canvas cards.</p>
+        <p>Better screen reader support in the editor, and many fixes.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-11-18">
       <description>
         <p>Live Preview: an Edit-mode style that hides Markdown markers away

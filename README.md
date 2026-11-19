@@ -12,7 +12,7 @@ profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
 ![Glyphvane showing a note in the Reading view, with a table, highlighted code, math and a diagram](docs/screenshots/01-reading-view.png)
 
-**Status:** 1.1 released. Download it from
+**Status:** 1.2 released. Download it from
 [GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
 `.rpm`, AppImage, Flatpak bundle and `.tar.gz` for Linux (x86_64 and arm64),
 an Arch Linux package (x86_64), and `.msi` and `.zip` for Windows (x64 and
@@ -20,9 +20,15 @@ arm64). There are no macOS builds. Changes are
 listed in [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
-flatpak install --user Glyphvane-<version>-<arch>.flatpak    # Flatpak
+flatpak install https://sorrelfox.github.io/glyphvane/glyphvane.flatpakref  # Flatpak
 sudo pacman -U glyphvane-<version>-1-x86_64.pkg.tar.zst      # Arch Linux
 ```
+
+The Flatpak comes from Glyphvane's own signed repository (the runtime comes
+from Flathub), and `flatpak update` keeps it up to date. The `.flatpak`
+bundle from the release page also updates from that repository. The
+repository key's fingerprint is
+`B21B F785 DDEE CA61 883A 8E60 7BB1 AFE9 14F8 475F`.
 
 The Flatpak has access to your home folder, so links between notes keep
 working outside the opened vault; it leaves updates to Flatpak and keeps its
