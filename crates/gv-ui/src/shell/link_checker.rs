@@ -1350,6 +1350,7 @@ impl Workspace {
                             meta: FileMeta {
                                 size: meta.len(),
                                 mtime: meta.modified().ok(),
+                                created: FileMeta::created_of(&meta),
                                 identity: None,
                             },
                         }]) {

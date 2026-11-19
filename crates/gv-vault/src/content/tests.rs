@@ -52,6 +52,7 @@ fn meta(size: usize, tick: u64) -> FileMeta {
     FileMeta {
         size: size as u64,
         mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + tick)),
+        created: None,
         identity: None,
     }
 }

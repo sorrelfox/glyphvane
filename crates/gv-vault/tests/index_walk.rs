@@ -70,6 +70,10 @@ fn default_walk_excludes_and_hides() {
     let a = idx.entry_by_path("notes/a.md").unwrap();
     assert_eq!(a.meta.size, 4);
     assert!(a.meta.mtime.is_some());
+    // The creation time where the file system keeps one, else the mtime.
+    let md = fs::metadata(dir.path().join("notes/a.md")).unwrap();
+    let created = md.created().ok().or(a.meta.mtime);
+    assert_eq!(a.meta.created, created);
     #[cfg(unix)]
     assert!(a.meta.identity.is_some());
 }

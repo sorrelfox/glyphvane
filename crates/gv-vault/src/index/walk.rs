@@ -102,6 +102,7 @@ impl Collector<'_> {
             Ok(m) => FileMeta {
                 size: if ft.is_file() { m.len() } else { 0 },
                 mtime: m.modified().ok(),
+                created: FileMeta::created_of(&m),
                 identity: identity(entry.path(), &m),
             },
             Err(e) => {
@@ -205,6 +206,7 @@ pub(crate) fn entry_of(
     let meta = FileMeta {
         size: if ft.is_file() { m.len() } else { 0 },
         mtime: m.modified().ok(),
+        created: FileMeta::created_of(&m),
         identity: identity(path, &m),
     };
     Ok((kind, meta))

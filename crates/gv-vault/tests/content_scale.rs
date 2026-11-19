@@ -317,6 +317,7 @@ fn content_index_scale() {
             meta: FileMeta {
                 size: md.len(),
                 mtime: md.modified().ok(),
+                created: None,
                 identity: None,
             },
         };
@@ -366,6 +367,7 @@ fn content_index_scale() {
             meta: FileMeta {
                 size: 11,
                 mtime: Some(SystemTime::now()),
+                created: None,
                 identity: None,
             },
         }])

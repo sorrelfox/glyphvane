@@ -149,6 +149,7 @@ impl EditorView {
                     meta: FileMeta {
                         size: 0,
                         mtime: None,
+                        created: None,
                         identity: None,
                     },
                 })

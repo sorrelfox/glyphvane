@@ -55,6 +55,7 @@ fn snapshot_data() -> IndexData {
                 mtime: Some(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i as u64 * 60),
                 ),
+                created: None,
                 identity: None,
             },
         )

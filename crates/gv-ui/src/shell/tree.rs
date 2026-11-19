@@ -90,15 +90,21 @@ pub(crate) enum SortOrder {
     ModifiedNewest,
     /// Files modified first first; folders by name.
     ModifiedOldest,
+    /// Files created last first; folders by name.
+    CreatedNewest,
+    /// Files created first first; folders by name.
+    CreatedOldest,
 }
 
 impl SortOrder {
     /// Every order, as the sort menu lists them.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::NameAscending,
         Self::NameDescending,
         Self::ModifiedNewest,
         Self::ModifiedOldest,
+        Self::CreatedNewest,
+        Self::CreatedOldest,
     ];
 
     /// How the session stores it.
@@ -108,6 +114,8 @@ impl SortOrder {
             Self::NameDescending => "name-reverse",
             Self::ModifiedNewest => "modified",
             Self::ModifiedOldest => "modified-reverse",
+            Self::CreatedNewest => "created",
+            Self::CreatedOldest => "created-reverse",
         }
     }
 
@@ -123,6 +131,8 @@ impl SortOrder {
             Self::NameDescending => "File name (Z to A)",
             Self::ModifiedNewest => "Modified time (new to old)",
             Self::ModifiedOldest => "Modified time (old to new)",
+            Self::CreatedNewest => "Created time (new to old)",
+            Self::CreatedOldest => "Created time (old to new)",
         }
     }
 }
@@ -399,6 +409,8 @@ impl TreeModel {
             return children.clone();
         }
         let index = &self.index;
+        let sort = self.sort;
+        let by_created = matches!(sort, SortOrder::CreatedNewest | SortOrder::CreatedOldest);
         let mut children: Vec<(bool, &str, Option<std::time::SystemTime>, FileId)> = index
             .children(dir)
             .iter()
@@ -407,12 +419,15 @@ impl TreeModel {
                 Some((
                     entry.kind.is_dir(),
                     entry.path.file_name().unwrap_or_default(),
-                    entry.meta.mtime,
+                    if by_created {
+                        entry.meta.created
+                    } else {
+                        entry.meta.mtime
+                    },
                     *id,
                 ))
             })
             .collect();
-        let sort = self.sort;
         children.sort_by(|a, b| {
             let by_name = natural_cmp(a.1, b.1);
             b.0.cmp(&a.0).then_with(|| match sort {
@@ -420,8 +435,8 @@ impl TreeModel {
                 SortOrder::NameDescending => by_name.reverse(),
                 // Folders have no meaningful time: by name.
                 _ if a.0 => by_name,
-                SortOrder::ModifiedNewest => b.2.cmp(&a.2).then(by_name),
-                SortOrder::ModifiedOldest => a.2.cmp(&b.2).then(by_name),
+                SortOrder::ModifiedNewest | SortOrder::CreatedNewest => b.2.cmp(&a.2).then(by_name),
+                SortOrder::ModifiedOldest | SortOrder::CreatedOldest => a.2.cmp(&b.2).then(by_name),
             })
         });
         let children: Arc<[FileId]> = children.into_iter().map(|(_, _, _, id)| id).collect();
@@ -621,6 +636,55 @@ mod tests {
         assert_eq!(names(&m), ["b.md", "a.md", "c.md"]);
         m.set_sort(SortOrder::ModifiedOldest);
         assert_eq!(names(&m), ["c.md", "a.md", "b.md"]);
+    }
+
+    #[test]
+    fn created_time_orders_files_independently_of_modified_time() {
+        use std::time::{Duration, SystemTime};
+        let base = model(&["a.md", "b.md", "c.md", "F/x.md"]);
+        let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+        // Created order: c, a, b; modified order the reverse of that.
+        let meta = |created: u64, modified: u64| gv_vault::FileMeta {
+            created: t(created),
+            mtime: t(modified),
+            ..gv_vault::FileMeta::default()
+        };
+        let upsert = |p: &str, meta| gv_vault::Change::Upsert {
+            path: VaultPath::new(p).expect("path"),
+            kind: EntryKind::File,
+            meta,
+        };
+        let next = base
+            .index()
+            .apply(&[
+                upsert("a.md", meta(20, 20)),
+                upsert("b.md", meta(30, 10)),
+                upsert("c.md", meta(10, 30)),
+            ])
+            .expect("apply");
+        let mut m = TreeModel::new(next);
+        m.set_sort(SortOrder::CreatedNewest);
+        assert_eq!(names(&m), ["F", "b.md", "a.md", "c.md"]);
+        m.set_sort(SortOrder::CreatedOldest);
+        assert_eq!(names(&m), ["F", "c.md", "a.md", "b.md"]);
+        m.set_sort(SortOrder::ModifiedNewest);
+        assert_eq!(names(&m), ["F", "c.md", "a.md", "b.md"]);
+    }
+
+    #[test]
+    fn every_sort_order_round_trips_through_its_saved_id() {
+        for order in SortOrder::ALL {
+            assert_eq!(SortOrder::from_saved_id(order.saved_id()), Some(order));
+        }
+        assert_eq!(
+            SortOrder::from_saved_id("created"),
+            Some(SortOrder::CreatedNewest)
+        );
+        assert_eq!(
+            SortOrder::from_saved_id("created-reverse"),
+            Some(SortOrder::CreatedOldest)
+        );
+        assert_eq!(SortOrder::from_saved_id("unknown"), None);
     }
 
     #[test]

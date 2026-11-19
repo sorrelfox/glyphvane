@@ -122,8 +122,20 @@ pub struct FileMeta {
     pub size: u64,
     /// Modification time, if the OS reports one.
     pub mtime: Option<SystemTime>,
+    /// Creation time where the platform and file system report one, else
+    /// the modification time.
+    pub created: Option<SystemTime>,
     /// OS file identity, if available.
     pub identity: Option<FileIdentity>,
+}
+
+impl FileMeta {
+    /// The creation time of `m` where the platform and file system report
+    /// one, else its modification time.
+    #[must_use]
+    pub fn created_of(m: &std::fs::Metadata) -> Option<SystemTime> {
+        m.created().ok().or_else(|| m.modified().ok())
+    }
 }
 
 /// Precomputed matching keys of a path.

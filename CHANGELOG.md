@@ -40,7 +40,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 - For an unresolved link whose name is not valid on every platform, the
   link checker offers to create the note under the cleaned name and
   rewrite the link to it, as following the link does.
-
+- The Files panel sorts by created time (new to old, or old to new), as
+  Obsidian does; where the file system keeps no creation time, the
+  modified time stands in.
 ### Documentation
 
 - A sample vault (`docs/sample-vault`) tours the features with one short

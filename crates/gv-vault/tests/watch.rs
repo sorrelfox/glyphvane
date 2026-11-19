@@ -224,6 +224,9 @@ fn create_modify_and_delete_a_file() {
         i.entry_by_path("a.md").is_some_and(|e| e.meta.size == 4)
     });
     let id = h.index().id_of("a.md");
+    // With its creation time (or its mtime where there is none).
+    let entry = h.index().entry_by_path("a.md").cloned().expect("indexed");
+    assert!(entry.meta.created.is_some());
 
     let path = h.track("a.md");
     write(&h.root, "a.md", "one two\n");

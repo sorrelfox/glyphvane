@@ -1090,6 +1090,7 @@ pub(super) fn upserts(root: &Path, path: &VaultPath) -> Vec<Change> {
             meta: FileMeta {
                 size: if meta.is_dir() { 0 } else { meta.len() },
                 mtime: meta.modified().ok(),
+                created: FileMeta::created_of(&meta),
                 identity: None,
             },
         });
