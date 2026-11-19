@@ -11,6 +11,11 @@ Conventional Commits, and versions follow Semantic Versioning.
   from one page to another to select and copy the text between; pages in
   two columns are read column by column, so find, selection and copying
   follow the reading order.
+- Find in a PDF matches across line ends, page ends and a hyphen at a line
+  end: a phrase continuing on the next line or page is found (and
+  highlighted on both pages), and "infor-" followed by "mation" is found
+  as "information".
+  Copying joins words split at a soft hyphen.
 
 ### Reading
 

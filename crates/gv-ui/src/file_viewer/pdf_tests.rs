@@ -808,6 +808,35 @@ fn pages_read_later_add_their_matches_from_the_page_shown(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn find_runs_on_to_the_next_page_and_over_a_line_end_hyphen(cx: &mut TestAppContext) {
+    let (_dir, _engine, mut vcx, _viewer, pdf) = open_text(
+        cx,
+        &["Read to the end of", "page two, the infor-\nmation age"],
+    );
+    press(&pdf, &mut vcx, "ctrl-f");
+    // From the end of page 1 on to page 2: one match.
+    vcx.simulate_input("of page");
+    draw(&mut vcx);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 1"));
+    assert_eq!(current(&pdf, &mut vcx), Some((0, "of\npage".to_owned())));
+    assert!(vcx.debug_bounds("pdf-current-match").is_some());
+    // A word split by a hyphen at a line end, found whole.
+    let bar = find_bar(&pdf, &mut vcx);
+    vcx.update(|window, cx| {
+        bar.update(cx, |bar, cx| {
+            bar.set_query("information", window, cx);
+            cx.emit(crate::find::FindBarEvent::Changed);
+        });
+    });
+    draw(&mut vcx);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 1"));
+    assert_eq!(
+        current(&pdf, &mut vcx),
+        Some((1, "infor-\nmation".to_owned()))
+    );
+}
+
+#[gpui::test]
 fn dragging_selects_text_that_ctrl_c_copies(cx: &mut TestAppContext) {
     let (_dir, engine, mut vcx, _viewer, pdf) =
         open_text(cx, &["Hello world\nSecond line", "Page two"]);

@@ -54,7 +54,14 @@
 //!   field, F3 and Shift+F3 anywhere in the viewer go to the next and
 //!   previous one, wrapping around, and scroll it a third down the view
 //!   when it is not in view (vertically only). Esc closes the popover and
-//!   gives the keyboard back to the pages. Matches do not span pages.
+//!   gives the keyboard back to the pages. The text matched
+//!   ([`pdf_text::search`]) reads a line end as a space (a line end for a
+//!   regular expression), and a page's end like a line end before the
+//!   next page's text when that was read, so a match can run on to the
+//!   next page: it counts once, and each part is highlighted on its page.
+//!   Soft hyphens are not read; a hyphen at a line end between a letter
+//!   and a lowercase letter is read both with and without it
+//!   ("infor-⏎mation" is found as "information" and "infor-mation").
 //! - **Highlights.** Over the page image: each match in `accent.tint`, the
 //!   current one in `accent.line` (the Reading view's find colours), the
 //!   selection in `selection.text`, all at `MARK_OPACITY` so the page
@@ -78,7 +85,8 @@
 //!   beyond it, scrolls the view every [`AUTOSCROLL_TICK`] (faster the
 //!   further in), the selection following. Ctrl+A selects the text of the
 //!   page shown; Ctrl+C copies the selection as plain text, the pages'
-//!   text separated by a line end. Copying a selection over pages whose
+//!   text separated by a line end, and words split at a soft hyphen at a
+//!   line end (or page end) joined; other hyphens are kept. Copying a selection over pages whose
 //!   text is still being read waits for it (it is read first) and then
 //!   copies; a page that cannot be read adds nothing.
 //! - **Accessibility.** The pages are a list named "Pages"; each page laid
@@ -109,7 +117,7 @@ use gpui::{
 use gv_render_tree::Finder;
 use serde::{Deserialize, Serialize};
 
-use super::pdf_text::{self, Mark, PageText, PdfMatch, Spot, Unit};
+use super::pdf_text::{self, Mark, PageText, PdfMatch, Query, Spot, Unit};
 
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
@@ -327,7 +335,7 @@ struct TextRead {
 struct PdfFind {
     bar: Option<Entity<FindBar>>,
     open: bool,
-    finder: Option<Finder>,
+    query: Option<Query>,
     /// In page order, then text order.
     matches: Vec<PdfMatch>,
     /// More matches than [`MAX_MATCHES`].
@@ -996,7 +1004,7 @@ impl PdfViewer {
                 if let Some(slot) = self.texts.get_mut(page) {
                     *slot = Some(Arc::clone(&text));
                 }
-                self.match_page(page, &text, cx);
+                self.match_page(page, cx);
             }
             Err(PdfError::Cancelled) => {}
             Err(PdfError::Failed(why)) => {
@@ -1032,7 +1040,13 @@ impl PdfViewer {
     pub fn current_match(&self) -> Option<(usize, String)> {
         let m = self.find.matches.get(self.find.current?)?;
         let text = self.texts.get(m.page)?.as_ref()?;
-        Some((m.page, text.slice(m.chars.clone()).to_owned()))
+        let mut found = text.slice(m.chars.clone()).to_owned();
+        if m.spill > 0 {
+            let next = self.texts.get(m.page + 1)?.as_ref()?;
+            found.push('\n');
+            found.push_str(next.slice(0..m.spill));
+        }
+        Some((m.page, found))
     }
 
     fn ensure_bar(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> Entity<FindBar> {
@@ -1130,11 +1144,15 @@ impl PdfViewer {
         self.find.more = false;
         match Finder::new(&query, options) {
             Ok(finder) if finder.is_empty() => {
-                self.find.finder = None;
+                self.find.query = None;
                 self.find.status = FindStatus::Empty;
             }
             Ok(finder) => {
-                let (matches, more) = super::pdf_text::search(&self.texts, &finder, MAX_MATCHES);
+                let query = Query {
+                    finder,
+                    regex: options.regex,
+                };
+                let (matches, more) = pdf_text::search(&self.texts, &query, MAX_MATCHES);
                 let k = matches.partition_point(|m| (m.page, m.chars.start) < from);
                 self.find.current = match matches.len() {
                     0 => None,
@@ -1142,13 +1160,13 @@ impl PdfViewer {
                 };
                 self.find.matches = matches;
                 self.find.more = more;
-                self.find.finder = Some(finder);
+                self.find.query = Some(query);
                 self.update_status();
                 self.reveal_current(cx);
             }
             Err(err) => {
                 tracing::debug!("find in PDF: {err}");
-                self.find.finder = None;
+                self.find.query = None;
                 self.find.status = FindStatus::Invalid;
             }
         }
@@ -1156,39 +1174,44 @@ impl PdfViewer {
         cx.notify();
     }
 
-    /// Adds the matches of page `page`, whose text just came.
-    fn match_page(&mut self, page: usize, text: &PageText, cx: &mut Context<'_, Self>) {
+    /// Adds the matches of page `page`, whose text just came: its own,
+    /// and those of the page before that run on to it.
+    fn match_page(&mut self, page: usize, cx: &mut Context<'_, Self>) {
         if !self.find.open {
             return;
         }
-        let Some(finder) = &self.find.finder else {
+        let Some(query) = &self.find.query else {
             return;
         };
-        let room = MAX_MATCHES.saturating_sub(self.find.matches.len());
-        let found = text.find(finder, room + 1);
-        if found.is_empty() {
-            return;
-        }
-        if found.len() > room {
+        let current = self
+            .find
+            .current
+            .and_then(|k| self.find.matches.get(k))
+            .map(|m| (m.page, m.chars.start));
+        if pdf_text::rematch(
+            &mut self.find.matches,
+            &self.texts,
+            page,
+            query,
+            MAX_MATCHES,
+        ) {
             self.find.more = true;
         }
-        let at = self.find.matches.partition_point(|m| m.page < page);
-        let added = found.len().min(room);
-        self.find.matches.splice(
-            at..at,
-            found
-                .into_iter()
-                .take(room)
-                .map(|chars| PdfMatch { page, chars }),
-        );
-        match self.find.current {
-            Some(k) if k >= at => self.find.current = Some(k + added),
-            Some(_) => {}
+        let n = self.find.matches.len();
+        match current {
+            // The same match, or the next one if it went.
+            Some(at) => {
+                let k = self
+                    .find
+                    .matches
+                    .partition_point(|m| (m.page, m.chars.start) < at);
+                self.find.current = (n > 0).then_some(if k < n { k } else { 0 });
+            }
             // The first matches: the first at or after the page shown.
-            None if added > 0 => {
+            None if n > 0 => {
                 let here = self.current_page();
                 let k = self.find.matches.partition_point(|m| m.page < here);
-                self.find.current = Some(if k < self.find.matches.len() { k } else { 0 });
+                self.find.current = Some(if k < n { k } else { 0 });
                 self.reveal_current(cx);
             }
             None => {}
@@ -1239,7 +1262,7 @@ impl PdfViewer {
     /// read for it (the count says so). While find is open every page
     /// missing is read in turn, so a read under way means more to come.
     pub fn is_searching(&self) -> bool {
-        self.find.open && self.find.finder.is_some() && self.reading.is_some()
+        self.find.open && self.find.query.is_some() && self.reading.is_some()
     }
 
     /// Scrolls the current match into view, a third down the view, when
@@ -1248,13 +1271,13 @@ impl PdfViewer {
         let Some(m) = self.find.current.and_then(|k| self.find.matches.get(k)) else {
             return;
         };
-        let page = m.page;
-        let Some(rect) = self
-            .texts
-            .get(page)
-            .and_then(Option::as_ref)
-            .and_then(|t| t.rects(m.chars.clone()).first().copied())
-        else {
+        // Its first box: on its page, else on the next (a match that is
+        // all line end there).
+        let parts = [(m.page, m.chars.clone()), (m.page + 1, 0..m.spill)];
+        let Some((page, rect)) = parts.into_iter().find_map(|(page, chars)| {
+            let text = self.texts.get(page)?.as_ref()?;
+            Some((page, text.rects(chars).first().copied()?))
+        }) else {
             return;
         };
         let (aw, ah) = self.view_size();
@@ -1578,19 +1601,27 @@ impl PdfViewer {
         };
         let mut rects: Vec<([f32; 4], Hsla, &'static str)> = Vec::new();
         if self.find.open {
-            let start = self.find.matches.partition_point(|m| m.page < page);
-            for (k, m) in self.find.matches[start..]
+            let matches = &self.find.matches;
+            let start = matches.partition_point(|m| m.page < page);
+            // A match from the page before that runs on to this one, then
+            // this page's.
+            let carried = start
+                .checked_sub(1)
+                .filter(|k| matches[*k].page + 1 == page && matches[*k].spill > 0)
+                .map(|k| (k, 0..matches[k].spill));
+            let own = matches[start..]
                 .iter()
                 .enumerate()
                 .take_while(|(_, m)| m.page == page)
-            {
-                let (color, name) = if Some(start + k) == self.find.current {
+                .map(|(k, m)| (start + k, m.chars.clone()));
+            for (k, chars) in carried.into_iter().chain(own) {
+                let (color, name) = if Some(k) == self.find.current {
                     (theme.accent.line, "pdf-current-match")
                 } else {
                     (theme.accent.tint, "pdf-match")
                 };
                 rects.extend(
-                    text.rects(m.chars.clone())
+                    text.rects(chars)
                         .into_iter()
                         .map(|r| (r, color.into(), name)),
                 );

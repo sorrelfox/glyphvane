@@ -53,8 +53,22 @@ example "3 of 17". Glyphvane reads the text of the pages in the background,
 starting with the page you are on, so in a long PDF the count grows for a
 moment after you type, and says "(searching…)" until every page has been
 read. The current match is highlighted more strongly than
-the others, and the PDF scrolls to it. A match cannot run from one page to
-the next.
+the others, and the PDF scrolls to it.
+
+A search treats the end of a line as a space, so a phrase is found even
+when it continues on the next line (with **.\*** on, a line end stays a line
+break, for `^`, `$` and `\n`). The end of a page counts as a line end too: a
+phrase that starts at the bottom of one page and continues at the top of the
+next is found, counted once, and highlighted on both pages. This works once
+Glyphvane has read the text of both pages.
+
+Words split at the end of a line are found whole. A hyphen at the end of a
+line, after a letter and before a lowercase letter on the next line, is
+read both ways: "infor-" followed by "mation" is found when you search for
+"information" and for "infor-mation" (a split compound such as "well-" and
+"known" is found as "well-known"). Before a capital letter or a digit the
+hyphen is kept ("Jean-Paul", "1990-2000"). Soft hyphens (invisible break
+points some PDFs mark words with) are ignored.
 
 **Selecting and copying text.** Drag across text on a page to select it,
 then press **Ctrl+C** to copy it. Double-click to select a word, or
@@ -66,7 +80,10 @@ scrolls.
 **Ctrl+A** selects all the text of the page you are on. A selection can run
 from one page to another: drag past the end of a page, or **Shift**+click on
 another page, and the text of every page between is selected too. Copied
-text has a line break between pages. Glyphvane reads the text of those pages
+text has a line break between pages. Copied text keeps the PDF's
+hyphens and line breaks as they are, with one exception: a word split at a
+soft hyphen at the end of a line (or page) is copied whole, without the
+hyphen. Glyphvane reads the text of those pages
 as the selection reaches them; if you copy before it has, the copy waits a
 moment for it.
 
