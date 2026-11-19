@@ -158,6 +158,23 @@ pub enum FixAction {
     Rewrite { path: String },
     /// Create an empty note at `path`, which the link then resolves to.
     CreateNote { path: VaultPath },
+    /// Rewrite the path part of the link's destination to `rewrite` (as
+    /// [`Rewrite`](Self::Rewrite) does), then create an empty note at
+    /// `path`, which the rewritten link resolves to: for a name not valid
+    /// on every platform, sanitised (09 § Unresolved). The checker never
+    /// offers it itself (the sanitising is the app's); the app adds it.
+    CreateNoteAndRewrite { path: VaultPath, rewrite: String },
+}
+
+impl FixAction {
+    /// Whether it creates a note (*Create note*).
+    #[must_use]
+    pub fn creates_note(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateNote { .. } | Self::CreateNoteAndRewrite { .. }
+        )
+    }
 }
 
 /// One way to fix a finding.
@@ -423,7 +440,8 @@ impl ContentSnapshot {
         if let Some(construct) = construct {
             for f in &mut out {
                 f.fixes.retain(|fix| match &fix.action {
-                    FixAction::Rewrite { path } => {
+                    FixAction::Rewrite { path }
+                    | FixAction::CreateNoteAndRewrite { rewrite: path, .. } => {
                         rewrite_link(construct, f.link_kind, &f.raw, path).is_some()
                     }
                     FixAction::CreateNote { .. } => true,
@@ -507,7 +525,8 @@ impl Checker<'_> {
                 f.column = column_of(&text, f.span.start as usize);
                 let construct = text.get(f.span.range()).unwrap_or("");
                 f.fixes.retain(|fix| match &fix.action {
-                    FixAction::Rewrite { path } => {
+                    FixAction::Rewrite { path }
+                    | FixAction::CreateNoteAndRewrite { rewrite: path, .. } => {
                         rewrite_link(construct, f.link_kind, &f.raw, path).is_some()
                     }
                     FixAction::CreateNote { .. } => true,

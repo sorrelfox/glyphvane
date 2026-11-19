@@ -37,6 +37,10 @@ Conventional Commits, and versions follow Semantic Versioning.
   Search panel does.
 - The hover preview of a link to a heading shows only that heading's
   section, up to the next heading of the same or a higher level.
+- For an unresolved link whose name is not valid on every platform, the
+  link checker offers to create the note under the cleaned name and
+  rewrite the link to it, as following the link does.
+
 ### Documentation
 
 - A sample vault (`docs/sample-vault`) tours the features with one short

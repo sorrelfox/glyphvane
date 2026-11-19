@@ -18,7 +18,10 @@
 //!   link, the note an alias belongs to, and *Create note* for an
 //!   unresolved link. A rewrite is one undoable edit in the source's
 //!   buffer (the source opens in a background tab when it is not open);
-//!   *Create note* creates the empty note and opens it.
+//!   *Create note* creates the empty note and opens it. A name not valid
+//!   on every platform gets the create-note popover's offer instead: the
+//!   note under the sanitised name, the link rewritten to it first
+//!   (09 § Unresolved; [`LinkChecker::offer_sanitised_notes`]).
 //!
 //! The check runs off the window's thread on the content index's snapshot
 //! ([`gv_vault::content::check`]) and runs again when the index changes,
@@ -44,7 +47,7 @@ use gpui::{
 use gv_vault::content::check::rewrite_link;
 use gv_vault::content::{
     CheckOptions, CheckProgress, CheckReport, CheckScope, ContentOptions, ContentSnapshot,
-    DiskSource, Finding, Fix, FixAction, Severity,
+    DiskSource, Finding, FindingKind, Fix, FixAction, Severity,
 };
 use gv_vault::profile::ProfileId;
 use gv_vault::{EntryKind, FileMeta, VaultPath};
@@ -421,6 +424,7 @@ impl LinkChecker {
                 b.kind,
             ))
         });
+        self.offer_sanitised_notes(&mut report.findings, cx);
         let selected_finding = self.selected_finding().cloned();
         self.groups = group(&report.findings);
         self.report = Some(report);
@@ -434,6 +438,47 @@ impl LinkChecker {
             .map(Row::Finding);
         self.rebuild_rows();
         cx.notify();
+    }
+
+    /// *Create note* for the unresolved links the checker could offer none
+    /// because their name is not valid on every platform: the note under
+    /// the name sanitised as the quick switcher does, the link rewritten
+    /// to it first, as the create-note popover offers (09 § Unresolved).
+    fn offer_sanitised_notes(&self, findings: &mut [Finding], cx: &App) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        let vault = vault.read(cx);
+        let index = vault.snapshot();
+        let profile = vault
+            .content()
+            .map_or(ProfileId::Extended, |c| c.options().profile);
+        let root = index.root().to_path_buf();
+        for f in findings.iter_mut().filter(|f| {
+            f.kind == FindingKind::Unresolved && !f.fixes.iter().any(|x| x.action.creates_note())
+        }) {
+            let file = f.source.to_fs_path(&root);
+            let resolver = crate::reader::Resolver::statuses(&file, Some(&index), profile);
+            // A wikilink's raw text holds its display text too.
+            let destination = if f.link_kind.is_wiki() {
+                f.raw.split('|').next().unwrap_or_default()
+            } else {
+                &f.raw
+            };
+            let Some(note) = crate::reader::new_note(&resolver, f.link_kind, destination) else {
+                continue;
+            };
+            let Some(rewrite) = note.rewrite else {
+                continue;
+            };
+            f.fixes.push(Fix {
+                label: format!("Create {} and rewrite link", note.path.as_str()),
+                action: FixAction::CreateNoteAndRewrite {
+                    path: note.path,
+                    rewrite,
+                },
+            });
+        }
     }
 
     fn rebuild_rows(&mut self) {
@@ -502,10 +547,7 @@ impl LinkChecker {
     pub fn fix_for_command(&self, create: bool) -> Option<(Finding, Fix)> {
         let finding = self.selected_finding()?;
         let fix = match (self.selected, create) {
-            (_, true) => finding
-                .fixes
-                .iter()
-                .find(|f| matches!(f.action, FixAction::CreateNote { .. })),
+            (_, true) => finding.fixes.iter().find(|f| f.action.creates_note()),
             (Some(Row::Fix(_, k)), false) => finding.fixes.get(k),
             _ => finding.fixes.first(),
         }?;
@@ -899,7 +941,7 @@ impl LinkChecker {
             return div();
         };
         let icon = match fix.action {
-            FixAction::CreateNote { .. } => Icon::NewNote,
+            FixAction::CreateNote { .. } | FixAction::CreateNoteAndRewrite { .. } => Icon::NewNote,
             FixAction::Rewrite { .. } => Icon::Edit,
         };
         div()
@@ -1159,6 +1201,20 @@ impl Workspace {
                 );
             }
             FixAction::CreateNote { path } => self.create_linked_note(&vault, path, window, cx),
+            FixAction::CreateNoteAndRewrite { path, rewrite } => {
+                // The link first, so that it resolves to the new note.
+                let (kind, raw, rewrite) =
+                    (finding.link_kind, finding.raw.clone(), rewrite.clone());
+                self.edit_source(
+                    &root,
+                    &finding.source,
+                    finding.span.range(),
+                    move |construct| rewrite_link(construct, kind, &raw, &rewrite),
+                    window,
+                    cx,
+                );
+                self.create_linked_note(&vault, path, window, cx);
+            }
         }
     }
 

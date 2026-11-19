@@ -387,6 +387,56 @@ fn create_note_creates_the_missing_note(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_name_not_valid_everywhere_is_created_sanitised_and_the_link_rewritten(
+    cx: &mut TestAppContext,
+) {
+    // 09 § Unresolved: a name some platform does not allow (`:`) gets the
+    // create-note popover's offer: the sanitised note, the link rewritten.
+    let hub = "# Hub\n\n[[Plan: A]]\n";
+    let mut f = fixture(cx, &[("Hub.md", hub)], "Hub.md");
+    f.vcx.dispatch_action(commands::CheckNote);
+    f.until("the offer", |c| {
+        c.report().is_some_and(|r| {
+            r.findings.iter().any(|x| {
+                x.kind == FindingKind::Unresolved
+                    && x.fixes.iter().any(|fix| {
+                        fix.label == "Create Plan A.md and rewrite link"
+                            && fix.action.creates_note()
+                    })
+            })
+        })
+    });
+    let i = f
+        .vcx
+        .read(|cx| {
+            let c = f.workspace.read(cx).link_checker().expect("checker");
+            c.read(cx)
+                .report()?
+                .findings
+                .iter()
+                .position(|x| x.kind == FindingKind::Unresolved)
+        })
+        .expect("the unresolved finding");
+    assert_eq!(i, 0, "the unresolved finding comes first");
+    f.click("checker-finding-0");
+    f.vcx.dispatch_action(commands::CreateNote);
+    draw(&mut f.vcx);
+    let created = f.path("Plan A.md");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !created.exists() && Instant::now() < deadline {
+        f.poll();
+    }
+    assert!(created.exists());
+    draw(&mut f.vcx);
+    assert_eq!(
+        f.editor_text("Hub.md").as_deref(),
+        Some("# Hub\n\n[[Plan A]]\n")
+    );
+    assert_eq!(f.active_path(), Some(created));
+    crate::files::overlay::clean(&f.path("Hub.md"));
+}
+
+#[gpui::test]
 fn edits_are_checked_again(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &vault_files(), "Hub.md");
     f.vcx.dispatch_action(commands::CheckVault);
