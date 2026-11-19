@@ -420,12 +420,10 @@ fn fetch(block: &LiveBlock, host: &Host, env: &Env, cancel: &Arc<AtomicBool>) ->
             let Some(content) = env.content.clone() else {
                 return Shown::Notice("Search results show once the vault is indexed.".into());
             };
-            Shown::Query(Arc::new(search(
-                &query,
-                content,
-                &root,
-                &CancelToken::new(),
-            )))
+            // Stops with the block's other work (another canvas, the
+            // card's block asked for again).
+            let cancel = CancelToken::from_flag(Arc::clone(cancel));
+            Shown::Query(Arc::new(search(&query, content, &root, &cancel)))
         }
         (Some(target), _, LiveKind::Base) => {
             let res = resolver.resolve_embed(target, block.host.as_deref());
@@ -925,10 +923,13 @@ mod tests {
         live.shown(0, &block);
         assert!(live.take_requests().is_empty());
         assert!(!live.set_index(None));
-        // Clearing forgets the blocks and stops the fetches that run.
+        // Clearing forgets the blocks and stops the fetches that run, a
+        // query's search too (its token shares the block's flag).
+        let search = CancelToken::from_flag(Arc::clone(&asked[0].cancel));
         live.clear();
         assert_eq!(live.len(), 0);
         assert!(asked[0].cancel.load(Ordering::Relaxed));
+        assert!(search.is_cancelled());
         assert!(!live.landed(1, block.key, asked[0].ticket + 1, Shown::Pending));
     }
 }

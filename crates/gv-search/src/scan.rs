@@ -173,6 +173,12 @@ impl CancelToken {
         Self::default()
     }
 
+    /// A token cancelled through `flag` (one that other work shares).
+    #[must_use]
+    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
     /// Cancels the search.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Relaxed);
