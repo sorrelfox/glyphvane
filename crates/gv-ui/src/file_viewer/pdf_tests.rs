@@ -1185,6 +1185,39 @@ fn on_page(
 }
 
 #[gpui::test]
+fn ctrl_wheel_zooms_at_the_pointer(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = pdf_file(dir.path());
+    let engine = Arc::new(FakePdf::pages(&[LETTER; 4]));
+    let (window, viewer) = open(cx, &file, Some(Arc::clone(&engine)), None);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let pdf = pdf_of(&viewer, &mut vcx);
+    press(&pdf, &mut vcx, "right");
+    press(&pdf, &mut vcx, "1");
+    // A point of page 2, off the view's centre.
+    let at = on_page(&pdf, &mut vcx, 2)(150.0, 200.0);
+    let control = Modifiers {
+        control: true,
+        ..Modifiers::none()
+    };
+    for _ in 0..2 {
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(10.0))),
+            modifiers: control,
+            ..gpui::ScrollEvent::default()
+        });
+        draw(&mut vcx);
+    }
+    assert_eq!(pdf.read_with(&vcx, |p, _| p.zoom()), PdfZoom::Scale(1.25));
+    // The same point of the page is still under the pointer.
+    let now = on_page(&pdf, &mut vcx, 2)(150.0, 200.0);
+    let off = (f32::from(now.x - at.x).abs(), f32::from(now.y - at.y).abs());
+    assert!(off.0 < 2.0 && off.1 < 2.0, "{at:?} -> {now:?}");
+}
+
+#[gpui::test]
 fn a_selection_runs_across_pages(cx: &mut TestAppContext) {
     // Three short pages, all in view at 75 %.
     let dir = tempfile::tempdir().expect("temp dir");

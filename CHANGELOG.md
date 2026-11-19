@@ -62,6 +62,8 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Renaming a note keeps the front matter valid YAML: a new name with `'`
   in a single-quoted link is written `''` (and escaped in double quotes).
 - Screen readers can scroll the editor sideways and to a position.
+- Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
+  the view.
 
 ## [1.2.0] - 2026-11-19
 

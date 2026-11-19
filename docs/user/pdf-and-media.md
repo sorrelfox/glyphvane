@@ -33,6 +33,7 @@ zoom you left.
 | **Ctrl+G** | Go to page… |
 | **0** | Fit width |
 | **1** | 100 % |
+| **Ctrl+wheel** | Zoom in or out, keeping the point under the pointer in place |
 | **Ctrl+F** | Find in the PDF |
 | **Enter** / **Shift+Enter** (in the find field), **F3** / **Shift+F3** | Next / previous match |
 | **Esc** | Close find |

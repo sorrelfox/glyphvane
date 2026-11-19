@@ -824,6 +824,38 @@ impl PdfViewer {
         self.set_zoom(PdfZoom::Scale(to), cx);
     }
 
+    /// Mod+wheel: the next zoom step, the point of the page under the
+    /// pointer (`at`, window px) staying under it.
+    pub(crate) fn zoom_at(&mut self, up: bool, at: Point<Pixels>, cx: &mut Context<'_, Self>) {
+        let area = self.area.get();
+        let (aw, ah) = self.view_size();
+        let old = self.layout();
+        if self.pending.is_some() || old.tops.is_empty() || aw <= 0.0 {
+            self.zoom_by_step(up, cx);
+            return;
+        }
+        let ax = f32::from(at.x - area.origin.x).clamp(0.0, aw);
+        let ay = f32::from(at.y - area.origin.y).clamp(0.0, ah);
+        let (x, y) = (
+            -f32::from(self.scroll.offset().x) + ax,
+            self.view_top() + ay,
+        );
+        let page = old.tops.iter().rposition(|t| *t <= y).unwrap_or(0);
+        let page_left = |l: &Layout| {
+            let w = self.sizes.get(page).map_or(0.0, |s| s.0) * l.ppt;
+            ((l.width - w) / 2.0).max(PAGE_GAP)
+        };
+        // The point under the pointer, in points from the page's corner.
+        let into_x = (x - page_left(&old)) / old.ppt;
+        let into_y = (y - old.tops[page]) / old.ppt;
+        self.zoom = PdfZoom::Scale(Self::step(old.ppt / PX_PER_PT, up));
+        let new = self.layout();
+        let left = (page_left(&new) + into_x * new.ppt - ax).clamp(0.0, (new.width - aw).max(0.0));
+        let top = (new.tops[page] + into_y * new.ppt - ay).clamp(0.0, (new.height - ah).max(0.0));
+        self.scroll.set_offset(point(px(-left), px(-top)));
+        cx.notify();
+    }
+
     // ----- drawing pages ---------------------------------------------------------------
 
     /// Asks for the next page `wanted` (in order) lacks at `scale` device
@@ -2004,17 +2036,8 @@ impl Render for PdfViewer {
             .overflow_scroll()
             .track_scroll(&self.scroll)
             .bg(theme.surface.sunken)
-            .on_scroll(cx.listener(|this, e: &gpui::ScrollEvent, _, cx| {
-                if zoom_modifier(&e.modifiers) {
-                    let dy = f32::from(e.delta.pixel_delta(px(16.0)).y);
-                    if dy != 0.0 {
-                        this.zoom_by_step(dy > 0.0, cx);
-                    }
-                    cx.stop_propagation();
-                } else {
-                    cx.notify();
-                }
-            }))
+            // Mod+wheel zooms (before the pages scroll: see `watch`).
+            .on_scroll(cx.listener(|_, _: &gpui::ScrollEvent, _, cx| cx.notify()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| this.press(e, window, cx)),
@@ -2070,12 +2093,31 @@ impl Render for PdfViewer {
                 .child(bar)
         });
         let view = Rc::clone(&self.view_bounds);
+        let over = Rc::clone(&self.view_bounds);
         let weak = cx.entity().downgrade();
-        // Where the pages' view is, for scrolling near its edges, and the
-        // pointer anywhere in the window while dragging a selection.
+        // Where the pages' view is, for scrolling near its edges, the
+        // pointer anywhere in the window while dragging a selection, and
+        // Mod+wheel over the pages, which zooms at the pointer instead of
+        // scrolling.
         let watch = canvas(
             move |bounds, _, _| view.set(bounds),
             move |_, _, window, _| {
+                let on_wheel = weak.clone();
+                window.on_mouse_event(move |e: &gpui::ScrollEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture
+                        || !zoom_modifier(&e.modifiers)
+                        || !over.get().contains(&e.position)
+                    {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    let dy = f32::from(e.delta.pixel_delta(px(16.0)).y);
+                    if dy != 0.0 {
+                        on_wheel
+                            .update(cx, |this, cx| this.zoom_at(dy > 0.0, e.position, cx))
+                            .ok();
+                    }
+                });
                 let on_move = weak.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble {
