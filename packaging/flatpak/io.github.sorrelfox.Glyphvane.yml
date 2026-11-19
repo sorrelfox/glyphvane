@@ -12,8 +12,14 @@
 #   cp dist/glyphvane-<version>-<triple>.tar.gz packaging/flatpak/glyphvane.tar.gz
 #   flatpak-builder --user --install-deps-from=flathub --repo=repo \
 #     build-dir packaging/flatpak/io.github.sorrelfox.Glyphvane.yml
+#   flatpak build-sign --gpg-sign=<key> repo io.github.sorrelfox.Glyphvane
 #   flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+#     --repo-url=https://sorrelfox.github.io/glyphvane/repo/ \
+#     --gpg-keys=packaging/flatpak/glyphvane-repo.gpg \
 #     repo Glyphvane-<version>-<arch>.flatpak io.github.sorrelfox.Glyphvane
+#
+# The release bundles are also published as a signed Flatpak repository on
+# GitHub Pages (make-repo.sh, .github/workflows/flatpak-repo.yml).
 #
 # The app recognises the sandbox by /.flatpak-info: it turns the update
 # check off (Flatpak updates it) and keeps the single-instance socket in

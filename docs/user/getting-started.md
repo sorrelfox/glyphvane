@@ -33,14 +33,25 @@ sudo pacman -U glyphvane-<version>-1-x86_64.pkg.tar.zst
 
 ### Flatpak
 
-The Flatpak bundle runs on the freedesktop runtime, which comes from
-Flathub. If you have not added Flathub yet, add it first, then install the
-bundle:
+Install Glyphvane from its Flatpak repository:
+
+```sh
+flatpak install https://sorrelfox.github.io/glyphvane/glyphvane.flatpakref
+flatpak run io.github.sorrelfox.Glyphvane
+```
+
+This adds the Glyphvane repository and, if it is missing, Flathub, which
+supplies the freedesktop runtime. `flatpak update` then installs new
+versions. The repository is signed; its key's fingerprint is
+`B21B F785 DDEE CA61 883A 8E60 7BB1 AFE9 14F8 475F`.
+
+You can also install the `.flatpak` bundle from the release page. It too
+adds the Glyphvane repository, so it updates the same way. Add Flathub first
+if you have not yet:
 
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user Glyphvane-<version>-x86_64.flatpak
-flatpak run io.github.sorrelfox.Glyphvane
 ```
 
 Glyphvane then also appears in your desktop's application list. The Flatpak

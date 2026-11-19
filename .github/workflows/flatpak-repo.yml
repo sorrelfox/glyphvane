@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Glyphvane contributors
+
+# Flatpak repository on GitHub Pages (https://sorrelfox.github.io/glyphvane/):
+# when a release is published, its two Flatpak bundles are imported into a
+# fresh GPG-signed OSTree repository (packaging/flatpak/make-repo.sh) and the
+# site is deployed. Users install with
+#   flatpak install https://sorrelfox.github.io/glyphvane/glyphvane.flatpakref
+# and update with `flatpak update`. The runtime comes from Flathub.
+#
+# Secrets:
+#   secrets.FLATPAK_REPO_GPG_KEY  armored private key of
+#                                    packaging/flatpak/glyphvane-repo.gpg
+# Pages must be set to deploy from GitHub Actions.
+
+name: Flatpak repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose Flatpak bundles to publish (for example v1.2.0)
+        required: true
+        type: string
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+# Jobs opt in to what they need.
+permissions: {}
+
+jobs:
+  build:
+    name: Build the repository
+    # A pre-release does not replace the stable repository.
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # configure-pages reads the Pages settings.
+      pages: read
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree gnupg
+
+      - name: Import the signing key
+        env:
+          FLATPAK_REPO_GPG_KEY: ${{ secrets.FLATPAK_REPO_GPG_KEY }}
+        run: |
+          if [ -z "$FLATPAK_REPO_GPG_KEY" ]; then
+            echo "::error::The secret FLATPAK_REPO_GPG_KEY is not set: add the armored private key of packaging/flatpak/glyphvane-repo.gpg"
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          printf '%s\n' "$FLATPAK_REPO_GPG_KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      - name: Download the bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundles"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.flatpak' --dir "$RUNNER_TEMP/bundles"
+          ls -l "$RUNNER_TEMP/bundles"
+          [ "$(find "$RUNNER_TEMP/bundles" -name '*.flatpak' | wc -l)" -eq 2 ] || {
+            echo "::error::Release $TAG does not have the two Flatpak bundles (x86_64, aarch64)"
+            exit 1
+          }
+
+      - name: Build the repository
+        run: GPG_HOMEDIR="$GNUPGHOME" packaging/flatpak/make-repo.sh site "$RUNNER_TEMP"/bundles/*.flatpak
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/gnupg"
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -10,6 +10,10 @@
 # unsigned):
 #   secrets.SIGNPATH_API_TOKEN       SignPath API token (environment `release`)
 #   vars.SIGNPATH_ORGANIZATION_ID    SignPath organization id
+#   secrets.FLATPAK_REPO_GPG_KEY  key of the Flatpak repository
+#                                    (packaging/flatpak/glyphvane-repo.gpg);
+#                                    without it the Flatpak bundles get no
+#                                    update remote
 # Linux and Windows only: there are no macOS builds.
 
 name: Release
@@ -337,6 +341,7 @@ jobs:
     env:
       VERSION: ${{ needs.check.outputs.version }}
       APP_ID: io.github.sorrelfox.Glyphvane
+      FLATPAK_SIGNING: ${{ secrets.FLATPAK_REPO_GPG_KEY != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -374,11 +379,35 @@ jobs:
           appstreamcli validate --no-net --explain "$files/share/metainfo/$APP_ID.metainfo.xml"
           desktop-file-validate "$files/share/applications/$APP_ID.desktop"
 
+      # The bundle carries the Flatpak repository's URL and public key, so
+      # installing it adds a remote that `flatpak update` uses. Flatpak then
+      # requires the bundled commit to be signed with that key; the
+      # repository (flatpak-repo.yml) serves the same commits.
+      - name: Sign the commit
+        if: env.FLATPAK_SIGNING == 'true'
+        env:
+          FLATPAK_REPO_GPG_KEY: ${{ secrets.FLATPAK_REPO_GPG_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          printf '%s\n' "$FLATPAK_REPO_GPG_KEY" | gpg --batch --import
+          fingerprint=$(gpg --batch --with-colons --show-keys packaging/flatpak/glyphvane-repo.gpg | awk -F: '$1 == "fpr" { print $10; exit }')
+          flatpak build-sign --gpg-sign="$fingerprint" --gpg-homedir="$GNUPGHOME" "$RUNNER_TEMP/repo" "$APP_ID"
+          rm -rf "$GNUPGHOME"
+
       - name: Bundle
         run: |
           mkdir -p dist
+          if [ "$FLATPAK_SIGNING" = true ]; then
+            update_args=(--repo-url=https://sorrelfox.github.io/glyphvane/repo/
+                         --gpg-keys=packaging/flatpak/glyphvane-repo.gpg)
+          else
+            echo "::warning::FLATPAK_REPO_GPG_KEY is not set: the Flatpak bundle will not update from the repository"
+            update_args=()
+          fi
           flatpak build-bundle \
             --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            "${update_args[@]}" \
             "$RUNNER_TEMP/repo" "dist/Glyphvane-$VERSION-${{ matrix.arch }}.flatpak" "$APP_ID"
 
       - name: Smoke test
@@ -524,7 +553,8 @@ jobs:
           | Debian, Ubuntu | \`glyphvane_${VERSION}-1_<arch>.deb\` | \`sudo apt install ./glyphvane_${VERSION}-1_<arch>.deb\` |
           | Fedora, openSUSE | \`glyphvane-${VERSION}-1.<arch>.rpm\` | \`sudo dnf install ./glyphvane-${VERSION}-1.<arch>.rpm\` |
           | Arch Linux (x86_64) | \`glyphvane-${VERSION}-1-x86_64.pkg.tar.zst\` | \`sudo pacman -U glyphvane-${VERSION}-1-x86_64.pkg.tar.zst\` |
-          | Any Linux (Flatpak) | \`Glyphvane-${VERSION}-<arch>.flatpak\` | \`flatpak install --user Glyphvane-${VERSION}-<arch>.flatpak\` |
+          | Any Linux (Flatpak) | from the Glyphvane Flatpak repository | \`flatpak install https://sorrelfox.github.io/glyphvane/glyphvane.flatpakref\`, then \`flatpak update\` |
+          | Any Linux (Flatpak bundle) | \`Glyphvane-${VERSION}-<arch>.flatpak\` | \`flatpak install --user Glyphvane-${VERSION}-<arch>.flatpak\` (also updates from the repository) |
           | Any Linux | \`Glyphvane-${VERSION}-<arch>.AppImage\` | make it executable and run it |
           | Any Linux | \`glyphvane-${VERSION}-<target>.tar.gz\` | unpack and run \`glyphvane\` |
           | Windows | \`.msi\` or \`.zip\` (x64, arm64) | run the installer, or unpack the zip |
@@ -535,6 +565,8 @@ jobs:
           sha256sum --check --ignore-missing SHA256SUMS
           gh attestation verify <file> --repo $GITHUB_REPOSITORY
           \`\`\`
+
+          The Flatpak repository is signed with the key \`packaging/flatpak/glyphvane-repo.gpg\`, fingerprint \`B21B F785 DDEE CA61 883A 8E60 7BB1 AFE9 14F8 475F\`.
 
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* \
