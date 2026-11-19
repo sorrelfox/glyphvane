@@ -32,7 +32,7 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # Pinned packaging tools (ADR-020). Keep in step with xtask/src/package/.
+  # Pinned packaging tools. Keep in step with xtask/src/package/.
   CARGO_DEB_VERSION: "3.8.0"
   CARGO_GENERATE_RPM_VERSION: "0.21.1"
   CARGO_CYCLONEDX_VERSION: "0.5.10"

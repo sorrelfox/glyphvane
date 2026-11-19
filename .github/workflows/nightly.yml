@@ -23,7 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # Pinned packaging tools (ADR-020); the same as release.yml.
+  # Pinned packaging tools; the same as release.yml.
   CARGO_DEB_VERSION: "3.8.0"
   CARGO_GENERATE_RPM_VERSION: "0.21.1"
   WIX_VERSION: "6.0.2"

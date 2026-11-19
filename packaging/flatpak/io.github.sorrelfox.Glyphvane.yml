@@ -41,8 +41,9 @@ finish-args:
   - --socket=pulseaudio
   # Remote images in notes. The update check is off in the Flatpak.
   - --share=network
-  # Links between notes may leave the opened vault (Q-10), so the home
-  # folder rather than portal-only access. File dialogs, printing, opening
+  # Links between notes may leave the opened vault, so the home folder
+  # rather than portal-only access (the metainfo description explains each
+  # permission to users). File dialogs, printing, opening
   # links and files, notifications and the colour scheme go through the
   # desktop portals, which need no permission here.
   - --filesystem=home

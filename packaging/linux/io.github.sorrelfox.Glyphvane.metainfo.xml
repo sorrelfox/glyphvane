@@ -28,6 +28,31 @@
       <li>Autosave, crash recovery with compare and merge, version history
         and remote content only with your consent</li>
     </ul>
+    <p>Why Glyphvane asks for these permissions:</p>
+    <ul>
+      <li><em>Your home folder (read and write).</em> Notes link to other
+        notes, images and attachments anywhere in your home folder, not only
+        inside the folder you opened. Glyphvane reads those files to follow
+        links and show embeds, and writes when you save, rename, move or
+        delete a note; a rename or move also updates the links in your
+        other notes. It reads the folder you open to index its notes, and
+        does not touch other files unless you open or link to them.</li>
+      <li><em>Network.</em> Only to load images and media that a note links
+        from the web, and only after you allow them for that folder or
+        site. You can block remote content completely in Restricted mode.
+        Glyphvane sends no telemetry, needs no account, and its update check
+        is off in the Flatpak, where Flatpak keeps it up to date.</li>
+      <li><em>Sound.</em> To play audio files embedded in notes. Glyphvane
+        never records audio.</li>
+      <li><em>Graphics card.</em> The window and your documents are drawn on
+        the GPU for smooth scrolling.</li>
+      <li><em>Display (Wayland, with X11 as a fallback).</em> To show its
+        windows.</li>
+    </ul>
+    <p>Choosing files, printing, opening web links in your browser and
+      following your desktop's light or dark style go through the desktop
+      portals and need no extra permission. Settings, file history and
+      recovery data stay on your computer, in the app's own folder.</p>
   </description>
   <developer id="io.github.sorrelfox">
     <name>Glyphvane contributors</name>

@@ -255,37 +255,41 @@ How to take them:
 
 ### Flathub (AppStream metainfo)
 
-Screenshots are listed in `packaging/linux/io.github.sorrelfox.Glyphvane.metainfo.xml`
-with stable URLs (for example raw files from a tagged release in this
-repository) and a caption each. The first one is the default.
+`packaging/linux/io.github.sorrelfox.Glyphvane.metainfo.xml` holds the
+listing: the description, the eleven screenshots with captions (URLs pinned
+to the commit that added them, so they never change) and the releases.
+`appstreamcli validate --explain` passes.
 
-```xml
-<screenshots>
-  <screenshot type="default">
-    <caption>A note in the Reading view, with a table, highlighted code, math and a Mermaid diagram</caption>
-    <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/v1.1.0/docs/screenshots/01-reading-view.png</image>
-  </screenshot>
-  <screenshot>
-    <caption>Live Preview: markup hides away from the cursor</caption>
-    <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/v1.1.0/docs/screenshots/02-live-preview.png</image>
-  </screenshot>
-</screenshots>
-```
+**Permissions.** Flathub shows every permission on the app's page and rates
+the app from them; only fewer permissions change that rating, but the
+description explains each one so users know why it is there:
+
+| Permission | Why |
+|---|---|
+| `--filesystem=home` (read and write) | Notes link to notes, images and attachments anywhere in the home folder, not only inside the opened folder. Glyphvane reads them to follow links and show embeds, and writes when you save, rename, move or delete a note; renames and moves update links in other notes |
+| `--share=network` | Only for images and media a note links from the web, after you allow them for that folder or site; Restricted mode blocks them all. No telemetry, no account; the update check is off in the Flatpak |
+| `--socket=pulseaudio` | Playing audio embedded in notes; never records |
+| `--device=dri` | Drawing on the GPU |
+| `--socket=wayland`, `--socket=fallback-x11`, `--share=ipc` | Showing windows |
+| Desktop portals (no permission) | File chooser, printing, opening links in the browser, light or dark style |
+
+If the rating matters more than these features, two permissions could go:
+without `--share=network` remote images never load; with portal-only file
+access instead of the home folder, links and embeds outside the opened
+folder stop working and renames cannot update links there.
 
 Before submitting:
 
-- Expand `<description>` in the metainfo with the long description above
-  (paragraphs and a `<ul>` of highlights; AppStream allows only `p`, `ul`,
-  `ol`, `li`, `em` and `code`).
-- Set the summary to the 35-character line above.
-- Add `<branding>` colours, `<content_rating type="oars-1.1"/>` (already
-  present) and `<keywords>`.
-- Run `appstreamcli validate --explain` and check Flathub's current quality
-  guidelines for screenshots and texts.
+- Verify the app ID on Flathub: an `io.github.sorrelfox.*` ID is verified
+  by signing in to Flathub with the `sorrelfox` GitHub account, which gives
+  the listing the "verified" check mark.
+- Optionally shorten the summary to the 35-character line above (the
+  current one, "Read and edit Markdown notes and vaults", passes
+  validation).
+- Add `<branding>` colours and `<keywords>`.
+- Check Flathub's current quality guidelines for screenshots and texts.
 - Flathub builds from source: its manifest needs vendored Cargo sources
   (the bundle manifest in `packaging/flatpak/` repackages release binaries).
-- Permission to explain in the listing: `--filesystem=home`, so links
-  between notes keep working outside the opened folder.
 
 ### Arch User Repository
 
