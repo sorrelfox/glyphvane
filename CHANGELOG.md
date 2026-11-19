@@ -57,6 +57,7 @@ Conventional Commits, and versions follow Semantic Versioning.
 - The mouse wheel scrolls the autocomplete list.
 - The trust prompt names plugins, themes, snippets and shared settings
   added to the folder while it shows.
+- Find in a PDF scrolls sideways to a match off the side of a zoomed page.
 
 ## [1.2.0] - 2026-11-19
 

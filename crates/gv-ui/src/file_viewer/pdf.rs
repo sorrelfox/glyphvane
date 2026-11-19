@@ -53,7 +53,8 @@
 //!   current match, else the page shown); Enter and Shift+Enter in the
 //!   field, F3 and Shift+F3 anywhere in the viewer go to the next and
 //!   previous one, wrapping around, and scroll it a third down the view
-//!   when it is not in view (vertically only). Esc closes the popover and
+//!   (and a third in from the left on a page wider than the view) when
+//!   it is not in view. Esc closes the popover and
 //!   gives the keyboard back to the pages. The text matched
 //!   ([`pdf_text::search`]) reads a line end as a space (a line end for a
 //!   regular expression), and a page's end like a line end before the
@@ -1265,8 +1266,9 @@ impl PdfViewer {
         self.find.open && self.find.query.is_some() && self.reading.is_some()
     }
 
-    /// Scrolls the current match into view, a third down the view, when
-    /// it is not in view.
+    /// Scrolls the current match into view, a third down the view (and a
+    /// third in from the left on a page wider than the view), when it is
+    /// not in view.
     fn reveal_current(&mut self, cx: &mut Context<'_, Self>) {
         let Some(m) = self.find.current.and_then(|k| self.find.matches.get(k)) else {
             return;
@@ -1297,6 +1299,20 @@ impl PdfViewer {
             let max = (layout.height - ah).max(0.0);
             self.set_top((top - ah / 3.0).clamp(0.0, max));
             self.pending = None;
+            cx.notify();
+        }
+        // Sideways on a page wider than the view: the match's start a
+        // third in from the left.
+        let page_width = self.sizes.get(page).map_or(0.0, |s| s.0) * layout.ppt;
+        let page_left = ((layout.width - page_width) / 2.0).max(PAGE_GAP);
+        let left = page_left + rect[0] * layout.ppt;
+        let right = page_left + rect[2] * layout.ppt;
+        let view_left = -f32::from(self.scroll.offset().x);
+        if left < view_left || right > view_left + aw {
+            let max = (layout.width - aw).max(0.0);
+            let x = (left - aw / 3.0).clamp(0.0, max);
+            self.scroll
+                .set_offset(point(px(-x), self.scroll.offset().y));
             cx.notify();
         }
     }

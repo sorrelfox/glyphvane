@@ -836,6 +836,30 @@ fn find_runs_on_to_the_next_page_and_over_a_line_end_hyphen(cx: &mut TestAppCont
     );
 }
 
+/// On a page wider than the view, a match off to the side is scrolled
+/// into view sideways too.
+#[gpui::test]
+fn a_match_off_to_the_side_is_scrolled_into_view(cx: &mut TestAppContext) {
+    let line = format!("{} zebra", "word ".repeat(13));
+    let (_dir, _engine, mut vcx, _viewer, pdf) = open_text(cx, &[line.as_str()]);
+    for _ in 0..12 {
+        press(&pdf, &mut vcx, "=");
+    }
+    assert!(pdf.read_with(&vcx, |p, _| p.effective_zoom()) >= 2.5);
+    press(&pdf, &mut vcx, "ctrl-f");
+    vcx.simulate_input("zebra");
+    draw(&mut vcx);
+    assert_eq!(current(&pdf, &mut vcx), Some((0, "zebra".to_owned())));
+    let view = vcx.debug_bounds("pdf-viewer-pages").expect("the pages");
+    let found = vcx
+        .debug_bounds("pdf-current-match")
+        .expect("the current match");
+    assert!(
+        found.left() >= view.left() && found.right() <= view.right(),
+        "{found:?} in {view:?}"
+    );
+}
+
 #[gpui::test]
 fn dragging_selects_text_that_ctrl_c_copies(cx: &mut TestAppContext) {
     let (_dir, engine, mut vcx, _viewer, pdf) =
