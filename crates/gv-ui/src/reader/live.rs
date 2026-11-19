@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{AppContext as _, Context, Task};
-use gv_render_tree::{RenderOptions, RenderTree, StyleTable, UpdateReport};
+use gv_render_tree::{ItemKind, RenderOptions, RenderTree, StyleTable, UpdateReport};
 use gv_text::TextSnapshot;
 
 use super::items::TreeItems;
@@ -284,6 +284,47 @@ impl Reader {
         ))
     }
 
+    /// The top of the view as a fractional line of the code block the
+    /// document is (the text viewer's: [`crate::file_viewer`]): line `n`
+    /// of the code plus the part of it above the top edge, as scroll sync
+    /// measures it ([`crate::split::sync`]); -1 to 0 in the top padding.
+    /// `None` when no code is at the top. As of the last frame.
+    pub(crate) fn top_code_line(&self) -> Option<f64> {
+        let (ix, spot) = self.top_spot()?;
+        let st = self.state.borrow();
+        let item = st.doc.as_ref()?.tree.items().get(ix)?;
+        let ItemKind::Code { lines, .. } = &item.kind else {
+            return None;
+        };
+        let (start, end) = (f64::from(lines.start), f64::from(lines.end));
+        Some(match spot {
+            Spot::Lead(f) => f64::from(f).clamp(-1.0, 0.0),
+            Spot::Gap(_) => start,
+            Spot::Content(c) => start + f64::from(c.clamp(0.0, 1.0)) * (end - start),
+        })
+    }
+
+    /// Scrolls so that fractional line `line` of the code block the
+    /// document is ([`Self::top_code_line`]) is at the top: in the next
+    /// frame, or once the document being loaded is shown.
+    pub(crate) fn scroll_to_code_line(&mut self, line: f64, cx: &mut Context<'_, Self>) {
+        if self.status != LoadStatus::Ready {
+            self.code_line = Some(line);
+            return;
+        }
+        let mut st = self.state.borrow_mut();
+        let Some(request) = st
+            .doc
+            .as_ref()
+            .and_then(|d| code_line_request(&d.tree, line))
+        else {
+            return;
+        };
+        st.sync = Some(request);
+        drop(st);
+        cx.notify();
+    }
+
     /// Scrolls, in the next frame, to the place `request` asks for.
     pub(crate) fn sync_to(&mut self, request: SyncRequest, cx: &mut Context<'_, Self>) {
         self.state.borrow_mut().sync = Some(request);
@@ -361,4 +402,44 @@ fn splice(st: &mut State, doc: Loaded, report: Option<UpdateReport>) {
     st.geometry.items.clear();
     st.geometry.buttons.clear();
     st.doc_version += 1;
+}
+
+/// Where fractional line `line` of the code block in `tree` (its code
+/// lines, from 0) is, for scroll sync: the chunk holding it and the part
+/// of the chunk above it; the top padding for a negative line, the end
+/// past the last. `None` without code.
+pub(crate) fn code_line_request(tree: &RenderTree, line: f64) -> Option<SyncRequest> {
+    let items = tree.items();
+    let chunk = |ix: usize| match &items[ix].kind {
+        ItemKind::Code { lines, .. } => Some((f64::from(lines.start), f64::from(lines.end))),
+        _ => None,
+    };
+    let first = (0..items.len()).find(|&ix| chunk(ix).is_some())?;
+    if line < 0.0 {
+        return Some(SyncRequest {
+            ix: first,
+            spot: Spot::Lead(line.max(-1.0) as f32),
+            reveal: None,
+        });
+    }
+    let mut last = first;
+    for ix in first..items.len() {
+        let Some((start, end)) = chunk(ix) else {
+            break;
+        };
+        last = ix;
+        if line < end {
+            let c = (line - start) / (end - start).max(1.0);
+            return Some(SyncRequest {
+                ix,
+                spot: Spot::Content(c.clamp(0.0, 1.0) as f32),
+                reveal: None,
+            });
+        }
+    }
+    Some(SyncRequest {
+        ix: last,
+        spot: Spot::Content(1.0),
+        reveal: None,
+    })
 }

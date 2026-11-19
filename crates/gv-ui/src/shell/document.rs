@@ -23,6 +23,9 @@
 //!   view is rebuilt from the editor's text
 //!   ([`Reader::open_text`](crate::reader::Reader::open_text)) instead of
 //!   the file.
+//! - **The built-in text viewer ↔ Edit:** the line of the text at the top
+//!   stays at the top both ways, to the part of a line
+//!   ([`FileViewer::text_top`](crate::file_viewer::FileViewer::text_top)).
 //!
 //! # Viewer mode
 //!
@@ -483,6 +486,12 @@ impl Workspace {
         let split_top = || self.tabs[index].split.as_ref()?.read(cx).top_offset(cx);
         match (from, to) {
             (_, ViewMode::Edit) => {
+                // The built-in viewer's text: its line at the top.
+                let viewer_top = self.tabs[index]
+                    .viewer
+                    .as_ref()
+                    .filter(|_| from == ViewMode::Preview && self.tabs[index].is_viewer())
+                    .and_then(|v| v.read(cx).text_top(cx));
                 let top = match from {
                     ViewMode::Split => split_top(),
                     ViewMode::Preview | ViewMode::Edit => preview_top(),
@@ -492,7 +501,9 @@ impl Workspace {
                 };
                 editor.update(cx, |e, cx| {
                     e.set_layout(EditorLayout::Column, cx);
-                    if let Some(offset) = top {
+                    if let Some(line) = viewer_top {
+                        e.scroll_to_position_soon(line, cx);
+                    } else if let Some(offset) = top {
                         e.scroll_to_offset(offset, cx);
                     }
                 });
@@ -520,9 +531,17 @@ impl Workspace {
                     else {
                         return;
                     };
-                    if let Some(text) = editor.update(cx, |e, _| e.take_preview_text()) {
-                        viewer.update(cx, |v, cx| v.show_text(&text, cx));
-                    }
+                    let (text, top) =
+                        editor.update(cx, |e, _| (e.take_preview_text(), e.top_position()));
+                    viewer.update(cx, |v, cx| {
+                        if let Some(text) = text {
+                            v.show_text(&text, cx);
+                        }
+                        // The editor's line at the top stays there.
+                        if let Some(line) = top {
+                            v.scroll_text_to(line, cx);
+                        }
+                    });
                     return;
                 }
                 let (Some(editor), Some(reader), Some(path)) =

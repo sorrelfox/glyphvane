@@ -985,6 +985,17 @@ impl EditorView {
         }
     }
 
+    /// Scrolls so that the top of the view is at fractional source line
+    /// `position` ([`Self::scroll_to_position`]) once the view is laid
+    /// out; before that, so that the line holding it is at the top.
+    pub(crate) fn scroll_to_position_soon(&mut self, position: f64, cx: &mut Context<'_, Self>) {
+        if self.doc.is_some() && self.row_map().is_some() {
+            self.scroll_to_position(position, cx);
+        } else {
+            self.scroll_to_line(position.max(0.0).floor() as usize, cx);
+        }
+    }
+
     /// The primary caret's offset and the text's revision.
     pub(crate) fn caret(&self) -> Option<(usize, Revision)> {
         let editor = &self.doc.as_ref()?.editor;

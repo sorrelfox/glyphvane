@@ -23,6 +23,11 @@ Conventional Commits, and versions follow Semantic Versioning.
   placeholders, filled in off the UI thread and kept up to date with the
   vault; a click on a result opens it. Embedded canvases stay placeholders.
 
+### Editing
+
+- A text or code file switched between the viewer and Edit keeps the line
+  at the top, both ways, edited or not.
+
 ## [1.2.0] - 2026-11-19
 
 ### PDF

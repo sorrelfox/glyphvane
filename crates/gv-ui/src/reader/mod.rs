@@ -278,6 +278,9 @@ pub struct Reader {
     statuses_from: Option<(u64, bool)>,
     /// Where to scroll once the document is loaded.
     target: Option<ScrollTarget>,
+    /// A line of the code block the document is to put at the top once it
+    /// is loaded ([`Reader::scroll_to_code_line`]).
+    code_line: Option<f64>,
     /// Find in page.
     find: find::FindState,
     /// What documents are built with: the type scale and the metrics.
@@ -376,6 +379,7 @@ impl Reader {
             }),
             _load_once: cx.observe_global::<remote::LoadOnce>(|this, cx| this.sync_remote(cx)),
             crop: None,
+            code_line: None,
         }
     }
 
@@ -661,6 +665,12 @@ impl Reader {
                 st.install(doc);
                 if let Some(target) = target {
                     jump(&mut st, &target);
+                }
+                if let Some(line) = self.code_line.take() {
+                    st.sync = st
+                        .doc
+                        .as_ref()
+                        .and_then(|d| live::code_line_request(&d.tree, line));
                 }
                 drop(st);
                 self.status = LoadStatus::Ready;

@@ -320,6 +320,84 @@ fn edit_switches_a_text_file_to_the_editor_and_back(cx: &mut TestAppContext) {
     );
 }
 
+/// Switching a text file between the viewer and the Source view keeps the
+/// line at the top, both ways, also after an edit.
+#[gpui::test]
+fn the_line_at_the_top_stays_between_the_viewer_and_edit(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    let dir = temp(&[("long.txt", text.as_bytes())]);
+    let (window, workspace) = open(cx, &dir.path().join("long.txt"));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let viewer = viewer(&workspace, &mut vcx);
+    until(&mut vcx, "the text", |vcx| {
+        viewer.read_with(vcx, |v, cx| v.text_ready(cx))
+    });
+    let viewer_top = |vcx: &mut VisualTestContext| {
+        viewer
+            .read_with(vcx, |v, cx| v.text_top(cx))
+            .expect("the viewer's top line")
+    };
+    let near = |what: &str, got: f64, want: f64| {
+        assert!((got - want).abs() < 1.5, "{what}: {got}, not {want}");
+    };
+    // The viewer, scrolled into its second chunk of lines.
+    viewer.update(&mut vcx, |v, cx| v.scroll_text_to(120.0, cx));
+    draw(&mut vcx);
+    near("viewer", viewer_top(&mut vcx), 120.0);
+
+    // Edit: the editor shows the same line at its top.
+    workspace.update(&mut vcx, |ws, cx| ws.set_mode(ViewMode::Edit, cx));
+    let editor = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("the tab has an editor");
+    until(&mut vcx, "the editor", |vcx| {
+        editor.read_with(vcx, |e, _| {
+            *e.status() == crate::editor::EditorStatus::Ready
+        })
+    });
+    draw(&mut vcx);
+    let top = editor
+        .read_with(&vcx, |e, _| e.top_position())
+        .expect("top");
+    near("editor", top, 120.0);
+
+    // Scrolled in the editor and back to Preview: the viewer follows.
+    editor.update(&mut vcx, |e, cx| e.scroll_to_line(250, cx));
+    draw(&mut vcx);
+    workspace.update(&mut vcx, |ws, cx| ws.set_mode(ViewMode::Preview, cx));
+    draw(&mut vcx);
+    near("viewer after Edit", viewer_top(&mut vcx), 250.0);
+
+    // Preview to Edit again (the editor is laid out): the viewer's line.
+    viewer.update(&mut vcx, |v, cx| v.scroll_text_to(42.5, cx));
+    draw(&mut vcx);
+    workspace.update(&mut vcx, |ws, cx| ws.set_mode(ViewMode::Edit, cx));
+    draw(&mut vcx);
+    let top = editor
+        .read_with(&vcx, |e, _| e.top_position())
+        .expect("top");
+    near("editor again", top, 42.5);
+
+    // An edit: the viewer is given the new text and still shows the
+    // editor's line at the top.
+    editor.update(&mut vcx, |e, cx| e.set_cursor(0, cx));
+    draw(&mut vcx);
+    vcx.simulate_input("new ");
+    editor.update(&mut vcx, |e, cx| e.scroll_to_line(300, cx));
+    draw(&mut vcx);
+    workspace.update(&mut vcx, |ws, cx| ws.set_mode(ViewMode::Preview, cx));
+    until(&mut vcx, "the edited text", |vcx| {
+        viewer.read_with(vcx, |v, cx| {
+            v.reader()
+                .and_then(|r| r.read(cx).plain_text())
+                .is_some_and(|t| t.contains("new line 0"))
+        })
+    });
+    draw(&mut vcx);
+    near("viewer after the edit", viewer_top(&mut vcx), 300.0);
+}
+
 /// A viewer tab takes the keyboard as a note's tab does: in a new window
 /// and when opened from a note that has it.
 #[gpui::test]

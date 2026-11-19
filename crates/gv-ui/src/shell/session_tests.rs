@@ -1021,6 +1021,66 @@ fn a_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
     assert_eq!(memory.last().windows[0].tabs[0].mode, ViewMode::Edit);
 }
 
+/// A file that is text only by its content (no known name) comes back in
+/// Edit at once, not in Preview until its viewer has read it.
+#[gpui::test]
+fn a_sniffed_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("notes.weird");
+    std::fs::write(&file, "plain words\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: file.clone(),
+                mode: ViewMode::Edit,
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    // Before anything was read: Edit, with its Source view.
+    let (mode, editor) = workspace.read_with(&vcx, |ws, _| {
+        (ws.active_tab().mode(), ws.active_tab().editor().cloned())
+    });
+    assert_eq!(mode, ViewMode::Edit);
+    let editor = editor.expect("the Source view");
+    let viewer = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().viewer().cloned())
+        .expect("the viewer");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        draw(&mut vcx);
+        let mode = workspace.read_with(&vcx, |ws, _| ws.active_tab().mode());
+        assert_eq!(mode, ViewMode::Edit);
+        let ready = editor.read_with(&vcx, |e, _| {
+            *e.status() == crate::editor::EditorStatus::Ready
+        });
+        let read = viewer.read_with(&vcx, |v, _| {
+            matches!(v.status(), crate::file_viewer::ViewerStatus::Text { .. })
+        });
+        if ready && read {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the editor loads");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(editor.read_with(&vcx, |e, _| e.is_plain() && !e.is_read_only()));
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory.last().windows[0].tabs[0].mode, ViewMode::Edit);
+}
+
 #[test]
 fn viewer_mode_and_the_pdf_place_are_stored_only_when_set() {
     use crate::file_viewer::{PdfPlace, PdfZoom};

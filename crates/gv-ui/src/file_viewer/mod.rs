@@ -533,6 +533,9 @@ pub struct FileViewer {
     pdf_page: Option<usize>,
     /// Where to show the PDF once it is read (a restored session's).
     pdf_restore: Option<PdfPlace>,
+    /// The line of the text to show at the top once it is read
+    /// ([`FileViewer::scroll_text_to`]).
+    text_line: Option<f64>,
     _load: Option<Task<()>>,
 }
 
@@ -578,6 +581,7 @@ impl FileViewer {
                 pdf: None,
                 pdf_page: None,
                 pdf_restore: None,
+                text_line: None,
                 _load: None,
             };
             viewer.load(path, cx);
@@ -657,6 +661,7 @@ impl FileViewer {
             self.scroll.set_offset(Point::default());
             self.pdf = None;
             self.pdf_restore = None;
+            self.text_line = None;
         }
         self.path = path.clone();
         self.cancel.cancel();
@@ -714,9 +719,13 @@ impl FileViewer {
                     }
                 };
                 let path = self.path.clone();
+                let line = self.text_line.take();
                 reader.update(cx, |r, cx| {
                     let at = r.position();
                     r.open_text(path, markdown, at, cx);
+                    if let Some(line) = line {
+                        r.scroll_to_code_line(line, cx);
+                    }
                 });
                 let language = language
                     .and_then(|l| gv_highlight::Language::from_info(&l))
@@ -776,6 +785,29 @@ impl FileViewer {
             r.open_text(path, markdown, at, cx);
         });
         cx.notify();
+    }
+
+    /// The top of the text viewer as a fractional line of the text (from
+    /// 0; -1 to 0 in the top padding), as the Source view's
+    /// [`crate::editor::EditorView::top_position`] gives its own. `None`
+    /// before the text is shown.
+    pub fn text_top(&self, cx: &App) -> Option<f64> {
+        if !matches!(self.status, ViewerStatus::Text { .. }) {
+            return None;
+        }
+        self.reader.as_ref()?.read(cx).top_code_line()
+    }
+
+    /// Scrolls the text viewer so that fractional line `line` of the text
+    /// ([`Self::text_top`]) is at the top: now, or once the text is shown.
+    pub fn scroll_text_to(&mut self, line: f64, cx: &mut Context<'_, Self>) {
+        match (&self.status, &self.reader) {
+            (ViewerStatus::Text { .. }, Some(reader)) => {
+                reader.update(cx, |r, cx| r.scroll_to_code_line(line, cx));
+            }
+            (ViewerStatus::Loading, _) => self.text_line = Some(line),
+            _ => {}
+        }
     }
 
     /// Whether the text viewer's document is laid out.
