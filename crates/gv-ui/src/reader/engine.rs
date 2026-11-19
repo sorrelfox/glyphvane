@@ -455,7 +455,12 @@ impl Engine {
             }
             Target::Y(y) => {
                 let lead = f64::from(self.lead);
-                let y = y.max(0.0);
+                // Not past the end of the height index: Scroll to Bottom
+                // asks for a y far beyond it, whose offset into the last
+                // item would not fit an f32 (an infinite offset, then a NaN
+                // one, would leave the last item at the top). From the end,
+                // the frame pulls the last item down to the bottom.
+                let y = y.clamp(0.0, lead + self.heights.total());
                 if y < lead {
                     Anchor {
                         id: items.id(0),
@@ -777,6 +782,29 @@ mod tests {
         e.frame(&mut short, 200.0, 500.0);
         assert_eq!(e.placed()[0].y, 20.0);
         assert!(e.thumb(500.0, 24.0).is_none());
+    }
+
+    #[test]
+    fn scroll_to_end_shows_the_end_at_the_bottom() {
+        let mut items = Fake::new(vec![100; 300]);
+        let mut e = engine(&mut items, 200.0, 100.0);
+        // From the top, where the items near the end are only estimated,
+        // and from the end itself.
+        for _ in 0..2 {
+            e.scroll_to_end();
+            e.frame(&mut items, 200.0, 100.0);
+            let last = e.placed().last().expect("placed");
+            assert_eq!(last.ix, 299);
+            assert!((last.y + last.height - 100.0).abs() < 1e-3, "{last:?}");
+        }
+        // The thumb dragged to the bottom of its track.
+        e.scroll_to_y(0.0);
+        e.frame(&mut items, 200.0, 100.0);
+        e.drag_thumb_to(1000.0, 100.0, 24.0);
+        e.frame(&mut items, 200.0, 100.0);
+        let last = e.placed().last().expect("placed");
+        assert_eq!(last.ix, 299);
+        assert!((last.y + last.height - 100.0).abs() < 1e-3, "{last:?}");
     }
 
     #[test]

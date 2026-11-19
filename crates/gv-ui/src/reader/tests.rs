@@ -1165,3 +1165,129 @@ fn activating_a_described_link_follows_it_as_a_click_does(cx: &mut TestAppContex
     assert_eq!(history.len(), 1, "Back returns to a.md");
     assert!(history[0].path.ends_with("a.md"));
 }
+
+/// Wheel-scrolls `docs/SHOWCASE.md` (a long note that ends in a list) to
+/// its end in a 1000 × 1000 window: at no frame does the end of the
+/// document come above the bottom of the view, and the last frame shows
+/// it there.
+/// Where the end of the document is and where the bottom of the view is
+/// (window y), when the last item is on screen.
+fn end_and_bottom(st: &Rc<RefCell<State>>) -> Option<(f32, f32)> {
+    let s = st.borrow();
+    let last = s.doc.as_ref()?.tree.items().len().checked_sub(1)?;
+    let g = s.geometry.items.iter().find(|g| g.ix == last)?;
+    Some((g.bottom, f32::from(s.geometry.bounds.bottom())))
+}
+
+/// `docs/SHOWCASE.md` (a long note that ends in a list) in a 1000 × 1000
+/// window.
+fn showcase(cx: &mut TestAppContext) -> (VisualTestContext, Rc<RefCell<State>>) {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/SHOWCASE.md");
+    let (window, workspace) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        let target = Some(OpenTarget::new(&file));
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(1000.0)));
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..WindowOptions::default()
+        };
+        gpui::open_window(options, cx, |window, cx| {
+            cx.new(|cx| Workspace::with_chrome(target, WindowChrome::Linux, window, cx))
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = drawn(window, cx);
+    let st = state(&reader(&workspace, &mut vcx), &mut vcx);
+    (vcx, st)
+}
+
+/// Draws one frame and checks it, before anything else (a hover change,
+/// the status bar's heading) draws another: the end of the document is
+/// not above the bottom of the view.
+fn draw_not_past_the_end(vcx: &mut VisualTestContext, st: &Rc<RefCell<State>>, what: &str) {
+    let frame = vcx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        end_and_bottom(st)
+    });
+    if let Some((end, bottom)) = frame {
+        assert!(
+            end >= bottom - 0.5,
+            "{what}: the end of the document ({end}) is above the bottom of the view ({bottom})"
+        );
+    }
+}
+
+/// Scrolling down to the end, with the wheel, the scrollbar thumb or
+/// Scroll to Bottom, stops with the end of the document at the bottom of
+/// the view: no frame shows the view scrolled past it.
+#[gpui::test]
+fn scrolling_stops_at_the_end_of_the_document(cx: &mut TestAppContext) {
+    let (mut vcx, st) = showcase(cx);
+    let centre = st.borrow().geometry.bounds.center();
+
+    // The wheel, on to the end and further.
+    let mut at_end = 0;
+    for step in 0..500 {
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: centre,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            ..Default::default()
+        });
+        draw_not_past_the_end(&mut vcx, &st, &format!("wheel step {step}"));
+        if end_and_bottom(&st).is_some() {
+            at_end += 1;
+            if at_end == 5 {
+                break;
+            }
+        }
+    }
+    let (end, bottom) = end_and_bottom(&st).expect("the wheel reaches the end");
+    assert!((end - bottom).abs() < 0.5, "{end} vs {bottom}");
+
+    // The thumb, from the top dragged down past the end of the track.
+    st.borrow_mut().engine.scroll_to_y(0.0);
+    draw(&mut vcx);
+    let thumb = st.borrow().geometry.thumb.expect("a thumb");
+    let grab = thumb.center();
+    vcx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+    for k in 1..=12 {
+        let to = grab + point(px(0.0), px(100.0 * k as f32));
+        // The move and the frame it causes, before any other frame.
+        let frame = vcx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: to,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::none(),
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            end_and_bottom(&st)
+        });
+        if let Some((end, bottom)) = frame {
+            assert!(
+                end >= bottom - 0.5,
+                "thumb dragged {} px: the end of the document ({end}) is above the bottom of the \
+                 view ({bottom})",
+                100 * k
+            );
+        }
+    }
+    let (end, bottom) = end_and_bottom(&st).expect("the thumb reaches the end");
+    assert!((end - bottom).abs() < 0.5, "{end} vs {bottom}");
+    vcx.simulate_mouse_up(
+        grab + point(px(0.0), px(1200.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    draw(&mut vcx);
+
+    // Scroll to Bottom (Ctrl+End).
+    st.borrow_mut().engine.scroll_to_y(0.0);
+    draw(&mut vcx);
+    st.borrow_mut().engine.scroll_to_end();
+    draw_not_past_the_end(&mut vcx, &st, "scroll to bottom");
+    let (end, bottom) = end_and_bottom(&st).expect("scroll to bottom reaches the end");
+    assert!((end - bottom).abs() < 0.5, "{end} vs {bottom}");
+}
