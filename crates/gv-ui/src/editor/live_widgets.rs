@@ -189,6 +189,9 @@ pub(crate) struct Widgets {
     /// The images being decoded, with their jobs' cancel flags.
     loading: HashMap<ImageKey, CancelFlag>,
     paints: HashMap<WidgetId, (WidgetPaint, WidgetClick)>,
+    /// What box widgets stand for, for assistive technology: an image's
+    /// alt text (or file name), a formula's TeX.
+    spoken: HashMap<WidgetId, Arc<str>>,
 }
 
 /// A widget id for `spec` in its current state (`state` tells states
@@ -248,6 +251,11 @@ impl Widgets {
     /// What widget `id` draws and what a click on it does.
     pub fn paint(&self, id: WidgetId) -> Option<&(WidgetPaint, WidgetClick)> {
         self.paints.get(&id)
+    }
+
+    /// What box widget `id` stands for, for assistive technology.
+    pub fn spoken(&self, id: WidgetId) -> Option<Arc<str>> {
+        self.spoken.get(&id).cloned()
     }
 
     /// Images to decode, taken.
@@ -381,6 +389,20 @@ impl Widgets {
                 load,
             ),
         };
+        let spoken = match spec {
+            WidgetSpec::Math { tex, .. } => Some(Arc::clone(tex)),
+            WidgetSpec::Image {
+                alt, destination, ..
+            } => Some(if alt.trim().is_empty() {
+                Arc::from(file_name(destination))
+            } else {
+                Arc::clone(alt)
+            }),
+            _ => None,
+        };
+        if let Some(spoken) = spoken {
+            self.spoken.insert(widget.id, spoken);
+        }
         self.paints.insert(widget.id, (paint, click));
         widget
     }

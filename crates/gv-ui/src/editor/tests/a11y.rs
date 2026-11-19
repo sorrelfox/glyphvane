@@ -227,3 +227,247 @@ fn plain_text_is_described_as_source(cx: &mut TestAppContext) {
     let (runs, _) = described(&view, &mut vcx);
     assert_eq!(runs[0].0, "a **b**\tc\n");
 }
+
+fn numbered(lines: usize) -> String {
+    (0..lines).map(|i| format!("line {i}\n")).collect()
+}
+
+/// The lines drawn in the last frame.
+fn on_screen(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> std::ops::Range<usize> {
+    draw(vcx);
+    probe_of(view, vcx).lines
+}
+
+fn run_texts(view: &Entity<EditorView>, vcx: &mut VisualTestContext) -> Vec<String> {
+    described(view, vcx).0.into_iter().map(|r| r.0).collect()
+}
+
+#[gpui::test]
+fn lines_past_the_screen_are_described(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, &numbered(1000));
+    let shown = on_screen(&view, &mut vcx);
+    let margin = crate::editor::source_a11y::margin(shown.len());
+    assert!(margin >= crate::editor::source_a11y::MARGIN);
+    // At the top: the screen and a margin below it.
+    let runs = run_texts(&view, &mut vcx);
+    assert_eq!(runs.len(), shown.len() + margin);
+    assert_eq!(runs[0], "line 0\n");
+    assert_eq!(
+        runs[runs.len() - 1],
+        format!("line {}\n", shown.end + margin - 1)
+    );
+    // In the middle: a margin above too, in order, after the caret's
+    // line (at the top of the file).
+    view.update(&mut vcx, |v, cx| v.scroll_to_line(500, cx));
+    let shown = on_screen(&view, &mut vcx);
+    assert_eq!(shown.start, 500);
+    let (runs, selection) = described(&view, &mut vcx);
+    let runs: Vec<String> = runs.into_iter().map(|r| r.0).collect();
+    let mut expected = vec!["line 0\n".to_owned()];
+    expected.extend((500 - margin..shown.end + margin).map(|i| format!("line {i}\n")));
+    assert_eq!(runs, expected);
+    assert_eq!(selection, Some(((0, 0), (0, 0))));
+}
+
+#[gpui::test]
+fn a_selection_past_the_screen_scrolls_it_into_view(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, &numbered(1000));
+    let shown = on_screen(&view, &mut vcx);
+    // "Read next line" past the bottom: the caret on the first line below.
+    let below = shown.end;
+    let runs = run_texts(&view, &mut vcx);
+    assert_eq!(runs[below], format!("line {below}\n"));
+    select(&view, &mut vcx, (below, 0), (below, 0));
+    let text = numbered(1000);
+    let offset = text.find(&format!("line {below}\n")).expect("there");
+    assert_eq!(selections(&view, &mut vcx), vec![(offset, offset)]);
+    let now = on_screen(&view, &mut vcx);
+    assert!(now.contains(&below), "{now:?}");
+    // The description moved with it.
+    let (runs, selection) = described(&view, &mut vcx);
+    let at = runs
+        .iter()
+        .position(|r| r.0 == format!("line {below}\n"))
+        .expect("described");
+    assert_eq!(selection, Some(((at, 0), (at, 0))));
+}
+
+#[gpui::test]
+fn a_screen_reader_scrolls_runs_and_the_input(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, &numbered(1000));
+    let shown = on_screen(&view, &mut vcx);
+    // A run below the screen into view: it is the bottom line now, and
+    // the caret stays.
+    let target = shown.end + 10;
+    view.update(&mut vcx, |v, cx| v.scroll_run_from_a11y(target, None, cx));
+    let now = on_screen(&view, &mut vcx);
+    assert!(now.contains(&target), "{now:?}");
+    assert!(!now.contains(&(target + 2)), "{now:?}");
+    assert_eq!(selections(&view, &mut vcx), vec![(0, 0)]);
+    // A run already shown: nothing moves.
+    let first = now.start;
+    let index = run_texts(&view, &mut vcx)
+        .iter()
+        .position(|r| *r == format!("line {}\n", first + 2))
+        .expect("described");
+    view.update(&mut vcx, |v, cx| v.scroll_run_from_a11y(index, None, cx));
+    assert_eq!(on_screen(&view, &mut vcx).start, first);
+    // A run's top to the view's top.
+    let (index, top) = view.read_with(&vcx, |v, _| {
+        let s = v.a11y_source();
+        let i = s
+            .runs
+            .iter()
+            .position(|r| r.text == format!("line {}\n", first + 20))
+            .expect("described");
+        (i, s.viewport.0)
+    });
+    view.update(&mut vcx, |v, cx| {
+        v.scroll_run_from_a11y(index, Some(top), cx)
+    });
+    assert_eq!(on_screen(&view, &mut vcx).start, first + 20);
+    // The input by a line, and by a page.
+    view.update(&mut vcx, |v, cx| v.scroll_from_a11y(false, None, cx));
+    assert_eq!(on_screen(&view, &mut vcx).start, first + 21);
+    view.update(&mut vcx, |v, cx| v.scroll_from_a11y(true, None, cx));
+    assert_eq!(on_screen(&view, &mut vcx).start, first + 20);
+    let page = gpui::accesskit::ActionData::ScrollUnit(gpui::accesskit::ScrollUnit::Page);
+    let before = on_screen(&view, &mut vcx);
+    view.update(&mut vcx, |v, cx| v.scroll_from_a11y(false, Some(&page), cx));
+    let after = on_screen(&view, &mut vcx);
+    // A page less a line: the last line stays in view.
+    assert!(
+        after.start > before.start + 1 && after.start < before.end,
+        "{before:?} {after:?}"
+    );
+}
+
+fn obsidian() -> ParseOptions {
+    ParseOptions::from_profile(&gv_profile::compile_builtin(
+        gv_profile::ProfileId::Obsidian,
+    ))
+}
+
+fn live(cx: &mut TestAppContext, text: &str) -> (Entity<EditorView>, VisualTestContext) {
+    let (view, mut vcx) = editor_with(cx, text, obsidian());
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    for _ in 0..8 {
+        draw(&mut vcx);
+    }
+    (view, vcx)
+}
+
+#[gpui::test]
+fn inline_math_reads_as_its_tex(cx: &mut TestAppContext) {
+    // 012345678
+    // a $x^2$ b
+    let (view, mut vcx) = live(cx, "a $x^2$ b\nnext\n");
+    caret_at(&view, &mut vcx, 12);
+    let (runs, _) = described(&view, &mut vcx);
+    assert_eq!(runs[0].0, "a x^2 b\n");
+    // Words by UAX #29: `^` stands alone.
+    assert_eq!(runs[0].2, vec![0, 2, 3, 4, 6]);
+    // Its characters are all at the formula's start; the next one after
+    // its end.
+    assert_eq!(&offsets(&view, &mut vcx, 0)[1..7], &[1, 2, 2, 2, 7, 8]);
+    // A screen reader's caret on it goes to the formula's start.
+    select(&view, &mut vcx, (0, 3), (0, 3));
+    assert_eq!(selections(&view, &mut vcx), vec![(2, 2)]);
+}
+
+#[gpui::test]
+fn images_read_as_their_alt_text(cx: &mut TestAppContext) {
+    let dir = temp(&[("note.md", "![a pic](pic.png) and ![](pic.png)\nnext\n")]);
+    image::RgbaImage::from_pixel(40, 20, image::Rgba([10, 20, 30, 255]))
+        .save(dir.path().join("pic.png"))
+        .expect("png");
+    let (window, view) = cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        gpui::open_window(options(), cx, |_, cx| {
+            cx.new(|cx| EditorView::new(obsidian(), cx))
+        })
+        .expect("test window opens")
+    });
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let path = dir.path().join("note.md");
+    view.update(&mut vcx, |v, cx| {
+        v.open(path, None, cx);
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    caret_at(&view, &mut vcx, 40);
+    let kinds: Vec<&str> = probe_of(&view, &mut vcx)
+        .widgets
+        .iter()
+        .map(|(_, k)| *k)
+        .collect();
+    assert_eq!(kinds, ["image", "image"]);
+    // The alt text, or the file name without one.
+    let (runs, _) = described(&view, &mut vcx);
+    assert_eq!(runs[0].0, "a pic and pic.png\n");
+}
+
+#[gpui::test]
+fn a_selection_in_a_block_shows_its_source(cx: &mut TestAppContext) {
+    let text = "intro\n\n```rust\nfn a() {}\n```\n\nafter\n";
+    let (view, mut vcx) = live(cx, text);
+    assert_eq!(
+        view.read_with(&vcx, |v, _| v.live_blocks()).len(),
+        1,
+        "rendered"
+    );
+    // The block's nodes go with where its source starts.
+    draw(&mut vcx);
+    let start = view.read_with(&vcx, |v, _| {
+        let s = v.a11y_source();
+        assert_eq!(s.blocks.len(), 1);
+        s.blocks[0].1
+    });
+    assert_eq!(start, 7);
+    // A screen reader's caret there: the block shows as source text.
+    view.update_in(&mut vcx, |v, window, cx| {
+        v.select_from_a11y(start, start, window, cx)
+    });
+    for _ in 0..4 {
+        draw(&mut vcx);
+    }
+    assert!(view.read_with(&vcx, |v, _| v.live_blocks()).is_empty());
+    let runs = run_texts(&view, &mut vcx);
+    assert!(runs.iter().any(|r| r == "fn a() {}\n"), "{runs:?}");
+}
+
+#[gpui::test]
+fn several_carets_are_counted(cx: &mut TestAppContext) {
+    let (view, mut vcx) = editor(cx, MIXED);
+    let carets = |view: &Entity<EditorView>, vcx: &mut VisualTestContext| {
+        draw(vcx);
+        view.read_with(vcx, |v, _| v.a11y_source().carets)
+    };
+    assert_eq!(carets(&view, &mut vcx), 1);
+    view.update(&mut vcx, |v, cx| {
+        if let Some(doc) = v.doc.as_mut() {
+            doc.editor.set_selections(
+                &[
+                    gv_editor::SelectionSpec::new(0, 0),
+                    gv_editor::SelectionSpec::new(12, 12),
+                    gv_editor::SelectionSpec::new(24, 27),
+                ],
+                1,
+            );
+        }
+        cx.notify();
+    });
+    assert_eq!(carets(&view, &mut vcx), 3);
+    // The selection is the primary one.
+    assert_eq!(described(&view, &mut vcx).1, Some(((1, 0), (1, 0))));
+    assert_eq!(
+        crate::editor::source_a11y::carets_description(3),
+        "3 carets"
+    );
+}

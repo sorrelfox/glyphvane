@@ -648,14 +648,14 @@ fn blocks_are_described_for_assistive_technology(cx: &mut TestAppContext) {
     assert_eq!(described.len(), 3);
     let roles: Vec<Vec<gpui::Role>> = described
         .iter()
-        .map(|(_, nodes)| nodes.iter().map(|n| n.role).collect())
+        .map(|(_, _, nodes)| nodes.iter().map(|n| n.role).collect())
         .collect();
     assert_eq!(roles[0], [gpui::Role::Table]);
     assert_eq!(roles[1], [gpui::Role::Table]);
     // Rows and cells under the table.
-    assert!(!described[0].1[0].children.is_empty());
+    assert!(!described[0].2[0].children.is_empty());
     // The same table twice: one view, but distinct node keys.
-    assert_ne!(described[0].1[0].key, described[1].1[0].key);
+    assert_ne!(described[0].2[0].key, described[1].2[0].key);
     // In order down the page.
     assert!(described[0].0 < described[1].0 && described[1].0 < described[2].0);
     // The image by its alt text.
@@ -666,7 +666,7 @@ fn blocks_are_described_for_assistive_technology(cx: &mut TestAppContext) {
         }
     }
     let mut image = Vec::new();
-    labels(&described[2].1, &mut image);
+    labels(&described[2].2, &mut image);
     assert!(image.iter().any(|l| l.contains("alt text")), "{image:?}");
 }
 

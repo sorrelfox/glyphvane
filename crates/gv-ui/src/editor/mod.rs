@@ -998,7 +998,9 @@ impl EditorView {
     /// assistive technology: the rows as text runs with the selection
     /// ([`source_a11y`]); a screen reader's `SetTextSelection` moves the
     /// selection, its `Focus` focuses the view (GPUI's own handling of the
-    /// focusable element).
+    /// focusable element), its `ScrollUp`/`ScrollDown` scroll by a line or
+    /// a page. Runs take `ScrollIntoView` and `ScrollToPoint` (registered
+    /// by the element when it paints, by their node ids).
     fn a11y_node(
         &self,
         root: gpui::Stateful<gpui::Div>,
@@ -1008,6 +1010,8 @@ impl EditorView {
         let shared = self.a11y.clone();
         let source = self.a11y.clone();
         let view = cx.entity().downgrade();
+        let up = view.clone();
+        let down = view.clone();
         root.role(gpui::Role::MultilineTextInput)
             .aria_label("Source")
             .a11y_synthetic_children(move |builder| source_a11y::push(&shared, builder))
@@ -1032,6 +1036,54 @@ impl EditorView {
                     }
                 },
             )
+            .on_a11y_action(gpui::accesskit::Action::ScrollUp, move |data, _, cx| {
+                let _ = up.update(cx, |view, cx| view.scroll_from_a11y(true, data, cx));
+            })
+            .on_a11y_action(gpui::accesskit::Action::ScrollDown, move |data, _, cx| {
+                let _ = down.update(cx, |view, cx| view.scroll_from_a11y(false, data, cx));
+            })
+    }
+
+    /// Scrolls up or down by a line or (`ScrollUnit::Page`) a screen, as a
+    /// screen reader asks.
+    pub(crate) fn scroll_from_a11y(
+        &mut self,
+        up: bool,
+        data: Option<&gpui::accesskit::ActionData>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let line = f64::from(self.metrics.line);
+        let step = match data {
+            Some(gpui::accesskit::ActionData::ScrollUnit(gpui::accesskit::ScrollUnit::Page)) => {
+                self.bounds.map_or(line, |b| {
+                    (f64::from(f32::from(b.size.height)) - line).max(line)
+                })
+            }
+            _ => line,
+        };
+        self.scroll_y += if up { -step } else { step };
+        cx.notify();
+    }
+
+    /// Scrolls run `run` of the last frame's description into view, or
+    /// its top to `y` (window px), as a screen reader asks.
+    pub(crate) fn scroll_run_from_a11y(
+        &mut self,
+        run: usize,
+        y: Option<f32>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let target = {
+            let source = self.a11y.borrow();
+            match y {
+                Some(y) => source.scroll_to_point(run, y),
+                None => source.scroll_to_show(run),
+            }
+        };
+        if let Some(target) = target {
+            self.scroll_y = target.max(0.0);
+            cx.notify();
+        }
     }
 
     /// Selects from `anchor` to `focus` (buffer offsets), as a screen

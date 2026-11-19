@@ -457,6 +457,8 @@ impl EditorView {
         };
         let mut a11y_runs: Vec<source_a11y::Run> = Vec::new();
         let mut a11y_found: [Option<source_a11y::Pos>; 2] = [None, None];
+        let widgets = &live.widgets;
+        let widget_text = |id: gv_editor::display_map::WidgetId| widgets.spoken(id);
 
         for (line_row, visual) in &visuals {
             let (line_row, line) = (*line_row, visual.first);
@@ -483,6 +485,7 @@ impl EditorView {
                     origin_x,
                     tops: &tops,
                     row_h: line_px,
+                    widget_text: &widget_text,
                 };
                 let (runs, found) = source_a11y::line_runs(row, &env, &wanted);
                 for (slot, f) in a11y_found.iter_mut().zip(found) {
@@ -914,50 +917,104 @@ impl EditorView {
                 ));
             }
         }
-        // The caret's line when it is off screen, so that the selection
-        // has a run to point into.
-        let head = wanted[1];
-        if a11y_on && a11y_found[1].is_none() && (head < visible.start || head > visible.end) {
-            let line = text.line_of_offset(head.min(text.len())).unwrap_or(0);
-            if let Some(visual) = VisualLine::new(&text, replace, line) {
-                let styled: Vec<usize> = visual.styled_lines().collect();
-                if let (Some(&a), Some(&b)) = (styled.iter().min(), styled.iter().max()) {
-                    doc.highlights.ensure(&doc.syntax, links, a..b + 1);
+        // The lines above and below the screen, so that reading by line
+        // goes on past its edges, and the caret's line when it is outside
+        // them, so that the selection has a run to point into.
+        if a11y_on {
+            let margin = source_a11y::margin(visuals.len());
+            let mut above: Vec<(usize, VisualLine)> = Vec::new();
+            let mut row = visuals.first().map_or(first_row, |(r, _)| *r);
+            while above.len() < margin && row > 0 {
+                let Some(visual) = VisualLine::new(&text, replace, map.line_of_row(row - 1)) else {
+                    break;
+                };
+                let first = map.first_row(visual.first);
+                if first >= row {
+                    break;
                 }
-                let line_row = map.first_row(visual.first);
-                let breaks = map.breaks(&visual);
-                let styles = visual.styles(&doc.highlights);
-                if let Some(row) = doc.rows.row(&visual, styles, breaks, env, window) {
-                    let tops = |k: usize| row_top(line_row + k);
-                    let env = source_a11y::LineEnv {
-                        text: &text,
-                        replace,
-                        line: visual.first,
-                        range: visual.range.clone(),
-                        terminator: a11y_terminator(&text, &visual),
-                        origin_x,
-                        tops: &tops,
-                        row_h: line_px,
-                    };
-                    let (runs, found) = source_a11y::line_runs(row, &env, &wanted);
-                    let before = head < visible.start;
-                    let shift = if before { 0 } else { a11y_runs.len() };
-                    let added = runs.len();
-                    if before {
-                        for (r, _) in a11y_found.iter_mut().flatten() {
-                            *r += added;
-                        }
-                        a11y_runs.splice(0..0, runs);
+                row = first;
+                above.push((row, visual));
+            }
+            above.reverse();
+            let mut below: Vec<(usize, VisualLine)> = Vec::new();
+            let mut next = visuals.last().map_or(lines, |(_, v)| v.last + 1);
+            while below.len() < margin && next < lines {
+                let Some(visual) = VisualLine::new(&text, replace, next) else {
+                    break;
+                };
+                next = visual.last + 1;
+                below.push((map.first_row(visual.first), visual));
+            }
+            let described = above.first().map_or(visible.start, |(_, v)| v.range.start)
+                ..below.last().map_or(visible.end, |(_, v)| v.range.end);
+            let head = wanted[1];
+            if a11y_found[1].is_none() && (head < described.start || head > described.end) {
+                let line = text.line_of_offset(head.min(text.len())).unwrap_or(0);
+                if let Some(visual) = VisualLine::new(&text, replace, line) {
+                    let row = map.first_row(visual.first);
+                    if head < described.start {
+                        above.insert(0, (row, visual));
                     } else {
-                        a11y_runs.extend(runs);
-                    }
-                    for (slot, f) in a11y_found.iter_mut().zip(found) {
-                        if let Some((r, i)) = f {
-                            *slot = Some((r + shift, i));
-                        }
+                        below.push((row, visual));
                     }
                 }
             }
+            let mut styled: Vec<usize> = above
+                .iter()
+                .chain(&below)
+                .flat_map(|(_, v)| v.styled_lines())
+                .collect();
+            styled.sort_unstable();
+            styled.dedup();
+            for run in styled.chunk_by(|a, b| b == &(a + 1)) {
+                if let (Some(&a), Some(&b)) = (run.first(), run.last()) {
+                    doc.highlights.ensure(&doc.syntax, links, a..b + 1);
+                }
+            }
+            let mut describe =
+                |lines: &[(usize, VisualLine)],
+                 runs: &mut Vec<source_a11y::Run>,
+                 found: &mut [Option<source_a11y::Pos>; 2]| {
+                    for (line_row, visual) in lines {
+                        if geo.hidden(*line_row) {
+                            continue;
+                        }
+                        let breaks = map.breaks(visual);
+                        let styles = visual.styles(&doc.highlights);
+                        let Some(row) = doc.rows.row(visual, styles, breaks, env, window) else {
+                            continue;
+                        };
+                        let tops = |k: usize| row_top(line_row + k);
+                        let env = source_a11y::LineEnv {
+                            text: &text,
+                            replace,
+                            line: visual.first,
+                            range: visual.range.clone(),
+                            terminator: a11y_terminator(&text, visual),
+                            origin_x,
+                            tops: &tops,
+                            row_h: line_px,
+                            widget_text: &widget_text,
+                        };
+                        let (more, at) = source_a11y::line_runs(row, &env, &wanted);
+                        for (slot, f) in found.iter_mut().zip(at) {
+                            if slot.is_none() {
+                                *slot = f.map(|(r, i)| (r + runs.len(), i));
+                            }
+                        }
+                        runs.extend(more);
+                    }
+                };
+            let mut before = Vec::new();
+            let mut before_found = [None, None];
+            describe(&above, &mut before, &mut before_found);
+            let shift = before.len();
+            for (slot, f) in a11y_found.iter_mut().zip(before_found) {
+                *slot = f.or(slot.map(|(r, i)| (r + shift, i)));
+            }
+            before.append(&mut a11y_runs);
+            a11y_runs = before;
+            describe(&below, &mut a11y_runs, &mut a11y_found);
         }
         doc.rows.end_frame();
         live.blocks_drawn = drawn_blocks
@@ -982,6 +1039,12 @@ impl EditorView {
             source.selection = tail.zip(head);
             source.scale = window.scale_factor();
             source.read_only = self.read_only;
+            source.carets = self
+                .doc
+                .as_ref()
+                .map_or(1, |d| d.editor.selections().as_slice().len());
+            source.scroll_y = self.scroll_y;
+            source.viewport = (f32::from(bounds.top()), f32::from(bounds.bottom()));
         }
         #[cfg(test)]
         {
@@ -1542,6 +1605,32 @@ impl Element for EditorElement {
             ElementInputHandler::new(bounds, self.view.clone()),
             cx,
         );
+        // A screen reader scrolling a text run into view or to a point.
+        if window.is_a11y_active() {
+            let ids = self.view.read(cx).a11y.borrow().ids().to_vec();
+            for (run, id) in ids.into_iter().enumerate() {
+                let view = self.view.downgrade();
+                window.on_a11y_action(
+                    id,
+                    gpui::accesskit::Action::ScrollIntoView,
+                    move |_, _, cx| {
+                        let _ = view.update(cx, |v, cx| v.scroll_run_from_a11y(run, None, cx));
+                    },
+                );
+                let view = self.view.downgrade();
+                window.on_a11y_action(
+                    id,
+                    gpui::accesskit::Action::ScrollToPoint,
+                    move |data, window, cx| {
+                        let Some(gpui::accesskit::ActionData::ScrollToPoint(point)) = data else {
+                            return;
+                        };
+                        let y = point.y as f32 / window.scale_factor();
+                        let _ = view.update(cx, |v, cx| v.scroll_run_from_a11y(run, Some(y), cx));
+                    },
+                );
+            }
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for quad in frame.under.drain(..) {
                 window.paint_quad(quad);

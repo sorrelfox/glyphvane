@@ -1116,13 +1116,14 @@ impl EditorView {
     /// The blocks drawn in the last frame described for assistive
     /// technology, as the Reading view describes them (tables by rows and
     /// cells, code, math, diagrams, images by their alt text, callouts):
-    /// each block's top (window y) and its nodes. Their keys are made
+    /// each block's top (window y), where its source starts (a screen
+    /// reader's selection in it goes there) and its nodes. Their keys are made
     /// unique per block; their links get no action (a screen reader reads
     /// them, the caret follows them from the source).
     pub(crate) fn blocks_a11y(
         &self,
         cx: &gpui::App,
-    ) -> Vec<(f32, Vec<crate::a11y::document::DocNode>)> {
+    ) -> Vec<(f32, usize, Vec<crate::a11y::document::DocNode>)> {
         fn rekey(nodes: &mut [crate::a11y::document::DocNode], salt: u64) {
             for node in nodes {
                 node.key.0 ^= salt;
@@ -1138,7 +1139,8 @@ impl EditorView {
                 let mut hasher = DefaultHasher::new();
                 id.hash(&mut hasher);
                 rekey(&mut nodes, hasher.finish());
-                (f32::from(bounds.top()), nodes)
+                let start = self.block_source_start(*id).unwrap_or(0);
+                (f32::from(bounds.top()), start, nodes)
             })
             .collect()
     }
