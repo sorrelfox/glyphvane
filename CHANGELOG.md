@@ -55,6 +55,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   hidden in the Reading view, and its markers in Live Preview, as on one
   line.
 - The mouse wheel scrolls the autocomplete list.
+- The trust prompt names plugins, themes, snippets and shared settings
+  added to the folder while it shows.
 
 ## [1.2.0] - 2026-11-19
 

@@ -221,6 +221,25 @@ fn the_prompt_scans_the_folder_and_stores_the_choice(cx: &mut TestAppContext) {
     });
 }
 
+/// A plugin added while the prompt shows is named once the folder is
+/// scanned again.
+#[gpui::test]
+fn the_folder_is_scanned_again_while_the_prompt_shows(cx: &mut TestAppContext) {
+    let mut p = prompt(cx);
+    let root = p.prompt.read_with(&p.vcx, |t, _| t.root().to_path_buf());
+    std::fs::create_dir_all(root.join(".obsidian/plugins/dataview")).expect("mkdir");
+    p.draw();
+    let detail = p.prompt.read_with(&p.vcx, |t, _| t.detail());
+    assert!(!detail.contains("plugin"), "not yet: {detail}");
+    p.vcx.executor().advance_clock(super::RESCAN);
+    p.draw();
+    let detail = p.prompt.read_with(&p.vcx, |t, _| t.detail());
+    assert!(
+        detail.ends_with("This folder has 1 CSS snippet and 1 Obsidian plugin (never run)."),
+        "{detail}"
+    );
+}
+
 #[gpui::test]
 fn restricted_mode_and_decide_later(cx: &mut TestAppContext) {
     let mut p = prompt(cx);

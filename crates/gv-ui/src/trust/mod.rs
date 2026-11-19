@@ -8,7 +8,8 @@
 //! what the folder's content may trigger: remote images and media, links
 //! that leave the app, and what the folder holds besides notes (CSS
 //! snippets, Obsidian themes and plugins, shared settings;
-//! [`gv_vault::trust::scan_trust`], read off the UI thread). It offers:
+//! [`gv_vault::trust::scan_trust`], read off the UI thread, and read
+//! again every [`RESCAN`] while the prompt shows). It offers:
 //!
 //! - **Trust**, with the remote-content mode the vault uses (*Allow*,
 //!   *Ask* or *Block*; the mode in effect is preselected);
@@ -55,6 +56,10 @@ use crate::metrics::spacing::infobar as spacing;
 use crate::metrics::{icon, radius, size as sizes, text};
 use crate::settings::{AppSettings, EditRefused, Target};
 use crate::theme::Theme;
+
+/// How often the folder is scanned again while the prompt shows, so that
+/// a plugin or snippet added meanwhile is named (not designed).
+pub const RESCAN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The setting that stores the decision.
 pub const TRUST_KEY: &str = "privacy_and_security.workspace_trust";
@@ -220,7 +225,8 @@ impl std::fmt::Debug for TrustPrompt {
 
 impl TrustPrompt {
     /// The prompt for the vault at `root`; the folder is scanned off the
-    /// UI thread. The remote-content mode in effect is preselected.
+    /// UI thread, and again every [`RESCAN`] while the prompt lives. The
+    /// remote-content mode in effect is preselected.
     pub fn new(root: PathBuf, cx: &mut Context<'_, Self>) -> Self {
         let mode = cx
             .try_global::<AppSettings>()
@@ -229,12 +235,20 @@ impl TrustPrompt {
             });
         let at = root.clone();
         let scan = cx.spawn(async move |this, cx| {
-            let summary = cx.background_spawn(async move { scan_trust(&at) }).await;
-            this.update(cx, |p, cx| {
-                p.summary = Some(summary);
-                cx.notify();
-            })
-            .ok();
+            loop {
+                let dir = at.clone();
+                let summary = cx.background_spawn(async move { scan_trust(&dir) }).await;
+                let alive = this.update(cx, |p, cx| {
+                    if p.summary.as_ref() != Some(&summary) {
+                        p.summary = Some(summary);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(RESCAN).await;
+            }
         });
         Self {
             root,
