@@ -578,3 +578,35 @@ fn ten_thousand_notes(cx: &mut TestAppContext) {
         headings.len()
     );
 }
+
+#[test]
+fn named_notes_are_never_made_outside_the_vault() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("vault");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    for rel in ["../out.md", "a/../../out.md", "./x/..", "..", "a/\0/b.md"] {
+        assert!(
+            super::switcher::create_named_note(&root, rel).is_err(),
+            "{rel:?}"
+        );
+    }
+    assert!(!dir.path().join("out.md").exists());
+    let (path, created) =
+        super::switcher::create_named_note(&root, "In/box/New.md").expect("created");
+    assert!(created);
+    assert_eq!(path, root.join("In").join("box").join("New.md"));
+}
+
+#[cfg(windows)]
+#[test]
+fn named_notes_with_drive_or_backslash_parts_are_refused_on_windows() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("vault");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    for rel in ["..\\..\\out.md", "C:\\out.md", "a/..\\..\\out.md"] {
+        assert!(
+            super::switcher::create_named_note(&root, rel).is_err(),
+            "{rel:?}"
+        );
+    }
+}

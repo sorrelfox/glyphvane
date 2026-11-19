@@ -1263,7 +1263,11 @@ impl Workspace {
         let handle = self.window_handle;
         let task = cx.background_spawn({
             let file = file.clone();
+            let root = root.clone();
             async move {
+                if !gv_vault::new_file::is_within(&root, &file) || file == root {
+                    return Err(std::io::Error::other("outside the vault"));
+                }
                 if let Some(parent) = file.parent() {
                     std::fs::create_dir_all(parent)?;
                 }

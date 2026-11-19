@@ -610,6 +610,21 @@ fn new_note_goes_where_the_vaults_new_file_location_says(cx: &mut TestAppContext
     f.dispatch(file_commands::NewNote);
     f.settle();
     assert_eq!(f.active_path(), Some(f.path("vault/Untitled.md")));
+    // Drive and backslash forms leave the vault on Windows: the root on
+    // every platform.
+    for (folder, name) in [
+        (r"C:\\Users\\x", "Untitled 1.md"),
+        (r"..\\..\\x", "Untitled 2.md"),
+    ] {
+        std::fs::write(
+            f.path("vault/.obsidian/app.json"),
+            format!("{{\"newFileLocation\": \"folder\", \"newFileFolderPath\": \"{folder}\"}}"),
+        )
+        .expect("write");
+        f.dispatch(file_commands::NewNote);
+        f.settle();
+        assert_eq!(f.active_path(), Some(f.path(&format!("vault/{name}"))));
+    }
 }
 
 #[gpui::test]

@@ -221,7 +221,7 @@ pub(super) fn create_named_note(root: &Path, rel: &str) -> std::io::Result<(Path
         .pop()
         .ok_or_else(|| std::io::Error::other("no name"))?;
     for part in parts {
-        if part == ".." {
+        if part == "." || part == ".." || part.contains('\0') {
             return Err(std::io::Error::other("outside the vault"));
         }
         // An existing folder in another letter case is used as it is.
@@ -235,6 +235,10 @@ pub(super) fn create_named_note(root: &Path, rel: &str) -> std::io::Result<(Path
                 .map(|e| e.file_name())
         });
         folder.push(existing.unwrap_or_else(|| part.into()));
+    }
+    // `C:`, `..\x` and the like are one name here but not on Windows.
+    if name == "." || name == ".." || !gv_vault::new_file::is_within(root, &folder.join(name)) {
+        return Err(std::io::Error::other("outside the vault"));
     }
     std::fs::create_dir_all(&folder)?;
     let wanted = name.to_lowercase();

@@ -242,7 +242,13 @@ impl Workspace {
             let root = folder.clone();
             async move {
                 let rel = gv_vault::new_file::new_note_folder(&root, current.as_deref());
-                let folder = rel.split('/').fold(root, |path, part| path.join(part));
+                let folder = rel
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .fold(root.clone(), |path, part| path.join(part));
+                if !gv_vault::new_file::is_within(&root, &folder) {
+                    return Err(std::io::Error::other("outside the vault"));
+                }
                 std::fs::create_dir_all(&folder)?;
                 create_note(&folder, NEW_NOTE_NAME)
             }
