@@ -12,7 +12,8 @@
 //! when it is outside them.
 //! A run's characters are grapheme clusters of what the row shows: Live
 //! Preview's hidden markers are not there, a hard tab is one `\t`, and the
-//! last row of a line ends in `\n` (one character, as AccessKit wants).
+//! last row of a line ends in `\n` (one character, as AccessKit wants,
+//! also for a `\r\n` or `\r` line end, whose bytes it spans).
 //! Each character keeps the buffer offset it starts at, so the node's
 //! text selection (the primary selection's anchor and focus) points into
 //! the runs, and a screen reader's `SetTextSelection` maps back to buffer
