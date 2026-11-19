@@ -63,14 +63,20 @@ whole words or lines. **Shift**+click moves the end of the selection to
 where you click. While you drag, move the pointer to the top or bottom edge
 of the view to scroll; the closer to the edge (or past it), the faster it
 scrolls.
-**Ctrl+A** selects all the text of the page you are on. A selection stays on
-one page: dragging past the page selects up to its first or last line.
+**Ctrl+A** selects all the text of the page you are on. A selection can run
+from one page to another: drag past the end of a page, or **Shift**+click on
+another page, and the text of every page between is selected too. Copied
+text has a line break between pages. Glyphvane reads the text of those pages
+as the selection reaches them; if you copy before it has, the copy waits a
+moment for it.
 
 Text is read in the order the PDF draws it, which is usually reading order.
-Some PDFs draw text in another order, for example a page in two columns, so
-a search or a selection can run across columns. A scanned page has text only
-if the PDF includes a text layer (from text recognition), and a PDF can only
-be searched as far as it says which characters its fonts draw.
+A page in two columns is read one column after the other, with a title or
+anything else across both columns where it stands, so find, selection and
+copying follow the columns. Other layouts (three columns, or text drawn out
+of order) can still make a search or a selection jump. A scanned page has
+text only if the PDF includes a text layer (from text recognition), and a
+PDF can only be searched as far as it says which characters its fonts draw.
 
 ## The image viewer
 

@@ -34,11 +34,12 @@
 //!   ([`PdfEngine::page_text`]: in the helper process, like drawing, with
 //!   the same 5 s deadline), one page at a time on the background
 //!   executor, only when it is needed: every page while find is open
-//!   (from the page shown on, then from the start), and the page a
-//!   selection starts on or Select all takes, first. A page's text is read
-//!   once and kept with the viewer. Its order is the PDF's drawing order
-//!   (no reading-order analysis: columns may interleave); a page drawn as
-//!   an image has none.
+//!   (from the page shown on, then from the start), and first the pages a
+//!   selection starts on, ends on and runs across, or Select all takes. A
+//!   page's text is read once and kept with the viewer. Its order is the
+//!   PDF's drawing order, except that a page in two columns is read column
+//!   by column (the engine's reading order); a page drawn as an image has
+//!   none.
 //! - **Find.** Ctrl+F opens the find popover of the Reading view
 //!   ([`FindBar`]: match case, whole word and regular expression, case
 //!   ignored by default) at the top right of the pages, filled with the
@@ -60,19 +61,26 @@
 //!   shows through. A run of characters is highlighted as one box per
 //!   line, from the characters' boxes (0.2 em below the baseline to 0.8 em
 //!   above it).
-//! - **Selection.** Dragging on a page selects its text from the character
-//!   nearest the press to the one nearest the pointer (one page at a time;
-//!   the pointer is the text cursor over pages whose text was read and has
-//!   some); a click drops it. As in the Source view, a double click selects
-//!   the word (Unicode word boundaries within the line) and a triple click
-//!   the line, and dragging on from either grows the selection by words or
-//!   lines; Shift+click moves the selection's end on the same page (from
-//!   the page's start after Select all). While dragging, the pointer within
-//!   [`EDGE`] px of the view's top or bottom edge, or beyond it, scrolls the
-//!   view every [`AUTOSCROLL_TICK`] (faster the further in), the selection
-//!   following; past its page it stops at the page's first or last line.
-//!   Ctrl+A selects the text of the page shown; Ctrl+C copies the
-//!   selection as plain text.
+//! - **Selection.** Dragging selects text from the character nearest the
+//!   press to the one nearest the pointer, on the page under the pointer
+//!   or the nearest one (the pointer is the text cursor over pages whose
+//!   text was read and has some); a click drops it. Above or below a page
+//!   (in the gap between pages) the selection's end is that page's start
+//!   or end. A selection across pages takes the rest of the first page,
+//!   every page between and the last page up to its end, each highlighted;
+//!   the pages' text is read as the selection reaches them. As in the
+//!   Source view, a double click selects the word (Unicode word boundaries
+//!   within the line) and a triple click the line, and dragging on from
+//!   either grows the selection by words or lines; Shift+click moves the
+//!   selection's end, on any page (after Select all, from the page's start,
+//!   or its end for a click on an earlier page). While dragging, the
+//!   pointer within [`EDGE`] px of the view's top or bottom edge, or
+//!   beyond it, scrolls the view every [`AUTOSCROLL_TICK`] (faster the
+//!   further in), the selection following. Ctrl+A selects the text of the
+//!   page shown; Ctrl+C copies the selection as plain text, the pages'
+//!   text separated by a line end. Copying a selection over pages whose
+//!   text is still being read waits for it (it is read first) and then
+//!   copies; a page that cannot be read adds nothing.
 //! - **Accessibility.** The pages are a list named "Pages"; each page laid
 //!   out is an image named "Page N of M" with its position in the list.
 //!   The find popover's match count is announced (a polite status).
@@ -101,7 +109,7 @@ use gpui::{
 use gv_render_tree::Finder;
 use serde::{Deserialize, Serialize};
 
-use super::pdf_text::{PageText, PdfMatch};
+use super::pdf_text::{self, Mark, PageText, PdfMatch, Spot, Unit};
 
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
@@ -329,33 +337,23 @@ struct PdfFind {
     _events: Option<Subscription>,
 }
 
-/// What a selection grows by: what the click that started it took.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Unit {
-    /// A press: characters.
-    #[default]
-    Char,
-    /// A double click: words.
-    Word,
-    /// A triple click: lines.
-    Line,
-}
-
-/// Selected text: on page `page`, from the character nearest `anchor` to
-/// the one nearest `head` (points from the page's top left), widened to
-/// whole words or lines by `unit`; or all of it.
+/// Selected text: from `anchor` (where it started) to `head` (where it
+/// ends), possibly on different pages, widened to whole words or lines by
+/// `unit` ([`pdf_text::selection`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PdfSelection {
-    page: usize,
-    anchor: (f32, f32),
-    head: (f32, f32),
+    anchor: Mark,
+    head: Mark,
     unit: Unit,
-    all: bool,
 }
 
-/// An anchor before the page's first character (Shift+click after
-/// Select all extends from the start).
-const PAGE_START: (f32, f32) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+impl PdfSelection {
+    /// The pages it runs over, first to last.
+    fn pages(&self) -> std::ops::RangeInclusive<usize> {
+        let (a, b) = (self.anchor.page, self.head.page);
+        a.min(b)..=a.max(b)
+    }
+}
 
 /// Where a page was painted, window px, and the scroll offset then.
 type Painted = (Bounds<Pixels>, Point<Pixels>);
@@ -420,12 +418,15 @@ pub struct PdfViewer {
     /// from the start.
     read_all: bool,
     read_from: usize,
-    /// A page whose text to read before the others (to select in it).
-    read_first: Option<usize>,
+    /// Pages whose text to read before the others, in order (to select
+    /// in them).
+    read_first: Vec<usize>,
     /// Stops the text reads when the viewer goes.
     text_cancel: Arc<AtomicBool>,
     find: PdfFind,
     selection: Option<PdfSelection>,
+    /// Ctrl+C waits for the text of pages the selection runs over.
+    copy_pending: bool,
     /// The left button went down on a page and has not come up.
     dragging: bool,
     /// Where the pointer was last while dragging, window px.
@@ -522,10 +523,11 @@ impl PdfViewer {
             reading: None,
             read_all: false,
             read_from: 0,
-            read_first: None,
+            read_first: Vec::new(),
             text_cancel: Arc::new(AtomicBool::new(false)),
             find: PdfFind::default(),
             selection: None,
+            copy_pending: false,
             dragging: false,
             pointer: None,
             autoscroll: None,
@@ -949,16 +951,16 @@ impl PdfViewer {
             return;
         }
         let n = self.sizes.len();
-        let next = self
-            .read_first
-            .take()
-            .filter(|p| self.text_missing(*p))
-            .or_else(|| {
-                let from = self.read_from.min(n.saturating_sub(1));
-                self.read_all
-                    .then(|| (from..n).chain(0..from).find(|p| self.text_missing(*p)))
-                    .flatten()
-            });
+        let mut first = std::mem::take(&mut self.read_first);
+        first.retain(|p| self.text_missing(*p));
+        let next = (!first.is_empty()).then(|| first.remove(0));
+        self.read_first = first;
+        let next = next.or_else(|| {
+            let from = self.read_from.min(n.saturating_sub(1));
+            self.read_all
+                .then(|| (from..n).chain(0..from).find(|p| self.text_missing(*p)))
+                .flatten()
+        });
         let Some(page) = next else {
             return;
         };
@@ -999,6 +1001,12 @@ impl PdfViewer {
             Err(PdfError::Cancelled) => {}
             Err(PdfError::Failed(why)) => {
                 self.text_failed.insert(page, why.into());
+            }
+        }
+        if self.copy_pending && !self.selection_waiting() {
+            self.copy_pending = false;
+            if let Some(text) = self.selected_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }
         self.pump_text(cx);
@@ -1304,48 +1312,81 @@ impl PdfViewer {
         )
     }
 
-    /// The selected characters: their page and range.
-    fn selected(&self) -> Option<(usize, std::ops::Range<usize>)> {
-        let sel = self.selection?;
-        let text = self.texts.get(sel.page)?.as_ref()?;
-        let range = if sel.all {
-            0..text.len()
-        } else if sel.unit == Unit::Char {
-            let a = text.caret_at(sel.anchor.0, sel.anchor.1)?;
-            let h = text.caret_at(sel.head.0, sel.head.1)?;
-            a.min(h)..a.max(h)
-        } else {
-            // Both ends widened to the word or line they are in.
-            let span = |(x, y): (f32, f32)| {
-                let at = text.char_near(x, y)?;
-                Some(match sel.unit {
-                    Unit::Line => text.line_at(at),
-                    _ => text.word_at(at),
-                })
-            };
-            let a = span(sel.anchor)?;
-            let h = span(sel.head)?;
-            a.start.min(h.start)..a.end.max(h.end)
+    /// The page under `position` (window px) or, off the pages, the
+    /// nearest one above or below; and where on it: the point (points from
+    /// its top left), or its start or end for a position above or below it.
+    fn mark_near(&self, position: Point<Pixels>) -> Option<Mark> {
+        let pages: Vec<usize> = self.page_bounds.borrow().keys().copied().collect();
+        let y = f32::from(position.y);
+        let off = |b: &Bounds<Pixels>| {
+            (f32::from(b.top()) - y)
+                .max(y - f32::from(b.bottom()))
+                .max(0.0)
         };
-        (!range.is_empty()).then_some((sel.page, range))
+        let (page, bounds) = pages
+            .into_iter()
+            .filter_map(|page| Some((page, self.page_rect(page)?)))
+            .min_by(|(pa, a), (pb, b)| off(a).total_cmp(&off(b)).then(pa.cmp(pb)))?;
+        let spot = if position.y < bounds.top() {
+            Spot::Start
+        } else if position.y > bounds.bottom() {
+            Spot::End
+        } else {
+            let (x, y) = self.point_on(&bounds, position);
+            Spot::At(x, y)
+        };
+        Some(Mark { page, spot })
     }
 
-    /// The selected text, if any.
+    /// The selected characters, page by page.
+    fn selected(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        self.selection.map_or_else(Vec::new, |sel| {
+            pdf_text::selection(&self.texts, sel.anchor, sel.head, sel.unit)
+        })
+    }
+
+    /// The selected text, if any (the text of pages not read yet left
+    /// out).
     pub fn selected_text(&self) -> Option<String> {
-        let (page, range) = self.selected()?;
-        let text = self.texts.get(page)?.as_ref()?;
-        Some(text.slice(range).to_owned())
+        let runs = self.selected();
+        (!runs.is_empty()).then(|| pdf_text::selection_text(&self.texts, &runs))
+    }
+
+    /// Whether the selection runs over pages whose text is still to be
+    /// read.
+    fn selection_waiting(&self) -> bool {
+        self.selection
+            .is_some_and(|sel| sel.pages().any(|p| self.text_missing(p)))
+    }
+
+    /// Reads the text of the pages the selection runs over that is not
+    /// read yet, before other pages: its ends first, then the pages
+    /// between.
+    fn read_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(sel) = self.selection else {
+            return;
+        };
+        for page in [sel.anchor.page, sel.head.page]
+            .into_iter()
+            .chain(sel.pages())
+        {
+            if self.text_missing(page) && !self.read_first.contains(&page) {
+                self.read_first.push(page);
+            }
+        }
+        self.pump_text(cx);
     }
 
     /// The left button went down on a page: a click starts a selection
     /// (its text is read first if it is not yet), a double click selects
     /// the word, a triple click the line; Shift+click moves the end of the
-    /// selection on that page (as in the Source view).
+    /// selection there, on this page or another (as in the Source view).
     fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.focus.focus(window, cx);
         self.dragging = false;
         self.pointer = None;
         self.autoscroll = None;
+        self.copy_pending = false;
         let Some((page, at)) = self.page_point(event.position) else {
             self.selection = None;
             cx.notify();
@@ -1357,26 +1398,43 @@ impl PdfViewer {
             _ => Unit::Line,
         };
         let extend = event.modifiers.shift && unit == Unit::Char;
+        let head = Mark {
+            page,
+            spot: Spot::At(at.0, at.1),
+        };
         self.selection = match self.selection {
-            Some(sel) if extend && sel.page == page => Some(PdfSelection {
-                anchor: if sel.all { PAGE_START } else { sel.anchor },
-                head: at,
-                all: false,
-                ..sel
-            }),
+            Some(sel) if extend => {
+                // After Select all, back from the page's end for a click
+                // on an earlier page.
+                let whole = sel.anchor.spot == Spot::Start
+                    && sel.head
+                        == Mark {
+                            page: sel.anchor.page,
+                            spot: Spot::End,
+                        };
+                let anchor = if whole && page < sel.anchor.page {
+                    sel.head
+                } else {
+                    sel.anchor
+                };
+                Some(PdfSelection {
+                    anchor,
+                    head,
+                    ..sel
+                })
+            }
             _ => Some(PdfSelection {
-                page,
-                anchor: at,
-                head: at,
+                anchor: head,
+                head,
                 unit,
-                all: false,
             }),
         };
         self.dragging = true;
         if self.text_missing(page) {
-            self.read_first = Some(page);
-            self.pump_text(cx);
+            self.read_first.retain(|p| *p != page);
+            self.read_first.insert(0, page);
         }
+        self.read_selection(cx);
         cx.notify();
     }
 
@@ -1415,23 +1473,24 @@ impl PdfViewer {
         self.autoscroll = None;
     }
 
-    /// Moves the selection's end to the pointer, on the selection's page
-    /// (above or below it: its first or last line).
+    /// Moves the selection's end to the pointer ([`Self::mark_near`]),
+    /// and reads the text of pages it reaches.
     fn follow_pointer(&mut self, cx: &mut Context<'_, Self>) {
-        let (Some(pointer), Some(page)) = (self.pointer, self.selection.map(|s| s.page)) else {
+        let Some(head) = self.pointer.and_then(|p| self.mark_near(p)) else {
             return;
         };
-        let Some(bounds) = self.page_rect(page) else {
+        let Some(sel) = &mut self.selection else {
             return;
         };
-        let at = self.point_on(&bounds, pointer);
-        if let Some(sel) = &mut self.selection
-            && (sel.head != at || sel.all)
-        {
-            sel.head = at;
-            sel.all = false;
-            cx.notify();
+        if sel.head == head {
+            return;
         }
+        let new_page = sel.head.page != head.page;
+        sel.head = head;
+        if new_page {
+            self.read_selection(cx);
+        }
+        cx.notify();
     }
 
     /// How far one tick scrolls for the pointer's place, px: up (below
@@ -1472,6 +1531,12 @@ impl PdfViewer {
 
     /// Ctrl+C: copies the selected text.
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.selection_waiting() {
+            // Once the pages' text is read ([`Self::text_landed`]).
+            self.copy_pending = true;
+            self.read_selection(cx);
+            return;
+        }
         match self.selected_text() {
             Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             None => cx.propagate(),
@@ -1481,24 +1546,33 @@ impl PdfViewer {
     /// Ctrl+A: selects the text of the page shown.
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<'_, Self>) {
         let page = self.current_page();
+        self.copy_pending = false;
         self.selection = Some(PdfSelection {
-            page,
-            anchor: (0.0, 0.0),
-            head: (0.0, 0.0),
+            anchor: Mark {
+                page,
+                spot: Spot::Start,
+            },
+            head: Mark {
+                page,
+                spot: Spot::End,
+            },
             unit: Unit::Char,
-            all: true,
         });
-        if self.text_missing(page) {
-            self.read_first = Some(page);
-            self.pump_text(cx);
-        }
+        self.read_selection(cx);
         cx.notify();
     }
 
     /// The highlights over page `page`: the find matches (the current one
     /// in `accent.line`, the others in `accent.tint`, as in the Reading
-    /// view) and the selection (`selection.text`).
-    fn marks(&self, page: usize, ppt: f32, theme: &Theme) -> Vec<AnyElement> {
+    /// view) and the selection (`selection.text`; `selected`, as
+    /// [`Self::selected`] gives it).
+    fn marks(
+        &self,
+        page: usize,
+        ppt: f32,
+        theme: &Theme,
+        selected: &[(usize, std::ops::Range<usize>)],
+    ) -> Vec<AnyElement> {
         let Some(text) = self.texts.get(page).and_then(Option::as_ref) else {
             return Vec::new();
         };
@@ -1522,12 +1596,10 @@ impl PdfViewer {
                 );
             }
         }
-        if let Some((at, range)) = self.selected()
-            && at == page
-        {
-            let color: Hsla = theme.selection.text.into();
+        let color: Hsla = theme.selection.text.into();
+        for (_, range) in selected.iter().filter(|(at, _)| *at == page) {
             rects.extend(
-                text.rects(range)
+                text.rects(range.clone())
                     .into_iter()
                     .map(|r| (r, color, "pdf-selection")),
             );
@@ -1790,11 +1862,15 @@ impl Render for PdfViewer {
         }
 
         let mut pages = div().relative().w(px(layout.width)).h(px(layout.height));
-        // The page a drag selects on stays known while it scrolls away.
-        let keep = self.selection.filter(|_| self.dragging).map(|s| s.page);
+        // The page a drag started on stays known while it scrolls away.
+        let keep = self
+            .selection
+            .filter(|_| self.dragging)
+            .map(|s| s.anchor.page);
         self.page_bounds
             .borrow_mut()
             .retain(|page, _| Some(*page) == keep);
+        let selected = self.selected();
         for page in from..=to.min(count.saturating_sub(1)) {
             let (w, h) = self.sizes[page];
             let (pw, ph) = (w * layout.ppt, h * layout.ppt);
@@ -1803,7 +1879,7 @@ impl Render for PdfViewer {
             let image = self.image_of(page, scale);
             let error = self.failed.get(&page).map(|(_, why)| why.clone());
             let label = format!("Page {} of {count}", page + 1);
-            let marks = self.marks(page, layout.ppt, theme);
+            let marks = self.marks(page, layout.ppt, theme, &selected);
             let has_text = self
                 .texts
                 .get(page)

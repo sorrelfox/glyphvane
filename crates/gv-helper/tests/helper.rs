@@ -246,3 +246,38 @@ fn the_helper_reads_the_text_of_an_exported_pdf() {
     assert!(second.y0 > first.y1 - 1.0, "{second:?}");
     helper.shutdown();
 }
+
+#[test]
+fn the_text_of_a_page_in_two_columns_is_read_column_by_column() {
+    let helper = Helper::new(config());
+    let job = PdfJob {
+        source: "#set page(width: 400pt, height: 300pt, margin: 20pt, columns: 2,\n\
+                   footer: align(center)[7])\n\
+                 #set text(font: \"Inter Variable\", size: 9pt)\n\
+                 #set par(justify: true)\n\
+                 #place(top + center, float: true, scope: \"parent\")[A title across the page]\n\
+                 Alpha starts the left column. #lorem(140) Omega ends the right column."
+            .into(),
+        fonts: vec!["Inter Variable".into()],
+        max_pages: 5,
+        ident: "columns".into(),
+        ..PdfJob::default()
+    };
+    let pdf = helper
+        .pdf(job, 30 * SECOND, 1 << 20, &never())
+        .expect("a PDF")
+        .pdf;
+    helper.open(1, pdf, 30 * SECOND, &never()).expect("opens");
+    let text = helper
+        .text(TextJob { key: 1, page: 0 }, 30 * SECOND, &never())
+        .expect("read")
+        .expect("held");
+    assert_eq!(text.boxes.len(), text.text.chars().count());
+    assert!(
+        text.text.starts_with("A title across the page\nAlpha"),
+        "{}",
+        text.text
+    );
+    assert!(text.text.ends_with("right column.\n7"), "{}", text.text);
+    helper.shutdown();
+}

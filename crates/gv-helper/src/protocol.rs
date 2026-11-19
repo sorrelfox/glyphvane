@@ -193,9 +193,9 @@ pub struct TextBox {
     pub y1: f32,
 }
 
-/// The text of a page, in the content stream's order, with spaces and
-/// line ends between words and lines; `boxes` has one box per character
-/// (`char`) of `text`.
+/// The text of a page, in the content stream's order (column by column
+/// on a page in two columns), with spaces and line ends between words and
+/// lines; `boxes` has one box per character (`char`) of `text`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PageText {
     pub text: String,

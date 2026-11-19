@@ -294,8 +294,9 @@ pub trait PdfEngine: Send + Sync {
     }
 }
 
-/// The text of a PDF page, in the order the PDF draws it, with spaces and
-/// line ends between words and lines.
+/// The text of a PDF page, in the order the PDF draws it (column by column
+/// on a page in two columns), with spaces and line ends between words and
+/// lines.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PdfPageText {
     pub text: String,

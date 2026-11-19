@@ -1110,3 +1110,118 @@ fn dragging_near_an_edge_scrolls_the_view(cx: &mut TestAppContext) {
     assert!(top(&mut vcx) < stopped);
     vcx.simulate_mouse_up(point(press_at.x, view.top()), MouseButton::Left, none);
 }
+
+/// Points on page `page` (from 1) as window pixels (inside its 1 px
+/// frame).
+fn on_page(
+    pdf: &Entity<PdfViewer>,
+    vcx: &mut VisualTestContext,
+    page: usize,
+) -> impl Fn(f32, f32) -> Point<Pixels> + use<> {
+    let name: &'static str = ["pdf-page-1", "pdf-page-2", "pdf-page-3"][page - 1];
+    let bounds = vcx
+        .debug_bounds(name)
+        .unwrap_or_else(|| panic!("page {page} laid out"));
+    let ppt = pdf.read_with(vcx, |p, _| p.effective_zoom()) * PX_PER_PT;
+    move |x: f32, y: f32| {
+        point(
+            bounds.origin.x + px(1.0 + x * ppt),
+            bounds.origin.y + px(1.0 + y * ppt),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_selection_runs_across_pages(cx: &mut TestAppContext) {
+    // Three short pages, all in view at 75 %.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = pdf_file(dir.path());
+    let texts = [
+        "First line\nend of first",
+        "Middle page",
+        "Third page\nlast",
+    ];
+    let engine = Arc::new(FakePdf {
+        texts: texts.iter().map(|t| (*t).to_owned()).collect(),
+        ..FakePdf::pages(&[(300.0, 150.0); 3])
+    });
+    let (window, viewer) = open(cx, &file, Some(Arc::clone(&engine)), None);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let pdf = pdf_of(&viewer, &mut vcx);
+    vcx.update(|_, cx| pdf.update(cx, |p, cx| p.set_zoom(PdfZoom::Scale(0.75), cx)));
+    draw(&mut vcx);
+    let none = Modifiers::none();
+    // Character k of line l on a page: its left and right quarter.
+    let pages: Vec<_> = (1..=3).map(|p| on_page(&pdf, &mut vcx, p)).collect();
+    let before = |p: usize, k: f32, l: f32| pages[p](72.0 + 6.0 * k + 1.0, 78.0 + 20.0 * l);
+    let after = |p: usize, k: f32, l: f32| pages[p](72.0 + 6.0 * k + 5.0, 78.0 + 20.0 * l);
+
+    // From before "end" on page 1 to after "Third" on page 3: the rest of
+    // page 1, page 2 whole and the start of page 3. Each page's text is
+    // read as the selection reaches it, its ends first.
+    vcx.simulate_mouse_down(before(0, 0.0, 1.0), MouseButton::Left, none);
+    vcx.simulate_mouse_move(after(2, 4.0, 0.0), MouseButton::Left, none);
+    vcx.simulate_mouse_up(after(2, 4.0, 0.0), MouseButton::Left, none);
+    draw(&mut vcx);
+    assert_eq!(engine.texted_pages(), [0, 2, 1]);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("end of first\nMiddle page\nThird")
+    );
+    assert!(vcx.debug_bounds("pdf-selection").is_some());
+    press(&pdf, &mut vcx, "ctrl-c");
+    let copied = vcx.read_from_clipboard().and_then(|c| c.text());
+    assert_eq!(copied.as_deref(), Some("end of first\nMiddle page\nThird"));
+
+    // Dragging the other way, up into the gap above page 2: the end of
+    // page 1 back to the press.
+    vcx.simulate_mouse_down(after(1, 5.0, 0.0), MouseButton::Left, none);
+    let gap = pages[1](10.0, 0.0) - point(px(0.0), px(5.0));
+    vcx.simulate_mouse_move(gap, MouseButton::Left, none);
+    vcx.simulate_mouse_up(gap, MouseButton::Left, none);
+    draw(&mut vcx);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("Middle"));
+    // Past page 1's end, below it: the rest of page 1.
+    vcx.simulate_mouse_down(before(0, 6.0, 0.0), MouseButton::Left, none);
+    let below = pages[0](10.0, 150.0) + point(px(0.0), px(2.0));
+    vcx.simulate_mouse_move(below, MouseButton::Left, none);
+    vcx.simulate_mouse_up(below, MouseButton::Left, none);
+    draw(&mut vcx);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("line\nend of first")
+    );
+
+    // Shift+click on another page moves the end there.
+    click(&mut vcx, before(2, 0.0, 1.0), 1, none);
+    click(&mut vcx, before(0, 4.0, 1.0), 1, Modifiers::shift());
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("of first\nMiddle page\nThird page\n")
+    );
+    // After Select all (page 1, the page shown), from its start.
+    press(&pdf, &mut vcx, "ctrl-a");
+    click(&mut vcx, after(1, 5.0, 0.0), 1, Modifiers::shift());
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("First line\nend of first\nMiddle")
+    );
+}
+
+#[gpui::test]
+fn copying_text_not_read_yet_waits_for_it(cx: &mut TestAppContext) {
+    let (_dir, engine, mut vcx, _viewer, pdf) = open_text(cx, &["Hello world", "Page two"]);
+    vcx.update(|window, cx| pdf.read(cx).focus_handle(cx).focus(window, cx));
+    draw(&mut vcx);
+    assert!(engine.texted_pages().is_empty());
+    // Select all and copy before the page's text has come.
+    vcx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::SelectAll), cx);
+        window.dispatch_action(Box::new(crate::keymap::actions::editor::Copy), cx);
+    });
+    draw(&mut vcx);
+    assert_eq!(engine.texted_pages(), [0]);
+    let copied = vcx.read_from_clipboard().and_then(|c| c.text());
+    assert_eq!(copied.as_deref(), Some("Hello world"));
+}

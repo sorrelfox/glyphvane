@@ -3,9 +3,10 @@
 
 //! The text of the PDF viewer's pages, as the engine read it
 //! ([`PdfPageText`]): matching a query across pages, the boxes to
-//! highlight for a run of characters, the character nearest a point, and
-//! the word and line around a character (selection). Positions are characters (`char`) of a page's text;
-//! coordinates are PDF points from the page's top left.
+//! highlight for a run of characters, the character nearest a point, the
+//! word and line around a character, and a selection from one page to
+//! another ([`selection`]). Positions are characters (`char`) of a page's
+//! text; coordinates are PDF points from the page's top left.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -194,6 +195,118 @@ impl PageText {
     fn char_of(&self, byte: usize) -> usize {
         self.starts.partition_point(|s| *s < byte)
     }
+
+    /// The characters an end of a selection at `spot` holds: the caret
+    /// there (an empty range) for characters, the word or line of the
+    /// character there for words and lines.
+    pub fn span(&self, spot: Spot, unit: Unit) -> Range<usize> {
+        let (x, y) = match spot {
+            Spot::Start => return 0..0,
+            Spot::End => return self.len()..self.len(),
+            Spot::At(x, y) => (x, y),
+        };
+        match unit {
+            Unit::Char => self.caret_at(x, y).map_or(0..0, |c| c..c),
+            Unit::Word => self.char_near(x, y).map_or(0..0, |c| self.word_at(c)),
+            Unit::Line => self.char_near(x, y).map_or(0..0, |c| self.line_at(c)),
+        }
+    }
+}
+
+/// What a selection grows by: what the click that started it took.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Unit {
+    /// A press: characters.
+    #[default]
+    Char,
+    /// A double click: words.
+    Word,
+    /// A triple click: lines.
+    Line,
+}
+
+/// Where on its page an end of a selection is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Spot {
+    /// Before the page's first character.
+    Start,
+    /// At the character nearest a point (points from the page's top left).
+    At(f32, f32),
+    /// After the page's last character.
+    End,
+}
+
+/// One end of a selection: a page and where on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Mark {
+    pub page: usize,
+    pub spot: Spot,
+}
+
+/// The characters selected from `anchor` to `head` (either way round),
+/// grown to whole words or lines by `unit`, as runs of characters page
+/// by page in page order: on one page, from the earlier end to the later
+/// one; across pages, from the first end to the end of its page, every
+/// page between whole, and the last page from its start to the last end.
+/// Pages whose text is not read yet (`None`) and empty runs are left out.
+pub(crate) fn selection(
+    pages: &[Option<Arc<PageText>>],
+    anchor: Mark,
+    head: Mark,
+    unit: Unit,
+) -> Vec<(usize, Range<usize>)> {
+    let (first, last) = if head.page < anchor.page {
+        (head, anchor)
+    } else {
+        (anchor, head)
+    };
+    let text = |page: usize| pages.get(page).and_then(Option::as_ref);
+    let mut out = Vec::new();
+    if first.page == last.page {
+        if let Some(text) = text(first.page) {
+            let a = text.span(first.spot, unit);
+            let b = text.span(last.spot, unit);
+            out.push((first.page, a.start.min(b.start)..a.end.max(b.end)));
+        }
+    } else {
+        for page in first.page..=last.page.min(pages.len().saturating_sub(1)) {
+            let Some(text) = text(page) else {
+                continue;
+            };
+            let start = if page == first.page {
+                text.span(first.spot, unit).start
+            } else {
+                0
+            };
+            let end = if page == last.page {
+                text.span(last.spot, unit).end
+            } else {
+                text.len()
+            };
+            out.push((page, start..end.max(start)));
+        }
+    }
+    out.retain(|(_, r)| !r.is_empty());
+    out
+}
+
+/// The text of `runs` (as [`selection`] gives them), the runs of one page
+/// after another separated by a line end.
+pub(crate) fn selection_text(
+    pages: &[Option<Arc<PageText>>],
+    runs: &[(usize, Range<usize>)],
+) -> String {
+    let mut out = String::new();
+    for (k, (page, chars)) in runs.iter().enumerate() {
+        let Some(text) = pages.get(*page).and_then(Option::as_ref) else {
+            continue;
+        };
+        if k > 0 {
+            out.push('\n');
+        }
+        out.push_str(text.slice(chars.clone()));
+    }
+    out
 }
 
 /// A match: characters `chars` of page `page`.
@@ -329,6 +442,68 @@ mod tests {
         assert_eq!(p.char_near(57.0, 15.0), Some(7));
         assert_eq!(PageText::default().char_near(0.0, 0.0), None);
         assert_eq!(PageText::default().line_at(0), 0..0);
+    }
+
+    #[test]
+    fn a_selection_runs_across_pages_in_order() {
+        let pages = vec![
+            Some(Arc::new(PageText::new(page(&["one two", "three"])))),
+            Some(Arc::new(PageText::new(page(&["middle page"])))),
+            None,
+            Some(Arc::new(PageText::new(page(&["last page here"])))),
+        ];
+        // From before "two" on page 1 to after "last" on page 4: the end
+        // of page 1, page 2 whole, page 3 (not read) left out, the start of
+        // page 4.
+        let before_two = Mark {
+            page: 0,
+            spot: Spot::At(35.0, 15.0),
+        };
+        let after_last = Mark {
+            page: 3,
+            spot: Spot::At(33.0, 15.0),
+        };
+        let runs = selection(&pages, before_two, after_last, Unit::Char);
+        assert_eq!(runs, [(0, 4..13), (1, 0..11), (3, 0..4)]);
+        assert_eq!(
+            selection_text(&pages, &runs),
+            "two\nthree\nmiddle page\nlast"
+        );
+        // Either way round.
+        assert_eq!(selection(&pages, after_last, before_two, Unit::Char), runs);
+        // By words: both ends grow to their words.
+        let in_two = Mark {
+            page: 0,
+            spot: Spot::At(38.0, 15.0),
+        };
+        let in_page = Mark {
+            page: 1,
+            spot: Spot::At(65.0, 15.0),
+        };
+        let runs = selection(&pages, in_page, in_two, Unit::Word);
+        assert_eq!(selection_text(&pages, &runs), "two\nthree\nmiddle page");
+        // By lines.
+        let runs = selection(&pages, in_two, in_page, Unit::Line);
+        assert_eq!(runs, [(0, 0..13), (1, 0..11)]);
+        // A page's start and end; an end at a page's very start adds
+        // nothing of it.
+        let start = |page| Mark {
+            page,
+            spot: Spot::Start,
+        };
+        let end = |page| Mark {
+            page,
+            spot: Spot::End,
+        };
+        assert_eq!(
+            selection(&pages, start(1), end(1), Unit::Char),
+            [(1, 0..11)]
+        );
+        assert!(selection(&pages, end(0), start(1), Unit::Char).is_empty());
+        assert_eq!(
+            selection(&pages, before_two, start(1), Unit::Char),
+            [(0, 4..13)]
+        );
     }
 
     #[test]

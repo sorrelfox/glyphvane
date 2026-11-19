@@ -3,6 +3,15 @@
 All notable changes to Glyphvane are listed here. The format follows
 Conventional Commits, and versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### PDF
+
+- Text selection in the PDF viewer runs across pages: drag or Shift+click
+  from one page to another to select and copy the text between; pages in
+  two columns are read column by column, so find, selection and copying
+  follow the reading order.
+
 ## [1.2.0] - 2026-11-19
 
 ### PDF

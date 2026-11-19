@@ -11,8 +11,10 @@
 //! `ToUnicode` map, else its glyph names) and its box on the page. Images
 //! are never decoded and Type 3 glyph procedures never run.
 //!
-//! - **Order.** The content stream's: no reading-order analysis, so a
-//!   two-column page may interleave its columns.
+//! - **Order.** The content stream's, except on a page in two columns
+//!   ([`order_columns`]): there each column is read top to bottom, the
+//!   left one first, and text across both (a title, a full-width figure,
+//!   a page number) comes where it is between them.
 //! - **Spaces and line ends.** A gap of more than a quarter of the font
 //!   size between two glyphs on a line adds a space, unless the PDF drew
 //!   one; a glyph off the previous one's line starts a new line (`\n`).
@@ -41,6 +43,10 @@ use hayro::hayro_syntax::page::Page;
 use hayro::kurbo::{Affine, BezPath, Point, Rect, Vec2};
 
 use crate::protocol::{PageText, TextBox};
+
+mod columns;
+
+use columns::order_columns;
 
 /// The most characters kept of one page.
 pub const MAX_CHARS: usize = 200_000;
@@ -106,6 +112,9 @@ struct Last {
 struct TextDevice {
     text: String,
     boxes: Vec<TextBox>,
+    /// Whether each character runs left to right along the page (not
+    /// rotated).
+    upright: Vec<bool>,
     last: Option<Last>,
 }
 
@@ -114,10 +123,11 @@ impl TextDevice {
         self.boxes.len() >= MAX_CHARS
     }
 
-    fn push_char(&mut self, c: char, b: TextBox) {
+    fn push_char(&mut self, c: char, b: TextBox, upright: bool) {
         if !self.full() {
             self.text.push(c);
             self.boxes.push(b);
+            self.upright.push(upright);
         }
     }
 
@@ -151,6 +161,7 @@ impl TextDevice {
             .map(|c| if c == '\u{a0}' || c == '\t' { ' ' } else { c })
             .collect();
         if let Some(last) = self.last {
+            let last_upright = is_upright(last.dir);
             // Drawn twice in place.
             if last.first == chars.first().copied()
                 && (origin - last.origin).hypot() < SAME_PLACE * em.min(last.em)
@@ -167,13 +178,13 @@ impl TextDevice {
             };
             if off > LINE_GAP * last.em {
                 if !self.text.ends_with('\n') && !self.text.is_empty() {
-                    self.push_char('\n', gap_box(last.end, last.end, last.em));
+                    self.push_char('\n', gap_box(last.end, last.end, last.em), last_upright);
                 }
             } else if (ahead > SPACE_GAP * last.em.min(em) || ahead < -2.0 * last.em)
                 && !self.ends_with_space()
                 && !chars.first().is_some_and(|c| c.is_whitespace())
             {
-                self.push_char(' ', gap_box(last.end, origin, last.em));
+                self.push_char(' ', gap_box(last.end, origin, last.em), last_upright);
             }
         }
         self.last = Some(Last {
@@ -189,6 +200,7 @@ impl TextDevice {
         // The glyph's box, shared out among its characters along the
         // baseline.
         let n = chars.len() as f64;
+        let upright = is_upright(dir);
         for (i, c) in chars.into_iter().enumerate() {
             let x0 = adv * i as f64 / n;
             let x1 = adv * (i + 1) as f64 / n;
@@ -198,7 +210,7 @@ impl TextDevice {
                 t * Point::new(x0, ASCENT * UNITS),
                 t * Point::new(x1, ASCENT * UNITS),
             ];
-            self.push_char(c, bbox(&corners, Vec2::ZERO, Vec2::ZERO));
+            self.push_char(c, bbox(&corners, Vec2::ZERO, Vec2::ZERO), upright);
         }
     }
 
@@ -206,12 +218,21 @@ impl TextDevice {
         while self.text.ends_with(['\n', ' ']) {
             self.text.pop();
             self.boxes.pop();
+            self.upright.pop();
         }
-        PageText {
-            text: self.text,
-            boxes: self.boxes,
+        match order_columns(&self.text, &self.boxes, &self.upright) {
+            Some((text, boxes)) => PageText { text, boxes },
+            None => PageText {
+                text: self.text,
+                boxes: self.boxes,
+            },
         }
     }
+}
+
+/// Whether a baseline along `dir` runs left to right on the page.
+fn is_upright(dir: Vec2) -> bool {
+    dir.x > 0.99 && dir.y.abs() < 0.1
 }
 
 /// The vector `by` points "up" from a baseline along `dir` (y grows down
@@ -325,6 +346,144 @@ mod tests {
         // The space spans the gap.
         let space = page.boxes[2];
         assert!((space.x0 - 20.0).abs() < 1e-3 && (space.x1 - 30.0).abs() < 1e-3);
+    }
+
+    /// Draws `s` from (`x`, `y`) at 10 pt, each character (spaces too) a
+    /// glyph 5 pt wide.
+    fn type_at(dev: &mut TextDevice, x: f64, y: f64, s: &str) {
+        for (k, c) in s.chars().enumerate() {
+            glyph_at(dev, x + 5.0 * k as f64, y, 10.0, c);
+        }
+    }
+
+    const TITLE: &str = "A title that runs across both of the columns of this page";
+
+    fn left(k: usize) -> String {
+        format!("left {k:02} lorem ipsum dolor sit amet ok")
+    }
+
+    fn right(k: usize) -> String {
+        format!("right {k:02} lorem ipsum dolor sit amet")
+    }
+
+    /// A title, 30 rows in two columns (x 50 to 235 and 300 to 485, a
+    /// gutter of 6.5 em) and a centred page number, drawn row by row or
+    /// column by column.
+    fn two_columns(by_rows: bool) -> PageText {
+        let mut dev = TextDevice::default();
+        type_at(&mut dev, 50.0, 40.0, TITLE);
+        let y = |k: usize| 80.0 + 20.0 * k as f64;
+        if by_rows {
+            for k in 0..30 {
+                type_at(&mut dev, 50.0, y(k), &left(k));
+                type_at(&mut dev, 300.0, y(k), &right(k));
+            }
+        } else {
+            for k in 0..30 {
+                type_at(&mut dev, 50.0, y(k), &left(k));
+            }
+            for k in 0..30 {
+                type_at(&mut dev, 300.0, y(k), &right(k));
+            }
+        }
+        type_at(&mut dev, 268.0, 720.0, "7");
+        dev.finish()
+    }
+
+    fn reading_order() -> String {
+        let mut lines = vec![TITLE.to_owned()];
+        lines.extend((0..30).map(left));
+        lines.extend((0..30).map(right));
+        lines.push("7".to_owned());
+        lines.join("\n")
+    }
+
+    #[test]
+    fn two_columns_are_read_one_after_the_other() {
+        for by_rows in [true, false] {
+            let page = two_columns(by_rows);
+            assert_eq!(page.text, reading_order(), "drawn by rows: {by_rows}");
+            assert_eq!(page.boxes.len(), page.text.chars().count());
+            // Each character keeps its box: "right 00" starts the right
+            // column.
+            let byte = page.text.find("right 00").expect("the right column");
+            let at = page.text[..byte].chars().count();
+            let r = page.boxes[at];
+            assert!(
+                (r.x0 - 300.0).abs() < 1e-3 && (r.y1 - 82.0).abs() < 1e-3,
+                "{r:?}"
+            );
+            // A line end between pieces has no width.
+            let end = page.boxes[TITLE.chars().count()];
+            assert!((end.x1 - end.x0).abs() < 1e-6, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn text_across_the_columns_mid_page_is_read_between_them() {
+        let mut dev = TextDevice::default();
+        let y = |k: usize| 80.0 + 20.0 * k as f64;
+        for k in (0..10).chain(20..30) {
+            type_at(&mut dev, 50.0, y(k), &left(k));
+            type_at(&mut dev, 300.0, y(k), &right(k));
+        }
+        // A full-width caption in the middle, drawn last.
+        type_at(&mut dev, 50.0, y(15), TITLE);
+        let page = dev.finish();
+        let mut lines: Vec<String> = (0..10).map(left).collect();
+        lines.extend((0..10).map(right));
+        lines.push(TITLE.to_owned());
+        lines.extend((20..30).map(left));
+        lines.extend((20..30).map(right));
+        assert_eq!(page.text, lines.join("\n"));
+    }
+
+    #[test]
+    fn a_page_in_one_column_keeps_the_order_drawn() {
+        // Prose across the page, with a centred page number.
+        let mut dev = TextDevice::default();
+        let mut lines = Vec::new();
+        for k in 0..30 {
+            let words = ["lorem", "ipsum", "dolor", "sit", "amet", "consectetur"];
+            let line: Vec<&str> = (0..14).map(|w| words[(w * 7 + k) % words.len()]).collect();
+            let line = line.join(" ");
+            type_at(&mut dev, 50.0, 80.0 + 20.0 * k as f64, &line);
+            lines.push(line);
+        }
+        type_at(&mut dev, 268.0, 720.0, "7");
+        lines.push("7".to_owned());
+        assert_eq!(dev.finish().text, lines.join("\n"));
+
+        // A table of short keys and long values is not two columns.
+        let mut dev = TextDevice::default();
+        let mut rows = Vec::new();
+        for k in 0..30 {
+            let key = ["a", "key", "bb", "name"][k % 4];
+            let value = right(k);
+            type_at(&mut dev, 50.0, 80.0 + 20.0 * k as f64, key);
+            type_at(&mut dev, 300.0, 80.0 + 20.0 * k as f64, &value);
+            rows.push(format!("{key} {value}"));
+        }
+        assert_eq!(dev.finish().text, rows.join("\n"));
+    }
+
+    #[test]
+    fn rotated_text_comes_after_the_columns() {
+        let mut dev = TextDevice::default();
+        // A note up the left margin, drawn first.
+        for (k, c) in "margin".chars().enumerate() {
+            let t = Affine::new([0.0, -0.01, -0.01, 0.0, 20.0, 600.0 - 5.0 * k as f64]);
+            dev.glyph(t, 500.0, Some(BfString::Char(c)));
+        }
+        for k in 0..30 {
+            let y = 80.0 + 20.0 * k as f64;
+            type_at(&mut dev, 50.0, y, &left(k));
+            type_at(&mut dev, 300.0, y, &right(k));
+        }
+        let page = dev.finish();
+        assert!(page.text.starts_with("left 00"), "{}", page.text);
+        assert!(page.text.ends_with("sit amet\nmargin"), "{}", page.text);
+        assert_eq!(page.boxes.len(), page.text.chars().count());
     }
 
     #[test]
