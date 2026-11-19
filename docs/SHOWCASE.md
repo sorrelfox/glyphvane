@@ -4,8 +4,9 @@ This file holds the texts and the screenshot plan for presenting Glyphvane:
 on the website or README, in release announcements, and in app stores
 (Flathub, AUR, winget and others). It describes Glyphvane 1.1.
 
-Screenshots go in [`docs/screenshots/`](screenshots/) under the file names
-used below. Until they are taken, the image links below show as missing.
+Screenshots are in [`docs/screenshots/`](screenshots/) under the file names
+used below, at 1600 × 1000 (taken at 2× and scaled down). The demo content is
+a made-up "Tide Station" vault.
 
 ---
 
