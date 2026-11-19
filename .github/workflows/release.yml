@@ -65,6 +65,16 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # Every package ships packaging/THIRD-PARTY-NOTICES.txt and the
+      # executables embed it (--licenses, Help > Third-party licenses): its
+      # generated crate section must list every crate linked on every
+      # target. `cargo xtask package` checks this again before packaging.
+      - name: Third-party notices list every linked crate
+        run: cargo xtask notices --check
+
   linux:
     name: Linux (${{ matrix.arch }})
     needs: check

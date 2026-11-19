@@ -8,12 +8,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::{cargo, deps, fixtures, headers, spec};
+use crate::{cargo, deps, fixtures, headers, notices, spec};
 
 enum Step {
     Cargo(&'static [&'static str]),
     Headers,
     Deps,
+    Notices,
     SpecFixtures,
     SpecRatchet,
 }
@@ -25,6 +26,7 @@ const STEPS: &[(&str, Step)] = &[
     ),
     ("check-headers", Step::Headers),
     ("check-deps", Step::Deps),
+    ("notices --check", Step::Notices),
     ("fetch-spec --verify --offline", Step::SpecFixtures),
     ("spec --ratchet (commonmark, gfm)", Step::SpecRatchet),
     (
@@ -57,6 +59,7 @@ pub(crate) fn run(root: &Path) -> Result<bool> {
                 .success(),
             Step::Headers => headers::run(root, false)?,
             Step::Deps => deps::run(root)?,
+            Step::Notices => notices::run(root, &["--check".to_owned()])?,
             Step::SpecFixtures => fixtures::verify_local(root)?,
             Step::SpecRatchet => spec::ratchet_all(root)?,
         };

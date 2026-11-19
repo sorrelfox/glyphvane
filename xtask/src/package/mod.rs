@@ -14,6 +14,9 @@
 //! | `dmg`      | `hdiutil`                                               |
 //! | `msi`      | WiX v6 `wix build` from `packaging/windows/glyphvane.wxs` |
 //!
+//! Every format ships `packaging/THIRD-PARTY-NOTICES.txt`; packaging fails
+//! unless its generated crate section is current (`cargo xtask notices`).
+//!
 //! Every artifact is built from the same binaries (`[profile.dist]` by
 //! default) with `SOURCE_DATE_EPOCH` set to the commit time, so the Linux
 //! artifacts are byte-identical across runs. External tools are never
@@ -35,7 +38,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::cargo;
+use crate::{cargo, notices};
 
 /// The application id (desktop file, metainfo, icons, bundle id).
 pub(crate) const APP_ID: &str = "io.github.sorrelfox.Glyphvane";
@@ -286,6 +289,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     }
 
     let meta = Metadata::load(root)?;
+    // Every format ships packaging/THIRD-PARTY-NOTICES.txt, and the
+    // executables embed it: it must list every crate linked into them.
+    notices::verify(root)?;
     let epoch = source_date_epoch(root)?;
     eprintln!(
         "==> glyphvane {} for {target} ({} profile), SOURCE_DATE_EPOCH={epoch}",

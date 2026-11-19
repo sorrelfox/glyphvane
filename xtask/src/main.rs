@@ -11,6 +11,7 @@ mod headers;
 mod highlight_bundle;
 mod icount;
 mod latency;
+mod notices;
 mod package;
 mod pathological;
 mod spec;
@@ -30,7 +31,8 @@ Commands:
   check-deps            Check that GUI-free crates do not depend on GPUI
                         (NFR-MAINT-01).
   ci                    Run the local equivalent of CI: fmt, check-headers,
-                        check-deps, spec fixtures and ratchet, clippy, test.
+                        check-deps, notices --check, spec fixtures and
+                        ratchet, clippy, test.
   spec [options]        Run the CommonMark (or GFM) spec examples against
                         gv-syntax's HTML emitter. Options:
                           --suite commonmark|gfm   (default commonmark)
@@ -55,6 +57,10 @@ Commands:
   latency LOG [--warm-up N]
                         Percentiles of a keystroke latency log written with
                         GLYPHVANE_DEBUG_LATENCY=LOG (default warm-up 20).
+  notices [--check]     Write (or with --check, verify) the generated Rust
+                        crate section of packaging/THIRD-PARTY-NOTICES.txt:
+                        every crate linked into the release executables, with
+                        its copyright notices and licence texts.
   package --format F[,F...] [--target T] [--profile P] [--out DIR] [--no-build]
                         Build release artifacts (deb, rpm, tar.gz, appimage,
                         app, zip, dmg, msi) and SHA256SUMS; see
@@ -117,6 +123,7 @@ fn run() -> Result<bool> {
         "pathological" => pathological::run(&root, rest),
         "fuzz-seed" => fuzz_seed::run(&root, rest),
         "latency" => latency::run(rest),
+        "notices" => notices::run(&root, rest),
         "package" => package::run(&root, rest),
         "size-report" => package::size::run(rest),
         "bench-icount" => icount::run(&root, rest),

@@ -69,6 +69,8 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    # Unicode data tables bundled in regex-syntax (listed in the notices).
+    "Unicode-DFS-2016",
     "CC0-1.0",
     "MPL-2.0",
     "LGPL-2.1-or-later",
