@@ -341,13 +341,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder appstream desktop-file-utils dbus-daemon
+            flatpak flatpak-builder appstream desktop-file-utils dbus-daemon \
+            librsvg2-common
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Set SOURCE_DATE_EPOCH to the commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      # flatpak-builder installs the runtime and SDK from Flathub.
+      # flatpak-builder installs the runtime and SDK from Flathub. Exporting
+      # checks the icons through the host's gdk-pixbuf, which reads SVG only
+      # with librsvg2-common (missing from the x86_64 runner image).
       - name: Build
         run: |
           cp "linux/glyphvane-$VERSION-${{ matrix.target }}.tar.gz" packaging/flatpak/glyphvane.tar.gz
