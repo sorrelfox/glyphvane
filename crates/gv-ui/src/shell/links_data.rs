@@ -31,6 +31,8 @@ pub(super) struct Snippet {
     pub text: SharedString,
     /// Byte range of the link's text in `text`.
     pub highlight: Range<usize>,
+    /// The formulas of the line (byte ranges of `text`), to typeset.
+    pub math: Vec<excerpt::Formula>,
 }
 
 /// One link, or one unlinked mention, in a source note.
@@ -277,14 +279,16 @@ pub(super) fn snippet(
     let line = text[content..line_end].trim_end();
     let mark = span.start - content..span.end - content;
     let stripped = excerpt::strip(line, std::slice::from_ref(&mark), options);
-    let (before, shown, after) = match stripped.marks.first() {
+    let (before, shown, after, mark, formulas) = match stripped.marks.first() {
         Some(m) if link_text || &stripped.text[m.clone()] == construct => (
             stripped.text[..m.start].to_string(),
             stripped.text[m.clone()].to_string(),
             stripped.text[m.end..].to_string(),
+            m.clone(),
+            stripped.math,
         ),
         // The span is not one piece of text (a mention across markup):
-        // the line as written.
+        // the line as written, its formulas not typeset.
         _ => (
             before,
             if link_text {
@@ -293,16 +297,41 @@ pub(super) fn snippet(
                 construct.to_string()
             },
             text[span.end..line_end].trim_end().to_string(),
+            0..0,
+            Vec::new(),
         ),
     };
+    // The replacements keep the lengths, so the formulas' ranges hold.
     let shown = shown.replace(['\n', '\t'], " ");
-    let before = shorten_start(&before.replace('\t', " "), CONTEXT_BEFORE);
-    let after = shorten_end(&after.replace('\t', " "), CONTEXT_AFTER);
+    let (before, kept_from) = shorten_start(&before.replace('\t', " "), CONTEXT_BEFORE);
+    let (after, kept_to) = shorten_end(&after.replace('\t', " "), CONTEXT_AFTER);
     let start = before.len();
+    // Where the kept text of the stripped line starts in `out`, before,
+    // in and after the link.
+    let lead = (start + kept_from).saturating_sub(mark.start);
+    let math = formulas
+        .into_iter()
+        .filter_map(|f| {
+            let r = f.out.clone();
+            let out = if r.end <= mark.start && r.start >= kept_from {
+                r.start - kept_from + lead..r.end - kept_from + lead
+            } else if r.start >= mark.start && r.end <= mark.end {
+                r.start - mark.start + start..r.end - mark.start + start
+            } else if r.start >= mark.end && r.end <= mark.end + kept_to {
+                let at = start + shown.len();
+                r.start - mark.end + at..r.end - mark.end + at
+            } else {
+                // Cut by the shortening, or across the link's edge.
+                return None;
+            };
+            Some(excerpt::Formula { out, ..f })
+        })
+        .collect();
     let out = format!("{before}{shown}{after}");
     Some(Snippet {
         highlight: start..start + shown.len(),
         text: out.into(),
+        math,
     })
 }
 
@@ -337,11 +366,12 @@ fn strip_block_markers(before: &str) -> String {
     }
 }
 
-/// The last `max` characters of `s`, cut after a space, behind "…".
-fn shorten_start(s: &str, max: usize) -> String {
+/// The last `max` characters of `s`, cut after a space, behind "…"; and
+/// where in `s` the kept text starts.
+fn shorten_start(s: &str, max: usize) -> (String, usize) {
     let count = s.chars().count();
     if count <= max {
-        return s.to_string();
+        return (s.to_string(), 0);
     }
     let cut = s
         .char_indices()
@@ -349,18 +379,19 @@ fn shorten_start(s: &str, max: usize) -> String {
         .map_or(s.len(), |(i, _)| i);
     let tail = &s[cut..];
     let tail = tail.find(' ').map_or(tail, |i| &tail[i + 1..]);
-    format!("…{tail}")
+    (format!("…{tail}"), s.len() - tail.len())
 }
 
-/// The first `max` characters of `s`, cut before a space, then "…".
-fn shorten_end(s: &str, max: usize) -> String {
+/// The first `max` characters of `s`, cut before a space, then "…"; and
+/// how many bytes of `s` are kept.
+fn shorten_end(s: &str, max: usize) -> (String, usize) {
     if s.chars().count() <= max {
-        return s.to_string();
+        return (s.to_string(), s.len());
     }
     let cut = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
     let head = &s[..cut];
     let head = head.rfind(' ').map_or(head, |i| &head[..i]);
-    format!("{head}…")
+    (format!("{head}…"), head.len())
 }
 
 pub(super) use crate::search_panel::excerpt::link_label;
@@ -476,6 +507,50 @@ mod tests {
         let s = snippet(text, at..at + 5, false, obsidian()).expect("snippet");
         assert_eq!(&s.text[s.highlight.clone()], "curve");
         assert!(!s.text.contains("**"), "{}", s.text);
+    }
+
+    #[test]
+    fn a_snippet_keeps_its_formulas_through_the_shortening() {
+        let tex = |s: &Snippet| -> Vec<(String, String)> {
+            s.math
+                .iter()
+                .map(|f| (s.text[f.out.clone()].to_owned(), f.tex.clone()))
+                .collect()
+        };
+        let text = "Area $\\pi r^2$ near [[Hub]] and $x$ costs $5 and $6.\n";
+        let start = text.find("[[Hub").expect("link");
+        let s = snippet(text, start..start + 7, true, obsidian()).expect("snippet");
+        assert_eq!(
+            s.text.as_ref(),
+            "Area \\pi r^2 near Hub and x costs $5 and $6."
+        );
+        assert_eq!(&s.text[s.highlight.clone()], "Hub");
+        assert_eq!(
+            tex(&s),
+            [
+                ("\\pi r^2".to_owned(), "\\pi r^2".to_owned()),
+                ("x".to_owned(), "x".to_owned()),
+            ]
+        );
+        // Shortened on both sides: a formula cut off is dropped, the ones
+        // kept move with the text.
+        let words = "word ".repeat(40);
+        let text = format!("$a$ {words}$b$ near [[Hub]] then $c$ {words}$d$ end\n");
+        let start = text.find("[[Hub").expect("link");
+        let s = snippet(&text, start..start + 7, true, obsidian()).expect("snippet");
+        assert!(
+            s.text.starts_with('…') && s.text.ends_with('…'),
+            "{}",
+            s.text
+        );
+        assert_eq!(&s.text[s.highlight.clone()], "Hub");
+        assert_eq!(
+            tex(&s),
+            [
+                ("b".to_owned(), "b".to_owned()),
+                ("c".to_owned(), "c".to_owned()),
+            ]
+        );
     }
 
     #[test]

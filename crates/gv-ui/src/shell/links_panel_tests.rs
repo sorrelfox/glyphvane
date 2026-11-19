@@ -497,3 +497,63 @@ fn the_backlinks_section_grows_to_its_wrapped_lines(cx: &mut TestAppContext) {
         "{last:?} in {list:?}"
     );
 }
+
+#[gpui::test]
+fn a_context_line_typesets_its_formulas(cx: &mut TestAppContext) {
+    let files = vec![
+        ("Hub.md", "Hub.\n"),
+        (
+            "A.md",
+            "Area $\\pi r^2$ near [[Hub]] and $x$ costs $5 and $6.\n",
+        ),
+        ("B.md", "The [[Hub|$y$ hub]] is here.\n"),
+    ];
+    let mut f = fixture(cx, &files, Some("Hub.md"));
+    f.until("backlinks", |p| p.settled() && p.backlink_count() == 2);
+    let line = f
+        .panel()
+        .read_with(&f.vcx, |p, _| p.backlink_line(0, 0))
+        .expect("a line");
+    let runs = crate::search_panel::segments(&line);
+    let formulas: Vec<&str> = runs
+        .iter()
+        .filter_map(|r| match r {
+            crate::search_panel::Segment::Math { tex, .. } => Some(tex.as_str()),
+            crate::search_panel::Segment::Text { .. } => None,
+        })
+        .collect();
+    assert_eq!(formulas, ["\\pi r^2", "x"], "{runs:?}");
+    // The link stays marked; the currency stays text.
+    let text: Vec<(&str, Vec<&str>)> = runs
+        .iter()
+        .filter_map(|r| match r {
+            crate::search_panel::Segment::Text { text, marks } => Some((
+                text.as_str(),
+                marks.iter().map(|m| &text[m.clone()]).collect(),
+            )),
+            crate::search_panel::Segment::Math { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        [
+            ("Area ", vec![]),
+            (" near Hub and ", vec!["Hub"]),
+            (" costs $5 and $6.", vec![]),
+        ]
+    );
+    assert!(f.has("backlink-line-0-0"));
+
+    // A formula in the link's text stays as its TeX, so the mark shows.
+    let line = f
+        .panel()
+        .read_with(&f.vcx, |p, _| p.backlink_line(1, 0))
+        .expect("a line");
+    let runs = crate::search_panel::segments(&line);
+    assert!(
+        matches!(runs.as_slice(), [crate::search_panel::Segment::Text { text, marks }]
+            if marks.len() == 1 && text[marks[0].clone()].contains('y')),
+        "{runs:?}"
+    );
+    assert!(f.has("backlink-line-1-0"));
+}

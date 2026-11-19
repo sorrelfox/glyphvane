@@ -69,6 +69,7 @@ use crate::keymap::actions::workspace::ShowOutgoingLinks;
 use crate::metrics::spacing::backlinks as spacing;
 use crate::metrics::{HAIRLINE, icon, radius, size, text};
 use crate::reader::ScrollTarget;
+use crate::search_panel::typeset::{Line, Segment, math_run, segments};
 use crate::settings::AppSettings;
 use crate::theme::Theme;
 
@@ -1077,32 +1078,73 @@ impl LinksPanel {
             })
     }
 
-    /// A context line with the link (or the mention) marked like a search
-    /// match, and its label ("embed", "alias").
-    fn render_line(&self, listing: &Listing, g: usize, i: usize, theme: &Theme) -> Div {
+    /// Context line `i` of source `g` of `listing` as drawn: the snippet
+    /// with its label ("embed", "alias"), the link marked, its formulas.
+    fn snippet_line(listing: &Listing, g: usize, i: usize) -> Option<Line> {
         let item = listing.groups.get(g).and_then(|group| group.items.get(i));
-        let snippet = listing
-            .snippets
-            .get(g)
-            .and_then(|s| s.get(i))
-            .and_then(Option::as_ref);
-        let note = item.and_then(|i| i.note);
-        let content: AnyElement = match snippet {
-            Some(snippet) => {
-                let mark = HighlightStyle {
-                    color: Some(theme.text.primary.into()),
-                    background_color: Some(theme.accent.tint.into()),
-                    ..HighlightStyle::default()
-                };
-                let mut text = snippet.text.to_string();
-                if let Some(note) = note {
-                    text.push_str(" (");
-                    text.push_str(note);
-                    text.push(')');
+        let snippet = listing.snippets.get(g)?.get(i)?.as_ref()?;
+        let mut text = snippet.text.to_string();
+        if let Some(note) = item.and_then(|i| i.note) {
+            text.push_str(" (");
+            text.push_str(note);
+            text.push(')');
+        }
+        Some(Line {
+            text,
+            marks: vec![snippet.highlight.clone()],
+            math: snippet.math.clone(),
+        })
+    }
+
+    /// Backlink context line `i` of source `g` as drawn, once read.
+    #[cfg(test)]
+    pub fn backlink_line(&self, g: usize, i: usize) -> Option<Line> {
+        Self::snippet_line(&self.backlinks, g, i)
+    }
+
+    /// A context line with the link (or the mention) marked like a search
+    /// match, its formulas typeset as in search results ([`segments`]),
+    /// and its label ("embed", "alias"). The line wraps; with formulas, it
+    /// wraps between words.
+    fn render_line(&self, listing: &Listing, g: usize, i: usize, theme: &Theme) -> Div {
+        let mark = HighlightStyle {
+            color: Some(theme.text.primary.into()),
+            background_color: Some(theme.accent.tint.into()),
+            ..HighlightStyle::default()
+        };
+        let styled = |text: String, marks: Vec<Range<usize>>| {
+            StyledText::new(text).with_highlights(marks.into_iter().map(|r| (r, mark)))
+        };
+        let content: AnyElement = match Self::snippet_line(listing, g, i) {
+            Some(line) => {
+                let runs = segments(&line);
+                if runs.iter().all(|r| matches!(r, Segment::Text { .. })) {
+                    styled(line.text, line.marks).into_any_element()
+                } else {
+                    let color: gpui::Hsla = theme.text.secondary.into();
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .children(runs.into_iter().flat_map(|run| {
+                            match run {
+                                Segment::Text { text, marks } => words(&text, &marks)
+                                    .into_iter()
+                                    .map(|(word, marks)| {
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(styled(word, marks))
+                                            .into_any_element()
+                                    })
+                                    .collect::<Vec<_>>(),
+                                Segment::Math { layout, .. } => {
+                                    vec![math_run(layout, color).into_any_element()]
+                                }
+                            }
+                        }))
+                        .into_any_element()
                 }
-                StyledText::new(text)
-                    .with_highlights([(snippet.highlight.clone(), mark)])
-                    .into_any_element()
             }
             // Not read yet: an empty line keeps the row's height.
             None => div().h(px(text::UI_SECTION.line)).into_any_element(),
@@ -1397,6 +1439,25 @@ fn message(note: &'static str, theme: &Theme) -> Div {
         .pl(px(size::LIST_ROW_INSET + spacing::HEAD_PAD_X))
         .text_color(theme.text.secondary)
         .child(note)
+}
+
+/// `text` cut after each space into words, each with the part of `marks`
+/// on it (byte ranges of the word), so a line of words and formulas wraps
+/// between words.
+fn words(text: &str, marks: &[Range<usize>]) -> Vec<(String, Vec<Range<usize>>)> {
+    let mut at = 0;
+    text.split_inclusive(' ')
+        .map(|word| {
+            let range = at..at + word.len();
+            at = range.end;
+            let marks = marks
+                .iter()
+                .filter(|m| m.start < range.end && range.start < m.end)
+                .map(|m| m.start.max(range.start) - range.start..m.end.min(range.end) - range.start)
+                .collect();
+            (word.to_owned(), marks)
+        })
+        .collect()
 }
 
 #[cfg(test)]
