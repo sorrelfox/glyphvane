@@ -113,6 +113,10 @@ pub(crate) struct MediaCard {
     /// What a click opens: the destination and the kind of link it is
     /// followed as.
     pub open: Option<(Arc<str>, gv_model::LinkKind)>,
+    /// A PDF embed whose page could not be drawn: the file, its length and
+    /// the page (from 0), so that a refresh with nothing changed does not
+    /// ask for it again.
+    pub failed_page: Option<(PathBuf, u64, u32)>,
 }
 
 impl MediaCard {
@@ -232,6 +236,7 @@ pub(crate) fn local_card(
             }
             _ => open,
         }),
+        failed_page: None,
     }
 }
 
@@ -288,6 +293,7 @@ pub(crate) fn web_card(kind: LiveKind, url: &str, host: &str, title: Option<&str
         detail,
         action: "Open in browser",
         open: Some((open.into(), gv_model::LinkKind::Inline)),
+        failed_page: None,
     }
 }
 
@@ -448,7 +454,8 @@ impl Reader {
     /// Shows the page `anchor` names of the PDF at `path` (`len` bytes)
     /// under `card`: the card at once, the page once the engine has drawn
     /// it, or the card saying why it could not. A page already shown for
-    /// the same file, page and height stays.
+    /// the same file, page and height stays, and so does the card of a page
+    /// that could not be drawn from the same file.
     #[allow(clippy::too_many_arguments)]
     fn show_pdf_page(
         &mut self,
@@ -470,6 +477,11 @@ impl Reader {
                     && p.len == len
                     && p.page == page
                     && (p.height - height).abs() < 0.5
+            ) || matches!(
+                st.cache.live.get(key),
+                Some(Shown::Media(c)) if c.failed_page.as_ref().is_some_and(
+                    |(p, l, n)| *p == path && *l == len && *n == page
+                )
             );
             if same {
                 st.cache.live.unchanged(key);
@@ -523,6 +535,7 @@ impl Reader {
                         Err(why) => {
                             let mut card = (*card).clone();
                             card.detail = format!("{} \u{b7} {why}", card.detail);
+                            card.failed_page = Some((path, len, page));
                             reader.land(key, Shown::Media(Arc::new(card)), cx);
                         }
                     }

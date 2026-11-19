@@ -583,16 +583,9 @@ fn pdf_embeds_show_their_page(cx: &mut TestAppContext) {
     assert_eq!(followed.len(), 1, "{followed:?}");
     assert_eq!(&*followed[0].destination, "Paper.pdf#page=3");
 
-    // Drawn again, nothing changed: the page is kept, not drawn again.
-    // (A page that could not be drawn is asked for again.)
-    let drawn = |e: &FakePdf| {
-        e.fitted
-            .lock()
-            .expect("lock")
-            .iter()
-            .filter(|f| f.0 != 8)
-            .count()
-    };
+    // Drawn again, nothing changed: the pages are kept, not drawn again,
+    // and a page that could not be drawn is not asked for again.
+    let drawn = |e: &FakePdf| e.fitted.lock().expect("lock").len();
     let before = drawn(&engine);
     v.reader.update(&mut v.vcx, |r, cx| {
         r.refresh_live_targets();

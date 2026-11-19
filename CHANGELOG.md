@@ -45,6 +45,8 @@ Conventional Commits, and versions follow Semantic Versioning.
 - An image that cannot be drawn shows its alt text without the `|300` size.
 - Property values chosen from autocomplete are quoted when YAML needs it
   (a `: `, a leading `#` or `[`, list separators in `[a, b]` lists).
+- A PDF embed whose page cannot be drawn is not asked for again on every
+  refresh.
 
 ## [1.2.0] - 2026-11-19
 
