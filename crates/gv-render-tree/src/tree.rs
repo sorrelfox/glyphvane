@@ -93,6 +93,12 @@ pub struct RenderOptions {
     /// `:shortcode:` emoji are drawn as the emoji (the profile's `emoji`
     /// switch).
     pub emoji: bool,
+    /// White space in text collapses as a browser collapses it (CSS
+    /// `white-space: normal`): a run of spaces, tabs and line endings is
+    /// one space, and none follows another space or a line break. Code
+    /// spans keep theirs. The Obsidian profile, whose Reading view is HTML
+    /// in a browser.
+    pub collapse_spaces: bool,
 }
 
 /// The macros in force for every formula of a tree, from one pass over
@@ -121,6 +127,7 @@ impl RenderOptions {
             soft_breaks: false,
             alt_sizes: false,
             emoji: false,
+            collapse_spaces: false,
         }
     }
 
@@ -135,6 +142,7 @@ impl RenderOptions {
             soft_breaks: profile.switches.soft_break == SoftBreak::Br,
             alt_sizes: profile.switches.embeds,
             emoji: profile.switches.emoji,
+            collapse_spaces: profile.id == ProfileId::Obsidian,
             ..Self::commonmark()
         }
     }
@@ -149,6 +157,7 @@ impl RenderOptions {
             soft_breaks: switches.soft_break == SoftBreak::Br,
             alt_sizes: switches.embeds,
             emoji: switches.emoji,
+            collapse_spaces: id == ProfileId::Obsidian,
             ..Self::commonmark()
         }
     }
@@ -165,6 +174,7 @@ impl RenderOptions {
             soft_breaks: p.soft_breaks,
             alt_sizes: p.alt_sizes,
             emoji: p.emoji,
+            collapse_spaces: p.collapse_spaces,
             ..self
         }
     }
@@ -387,6 +397,7 @@ impl RenderTree {
                     soft_breaks: self.opts.soft_breaks,
                     alt_sizes: self.opts.alt_sizes,
                     emoji: self.opts.emoji,
+                    collapse_spaces: self.opts.collapse_spaces,
                     title: None,
                     embed: None,
                 };
@@ -465,6 +476,7 @@ impl RenderTree {
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
             emoji: self.opts.emoji,
+            collapse_spaces: self.opts.collapse_spaces,
             title: None,
             embed: None,
         };

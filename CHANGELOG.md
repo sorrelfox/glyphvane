@@ -105,6 +105,9 @@ Conventional Commits, and versions follow Semantic Versioning.
   even while the Reading view is idle.
 - A PDF embed's page is drawn again, sharper, after zooming in.
 - The Bookmarks panel follows changes to Obsidian's `bookmarks.json`.
+- In the Obsidian profile the Reading view collapses white space as
+  Obsidian does: a run of spaces or tabs shows as one space, also around
+  a hidden `%%…%%` comment; code spans and `&nbsp;` keep theirs.
 - Two Glyphvane windows of separate processes saving the same note at the
   same moment both keep their version in the file history.
 - Performance: a remote image in a `<picture>` takes its place without

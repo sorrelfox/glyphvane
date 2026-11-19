@@ -18,6 +18,11 @@
 //! - Images of known size are boxes, sized to fit the column; others show
 //!   their alt text.
 //! - Raw inline HTML is shown as text until the HTML pipeline exists.
+//! - With the profile's whitespace collapsing (Obsidian), text shows a
+//!   run of spaces, tabs and line endings as one space, mapped to the
+//!   whole run, and drops white space after a space or a line break, as
+//!   a browser does (CSS `white-space: normal`). Code spans, raw HTML
+//!   and `&nbsp;` keep theirs.
 //! - With the profile's `emoji` switch, a `:shortcode:` is its emoji, one
 //!   unit mapped to the whole code.
 //! - Strikethrough is a line through the text in its colour.
@@ -62,6 +67,9 @@ pub(crate) struct InlineCx<'a> {
     pub alt_sizes: bool,
     /// `:shortcode:` emoji are drawn as the emoji.
     pub emoji: bool,
+    /// White space in text collapses as in a browser
+    /// ([`RenderOptions::collapse_spaces`](crate::RenderOptions::collapse_spaces)).
+    pub collapse_spaces: bool,
     /// A callout's title: bold, in this colour, after a gutter of this
     /// width for the type's icon.
     pub title: Option<(ColorToken, f32)>,
@@ -303,6 +311,10 @@ struct Builder<'c, 'a> {
     /// While an image's alt text is shown in its place: where its `|300`
     /// size starts in the source (not shown).
     alt_cut: Option<usize>,
+    /// The content so far ends in collapsible white space or a line
+    /// break, or is empty: with whitespace collapsing, white space here
+    /// is dropped.
+    after_space: bool,
 }
 
 impl<'c, 'a> Builder<'c, 'a> {
@@ -324,6 +336,7 @@ impl<'c, 'a> Builder<'c, 'a> {
             math: Vec::new(),
             footnotes: Vec::new(),
             alt_cut: None,
+            after_space: true,
         }
     }
 
@@ -456,7 +469,7 @@ impl Builder<'_, '_> {
                         let kept = text[..cut - r.start].trim_end();
                         if !kept.is_empty() {
                             let key = self.key(state, InlineRole::Text);
-                            self.piece(kept, r.start..r.start + kept.len(), true, key);
+                            self.text_piece(kept, r.start..r.start + kept.len(), true, key);
                         }
                     }
                 }
@@ -472,16 +485,17 @@ impl Builder<'_, '_> {
                     let text = node.text();
                     if text.contains('\0') {
                         let fixed = text.replace('\0', "\u{fffd}");
-                        self.piece(&fixed, r, false, self.key(state, InlineRole::Text));
+                        self.text_piece(&fixed, r, false, self.key(state, InlineRole::Text));
                     } else {
                         let exact = text.len() == r.len();
-                        self.piece(text, r, exact, self.key(state, InlineRole::Text));
+                        self.text_piece(text, r, exact, self.key(state, InlineRole::Text));
                     }
                 }
                 InlineKind::Escape | InlineKind::Entity => {
                     let mut s = String::new();
                     node.push_text(TextProjection::TextContent, &mut s);
-                    self.piece(&s, node.range(), false, self.key(state, InlineRole::Text));
+                    // `&#32;` collapses like a space; `&nbsp;` does not.
+                    self.text_piece(&s, node.range(), false, self.key(state, InlineRole::Text));
                 }
                 InlineKind::SoftBreak if self.cx.soft_breaks => {
                     self.flush();
@@ -492,11 +506,16 @@ impl Builder<'_, '_> {
                         link: state.link,
                     });
                     self.lines.push(std::mem::take(&mut self.line));
+                    self.after_space = true;
                 }
                 InlineKind::SoftBreak => {
                     let r = node.range();
                     let exact = r.len() == 1;
+                    if self.cx.collapse_spaces && self.after_space {
+                        continue;
+                    }
                     self.piece(" ", r, exact, self.key(state, InlineRole::Text));
+                    self.after_space = true;
                 }
                 InlineKind::HardBreak => {
                     self.flush();
@@ -507,6 +526,7 @@ impl Builder<'_, '_> {
                         link: state.link,
                     });
                     self.lines.push(std::mem::take(&mut self.line));
+                    self.after_space = true;
                 }
                 // Syntax and the tokens of nodes handled whole.
                 InlineKind::Whitespace
@@ -632,14 +652,80 @@ impl Builder<'_, '_> {
         for (code, glyph) in crate::emoji::emoji_shortcodes(text) {
             if code.start > at {
                 let r = range.start + at..range.start + code.start;
-                self.piece(&text[at..code.start], r, true, key);
+                self.text_piece(&text[at..code.start], r, true, key);
             }
             let r = range.start + code.start..range.start + code.end;
             self.piece(glyph, r, false, key);
             at = code.end;
         }
         if at < text.len() || at == 0 {
-            self.piece(&text[at..], range.start + at..range.end, true, key);
+            self.text_piece(&text[at..], range.start + at..range.end, true, key);
+        }
+    }
+
+    /// [`piece`](Self::piece) for text: with whitespace collapsing, each
+    /// run of white space is one space mapped to the whole run, and white
+    /// space after a space or a line break is dropped (it is a gap in the
+    /// mapping, like syntax).
+    fn text_piece(&mut self, text: &str, source: Range<usize>, exact: bool, key: RunKey) {
+        if !self.cx.collapse_spaces {
+            self.piece(text, source, exact, key);
+            return;
+        }
+        if !exact {
+            // One unit over the whole source: collapse its text.
+            let mut out = String::with_capacity(text.len());
+            let mut space = self.after_space;
+            for c in text.chars() {
+                if is_collapsible(c) {
+                    if !space {
+                        out.push(' ');
+                        space = true;
+                    }
+                } else {
+                    out.push(c);
+                    space = false;
+                }
+            }
+            if !out.is_empty() {
+                self.piece(&out, source, false, key);
+                self.after_space = space;
+            }
+            return;
+        }
+        let b = text.as_bytes();
+        // Text before `clean` is done; text from `clean` to `at` needs no
+        // change and goes in one exact piece.
+        let (mut clean, mut at) = (0, 0);
+        while at < b.len() {
+            if !is_collapsible(char::from(b[at])) {
+                at += 1;
+                continue;
+            }
+            let mut end = at + 1;
+            while end < b.len() && is_collapsible(char::from(b[end])) {
+                end += 1;
+            }
+            let lone_space = end == at + 1 && b[at] == b' ';
+            if lone_space && !(at == 0 && self.after_space) {
+                at = end;
+                continue;
+            }
+            if clean < at {
+                let r = source.start + clean..source.start + at;
+                self.piece(&text[clean..at], r, true, key);
+            }
+            if clean < at || !self.after_space {
+                let r = source.start + at..source.start + end;
+                self.piece(" ", r, lone_space, key);
+            }
+            self.after_space = true;
+            clean = end;
+            at = end;
+        }
+        if clean < b.len() {
+            self.piece(&text[clean..], source.start + clean..source.end, true, key);
+            self.after_space = b.last() == Some(&b' ');
         }
     }
 
@@ -647,6 +733,8 @@ impl Builder<'_, '_> {
         if self.run.as_ref().is_some_and(|r| r.key != key) {
             self.flush();
         }
+        // Text pieces set it again after this.
+        self.after_space = false;
         let src = self.rel(source);
         let exact = exact && self.cx.embed.is_none();
         self.count(text, key);
@@ -844,6 +932,7 @@ impl Builder<'_, '_> {
         self.extra_height += (b.height() - self.line_height).max(0.0);
         let r = self.rel(source);
         self.para.inline_box(b, r);
+        self.after_space = false;
         self.spans.push(InlineSpan { role, link });
     }
 
@@ -1197,6 +1286,12 @@ pub const MATH_DISPLAY_SCALE: f32 = 1.21;
 /// Estimated formula width per character of TeX, in em (until the view
 /// typesets it).
 const MATH_EM_PER_CHAR: f32 = 0.45;
+
+/// White space that collapses in CSS `white-space: normal`: spaces,
+/// tabs, line endings and form feeds (not no-break spaces).
+fn is_collapsible(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
+}
 
 /// Splits a token's gathered text at line endings into exact pieces and a
 /// space for each line ending. A token is either all real (its text is its

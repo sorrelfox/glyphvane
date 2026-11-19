@@ -71,7 +71,7 @@ fn the_vault_reads_in_the_obsidian_profile(cx: &mut TestAppContext) {
         reader.read_with(&vcx, |r, _| r.profile()),
         gv_profile::ProfileId::Obsidian
     );
-    assert_eq!(painted(&reader, &mut vcx), ["Text marked  end."]);
+    assert_eq!(painted(&reader, &mut vcx), ["Text marked end."]);
 }
 
 #[gpui::test]

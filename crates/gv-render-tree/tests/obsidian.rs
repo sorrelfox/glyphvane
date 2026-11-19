@@ -204,7 +204,8 @@ fn wikilinks_are_links_with_a_status() {
 #[test]
 fn highlights_comments_block_ids_and_tags() {
     let d = ob("A ==mark== b %%hidden%% c #tag/x d ^block-1\n");
-    assert_eq!(d.render.item_text(0).text, "A mark b  c #tag/x d");
+    // The space before the hidden comment and the one after it collapse.
+    assert_eq!(d.render.item_text(0).text, "A mark b c #tag/x d");
     let c = d.render.nodes()[0].inline().expect("inline");
     let dump = d.render.dump();
     assert!(dump.contains("tag"), "{dump}");
@@ -229,7 +230,50 @@ fn highlights_comments_block_ids_and_tags() {
     assert_eq!(outline(&d.render), ["a ", "End "]);
     // An inline comment across a soft line break is hidden too.
     let d = ob("A %%one\ntwo%% B\n");
-    assert_eq!(d.render.item_text(0).text, "A  B");
+    assert_eq!(d.render.item_text(0).text, "A B");
+}
+
+#[test]
+fn white_space_collapses_as_in_a_browser() {
+    // Runs of spaces and tabs are one space; code spans and no-break
+    // spaces keep theirs.
+    let text = "a   b\tc  *d*  `x  y`  e&nbsp;&nbsp;f\n";
+    let d = ob(text);
+    assert_eq!(d.render.item_text(0).text, "a b c d x  y e\u{a0}\u{a0}f");
+    // A collapsed run maps to the whole run in the source, and the text
+    // after it to its own bytes.
+    let t = d.render.item_text(0);
+    assert_eq!(&text[t.source_range(1..2)], "   ");
+    assert_eq!(&text[t.source_range(3..4)], "\t");
+    assert_eq!(&text[t.source_range(2..3)], "b");
+    assert_eq!(t.source_offset(6), text.find('d').expect("d"));
+    // `&#32;` collapses like a space; a line break drops the white space
+    // after it.
+    let d = ob("a &#32; b\\\n c\n");
+    assert_eq!(d.render.item_text(0).text, "a b\nc");
+    // With strict line breaks the soft break is a space, and collapses
+    // with the spaces before it.
+    let strict = gv_profile::compile(
+        ProfileId::Obsidian,
+        gv_profile::Tuning::from_obsidian_app_json(r#"{"strictLineBreaks": true}"#),
+        &gv_profile::SwitchOverrides::new(),
+    );
+    let d = build_with(
+        "one %%x%%\ntwo   three\n",
+        ParseOptions::from_profile(&strict),
+        RenderOptions::for_profile(&strict),
+        Sources::default(),
+    );
+    check(&d);
+    assert_eq!(d.render.item_text(0).text, "one two three");
+    // Other profiles show the text as written.
+    let d = build_with(
+        "a   b\n",
+        ParseOptions::builtin(ProfileId::CommonMark),
+        RenderOptions::builtin(ProfileId::CommonMark),
+        Sources::default(),
+    );
+    assert_eq!(d.render.item_text(0).text, "a   b");
 }
 
 #[test]
