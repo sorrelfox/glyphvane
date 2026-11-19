@@ -72,6 +72,7 @@ impl MediaCard {
             kind,
             disposition,
             range: None,
+            from: None,
         })
     }
 }

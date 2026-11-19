@@ -125,6 +125,9 @@ pub(crate) struct LinkHit {
     /// The whole construct in the document's text (`None` inside an
     /// embed, whose text is another note's).
     pub range: Option<std::ops::Range<usize>>,
+    /// Inside a note embed: the embedded note's key (its vault path),
+    /// which the link is followed from.
+    pub from: Option<Arc<str>>,
 }
 
 /// A button in a code block's head, or a table's Expand button.
@@ -521,6 +524,7 @@ impl State {
         let info = content.links.get(link as usize)?;
         let start = doc.tree.node_of(item).map(|n| n.source.start);
         let range = start
+            .filter(|_| info.from.is_none())
             .map(|s| s + info.source.start..s + info.source.end)
             .filter(|r| {
                 // A link of an embedded note is not in this text.
@@ -535,6 +539,7 @@ impl State {
             kind: info.kind,
             image: false,
             range,
+            from: info.from.clone(),
         })
     }
 
@@ -573,6 +578,7 @@ impl State {
             kind: info.kind,
             image: true,
             range,
+            from: None,
         })
     }
 
@@ -606,6 +612,7 @@ impl State {
             kind,
             image: false,
             range: None,
+            from: None,
         })
     }
 

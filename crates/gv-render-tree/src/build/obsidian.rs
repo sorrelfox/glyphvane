@@ -8,9 +8,12 @@
 //! or `![[Note#^block]]`. Its own line stays (a link to the note, the
 //! embed's header) and the embedded blocks follow inside a
 //! [`FrameKind::Embed`] frame. The embedded note comes from the link
-//! source ([`crate::LinkStatusSource::embed`]); its blocks are built as
-//! plain text (headings keep their level), because their sources are in
-//! another file: every embedded node maps to the end of the embed's line.
+//! source ([`crate::LinkStatusSource::embed`]). Its paragraphs and
+//! headings keep their inline formatting and links (headings their
+//! level, list items a bullet); its links resolve from the embedded note
+//! ([`crate::LinkInfo::from`]). Code, tables and HTML are plain text.
+//! Their sources are in another file: every embedded node maps to the
+//! end of the embed's line.
 //! Embeds inside the embedded note are shown the same way, up to the
 //! budgets: [`MAX_EMBED_DEPTH`] nested embeds, [`MAX_EMBED_NODES`] blocks
 //! and [`MAX_EMBED_BYTES`] of embedded text per outermost embed. A cycle
@@ -26,7 +29,7 @@ use std::sync::Arc;
 
 use gv_model::{Anchoring, BlockMatch, DocModel, FragmentMatch};
 use gv_syntax::inline::{
-    InlineInput, InlineKind, InlineOptions, TextProjection, parse_inlines_with,
+    InlineInput, InlineKind, InlineOptions, InlineTree, TextProjection, parse_inlines_with,
 };
 use gv_syntax::{
     BlockId, CalloutFold, Container, ContainerKind, Leaf, LeafKind, SyntaxTree, Visitor,
@@ -355,6 +358,9 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             }
             match block.kind {
                 Block::Text { role, text } => self.plain_node(&text, role, at),
+                Block::Inline { role, tree, bullet } => {
+                    self.inline_node(&tree, bullet, role, at, key);
+                }
                 Block::Fence { kind, code } => {
                     if depth + 1 >= MAX_EMBED_DEPTH {
                         self.notice(
@@ -450,6 +456,41 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
     /// A notice in an embed (a cycle, a budget, a missing section).
     fn notice(&mut self, text: &str, at: usize) {
         self.plain_node(text, TextRole::Body, at);
+    }
+
+    /// A paragraph or heading of the embedded note `key` (its inlines
+    /// `tree`, after a bullet for a list item's first block), mapped to
+    /// `at`.
+    fn inline_node(
+        &mut self,
+        tree: &InlineTree,
+        bullet: bool,
+        role: TextRole,
+        at: usize,
+        key: &Arc<str>,
+    ) {
+        self.synthetic += 1;
+        let id = BlockId(SYNTHETIC | self.synthetic);
+        let mut cx = self.inline_cx(id);
+        // The document's footnotes are not the embedded note's.
+        cx.footnotes = None;
+        cx.embed = Some((key, at));
+        let prefix = bullet.then_some("\u{2022} ");
+        let content = Arc::new(inline::build_embedded(tree, prefix, role, &cx));
+        let context = self.context();
+        self.push(
+            BlockNode {
+                id,
+                kind: NodeKind::Paragraph(content),
+                source: at..at,
+                context,
+                block: at..at,
+                top: at..at,
+                lookups: None,
+                table: false,
+            },
+            None,
+        );
     }
 
     /// A plain-text node of an embed, mapped to `at`.
@@ -579,6 +620,13 @@ enum Block {
         role: TextRole,
         text: String,
     },
+    /// A paragraph or heading: its inlines.
+    Inline {
+        role: TextRole,
+        tree: Arc<InlineTree>,
+        /// The first block of a list item.
+        bullet: bool,
+    },
     Embed {
         inner: String,
         anchor: Option<String>,
@@ -621,7 +669,10 @@ impl Visitor for Blocks<'_> {
         let start = leaf.range.start;
         let first = std::mem::take(&mut self.first_in_item);
         let (role, mut text) = match leaf.kind {
-            LeafKind::Heading { level, .. } => (TextRole::heading(level), self.inline_text(leaf)),
+            LeafKind::Heading { level, .. } => {
+                self.inline(leaf, TextRole::heading(level), first);
+                return;
+            }
             LeafKind::Paragraph | LeafKind::CalloutTitle => {
                 let lines: Vec<&str> = leaf
                     .lines
@@ -652,7 +703,8 @@ impl Visitor for Blocks<'_> {
                         return;
                     }
                 }
-                (TextRole::Body, self.inline_text(leaf))
+                self.inline(leaf, TextRole::Body, first);
+                return;
             }
             LeafKind::FencedCode if self.fences && self.live_fence(leaf).is_some() => {
                 if let Some((kind, code)) = self.live_fence(leaf) {
@@ -735,13 +787,24 @@ impl Blocks<'_> {
         ))
     }
 
-    /// The text of a paragraph or heading as a reader sees it.
-    fn inline_text(&self, leaf: &Leaf<'_>) -> String {
+    /// A paragraph or heading with text: its inlines. `first`: the first
+    /// leaf of a list item.
+    fn inline(&mut self, leaf: &Leaf<'_>, role: TextRole, first: bool) {
         let tree = self.tree.inlines(leaf, self.text);
         let mut s = String::new();
         for n in tree.top_level() {
             n.push_text(TextProjection::TextContent, &mut s);
         }
-        s.replace('\n', " ")
+        if s.trim().is_empty() {
+            return;
+        }
+        self.out.push(EmbeddedBlock {
+            start: leaf.range.start,
+            kind: Block::Inline {
+                role,
+                tree,
+                bullet: first && self.items > 0,
+            },
+        });
     }
 }

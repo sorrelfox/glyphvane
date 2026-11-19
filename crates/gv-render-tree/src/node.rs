@@ -630,8 +630,13 @@ pub struct LinkInfo {
     pub destination: Arc<str>,
     pub title: Option<Arc<str>>,
     pub status: LinkStatus,
-    /// The whole construct, relative to the node's start.
+    /// The whole construct, relative to the node's start (inside a note
+    /// embed, empty at the embed's end).
     pub source: Range<usize>,
+    /// Inside a note embed: the embedded note's key
+    /// ([`crate::EmbedFetch::Note::key`]), which the link resolves from.
+    /// `None`: a link of the document.
+    pub from: Option<Arc<str>>,
 }
 
 /// An image of a block.

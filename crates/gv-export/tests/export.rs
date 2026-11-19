@@ -729,3 +729,75 @@ fn live_blocks_fall_back_to_their_link_or_code() {
     let gfm = export(src, ProfileId::GfmFile);
     assert_eq!(gfm.matches("<pre").count(), 2, "{gfm}");
 }
+
+#[test]
+fn links_inside_note_embeds_resolve_from_the_embedded_note() {
+    use gv_render_tree::{EmbedFetch, LinkStatus, LinkStatusSource, LinkTarget};
+    struct Vault;
+    impl LinkStatusSource for Vault {
+        fn status(&self, _: &LinkTarget<'_>) -> LinkStatus {
+            LinkStatus::Exact
+        }
+        fn embed(&self, destination: &str, _: Option<&str>) -> EmbedFetch {
+            if destination != "Other" {
+                return EmbedFetch::Unavailable;
+            }
+            EmbedFetch::Note {
+                key: "sub/Other.md".into(),
+                title: "Other".into(),
+                text:
+                    "Go [[#Part]], [rel](pic.md#x), [up](../top.md), [web](https://example.com/a), \
+                       [frag](#y), [[Third]] and #tag.\n\n# Part\n"
+                        .into(),
+            }
+        }
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("sub")).expect("mkdir");
+    let src = "# Host\n\n![[Other]]\n";
+    let id = ProfileId::Obsidian;
+    let syntax = gv_syntax::parse_with(src, ParseOptions::builtin(id));
+    let model = DocModel::build(&syntax, src);
+    let t = RenderTree::build(
+        &syntax,
+        &model,
+        src,
+        RenderOptions::builtin(id),
+        Sources {
+            links: &Vault,
+            images: &NoImageSizes,
+        },
+    );
+    let mut opts = ExportOptions::new(Some(dir.path().join("doc.md")), theme());
+    opts.root = Some(dir.path().to_path_buf());
+    let html = export_html(&t, &opts).html;
+    let slug = t.options().slugs.slug("Part");
+    for needle in [
+        format!("href=\"sub/Other.html#user-content-{slug}\""),
+        "href=\"sub/pic.html#user-content-x\"".to_owned(),
+        "href=\"sub/../top.html\"".to_owned(),
+        "href=\"https://example.com/a\"".to_owned(),
+        "href=\"sub/Other.html#user-content-y\"".to_owned(),
+        "href=\"sub/Third.html\"".to_owned(),
+        "<span class=\"gv-tag\">".to_owned(),
+    ] {
+        assert!(html.contains(&needle), "missing {needle:?} in\n{html}");
+    }
+    // The embedded heading is no link target of the document.
+    assert!(
+        !html.contains(&format!("href=\"#user-content-{slug}\"")),
+        "{html}"
+    );
+    // Without a document file there is no place to point to: plain text.
+    let mut opts = ExportOptions::new(None, theme());
+    opts.root = None;
+    let html = export_html(&t, &opts).html;
+    assert!(!html.contains("sub/"), "{html}");
+    assert!(html.contains("href=\"https://example.com/a\""), "{html}");
+    // PDF: only the URL is a link; the embedded note's local targets have
+    // no label in this document.
+    let opts = ExportOptions::new(Some(dir.path().join("doc.md")), theme());
+    let typ = gv_export::export_typst(&t, &opts, &gv_export::PageOptions::default()).source;
+    assert!(typ.contains("#link(\"https://example.com/a\")"), "{typ}");
+    assert_eq!(typ.matches("#link(").count(), 1, "{typ}");
+}

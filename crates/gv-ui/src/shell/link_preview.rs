@@ -541,7 +541,7 @@ impl Workspace {
             return;
         };
         let r = reader.read(cx);
-        let Some(file) = r.path().map(Path::to_path_buf) else {
+        let Some(file) = r.link_file(request.from.as_deref()) else {
             return;
         };
         let construct = request.range.clone().and_then(|range| r.source_text(range));

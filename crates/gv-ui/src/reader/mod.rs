@@ -198,6 +198,10 @@ pub struct LinkRequest {
     /// The whole construct in the document's text, when known (to rewrite
     /// the link).
     pub range: Option<std::ops::Range<usize>>,
+    /// Inside a note embed: the embedded note's key (its vault path),
+    /// which the link is followed from ([`Reader::link_file`]); `None`: a
+    /// link of the document.
+    pub from: Option<Arc<str>>,
 }
 
 /// What the Reading view asks of its window.
@@ -915,6 +919,39 @@ impl Reader {
             return Vec::new();
         };
         crate::a11y::document::describe(&doc.tree, 0..doc.tree.items().len())
+    }
+
+    /// The file a link of this view is in: the document, or for a link
+    /// inside a note embed the embedded note `from` (its key in the render
+    /// tree, a vault path below the root the document's links resolve
+    /// in).
+    pub(crate) fn link_file(&self, from: Option<&str>) -> Option<PathBuf> {
+        let path = self.path.clone()?;
+        let Some(from) = from else {
+            return Some(path);
+        };
+        let key = gv_vault::VaultPath::new(from).ok()?;
+        Some(Resolver::statuses(&path, self.index.as_ref(), self.profile()).fs_path(&key))
+    }
+
+    /// The link of an embedded note under window point `position`, as of
+    /// the last frame (a Live Preview block's host follows it: it is not
+    /// in the block's source).
+    pub(crate) fn embedded_link_at(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+    ) -> Option<link_info::LinkAt> {
+        let hit = self.state.borrow().link_at(position)?;
+        let from = hit.from.as_deref()?;
+        Some(link_info::LinkAt {
+            file: self.link_file(Some(from))?,
+            kind: hit.kind,
+            image: false,
+            destination: hit.destination.clone(),
+            range: None,
+            construct: None,
+            profile: self.profile(),
+        })
     }
 
     /// Where the link under window point `position` starts in the shown

@@ -11,6 +11,9 @@
 //!   the caret on a link.
 //! - The `links.*` commands act on the link under the caret
 //!   ([`EditorView::link_at_caret`]) when not run from the link menu.
+//! - A link of an embedded note in a Live Preview block is not in the
+//!   text: Mod+click and the link menu take it from the block's view,
+//!   resolved from the embedded note.
 //! - **Tooltip:** resting the pointer on a link whose status needs
 //!   explaining shows what it means, after [`TOOLTIP_DELAY`].
 //! - **Mod+hover:** the window opens the link's hover preview when the
@@ -93,6 +96,14 @@ impl EditorView {
         self.link_at_offset(offset)
     }
 
+    /// A link of an embedded note under window point `position`, in a
+    /// Live Preview block: not in this document's text, so it is followed
+    /// from the embedded note.
+    fn embedded_link_at(&self, position: Point<Pixels>, cx: &gpui::App) -> Option<LinkAt> {
+        let (_, reader) = self.block_view_at(position)?;
+        reader.read(cx).embedded_link_at(position)
+    }
+
     /// `link` of this document, for the window.
     pub(crate) fn link_of(&self, link: SourceLink) -> Option<LinkAt> {
         let file = self.path.clone()?;
@@ -124,10 +135,10 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let Some(link) = self
-            .link_at_point(position, window, cx)
-            .and_then(|l| self.link_of(l))
-        else {
+        let Some(link) = self.embedded_link_at(position, cx).or_else(|| {
+            self.link_at_point(position, window, cx)
+                .and_then(|l| self.link_of(l))
+        }) else {
             return false;
         };
         self.clicked_link = Some(link);
@@ -147,8 +158,10 @@ impl EditorView {
         window: &Window,
         cx: &gpui::App,
     ) -> Option<LinkAt> {
-        self.link_at_point(position, window, cx)
-            .and_then(|l| self.link_of(l))
+        self.embedded_link_at(position, cx).or_else(|| {
+            self.link_at_point(position, window, cx)
+                .and_then(|l| self.link_of(l))
+        })
     }
 
     /// The pointer moved (no button down): the link under it, for its

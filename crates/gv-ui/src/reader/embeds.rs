@@ -606,6 +606,7 @@ impl Reader {
                     kind: gv_model::LinkKind::Wikilink,
                     disposition: *disposition,
                     range: None,
+                    from: None,
                 }),
                 BasesEvent::FollowLink(request) => Some(request.clone()),
             };
@@ -730,5 +731,6 @@ pub(crate) fn open_request(
         kind: gv_model::LinkKind::Wikilink,
         disposition,
         range: None,
+        from: None,
     })
 }

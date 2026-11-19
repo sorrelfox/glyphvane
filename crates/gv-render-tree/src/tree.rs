@@ -380,6 +380,7 @@ impl RenderTree {
                     soft_breaks: self.opts.soft_breaks,
                     alt_sizes: self.opts.alt_sizes,
                     title: None,
+                    embed: None,
                 };
                 let content = crate::inline::build_backrefs_only(at, count, &cx);
                 def.nodes.push(BlockNode {
@@ -443,6 +444,7 @@ impl RenderTree {
                 soft_breaks: self.opts.soft_breaks,
                 alt_sizes: self.opts.alt_sizes,
                 title: None,
+                embed: None,
             };
             let base = note.source.start;
             let Some(content) =
@@ -765,6 +767,7 @@ impl RenderTree {
                             title: l.title.as_deref(),
                             range: n.to_document(l.source.start)..n.to_document(l.source.end),
                             block: n.id,
+                            from: l.from.as_deref(),
                         };
                         which(&target) && sources.links.status(&target) != l.status
                     })
@@ -778,6 +781,7 @@ impl RenderTree {
                             title: i.title.as_deref(),
                             range: n.to_document(i.source.start)..n.to_document(i.source.end),
                             block: n.id,
+                            from: None,
                         };
                         which(&target) && sources.images.size(&target) != i.size
                     })

@@ -181,6 +181,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
             title: self.title_cx,
+            embed: None,
         }
     }
 
@@ -415,6 +416,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                     title: None,
                     range: range.clone(),
                     block,
+                    from: None,
                 }),
                 None => ImageSize::Failed,
             };
@@ -439,6 +441,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
             title: None,
+            embed: None,
         };
         let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));
         let mut labels: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = Vec::new();

@@ -75,6 +75,10 @@ pub struct LinkTarget<'a> {
     pub range: Range<usize>,
     /// The block it is in.
     pub block: BlockId,
+    /// Inside a note embed: the embedded note's key
+    /// ([`EmbedFetch::Note::key`]), which the link resolves from, `range`
+    /// being in that note's text. `None`: a link of the document.
+    pub from: Option<&'a str>,
 }
 
 /// What a note embed (`![[Note#Heading]]`) shows, as the UI finds it.

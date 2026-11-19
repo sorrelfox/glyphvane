@@ -801,8 +801,7 @@ fn a_long_note_has_its_blocks_from_the_first_frame_and_keeps_its_top_line(cx: &m
 
 #[gpui::test]
 fn mod_click_on_an_embeds_link_follows_the_embedded_note(cx: &mut TestAppContext) {
-    // The embedded note's text is plain in the Reading view (and so in
-    // the block); the embed's own link goes to the note.
+    // The embed's own link goes to the note.
     let vault = super::autocomplete::vault(&[
         ("Host.md", "intro\n\n![[Other]]\n\nend\n"),
         ("Sub/Other.md", "See [near](Near.md) here.\n"),
@@ -829,4 +828,70 @@ fn mod_click_on_an_embeds_link_follows_the_embedded_note(cx: &mut TestAppContext
     assert_eq!(&*followed.destination, "Other");
     // The caret stayed out of the block.
     assert_eq!(kinds(&view, &mut vcx), ["embed"]);
+}
+
+#[gpui::test]
+fn mod_click_on_a_link_inside_an_embed_follows_it_from_the_embedded_note(cx: &mut TestAppContext) {
+    let vault = super::autocomplete::vault(&[
+        ("Host.md", "intro\n\n![[Other]]\n\nend\n"),
+        ("Sub/Other.md", "See [near](Near.md) here.\n"),
+        ("Sub/Near.md", "# Near\n"),
+    ]);
+    let (view, mut vcx) =
+        super::autocomplete::editor_in(cx, &vault, "Host.md", gv_profile::ProfileId::Obsidian);
+    view.update(&mut vcx, |v, cx| {
+        v.set_profile("obsidian", cx);
+        v.set_live_preview(true, cx);
+    });
+    settle(&mut vcx);
+    vcx.run_until_parked();
+    settle(&mut vcx);
+    assert_eq!(kinds(&view, &mut vcx), ["embed"]);
+    let (bounds, embed) = block_reader(&view, &mut vcx, 0);
+    // The link inside the embedded note is not in the host's text.
+    let at = embed.read_with(&vcx, |r, _| {
+        let (x0, y0) = (f32::from(bounds.left()), f32::from(bounds.top()));
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let mut y = y0 + 1.0;
+        while y < y0 + h {
+            let mut x = x0 + 1.0;
+            while x < x0 + w {
+                let p = point(px(x), px(y));
+                if r.embedded_link_at(p).is_some() {
+                    return p;
+                }
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+        panic!("no embedded link in {bounds:?}")
+    });
+    let secondary = vcx.update(|_, cx| Modifiers::secondary_key(cx));
+    press(&mut vcx, at, 1, secondary);
+    settle(&mut vcx);
+    let followed = view
+        .update(&mut vcx, |v, _| v.take_clicked_link())
+        .expect("followed");
+    // Followed from the embedded note: `Near.md` beside it.
+    assert_eq!(followed.file, vault.root.join("Sub/Other.md"));
+    assert_eq!(&*followed.destination, "Near.md");
+    assert_eq!(followed.range, None);
+    let nav = crate::reader::navigation(
+        &followed.file,
+        None,
+        followed.profile,
+        followed.kind,
+        &followed.destination,
+    );
+    assert!(
+        matches!(&nav, crate::reader::Navigation::Open { path, .. } if path.ends_with("Sub/Near.md")),
+        "{nav:?}"
+    );
+    // A plain click does not follow it.
+    press(&mut vcx, at, 1, Modifiers::none());
+    settle(&mut vcx);
+    assert!(
+        view.update(&mut vcx, |v, _| v.take_clicked_link())
+            .is_none()
+    );
 }

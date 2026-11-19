@@ -73,7 +73,11 @@ impl Reader {
         }
         let path = self.path.as_deref()?;
         let resolution = Resolver::for_click(path, self.index.as_ref(), self.profile())
-            .resolve(resolver_kind(link.kind, false), &link.destination);
+            .resolve_from(
+                resolver_kind(link.kind, false),
+                &link.destination,
+                link.from.as_deref(),
+            );
         let name = link_name(link.kind, &link.destination);
         let text = status_tooltip(status, &name, Some(&resolution), "click")?;
         Some((status, text))
@@ -97,7 +101,7 @@ impl Reader {
                 .and_then(|d| d.text.get(r.clone()).map(std::sync::Arc::<str>::from))
         });
         Some(LinkAt {
-            file: self.path.clone()?,
+            file: self.link_file(link.from.as_deref())?,
             kind: link.kind,
             image: link.image,
             destination: link.destination.clone(),

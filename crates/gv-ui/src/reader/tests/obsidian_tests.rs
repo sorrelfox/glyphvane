@@ -123,6 +123,92 @@ fn a_note_embed_shows_the_note_and_stops_at_a_cycle(cx: &mut TestAppContext) {
     );
 }
 
+/// The centre of the first link piece of the painted item whose text
+/// holds `needle` (an embedded note's item: not in the document's text).
+fn embedded_link(st: &State, needle: &str) -> (usize, Point<Pixels>) {
+    let doc = st.doc.as_ref().expect("loaded");
+    for g in &st.geometry.items {
+        if !doc.tree.item_text(g.ix).text.contains(needle) {
+            continue;
+        }
+        let content = doc.tree.item_inline(g.ix).expect("inline content");
+        let piece = content
+            .spans
+            .iter()
+            .position(|s| s.link.is_some() && s.role == InlineRole::Text)
+            .expect("a link");
+        let block = g.text.as_ref().expect("text").borrow();
+        let layout = block.layout().expect("laid out");
+        let origin = block.bounds().expect("painted").origin;
+        let r = layout.item_rects(piece)[0];
+        return (
+            g.ix,
+            origin + point(px(r.x + r.width / 2.0), px(r.y + r.height / 2.0)),
+        );
+    }
+    panic!("{needle:?} is not on screen");
+}
+
+#[gpui::test]
+fn links_inside_a_note_embed_resolve_and_follow_from_the_embedded_note(cx: &mut TestAppContext) {
+    // `./d.md` is beside the embedded note, not beside the document.
+    let dir = vault(&[
+        ("a.md", "# A\n\n![[sub/b]]\n"),
+        ("sub/b.md", "B has **bold** and [the d note](./d.md).\n"),
+        ("sub/d.md", "# D\n"),
+    ]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    settle(&mut vcx);
+    let reader = reader(&workspace, &mut vcx);
+    assert_eq!(
+        painted(&reader, &mut vcx),
+        ["A", "sub/b", "B has bold and the d note."]
+    );
+    let st = state(&reader, &mut vcx);
+    let (item, at) = embedded_link(&st.borrow(), "the d note");
+    {
+        let s = st.borrow();
+        let link = &s
+            .doc
+            .as_ref()
+            .expect("loaded")
+            .tree
+            .item_inline(item)
+            .expect("inline")
+            .links[0];
+        assert_eq!(link.from.as_deref(), Some("sub/b.md"));
+        // Pending until the vault index exists; resolved from the
+        // embedded note's folder, not the document's.
+        assert_ne!(link.status, gv_render_tree::LinkStatus::Unresolved);
+        let resolver = crate::reader::Resolver::for_click(
+            &dir.path().join("a.md"),
+            None,
+            gv_profile::ProfileId::Obsidian,
+        );
+        let kind = gv_vault::LinkKind::Inline;
+        let r = resolver.resolve_from(kind, "./d.md", Some("sub/b.md"));
+        assert!(r.status.is_resolved(), "{r:?}");
+        assert!(!resolver.resolve(kind, "./d.md").status.is_resolved());
+        let hit = s.link_at(at).expect("the link under the pointer");
+        assert_eq!((hit.range, hit.from.as_deref()), (None, Some("sub/b.md")));
+    }
+    // Hovering it: the link the window previews is the embedded note's.
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    draw(&mut vcx);
+    let hovered = reader
+        .read_with(&vcx, |r, _| r.hovered_link())
+        .expect("a hovered link");
+    assert!(hovered.file.ends_with("sub/b.md"), "{:?}", hovered.file);
+    // Mod+click: a new tab with the note beside the embedded one.
+    let secondary = vcx.update(|_, cx| Modifiers::secondary_key(cx));
+    vcx.simulate_click(at, secondary);
+    settle(&mut vcx);
+    assert_eq!(workspace.read_with(&vcx, |ws, _| ws.tabs().len()), 2);
+    let path = workspace.read_with(&vcx, |ws, _| ws.active_tab().path().map(Path::to_path_buf));
+    assert!(path.is_some_and(|p| p.ends_with("sub/d.md")));
+}
+
 #[gpui::test]
 fn a_foldable_callout_folds_on_a_click(cx: &mut TestAppContext) {
     let dir = vault(&[("c.md", "> [!faq]- Question?\n> The answer.\n\nAfter.\n")]);

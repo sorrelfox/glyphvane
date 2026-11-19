@@ -690,6 +690,7 @@ impl CanvasView {
                     kind: gv_model::LinkKind::UriAutolink,
                     disposition,
                     range: None,
+                    from: None,
                 }));
             }
             _ => {}

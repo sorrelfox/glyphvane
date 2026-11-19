@@ -631,6 +631,9 @@ impl Emitter<'_> {
         ) {
             return None;
         }
+        if let Some(from) = &link.from {
+            return self.embedded_link_target(link, from);
+        }
         match link.kind {
             LinkKind::Wikilink | LinkKind::Embed => {
                 let target = link.destination.split('|').next().unwrap_or_default();
@@ -639,6 +642,75 @@ impl Emitter<'_> {
             }
             LinkKind::Tag => None,
             _ => rewrite_link(&link.destination),
+        }
+    }
+
+    /// The href of a link inside a note embed, resolved from the embedded
+    /// note `from` (its key: a path below the vault root, or below the
+    /// document's folder without one) and made relative to the exported
+    /// document: links to the note itself (`[[#Heading]]`, `#id`) and
+    /// relative links point to the note's `.html` (or the file) where it
+    /// is beside the export; wikilinks resolve by name as in the
+    /// document. `None` (plain text) when that place is not known.
+    fn embedded_link_target(&self, link: &LinkInfo, from: &str) -> Option<String> {
+        // The embedded note's folder seen from the document's (`""`: the
+        // same folder), and its file name.
+        let place = || -> Option<(String, String)> {
+            let host = self.opts.base_dir()?;
+            let note = self.opts.root.as_deref().unwrap_or(host).join(from);
+            let note_dir = note.parent()?;
+            let prefix = if same_dir(host, note_dir) {
+                String::new()
+            } else {
+                format!("{}/", relative_path(host, note_dir)?)
+            };
+            Some((prefix, note.file_name()?.to_str()?.to_owned()))
+        };
+        let slugs = self.tree.options().slugs;
+        let heading = |anchor: &str| {
+            (!anchor.is_empty() && !anchor.starts_with('^')).then(|| {
+                let last = anchor.rsplit('#').next().unwrap_or(anchor);
+                format!("#{ID_PREFIX}{}", slugs.slug(last))
+            })
+        };
+        match link.kind {
+            LinkKind::Tag => None,
+            LinkKind::Wikilink | LinkKind::Embed => {
+                let target = link.destination.split('|').next().unwrap_or_default();
+                let (file, anchor) = target.split_once('#').unwrap_or((target, ""));
+                if file.trim().is_empty() {
+                    let (prefix, name) = place()?;
+                    return Some(note_href(format!("{prefix}{name}"), heading(anchor)));
+                }
+                if self.opts.wiki.is_some() {
+                    return wikilink_href(target, self.opts, |h| slugs.slug(h));
+                }
+                // Without a vault: the note of that name beside the
+                // embedded note.
+                let (prefix, _) = place()?;
+                let file = if Path::new(file).extension().is_some() {
+                    file.to_owned()
+                } else {
+                    format!("{file}.md")
+                };
+                Some(note_href(format!("{prefix}{file}"), heading(anchor)))
+            }
+            _ => {
+                let dest = link.destination.trim();
+                match gv_vault::url::classify(dest) {
+                    gv_vault::url::UrlClass::Fragment(id) => {
+                        let (prefix, name) = place()?;
+                        let id = id.strip_prefix(ID_PREFIX).unwrap_or(&id);
+                        let fragment = (!id.is_empty()).then(|| format!("#{ID_PREFIX}{id}"));
+                        Some(note_href(format!("{prefix}{name}"), fragment))
+                    }
+                    gv_vault::url::UrlClass::Relative(path) if !path.starts_with('/') => {
+                        let (prefix, _) = place()?;
+                        rewrite_link(&format!("{prefix}{dest}"))
+                    }
+                    _ => rewrite_link(dest),
+                }
+            }
         }
     }
 
@@ -1107,7 +1179,7 @@ pub fn wikilink_href(
     if file.is_empty() {
         return fragment;
     }
-    let mut rel = match &opts.wiki {
+    let rel = match &opts.wiki {
         Some(wiki) => {
             let resolved = wiki.resolve(file)?;
             relative_path(opts.base_dir()?, &resolved)?
@@ -1116,6 +1188,13 @@ pub fn wikilink_href(
         None if Path::new(file).extension().is_some() => file.to_owned(),
         None => format!("{file}.md"),
     };
+    Some(note_href(rel, fragment))
+}
+
+/// The href of a note at `rel` (a path relative to the export, `/`
+/// separated): a Markdown file becomes its `.html`, the characters a URL
+/// path cannot hold are encoded, then `fragment` (with its `#`).
+fn note_href(mut rel: String, fragment: Option<String>) -> String {
     if let Some(stem) = [".md", ".markdown"].iter().find_map(|ext| {
         rel.to_ascii_lowercase()
             .ends_with(ext)
@@ -1136,7 +1215,14 @@ pub fn wikilink_href(
     if let Some(f) = fragment {
         href.push_str(&f);
     }
-    Some(href)
+    href
+}
+
+/// Whether two folders are the same (after resolving links when they
+/// exist).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    norm(a) == norm(b)
 }
 
 /// `to` relative to the folder `from`, with `/` separators.

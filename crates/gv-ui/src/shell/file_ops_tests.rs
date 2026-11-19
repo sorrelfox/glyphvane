@@ -290,6 +290,7 @@ impl Fixture {
             kind: LinkKind::Inline,
             disposition: Disposition::InPlace,
             range: None,
+            from: None,
         };
         reader.update(&mut self.vcx, |_, cx| {
             cx.emit(ReaderEvent::FollowLink(request))

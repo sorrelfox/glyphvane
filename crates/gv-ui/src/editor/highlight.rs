@@ -225,6 +225,7 @@ impl LinkStatuses {
             title: None,
             range: 0..0,
             block: BlockId(0),
+            from: None,
         });
         if self.cache.len() > 4096 {
             self.cache.clear();

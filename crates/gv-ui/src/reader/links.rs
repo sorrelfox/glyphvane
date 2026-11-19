@@ -206,7 +206,21 @@ impl Resolver {
     }
 
     pub fn resolve(&self, kind: LinkKind, destination: &str) -> Resolution {
-        let link = LinkRef::new(kind, destination, self.source.clone(), self.profile);
+        self.resolve_from(kind, destination, None)
+    }
+
+    /// [`Self::resolve`] for a link of the note `from` (a vault path: a
+    /// link inside a note embed), or of the document (`None`).
+    pub fn resolve_from(
+        &self,
+        kind: LinkKind,
+        destination: &str,
+        from: Option<&str>,
+    ) -> Resolution {
+        let source = from
+            .and_then(|f| VaultPath::new(f).ok())
+            .unwrap_or_else(|| self.source.clone());
+        let link = LinkRef::new(kind, destination, source, self.profile);
         match &self.probe {
             Some(probe) => resolve_with_probe(&self.index, &link, &self.params, probe),
             None => resolve(&self.index, &link, &self.params),
@@ -264,7 +278,11 @@ const EMBED_MAX_BYTES: u64 = 2 << 20;
 
 impl LinkStatusSource for Resolver {
     fn status(&self, link: &LinkTarget<'_>) -> LinkStatus {
-        let res = self.resolve(resolver_kind(link.kind, link.image), link.destination);
+        let res = self.resolve_from(
+            resolver_kind(link.kind, link.image),
+            link.destination,
+            link.from,
+        );
         match link_status(res.status) {
             // Without the index nothing local is known to be missing.
             LinkStatus::Unresolved if !self.vault => LinkStatus::Pending,
@@ -675,6 +693,7 @@ mod tests {
             title: None,
             range: 0..1,
             block: gv_syntax::BlockId(0),
+            from: None,
         }
     }
 

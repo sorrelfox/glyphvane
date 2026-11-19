@@ -608,6 +608,7 @@ fn links_in_the_preview_pane_are_followed(cx: &mut TestAppContext) {
             kind: gv_model::LinkKind::Inline,
             disposition: Disposition::InPlace,
             range: None,
+            from: None,
         };
         preview.update(&mut f.vcx, |_, cx| {
             cx.emit(ReaderEvent::FollowLink(request))

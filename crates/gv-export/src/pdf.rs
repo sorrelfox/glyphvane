@@ -988,6 +988,11 @@ impl Emitter<'_> {
             return None;
         }
         let dest = link.destination.trim();
+        if link.from.is_some() {
+            // A link inside a note embed: its local targets are the
+            // embedded note's, which this document has no labels for.
+            return (link.kind != LinkKind::Tag && url_allowed(dest)).then(|| str_lit(dest));
+        }
         let anchor = match link.kind {
             LinkKind::Tag => return None,
             LinkKind::Wikilink | LinkKind::Embed => {

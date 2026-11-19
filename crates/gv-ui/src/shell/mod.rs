@@ -1695,10 +1695,15 @@ impl Workspace {
         else {
             return;
         };
-        let Some(file) = self.tabs[index].path.clone() else {
+        let r = reader.read(cx);
+        // A link inside a note embed is followed from the embedded note.
+        let file = match request.from.as_deref() {
+            Some(from) => r.link_file(Some(from)),
+            None => self.tabs[index].path.clone(),
+        };
+        let Some(file) = file else {
             return;
         };
-        let r = reader.read(cx);
         let construct = request.range.clone().and_then(|range| r.source_text(range));
         let link = crate::reader::link_info::LinkAt {
             file,

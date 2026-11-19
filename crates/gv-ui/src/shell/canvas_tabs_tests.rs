@@ -162,6 +162,7 @@ fn a_link_to_a_canvas_opens_it_in_a_tab(cx: &mut TestAppContext) {
             kind: LinkKind::Inline,
             disposition: Disposition::InPlace,
             range: None,
+            from: None,
         }));
     });
     draw(&mut vcx);

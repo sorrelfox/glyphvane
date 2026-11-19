@@ -298,6 +298,112 @@ fn note_embeds_show_the_note_section_or_block() {
     assert_eq!(outline(&d.render), ["Gone embed(0)"]);
 }
 
+/// Records the links asked about, with the note they are in.
+#[derive(Default)]
+struct Recording {
+    vault: Vault,
+    asked: std::sync::Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl LinkStatusSource for Recording {
+    fn status(&self, link: &LinkTarget<'_>) -> LinkStatus {
+        self.asked
+            .lock()
+            .expect("lock")
+            .push((link.destination.to_owned(), link.from.map(str::to_owned)));
+        if link.from.is_some() && link.destination == "Missing" {
+            LinkStatus::Unresolved
+        } else {
+            LinkStatus::Exact
+        }
+    }
+
+    fn embed(&self, destination: &str, from: Option<&str>) -> EmbedFetch {
+        self.vault.embed(destination, from)
+    }
+}
+
+#[test]
+fn note_embeds_keep_inline_formatting_and_links_from_the_embedded_note() {
+    let mut vault = Vault::default();
+    vault.notes.insert(
+        "Other",
+        "# Top\n\nIntro **bold** [[Third]] [rel](../x.md) [[Missing]] ![pic](p.png) ![[i.png]]\n\n- see [[#Top]]\n",
+    );
+    let rec = Recording {
+        vault,
+        ..Recording::default()
+    };
+    let text = "Host [[Here]]\n\n![[Other]]\n";
+    let d = build_with(
+        text,
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources {
+            links: &rec,
+            images: &Images,
+        },
+    );
+    check(&d);
+    let rt = &d.render;
+    let texts = outline(rt);
+    assert_eq!(
+        texts,
+        [
+            "Host Here ",
+            "Other embed(0)",
+            "Top embed(0)",
+            "Intro bold Third rel Missing pic i.png embed(0)",
+            "\u{2022} see Top embed(0)"
+        ]
+    );
+    // The paragraph: its links, from the embedded note, mapped to the
+    // embed's end; the bold run is a run of its own.
+    let c = rt.item_inline(3).expect("inline content");
+    let links: Vec<(&str, Option<&str>, LinkStatus)> = c
+        .links
+        .iter()
+        .map(|l| (&*l.destination, l.from.as_deref(), l.status))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("Third", Some("Other.md"), LinkStatus::Exact),
+            ("../x.md", Some("Other.md"), LinkStatus::Exact),
+            ("Missing", Some("Other.md"), LinkStatus::Unresolved),
+            ("i.png", Some("Other.md"), LinkStatus::Exact),
+        ]
+    );
+    assert!(c.links.iter().all(|l| l.source.is_empty()));
+    assert!(c.images.is_empty(), "embedded images are their description");
+    let end = rt.node_of(1).expect("the embed's line").source.end;
+    assert_eq!(rt.node_of(3).expect("node").source, end..end);
+    let para = &c.paragraph;
+    let style_of = |word: &str| {
+        let at = para.text().find(word).expect("word");
+        para.items()
+            .iter()
+            .find(|i| i.range().contains(&at))
+            .and_then(|i| i.style())
+            .map(|s| s.font)
+    };
+    assert_ne!(style_of("Intro"), style_of("bold"));
+    assert!(
+        para.items().iter().all(|i| i.source() == (0..0)),
+        "every item maps to the embed's end"
+    );
+    // The list item's link to a heading of the embedded note.
+    let c = rt.item_inline(4).expect("inline content");
+    assert_eq!(&*c.links[0].destination, "#Top");
+    assert_eq!(c.links[0].from.as_deref(), Some("Other.md"));
+    // The resolver was asked with the embedded note as the source; the
+    // host's own link without one.
+    let asked = rec.asked.lock().expect("lock").clone();
+    assert!(asked.contains(&("Here".to_owned(), None)));
+    assert!(asked.contains(&("../x.md".to_owned(), Some("Other.md".to_owned()))));
+    assert!(asked.contains(&("#Top".to_owned(), Some("Other.md".to_owned()))));
+}
+
 #[test]
 fn embed_cycles_and_depth_are_guarded() {
     let mut vault = Vault::default();

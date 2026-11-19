@@ -61,6 +61,11 @@ pub(crate) struct InlineCx<'a> {
     /// A callout's title: bold, in this colour, after a gutter of this
     /// width for the type's icon.
     pub title: Option<(ColorToken, f32)>,
+    /// Inside a note embed: the embedded note's key (what its links
+    /// resolve from) and where its content maps to in the document
+    /// (every source range collapses there; the inline tree's offsets are
+    /// in the embedded note's text).
+    pub embed: Option<(&'a Arc<str>, usize)>,
 }
 
 /// Size of a tag pill's text relative to the text around it (11.5 px in
@@ -86,6 +91,34 @@ pub(crate) fn build(
     b.para
         .source_anchor(tree.source_range().start.saturating_sub(base));
     b.title_gutter(tree.source_range().start);
+    b.walk(tree.top_level());
+    b.finish()
+}
+
+/// The inline content of a paragraph or heading of an embedded note
+/// (`cx.embed` set; the node starts at the embed's point), after
+/// `prefix` (a list item's bullet).
+pub(crate) fn build_embedded(
+    tree: &InlineTree,
+    prefix: Option<&str>,
+    role: TextRole,
+    cx: &InlineCx<'_>,
+) -> InlineContent {
+    let at = cx.embed.map_or(0, |(_, at)| at);
+    let mut b = Builder::new(cx, role, at);
+    b.para.source_anchor(0);
+    if let Some(prefix) = prefix {
+        let state = State {
+            variant: Variant::PLAIN,
+            link: None,
+            alt: None,
+            strike: false,
+            mark: None,
+            note: false,
+        };
+        let key = b.key(state, InlineRole::Text);
+        b.piece(prefix, at..at, false, key);
+    }
     b.walk(tree.top_level());
     b.finish()
 }
@@ -306,6 +339,11 @@ impl<'c, 'a> Builder<'c, 'a> {
 
 impl Builder<'_, '_> {
     fn rel(&self, r: Range<usize>) -> Range<usize> {
+        if let Some((_, at)) = self.cx.embed {
+            // Another note's text: everything maps to the embed's point.
+            let at = at.saturating_sub(self.base);
+            return at..at;
+        }
         r.start.saturating_sub(self.base)..r.end.saturating_sub(self.base)
     }
 
@@ -379,6 +417,12 @@ impl Builder<'_, '_> {
                 }
                 InlineKind::Link => {
                     // Link text inside an image's alt text: plain alt text.
+                    let saved = state;
+                    stack.push((node.children(), Some(Exit::Restore(saved))));
+                }
+                InlineKind::Image if self.cx.embed.is_some() => {
+                    // Inside a note embed: its description (the image's
+                    // path is the embedded note's).
                     let saved = state;
                     stack.push((node.children(), Some(Exit::Restore(saved))));
                 }
@@ -556,6 +600,7 @@ impl Builder<'_, '_> {
             self.flush();
         }
         let src = self.rel(source);
+        let exact = exact && self.cx.embed.is_none();
         self.count(text, key);
         let run = self.run.get_or_insert_with(|| Run {
             key,
@@ -782,6 +827,7 @@ impl Builder<'_, '_> {
             title: title.as_deref(),
             range: range.clone(),
             block: self.cx.block,
+            from: self.cx.embed.map(|(key, _)| &**key),
         });
         let source = self.rel(range);
         self.links.push(LinkInfo {
@@ -790,6 +836,7 @@ impl Builder<'_, '_> {
             title,
             status,
             source,
+            from: self.cx.embed.map(|(key, _)| Arc::clone(key)),
         });
         u32::try_from(self.links.len() - 1).unwrap_or(u32::MAX)
     }
@@ -850,6 +897,7 @@ impl Builder<'_, '_> {
             title: l.title,
             range: l.range.clone(),
             block: self.cx.block,
+            from: None,
         });
         // Obsidian: `![alt|300](x.png)` is 300 px wide.
         let wanted = if self.cx.alt_sizes {
@@ -946,7 +994,9 @@ impl Builder<'_, '_> {
             return;
         };
         let path = w.path().trim();
-        if state.alt.is_some() || !is_image_path(path) {
+        // Inside a note embed an image embed is a link to the image (its
+        // path is the embedded note's).
+        if state.alt.is_some() || !is_image_path(path) || self.cx.embed.is_some() {
             self.wikilink(node, state);
             return;
         }
@@ -958,6 +1008,7 @@ impl Builder<'_, '_> {
             title: None,
             range: range.clone(),
             block: self.cx.block,
+            from: None,
         });
         let index = u32::try_from(self.images.len()).unwrap_or(u32::MAX);
         self.images.push(ImageInfo {
@@ -1002,6 +1053,7 @@ impl Builder<'_, '_> {
                 title: None,
                 status: crate::status::LinkStatus::Exact,
                 source: self.rel(range.clone()),
+                from: None,
             });
             inner.link = Some(index);
         }

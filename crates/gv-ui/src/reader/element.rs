@@ -2116,7 +2116,7 @@ impl ReaderElement {
                     .upgrade()
                     .and_then(|r| {
                         let r = r.read(cx);
-                        Some((r.path()?.to_path_buf(), r.profile()))
+                        Some((r.link_file(link.from.as_deref())?, r.profile()))
                     })
                     .map(|(file, profile)| {
                         let construct = link.range.as_ref().and_then(|r| {
@@ -2536,6 +2536,7 @@ fn request(link: &LinkHit, disposition: Disposition) -> LinkRequest {
         kind: link.kind,
         disposition,
         range: link.range.clone(),
+        from: link.from.clone(),
     }
 }
 

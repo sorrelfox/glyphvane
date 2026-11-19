@@ -742,6 +742,7 @@ impl BasesView {
             kind,
             disposition,
             range: None,
+            from: None,
         }));
     }
 

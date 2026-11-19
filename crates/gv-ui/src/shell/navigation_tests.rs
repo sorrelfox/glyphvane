@@ -121,6 +121,7 @@ fn follow(
         kind: LinkKind::Inline,
         disposition,
         range: None,
+        from: None,
     };
     reader.update(vcx, |_, cx| cx.emit(ReaderEvent::FollowLink(request)));
     draw(vcx);
