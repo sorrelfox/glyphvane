@@ -30,13 +30,48 @@
 //! - **Place.** The page at the top, how far down it and the zoom
 //!   ([`PdfPlace`]) are kept with the session and shown again when the
 //!   tab is restored, and when the PDF is read again after a change.
+//! - **Text.** The engine reads a page's text with each character's box
+//!   ([`PdfEngine::page_text`]: in the helper process, like drawing, with
+//!   the same 5 s deadline), one page at a time on the background
+//!   executor, only when it is needed: every page while find is open
+//!   (from the page shown on, then from the start), and the page a
+//!   selection starts on or Select all takes, first. A page's text is read
+//!   once and kept with the viewer. Its order is the PDF's drawing order
+//!   (no reading-order analysis: columns may interleave); a page drawn as
+//!   an image has none.
+//! - **Find.** Ctrl+F opens the find popover of the Reading view
+//!   ([`FindBar`]: match case, whole word and regular expression, case
+//!   ignored by default) at the top right of the pages, filled with the
+//!   selection when that is one line. Each change of the query matches the
+//!   text read so far (on the UI thread: a regular expression over a few
+//!   KB a page); pages read later add their matches as they come, so the
+//!   count ("3 of 17", a polite status, as in the other find popovers)
+//!   grows while the text is read. At most 10,000 matches are
+//!   kept. The current match is the first at or after the place (the
+//!   current match, else the page shown); Enter and Shift+Enter in the
+//!   field, F3 and Shift+F3 anywhere in the viewer go to the next and
+//!   previous one, wrapping around, and scroll it a third down the view
+//!   when it is not in view (vertically only). Esc closes the popover and
+//!   gives the keyboard back to the pages. Matches do not span pages.
+//! - **Highlights.** Over the page image: each match in `accent.tint`, the
+//!   current one in `accent.line` (the Reading view's find colours), the
+//!   selection in `selection.text`, all at `MARK_OPACITY` so the page
+//!   shows through. A run of characters is highlighted as one box per
+//!   line, from the characters' boxes (0.2 em below the baseline to 0.8 em
+//!   above it).
+//! - **Selection.** Dragging on a page selects its text from the character
+//!   nearest the press to the one nearest the pointer (one page at a time,
+//!   no scrolling while dragging; the pointer is the text cursor over pages
+//!   whose text was read and has some); a click drops it. Ctrl+A selects the text of the page shown; Ctrl+C copies the
+//!   selection as plain text.
 //! - **Accessibility.** The pages are a list named "Pages"; each page laid
 //!   out is an image named "Page N of M" with its position in the list.
+//!   The find popover's match count is announced (a polite status).
 //!
 //! Not designed (flagged): the toolbar, the page gap and frame, the
-//! per-page messages.
+//! per-page messages, the highlights' opacity over the page image.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -45,21 +80,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, FocusHandle, Focusable, FontWeight,
-    ImageSource, InteractiveElement as _, IntoElement, KeyBinding, ObjectFit, ParentElement as _,
-    Pixels, Render, RenderImage, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Task, Window, canvas, div, img, point, px,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, ImageSource, InteractiveElement as _, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement as _, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, Window,
+    canvas, div, img, point, px,
 };
+use gv_render_tree::Finder;
 use serde::{Deserialize, Serialize};
+
+use super::pdf_text::{PageText, PdfMatch};
 
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
-use crate::export::{PageRaster, PdfEngine, PdfError};
+use crate::export::{PageRaster, PdfEngine, PdfError, PdfPageText};
+use crate::find::{CloseFind, Find, FindBar, FindBarEvent, FindNext, FindPrevious, FindStatus};
 use crate::goto::{self, Choice, GotoEvent, GotoKind, GotoRequest};
 use crate::icons::Icon;
+use crate::keymap::actions::editor::{Copy, SelectAll};
 use crate::keymap::actions::navigation::GoToLine;
 use crate::keymap::actions::view::{ZoomIn, ZoomOut, ZoomReset};
 use crate::metrics::size::infobar as size;
+use crate::metrics::spacing::find as find_spacing;
 use crate::metrics::spacing::infobar as spacing;
 use crate::metrics::{icon, radius, size as sizes, text};
 use crate::theme::Theme;
@@ -90,6 +133,17 @@ const SCALE_SLACK: f32 = 0.1;
 
 /// The key context of the PDF viewer's pages.
 pub(crate) const KEY_CONTEXT: &str = "PdfViewer";
+
+/// The key context of the whole viewer (the pages, the toolbar and the
+/// find popover): find's keys.
+pub(crate) const DOCUMENT_CONTEXT: &str = "PdfDocument";
+
+/// At most this many matches are kept (as in the Reading view).
+pub(crate) const MAX_MATCHES: usize = 10_000;
+
+/// How opaque the match and selection highlights over a page are: the
+/// page is an image, so a highlight lets it show through (not designed).
+const MARK_OPACITY: f32 = 0.45;
 
 gpui::actions!(
     pdf_viewer,
@@ -146,6 +200,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("+", ZoomInPages, c),
         KeyBinding::new("shift-=", ZoomInPages, c),
         KeyBinding::new("-", ZoomOutPages, c),
+        KeyBinding::new("ctrl-c", Copy, c),
+        KeyBinding::new("ctrl-a", SelectAll, c),
+        KeyBinding::new("ctrl-f", Find, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("f3", FindNext, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("shift-f3", FindPrevious, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("escape", CloseFind, Some(DOCUMENT_CONTEXT)),
     ]
 }
 
@@ -226,6 +286,37 @@ struct InFlight {
     _task: Task<()>,
 }
 
+/// The page whose text is being read.
+struct TextRead {
+    page: usize,
+    _task: Task<()>,
+}
+
+/// Find in the PDF.
+#[derive(Default)]
+struct PdfFind {
+    bar: Option<Entity<FindBar>>,
+    open: bool,
+    finder: Option<Finder>,
+    /// In page order, then text order.
+    matches: Vec<PdfMatch>,
+    /// More matches than [`MAX_MATCHES`].
+    more: bool,
+    current: Option<usize>,
+    status: FindStatus,
+    _events: Option<Subscription>,
+}
+
+/// Selected text: on page `page`, from the character nearest `anchor` to
+/// the one nearest `head` (points from the page's top left), or all of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PdfSelection {
+    page: usize,
+    anchor: (f32, f32),
+    head: (f32, f32),
+    all: bool,
+}
+
 /// Where the pages are, for one zoom and view size.
 #[derive(Debug, Clone, PartialEq)]
 struct Layout {
@@ -277,6 +368,25 @@ pub struct PdfViewer {
     generation: u64,
     /// Pages drawn so far (for tests).
     draws: usize,
+    /// Each page's text, once the engine read it.
+    texts: Vec<Option<Arc<PageText>>>,
+    /// Pages whose text could not be read, and why.
+    text_failed: HashMap<usize, SharedString>,
+    reading: Option<TextRead>,
+    /// Read every page's text (find is open): from `read_from` on, then
+    /// from the start.
+    read_all: bool,
+    read_from: usize,
+    /// A page whose text to read before the others (to select in it).
+    read_first: Option<usize>,
+    /// Stops the text reads when the viewer goes.
+    text_cancel: Arc<AtomicBool>,
+    find: PdfFind,
+    selection: Option<PdfSelection>,
+    /// The left button went down on a page and has not come up.
+    dragging: bool,
+    /// Where each page laid out was painted last, window px.
+    page_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
 }
 
 impl std::fmt::Debug for PdfViewer {
@@ -300,6 +410,9 @@ impl Drop for PdfViewer {
     fn drop(&mut self) {
         if let Some(job) = self.in_flight.take() {
             job.cancel.store(true, Ordering::Release);
+        }
+        if self.reading.is_some() {
+            self.text_cancel.store(true, Ordering::Release);
         }
     }
 }
@@ -328,6 +441,7 @@ impl PdfViewer {
             })
             .collect::<Vec<_>>();
         let last = sizes.len().saturating_sub(1);
+        let count = sizes.len();
         let page = page.map(|(page, into)| {
             if page > last {
                 (last, None)
@@ -352,6 +466,17 @@ impl PdfViewer {
             in_flight: None,
             generation: 0,
             draws: 0,
+            texts: vec![None; count],
+            text_failed: HashMap::new(),
+            reading: None,
+            read_all: false,
+            read_from: 0,
+            read_first: None,
+            text_cancel: Arc::new(AtomicBool::new(false)),
+            find: PdfFind::default(),
+            selection: None,
+            dragging: false,
+            page_bounds: Rc::default(),
         }
     }
 
@@ -747,6 +872,498 @@ impl PdfViewer {
         Some(image)
     }
 
+    // ----- text ------------------------------------------------------------------------
+
+    /// The text of page `page` (from 0), once the engine read it.
+    pub fn page_text(&self, page: usize) -> Option<&str> {
+        self.texts.get(page)?.as_deref().map(PageText::text)
+    }
+
+    /// Why the text of page `page` (from 0) could not be read.
+    pub fn page_text_error(&self, page: usize) -> Option<&SharedString> {
+        self.text_failed.get(&page)
+    }
+
+    fn text_missing(&self, page: usize) -> bool {
+        self.texts.get(page).is_some_and(Option::is_none) && !self.text_failed.contains_key(&page)
+    }
+
+    /// Asks the engine for the next page's text: the one to select in
+    /// first, then (while find is open) every page from the one shown on.
+    fn pump_text(&mut self, cx: &mut Context<'_, Self>) {
+        if self.reading.is_some() {
+            return;
+        }
+        let n = self.sizes.len();
+        let next = self
+            .read_first
+            .take()
+            .filter(|p| self.text_missing(*p))
+            .or_else(|| {
+                let from = self.read_from.min(n.saturating_sub(1));
+                self.read_all
+                    .then(|| (from..n).chain(0..from).find(|p| self.text_missing(*p)))
+                    .flatten()
+            });
+        let Some(page) = next else {
+            return;
+        };
+        let engine = Arc::clone(&self.engine);
+        let bytes = Arc::clone(&self.bytes);
+        let key = self.key;
+        let cancel = Arc::clone(&self.text_cancel);
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let at = u32::try_from(page).unwrap_or(u32::MAX);
+                    engine.page_text(key, &bytes, at, &cancel)
+                })
+                .await;
+            this.update(cx, |viewer, cx| viewer.text_landed(page, result, cx))
+                .ok();
+        });
+        self.reading = Some(TextRead { page, _task: task });
+    }
+
+    fn text_landed(
+        &mut self,
+        page: usize,
+        result: Result<PdfPageText, PdfError>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.reading.as_ref().is_some_and(|r| r.page == page) {
+            self.reading = None;
+        }
+        match result {
+            Ok(text) => {
+                let text = Arc::new(PageText::new(text));
+                if let Some(slot) = self.texts.get_mut(page) {
+                    *slot = Some(Arc::clone(&text));
+                }
+                self.match_page(page, &text, cx);
+            }
+            Err(PdfError::Cancelled) => {}
+            Err(PdfError::Failed(why)) => {
+                self.text_failed.insert(page, why.into());
+            }
+        }
+        self.pump_text(cx);
+        cx.notify();
+    }
+
+    // ----- find --------------------------------------------------------------------------
+
+    /// The find popover, if it was ever opened.
+    pub fn find_bar(&self) -> Option<&Entity<FindBar>> {
+        self.find.bar.as_ref()
+    }
+
+    /// Whether the find popover is open.
+    pub fn is_find_open(&self) -> bool {
+        self.find.open
+    }
+
+    /// The current match: its page (from 0) and its text.
+    pub fn current_match(&self) -> Option<(usize, String)> {
+        let m = self.find.matches.get(self.find.current?)?;
+        let text = self.texts.get(m.page)?.as_ref()?;
+        Some((m.page, text.slice(m.chars.clone()).to_owned()))
+    }
+
+    fn ensure_bar(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> Entity<FindBar> {
+        if let Some(bar) = &self.find.bar {
+            return bar.clone();
+        }
+        let bar = cx.new(|cx| FindBar::new(window, cx));
+        self.find._events = Some(cx.subscribe_in(
+            &bar,
+            window,
+            |this, _, event: &FindBarEvent, window, cx| match event {
+                FindBarEvent::Changed => this.search(cx),
+                FindBarEvent::Next => this.step_match(true, cx),
+                FindBarEvent::Previous => this.step_match(false, cx),
+                FindBarEvent::Close => this.close_find(window, cx),
+                // A PDF is only read.
+                FindBarEvent::Replace | FindBarEvent::ReplaceAll | FindBarEvent::SelectAll => {}
+            },
+        ));
+        self.find.bar = Some(bar.clone());
+        bar
+    }
+
+    /// Ctrl+F: opens the popover (or keeps it open), fills it with the
+    /// selection when that is one line of text, focuses the field with its
+    /// text selected, and reads the pages' text from the one shown on.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let bar = self.ensure_bar(window, cx);
+        let prefill = self
+            .selected_text()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty() && !t.contains('\n'));
+        let was_open = std::mem::replace(&mut self.find.open, true);
+        bar.update(cx, |bar, cx| {
+            if let Some(text) = &prefill {
+                bar.set_query(text, window, cx);
+            }
+            bar.focus_field(window, cx);
+        });
+        if !was_open {
+            self.read_all = true;
+            self.read_from = self.current_page();
+        }
+        if prefill.is_some() || !was_open {
+            self.search(cx);
+        }
+        self.pump_text(cx);
+        cx.notify();
+    }
+
+    /// Esc or the close button: closes the popover, drops the highlights
+    /// and gives the keyboard back to the pages. The query stays for the
+    /// next time; the text read stays too.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if !self.find.open {
+            cx.propagate();
+            return;
+        }
+        self.find.open = false;
+        self.find.matches.clear();
+        self.find.current = None;
+        self.find.more = false;
+        self.read_all = false;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn next_or_open(&mut self, forward: bool, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self.find.open {
+            self.step_match(forward, cx);
+        } else {
+            self.open_find(window, cx);
+        }
+    }
+
+    /// Matches the popover's query against the pages read so far; the
+    /// others are matched as their text comes.
+    fn search(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(bar) = self.find.bar.clone() else {
+            return;
+        };
+        if !self.find.open {
+            return;
+        }
+        let (query, options) = bar.read_with(cx, |bar, cx| (bar.query(cx), bar.options()));
+        // Keep the place: from the current match, or else the page shown.
+        let from = self
+            .find
+            .current
+            .and_then(|k| self.find.matches.get(k))
+            .map_or((self.current_page(), 0), |m| (m.page, m.chars.start));
+        self.find.matches.clear();
+        self.find.current = None;
+        self.find.more = false;
+        match Finder::new(&query, options) {
+            Ok(finder) if finder.is_empty() => {
+                self.find.finder = None;
+                self.find.status = FindStatus::Empty;
+            }
+            Ok(finder) => {
+                let (matches, more) = super::pdf_text::search(&self.texts, &finder, MAX_MATCHES);
+                let k = matches.partition_point(|m| (m.page, m.chars.start) < from);
+                self.find.current = match matches.len() {
+                    0 => None,
+                    n => Some(if k < n { k } else { 0 }),
+                };
+                self.find.matches = matches;
+                self.find.more = more;
+                self.find.finder = Some(finder);
+                self.update_status();
+                self.reveal_current(cx);
+            }
+            Err(err) => {
+                tracing::debug!("find in PDF: {err}");
+                self.find.finder = None;
+                self.find.status = FindStatus::Invalid;
+            }
+        }
+        self.show_status(cx);
+        cx.notify();
+    }
+
+    /// Adds the matches of page `page`, whose text just came.
+    fn match_page(&mut self, page: usize, text: &PageText, cx: &mut Context<'_, Self>) {
+        if !self.find.open {
+            return;
+        }
+        let Some(finder) = &self.find.finder else {
+            return;
+        };
+        let room = MAX_MATCHES.saturating_sub(self.find.matches.len());
+        let found = text.find(finder, room + 1);
+        if found.is_empty() {
+            return;
+        }
+        if found.len() > room {
+            self.find.more = true;
+        }
+        let at = self.find.matches.partition_point(|m| m.page < page);
+        let added = found.len().min(room);
+        self.find.matches.splice(
+            at..at,
+            found
+                .into_iter()
+                .take(room)
+                .map(|chars| PdfMatch { page, chars }),
+        );
+        match self.find.current {
+            Some(k) if k >= at => self.find.current = Some(k + added),
+            Some(_) => {}
+            // The first matches: the first at or after the page shown.
+            None if added > 0 => {
+                let here = self.current_page();
+                let k = self.find.matches.partition_point(|m| m.page < here);
+                self.find.current = Some(if k < self.find.matches.len() { k } else { 0 });
+                self.reveal_current(cx);
+            }
+            None => {}
+        }
+        self.update_status();
+        self.show_status(cx);
+    }
+
+    /// Moves the current match forward or back, wrapping around.
+    fn step_match(&mut self, forward: bool, cx: &mut Context<'_, Self>) {
+        let n = self.find.matches.len();
+        if n == 0 {
+            return;
+        }
+        let next = match (self.find.current, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(k), true) => (k + 1) % n,
+            (Some(k), false) => (k + n - 1) % n,
+        };
+        self.find.current = Some(next);
+        self.update_status();
+        self.show_status(cx);
+        self.reveal_current(cx);
+        cx.notify();
+    }
+
+    fn update_status(&mut self) {
+        self.find.status = FindStatus::Matches {
+            current: self.find.current,
+            total: self.find.matches.len(),
+            more: self.find.more,
+        };
+    }
+
+    fn show_status(&self, cx: &mut Context<'_, Self>) {
+        let status = self.find.status;
+        if let Some(bar) = &self.find.bar {
+            bar.update(cx, |bar, cx| bar.set_status(status, cx));
+        }
+    }
+
+    /// Scrolls the current match into view, a third down the view, when
+    /// it is not in view.
+    fn reveal_current(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(m) = self.find.current.and_then(|k| self.find.matches.get(k)) else {
+            return;
+        };
+        let page = m.page;
+        let Some(rect) = self
+            .texts
+            .get(page)
+            .and_then(Option::as_ref)
+            .and_then(|t| t.rects(m.chars.clone()).first().copied())
+        else {
+            return;
+        };
+        let (aw, ah) = self.view_size();
+        if aw <= 0.0 {
+            self.pending = Some((page, Some((rect[1] - 2.0 * PAGE_GAP).max(0.0))));
+            cx.notify();
+            return;
+        }
+        let layout = self.layout();
+        let Some(page_top) = layout.tops.get(page) else {
+            return;
+        };
+        let top = page_top + rect[1] * layout.ppt;
+        let bottom = page_top + rect[3] * layout.ppt;
+        let view = self.view_top();
+        if top < view || bottom > view + ah {
+            let max = (layout.height - ah).max(0.0);
+            self.set_top((top - ah / 3.0).clamp(0.0, max));
+            self.pending = None;
+            cx.notify();
+        }
+    }
+
+    // ----- selection ---------------------------------------------------------------------
+
+    /// The page under `position` (window px), and the point on it in
+    /// points from its top left.
+    fn page_point(&self, position: Point<Pixels>) -> Option<(usize, (f32, f32))> {
+        let bounds = self.page_bounds.borrow();
+        let (page, b) = bounds.iter().find(|(_, b)| b.contains(&position))?;
+        Some((*page, self.point_on(b, position)))
+    }
+
+    /// `position` (window px) in points from the top left of a page
+    /// painted at `bounds`.
+    fn point_on(&self, bounds: &Bounds<Pixels>, position: Point<Pixels>) -> (f32, f32) {
+        let ppt = self.layout().ppt.max(f32::EPSILON);
+        (
+            f32::from(position.x - bounds.origin.x) / ppt,
+            f32::from(position.y - bounds.origin.y) / ppt,
+        )
+    }
+
+    /// The selected characters: their page and range.
+    fn selected(&self) -> Option<(usize, std::ops::Range<usize>)> {
+        let sel = self.selection?;
+        let text = self.texts.get(sel.page)?.as_ref()?;
+        let range = if sel.all {
+            0..text.len()
+        } else {
+            let a = text.caret_at(sel.anchor.0, sel.anchor.1)?;
+            let h = text.caret_at(sel.head.0, sel.head.1)?;
+            a.min(h)..a.max(h)
+        };
+        (!range.is_empty()).then_some((sel.page, range))
+    }
+
+    /// The selected text, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        let (page, range) = self.selected()?;
+        let text = self.texts.get(page)?.as_ref()?;
+        Some(text.slice(range).to_owned())
+    }
+
+    /// The left button went down: a new selection starts on the page
+    /// under it (its text is read first if it is not yet).
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.focus.focus(window, cx);
+        self.selection = None;
+        self.dragging = false;
+        if let Some((page, at)) = self.page_point(event.position) {
+            self.selection = Some(PdfSelection {
+                page,
+                anchor: at,
+                head: at,
+                all: false,
+            });
+            self.dragging = true;
+            if self.text_missing(page) {
+                self.read_first = Some(page);
+                self.pump_text(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
+        if !self.dragging {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.dragging = false;
+            return;
+        }
+        let Some(page) = self.selection.map(|s| s.page) else {
+            return;
+        };
+        let bounds = self.page_bounds.borrow().get(&page).copied();
+        if let Some(bounds) = bounds {
+            let at = self.point_on(&bounds, event.position);
+            if let Some(sel) = &mut self.selection {
+                sel.head = at;
+                sel.all = false;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Ctrl+C: copies the selected text.
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<'_, Self>) {
+        match self.selected_text() {
+            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            None => cx.propagate(),
+        }
+    }
+
+    /// Ctrl+A: selects the text of the page shown.
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<'_, Self>) {
+        let page = self.current_page();
+        self.selection = Some(PdfSelection {
+            page,
+            anchor: (0.0, 0.0),
+            head: (0.0, 0.0),
+            all: true,
+        });
+        if self.text_missing(page) {
+            self.read_first = Some(page);
+            self.pump_text(cx);
+        }
+        cx.notify();
+    }
+
+    /// The highlights over page `page`: the find matches (the current one
+    /// in `accent.line`, the others in `accent.tint`, as in the Reading
+    /// view) and the selection (`selection.text`).
+    fn marks(&self, page: usize, ppt: f32, theme: &Theme) -> Vec<AnyElement> {
+        let Some(text) = self.texts.get(page).and_then(Option::as_ref) else {
+            return Vec::new();
+        };
+        let mut rects: Vec<([f32; 4], Hsla, &'static str)> = Vec::new();
+        if self.find.open {
+            let start = self.find.matches.partition_point(|m| m.page < page);
+            for (k, m) in self.find.matches[start..]
+                .iter()
+                .enumerate()
+                .take_while(|(_, m)| m.page == page)
+            {
+                let (color, name) = if Some(start + k) == self.find.current {
+                    (theme.accent.line, "pdf-current-match")
+                } else {
+                    (theme.accent.tint, "pdf-match")
+                };
+                rects.extend(
+                    text.rects(m.chars.clone())
+                        .into_iter()
+                        .map(|r| (r, color.into(), name)),
+                );
+            }
+        }
+        if let Some((at, range)) = self.selected()
+            && at == page
+        {
+            let color: Hsla = theme.selection.text.into();
+            rects.extend(
+                text.rects(range)
+                    .into_iter()
+                    .map(|r| (r, color, "pdf-selection")),
+            );
+        }
+        rects
+            .into_iter()
+            .map(|(r, color, name)| {
+                div()
+                    .debug_selector(move || name.to_owned())
+                    .absolute()
+                    .left(px(r[0] * ppt))
+                    .top(px(r[1] * ppt))
+                    .w(px((r[2] - r[0]) * ppt))
+                    .h(px((r[3] - r[1]) * ppt))
+                    .bg(color)
+                    .opacity(MARK_OPACITY)
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     // ----- drawing the view --------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -988,6 +1605,7 @@ impl Render for PdfViewer {
         }
 
         let mut pages = div().relative().w(px(layout.width)).h(px(layout.height));
+        self.page_bounds.borrow_mut().clear();
         for page in from..=to.min(count.saturating_sub(1)) {
             let (w, h) = self.sizes[page];
             let (pw, ph) = (w * layout.ppt, h * layout.ppt);
@@ -996,6 +1614,13 @@ impl Render for PdfViewer {
             let image = self.image_of(page, scale);
             let error = self.failed.get(&page).map(|(_, why)| why.clone());
             let label = format!("Page {} of {count}", page + 1);
+            let marks = self.marks(page, layout.ppt, theme);
+            let has_text = self
+                .texts
+                .get(page)
+                .and_then(Option::as_ref)
+                .is_some_and(|t| t.len() > 0);
+            let bounds = Rc::clone(&self.page_bounds);
             pages = pages.child(
                 div()
                     .id(("pdf-page", page))
@@ -1034,6 +1659,21 @@ impl Render for PdfViewer {
                                 .child(format!("This page could not be drawn: {why}")),
                         )
                     })
+                    .when(has_text, |d| d.cursor(CursorStyle::IBeam))
+                    .children(marks)
+                    .child(
+                        // Where the page is painted, for the mouse.
+                        canvas(
+                            move |b, _, _| {
+                                bounds.borrow_mut().insert(page, b);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
                     .accessible(),
             );
         }
@@ -1046,8 +1686,7 @@ impl Render for PdfViewer {
             .debug_selector(|| "pdf-viewer-pages".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .relative()
             .overflow_scroll()
             .track_scroll(&self.scroll)
@@ -1064,11 +1703,16 @@ impl Render for PdfViewer {
                 }
             }))
             .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
-                    this.focus.focus(window, cx);
-                }),
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| this.press(e, window, cx)),
             )
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag(e, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false),
+            )
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(|this, _: &ScrollUp, _, cx| this.scroll_by(-SCROLL_STEP, cx)))
             .on_action(cx.listener(|this, _: &ScrollDown, _, cx| this.scroll_by(SCROLL_STEP, cx)))
             .on_action(cx.listener(|this, _: &ScreenUp, _, cx| this.screen(false, cx)))
@@ -1109,11 +1753,35 @@ impl Render for PdfViewer {
             )
             .child(pages);
         let zoom = layout.ppt / PX_PER_PT;
+        // The find popover, at the top right of the pages.
+        let popover = self.find.bar.clone().filter(|_| self.find.open).map(|bar| {
+            div()
+                .absolute()
+                .top(px(find_spacing::INSET_TOP))
+                .right(px(find_spacing::INSET_RIGHT))
+                .child(bar)
+        });
         div()
+            .key_context(DOCUMENT_CONTEXT)
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                this.next_or_open(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                this.next_or_open(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
             .size_full()
             .flex()
             .flex_col()
             .child(self.toolbar(zoom, theme, cx))
-            .child(body.accessible())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(body.accessible())
+                    .children(popover),
+            )
     }
 }

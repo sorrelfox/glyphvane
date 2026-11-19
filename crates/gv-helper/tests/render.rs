@@ -2,15 +2,16 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! PDF pages drawn by the real `glyphvane-helper`: a PDF opened once and
-//! drawn page by page at a scale (the PDF viewer), the caps on images and
-//! pages, unreadable and encrypted files, and the deadline. The PDFs are
-//! written by the tests themselves ([`tiny_pdf`]).
+//! drawn page by page at a scale (the PDF viewer), the text of its pages,
+//! the caps on images and pages, unreadable and encrypted files, and the
+//! deadline. The PDFs are written by the tests themselves ([`tiny_pdf`],
+//! [`text_pdf`]).
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use gv_helper::protocol::{MAX_RENDER_PIXELS, MAX_RENDER_SIDE};
-use gv_helper::{Helper, HelperConfig, HelperError, PageJob, RenderJob};
+use gv_helper::{Helper, HelperConfig, HelperError, PageJob, RenderJob, TextJob};
 
 fn helper() -> Helper {
     Helper::new(HelperConfig::new(env!("CARGO_BIN_EXE_glyphvane-helper")))
@@ -103,6 +104,87 @@ fn tiny_pdf(sizes: &[(f32, f32)], extra: Extra) -> Vec<u8> {
     out
 }
 
+/// Writes `objects` (numbered from 1; the first is the catalog) as a PDF.
+fn write_pdf(objects: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A Letter-size PDF with one page per entry of `pages`, each line of it
+/// set at 12 pt from 72 pt from the left, the first baseline 92 pt from
+/// the top and 20 pt between baselines, in a Type 3 font (defined in the
+/// file, so no font has to be installed) whose glyphs are 6 pt wide
+/// (500 units) and draw nothing; its glyph names give the text. Letters
+/// and spaces only.
+fn text_pdf(pages: &[&[&str]]) -> Vec<u8> {
+    let n = pages.len();
+    // 1: catalog, 2: pages, 3: font, 4: the glyph procedure, then a page
+    // and its content per page.
+    let mut objects: Vec<String> = vec!["<< /Type /Catalog /Pages 2 0 R >>".into()];
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 5 + 2 * i)).collect();
+    objects.push(format!(
+        "<< /Type /Pages /Kids [{}] /Count {n} >>",
+        kids.join(" ")
+    ));
+    let upper: Vec<String> = ('A'..='Z').map(|c| format!("/{c}")).collect();
+    let lower: Vec<String> = ('a'..='z').map(|c| format!("/{c}")).collect();
+    let procs: Vec<String> = std::iter::once("/space 4 0 R".to_owned())
+        .chain(('A'..='Z').chain('a'..='z').map(|c| format!("/{c} 4 0 R")))
+        .collect();
+    let widths = vec!["500"; 122 - 32 + 1].join(" ");
+    objects.push(format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] /FontMatrix [0.001 0 0 0.001 0 0] \
+         /CharProcs << {} >> /Encoding << /Type /Encoding /Differences [32 /space 65 {} 97 {}] >> \
+         /FirstChar 32 /LastChar 122 /Widths [{widths}] /Resources << >> >>",
+        procs.join(" "),
+        upper.join(" "),
+        lower.join(" ")
+    ));
+    let glyph = "500 0 d0";
+    objects.push(format!(
+        "<< /Length {} >>\nstream\n{glyph}\nendstream",
+        glyph.len()
+    ));
+    for (i, lines) in pages.iter().enumerate() {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R \
+             /Resources << /Font << /F1 3 0 R >> >> >>",
+            6 + 2 * i
+        ));
+        let mut content = "BT /F1 12 Tf 72 700 Td".to_owned();
+        for (k, line) in lines.iter().enumerate() {
+            if k > 0 {
+                content.push_str(" 0 -20 Td");
+            }
+            content.push_str(&format!(" ({line}) Tj"));
+        }
+        content.push_str(" ET");
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ));
+    }
+    write_pdf(&objects)
+}
+
 fn render(key: u64, page: u32, scale: f32) -> RenderJob {
     RenderJob {
         key,
@@ -168,6 +250,75 @@ fn a_pdf_opens_once_and_draws_page_by_page_at_a_scale() {
     assert!(
         helper
             .render(render(2, 0, 1.0), DEADLINE, &never())
+            .expect("answered")
+            .is_none()
+    );
+    helper.shutdown();
+}
+
+#[test]
+fn the_text_of_a_page_comes_with_each_characters_box() {
+    let helper = helper();
+    let pdf = text_pdf(&[&["Hello world", "Second line"], &["Page two"]]);
+    helper.open(11, pdf, DEADLINE, &never()).expect("opens");
+    let text = helper
+        .text(TextJob { key: 11, page: 0 }, DEADLINE, &never())
+        .expect("read")
+        .expect("the helper holds the PDF");
+    assert_eq!(text.text, "Hello world\nSecond line");
+    assert_eq!(text.boxes.len(), text.text.chars().count());
+    // "H": 72 pt from the left, 6 pt wide; the baseline 92 pt from the
+    // top, the box from 0.8 em above it to 0.2 em below.
+    let h = text.boxes[0];
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(near(h.x0, 72.0) && near(h.x1, 78.0), "{h:?}");
+    assert!(near(h.y0, 92.0 - 9.6) && near(h.y1, 92.0 + 2.4), "{h:?}");
+    // "S" starts the second line, 20 pt lower.
+    let s = text.boxes[12];
+    assert!(near(s.x0, 72.0) && near(s.y0, 112.0 - 9.6), "{s:?}");
+
+    // Another page of the same session, while it also draws.
+    let pid = helper.pid();
+    assert!(
+        helper
+            .render(render(11, 1, 1.0), DEADLINE, &never())
+            .expect("drawn")
+            .is_some()
+    );
+    let two = helper
+        .text(TextJob { key: 11, page: 1 }, DEADLINE, &never())
+        .expect("read")
+        .expect("held");
+    assert_eq!(two.text, "Page two");
+    assert_eq!(helper.pid(), pid, "the same helper");
+
+    // No such page: an error; another key is not held.
+    let err = helper
+        .text(TextJob { key: 11, page: 5 }, DEADLINE, &never())
+        .expect_err("no page 6");
+    assert!(
+        matches!(&err, HelperError::Failed(m) if m.contains("no page 6")),
+        "{err}"
+    );
+    assert!(
+        helper
+            .text(TextJob { key: 12, page: 0 }, DEADLINE, &never())
+            .expect("answered")
+            .is_none()
+    );
+    // A page without text has none.
+    let square = tiny_pdf(&[(100.0, 100.0)], Extra::None);
+    helper.open(13, square, DEADLINE, &never()).expect("opens");
+    let empty = helper
+        .text(TextJob { key: 13, page: 0 }, DEADLINE, &never())
+        .expect("read")
+        .expect("held");
+    assert!(empty.text.is_empty() && empty.boxes.is_empty());
+    helper.shutdown();
+    // A new helper holds nothing.
+    assert!(
+        helper
+            .text(TextJob { key: 13, page: 0 }, DEADLINE, &never())
             .expect("answered")
             .is_none()
     );

@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 /// The protocol's version. Bump it whenever a type of this module changes.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// The largest frame, in bytes, in either direction.
 pub const MAX_FRAME: u32 = 256 << 20;
@@ -35,6 +35,10 @@ pub const MAX_RENDER_PIXELS: u64 = 24 << 20;
 /// decodes images at full size, so a page with a larger one is refused
 /// before it is drawn.
 pub const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+/// The largest text of a page ([`Job::Text`]) the parent accepts, in
+/// bytes (its text and 16 bytes per character box).
+pub const MAX_TEXT_BYTES: u64 = 16 << 20;
 
 /// The version both sides announce.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,6 +99,10 @@ pub enum Job {
     /// that does not hold that PDF (a new one, or another PDF opened
     /// since) answers [`Output::NoDocument`]: open it again.
     Render(RenderJob),
+    /// Read the text of a page of the PDF [`Job::Open`] kept, with each
+    /// character's box ([`Output::Text`]); like [`Job::Render`], a helper
+    /// that does not hold that PDF answers [`Output::NoDocument`].
+    Text(TextJob),
     /// Misbehave on purpose, for the tests of the parent's limits.
     Fault(Fault),
 }
@@ -135,7 +143,10 @@ pub enum Output {
     Page(PageImage),
     /// The pages of a PDF [`Job::Open`] read.
     Document(DocInfo),
-    /// The helper does not hold the PDF a [`Job::Render`] names.
+    /// The text of a page ([`Job::Text`]).
+    Text(PageText),
+    /// The helper does not hold the PDF a [`Job::Render`] or a
+    /// [`Job::Text`] names.
     NoDocument,
     /// The answer of a [`Job::Fault`] that returned.
     Done,
@@ -161,6 +172,41 @@ pub struct RenderJob {
     /// The most pixels of the image (at most [`MAX_RENDER_PIXELS`]): a
     /// larger page is drawn at a smaller scale.
     pub max_pixels: u64,
+}
+
+/// A page of the kept PDF whose text to read ([`Job::Text`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextJob {
+    /// The key of the PDF ([`OpenJob::key`]).
+    pub key: u64,
+    /// The page, from 0.
+    pub page: u32,
+}
+
+/// The box of a character on its page, in PDF points from the page's top
+/// left (as shown: crop box, rotated).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// The text of a page, in the content stream's order, with spaces and
+/// line ends between words and lines; `boxes` has one box per character
+/// (`char`) of `text`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageText {
+    pub text: String,
+    pub boxes: Vec<TextBox>,
+}
+
+impl PageText {
+    /// Its size as the parent counts it against [`MAX_TEXT_BYTES`].
+    pub fn bytes(&self) -> u64 {
+        self.text.len() as u64 + 16 * self.boxes.len() as u64
+    }
 }
 
 /// The size of a page as shown (its crop box, rotated), in PDF points.
@@ -268,6 +314,21 @@ mod tests {
         };
         assert_eq!(id, 7);
         assert!(matches!(job, Job::Pdf(p) if p.max_pages == 5));
+
+        let text = Response::Done {
+            id: 8,
+            result: Ok(Output::Text(PageText {
+                text: "Hi".into(),
+                boxes: vec![TextBox::default(); 2],
+            })),
+        };
+        let mut buf = Vec::new();
+        send(&mut buf, &text).expect("send");
+        let frame = read_frame(&mut buf.as_slice()).expect("read");
+        let Response::Done { result, .. } = decode(&frame).expect("decode") else {
+            panic!("an answer");
+        };
+        assert!(matches!(result, Ok(Output::Text(t)) if t.text == "Hi" && t.bytes() == 34));
 
         let mut huge = Vec::new();
         huge.extend_from_slice(&(MAX_FRAME + 1).to_le_bytes());

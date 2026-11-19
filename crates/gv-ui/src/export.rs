@@ -275,6 +275,33 @@ pub trait PdfEngine: Send + Sync {
             "the PDF engine is not available".to_owned(),
         ))
     }
+
+    /// The text of page `page` (from 0) of the PDF `pdf`, kept as `key`,
+    /// with each character's box (the PDF viewer's find and selection).
+    /// The engine reads `pdf` again when it no longer holds it. Engines
+    /// without text extraction say so.
+    fn page_text(
+        &self,
+        key: u64,
+        pdf: &[u8],
+        page: u32,
+        cancel: &AtomicBool,
+    ) -> Result<PdfPageText, PdfError> {
+        let _ = (key, pdf, page, cancel);
+        Err(PdfError::Failed(
+            "the text of PDF pages is not available".to_owned(),
+        ))
+    }
+}
+
+/// The text of a PDF page, in the order the PDF draws it, with spaces and
+/// line ends between words and lines.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PdfPageText {
+    pub text: String,
+    /// One box per character (`char`) of `text`: left, top, right, bottom
+    /// in PDF points from the page's top left (as shown).
+    pub boxes: Vec<[f32; 4]>,
 }
 
 /// A drawn PDF page: straight-alpha RGBA rows, top first.

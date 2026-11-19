@@ -8,7 +8,8 @@
 //! pages of a PDF: for the export dialog's preview, canvas cards and PDF
 //! embeds (a page fitted in a box), and for the PDF viewer (a PDF opened
 //! once, drawn page by page at a scale, read again when a new helper no
-//! longer holds it).
+//! longer holds it), and reads the text of its pages for the viewer's
+//! find and selection.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, PoisonError};
@@ -16,8 +17,8 @@ use std::time::Duration;
 
 use gv_export::TypstDocument;
 use gv_helper::protocol::MAX_RENDER_PIXELS;
-use gv_helper::{Helper, HelperError, PageJob, PdfJob, RenderJob};
-use gv_ui::export::{PageRaster, PdfEngine, PdfError};
+use gv_helper::{Helper, HelperError, PageJob, PdfJob, RenderJob, TextJob};
+use gv_ui::export::{PageRaster, PdfEngine, PdfError, PdfPageText};
 
 /// The longest a PDF may take (plan: 60 s; 300 pages took 0.33 s).
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -154,6 +155,48 @@ impl PdfEngine for HelperEngine {
             rgba: image.rgba,
             pages: image.pages,
         })
+    }
+
+    fn page_text(
+        &self,
+        key: u64,
+        pdf: &[u8],
+        page: u32,
+        cancel: &AtomicBool,
+    ) -> Result<PdfPageText, PdfError> {
+        let text = self.in_document(key, pdf, cancel, |helper| {
+            helper.text(TextJob { key, page }, PAGE_DEADLINE, cancel)
+        })?;
+        Ok(PdfPageText {
+            text: text.text,
+            boxes: text
+                .boxes
+                .iter()
+                .map(|b| [b.x0, b.y0, b.x1, b.y1])
+                .collect(),
+        })
+    }
+}
+
+impl HelperEngine {
+    /// Runs `job` for the PDF `pdf` kept as `key`, opening it again once
+    /// when the helper no longer holds it.
+    fn in_document<T>(
+        &self,
+        key: u64,
+        pdf: &[u8],
+        cancel: &AtomicBool,
+        job: impl Fn(&Helper) -> Result<Option<T>, HelperError>,
+    ) -> Result<T, PdfError> {
+        let helper = self.helper()?;
+        let mut out = job(&helper).map_err(failed)?;
+        if out.is_none() {
+            helper
+                .open(key, pdf.to_vec(), OPEN_DEADLINE, cancel)
+                .map_err(failed)?;
+            out = job(&helper).map_err(failed)?;
+        }
+        out.ok_or_else(|| PdfError::Failed("the PDF engine lost the document".to_owned()))
     }
 }
 

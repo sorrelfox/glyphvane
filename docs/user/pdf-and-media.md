@@ -33,12 +33,35 @@ zoom you left.
 | **Ctrl+G** | Go to page… |
 | **0** | Fit width |
 | **1** | 100 % |
+| **Ctrl+F** | Find in the PDF |
+| **Enter** / **Shift+Enter** (in the find field), **F3** / **Shift+F3** | Next / previous match |
+| **Esc** | Close find |
+| **Ctrl+A** | Select the text of the page shown |
+| **Ctrl+C** | Copy the selected text |
 
 **Linking to a page.** A link to `file.pdf#page=5` opens the PDF viewer at
 page 5. In profiles with embeds, `![[file.pdf#page=5]]` shows a card with
 **Open in PDF viewer**.
 
-Selecting and searching text in PDFs is not available yet.
+**Finding text.** **Ctrl+F** opens the find box at the top right of the
+pages, with the same options as find in a note (**Aa** match case, **ab**
+whole word, **.\*** regular expression); case is ignored unless you turn on
+**Aa**. The count shows the current match and the number of matches, for
+example "3 of 17". Glyphvane reads the text of the pages in the background,
+starting with the page you are on, so in a long PDF the count grows for a
+moment after you type. The current match is highlighted more strongly than
+the others, and the PDF scrolls to it. A match cannot run from one page to
+the next.
+
+**Selecting and copying text.** Drag across text on a page to select it,
+then press **Ctrl+C** to copy it. **Ctrl+A** selects all the text of the
+page you are on. A selection stays on one page.
+
+Text is read in the order the PDF draws it, which is usually reading order.
+Some PDFs draw text in another order, for example a page in two columns, so
+a search or a selection can run across columns. A scanned page has text only
+if the PDF includes a text layer (from text recognition), and a PDF can only
+be searched as far as it says which characters its fonts draw.
 
 ## The image viewer
 

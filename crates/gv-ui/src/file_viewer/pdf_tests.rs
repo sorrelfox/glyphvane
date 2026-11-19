@@ -3,7 +3,8 @@
 
 //! The PDF viewer in a headless window, with a PDF engine of its own
 //! ([`FakePdf`]): pages, drawing only what is in view, navigation, zoom,
-//! `#page=` and the error states, and what assistive technology is told.
+//! `#page=` and the error states, what assistive technology is told, and
+//! find and text selection over the pages' text.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +17,8 @@ use gpui::{
 
 use super::pdf::{PX_PER_PT, PdfViewer, PdfZoom};
 use super::{FileViewer, PDF_MAX_BYTES, ViewerKind, ViewerStatus, kind};
-use crate::export::{PageRaster, PdfEngine, PdfError};
+use crate::export::{PageRaster, PdfEngine, PdfError, PdfPageText};
+use crate::find::FindBar;
 use crate::{AppSettings, ThemeChoice};
 
 /// A PDF engine for tests: every PDF has the pages `sizes` (points); it
@@ -34,6 +36,10 @@ pub(crate) struct FakePdf {
     /// Pages fitted in a box: (page, max width, max height).
     pub fitted: Mutex<Vec<(u32, u32, u32)>>,
     pub opened: AtomicBool,
+    /// Each page's text ([`FakePdf::text_of`] places it).
+    pub texts: Vec<String>,
+    /// Pages whose text was read, in order.
+    pub texted: Mutex<Vec<u32>>,
 }
 
 impl FakePdf {
@@ -41,6 +47,36 @@ impl FakePdf {
         Self {
             sizes: sizes.to_vec(),
             ..Self::default()
+        }
+    }
+
+    pub fn texted_pages(&self) -> Vec<u32> {
+        self.texted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// `text` placed as a PDF would: each line 72 pt from the left, the
+    /// first 72 pt from the top and 20 pt apart; each character 6 pt wide
+    /// and 12 pt high; a line end has no area.
+    pub fn text_of(text: &str) -> PdfPageText {
+        let mut boxes = Vec::new();
+        let (mut line, mut col) = (0.0_f32, 0.0_f32);
+        for c in text.chars() {
+            let (x, y) = (72.0 + 6.0 * col, 72.0 + 20.0 * line);
+            if c == '\n' {
+                boxes.push([x, y, x, y + 12.0]);
+                line += 1.0;
+                col = 0.0;
+            } else {
+                boxes.push([x, y, x + 6.0, y + 12.0]);
+                col += 1.0;
+            }
+        }
+        PdfPageText {
+            text: text.to_owned(),
+            boxes,
         }
     }
 
@@ -131,6 +167,21 @@ impl PdfEngine for FakePdf {
         }
         let pages = u32::try_from(self.sizes.len()).unwrap_or(0);
         Ok(Self::raster(4, 4, pages))
+    }
+
+    fn page_text(
+        &self,
+        _: u64,
+        _: &[u8],
+        page: u32,
+        _: &AtomicBool,
+    ) -> Result<PdfPageText, PdfError> {
+        self.texted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(page);
+        let text = self.texts.get(page as usize).map_or("", String::as_str);
+        Ok(Self::text_of(text))
     }
 }
 
@@ -592,4 +643,257 @@ fn a_place_from_a_damaged_session_is_made_usable() {
     };
     assert_eq!(place.sanitized().zoom, PdfZoom::FitWidth);
     assert!(PdfPlace::default().is_start());
+}
+
+// ----- find and selection -------------------------------------------------------------
+
+/// A PDF of Letter pages with `texts`, open and drawn.
+fn open_text(
+    cx: &mut TestAppContext,
+    texts: &[&str],
+) -> (
+    tempfile::TempDir,
+    Arc<FakePdf>,
+    VisualTestContext,
+    Entity<FileViewer>,
+    Entity<PdfViewer>,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = pdf_file(dir.path());
+    let engine = Arc::new(FakePdf {
+        texts: texts.iter().map(|t| (*t).to_owned()).collect(),
+        ..FakePdf::pages(&vec![LETTER; texts.len()])
+    });
+    let (window, viewer) = open(cx, &file, Some(Arc::clone(&engine)), None);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let pdf = pdf_of(&viewer, &mut vcx);
+    (dir, engine, vcx, viewer, pdf)
+}
+
+fn find_bar(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Entity<FindBar> {
+    pdf.read_with(vcx, |p, _| p.find_bar().cloned())
+        .expect("the find popover exists")
+}
+
+/// What the match count says (and what assistive technology hears).
+fn count(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Option<String> {
+    let bar = find_bar(pdf, vcx);
+    bar.read_with(vcx, |b, _| b.status().text())
+}
+
+fn current(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Option<(usize, String)> {
+    pdf.read_with(vcx, |p, _| p.current_match())
+}
+
+/// Presses `keys` wherever the focus is, and draws.
+fn keys(vcx: &mut VisualTestContext, keys: &str) {
+    vcx.simulate_keystrokes(keys);
+    draw(vcx);
+}
+
+const TEXTS: [&str; 5] = [
+    "Alpha beta",
+    "nothing here",
+    "ALPHA and alpha",
+    "",
+    "the alphabet",
+];
+
+#[gpui::test]
+fn ctrl_f_finds_across_the_pages_and_steps_through_the_matches(cx: &mut TestAppContext) {
+    let (_dir, engine, mut vcx, _viewer, pdf) = open_text(cx, &TEXTS);
+    // No text is read before it is needed.
+    assert!(engine.texted_pages().is_empty());
+
+    press(&pdf, &mut vcx, "ctrl-f");
+    assert!(pdf.read_with(&vcx, |p, _| p.is_find_open()));
+    assert!(vcx.debug_bounds("find-bar").is_some());
+    // Every page's text was read in the background, once each, from the
+    // page shown on.
+    assert_eq!(engine.texted_pages(), [0, 1, 2, 3, 4]);
+    pdf.read_with(&vcx, |p, _| {
+        assert_eq!(p.page_text(2), Some("ALPHA and alpha"));
+        assert_eq!(p.page_text(3), Some(""));
+    });
+
+    // The field has the keyboard; case is ignored.
+    vcx.simulate_input("alpha");
+    draw(&mut vcx);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 4"));
+    assert_eq!(current(&pdf, &mut vcx), Some((0, "Alpha".to_owned())));
+    assert!(vcx.debug_bounds("pdf-current-match").is_some());
+
+    // Enter and Shift+Enter, F3 and Shift+F3: next and previous; the view
+    // follows the current match.
+    keys(&mut vcx, "enter");
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("2 of 4"));
+    assert_eq!(current(&pdf, &mut vcx), Some((2, "ALPHA".to_owned())));
+    assert_eq!(pdf.read_with(&vcx, |p, _| p.current_page()), 2);
+    assert!(vcx.debug_bounds("pdf-match").is_some(), "the other match");
+    keys(&mut vcx, "f3");
+    assert_eq!(current(&pdf, &mut vcx), Some((2, "alpha".to_owned())));
+    keys(&mut vcx, "f3");
+    assert_eq!(current(&pdf, &mut vcx), Some((4, "alpha".to_owned())));
+    assert_eq!(pdf.read_with(&vcx, |p, _| p.current_page()), 4);
+    // Wraps around.
+    keys(&mut vcx, "f3");
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 4"));
+    keys(&mut vcx, "shift-f3");
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("4 of 4"));
+    keys(&mut vcx, "shift-enter");
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("3 of 4"));
+
+    // Typing on keeps the place; no match says so.
+    vcx.simulate_input("b");
+    draw(&mut vcx);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 1"));
+    assert_eq!(current(&pdf, &mut vcx), Some((4, "alphab".to_owned())));
+    vcx.simulate_input("x");
+    draw(&mut vcx);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("No results"));
+    assert_eq!(current(&pdf, &mut vcx), None);
+
+    // Escape closes it, drops the highlights and gives the keyboard back
+    // to the pages; the text read is kept.
+    keys(&mut vcx, "escape");
+    assert!(!pdf.read_with(&vcx, |p, _| p.is_find_open()));
+    assert!(vcx.debug_bounds("find-bar").is_none());
+    assert!(vcx.debug_bounds("pdf-match").is_none());
+    let focused = vcx.update(|window, cx| pdf.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "the pages have the keyboard");
+    // F3 with find closed opens it again, with the same query.
+    keys(&mut vcx, "f3");
+    assert!(pdf.read_with(&vcx, |p, _| p.is_find_open()));
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("No results"));
+    assert_eq!(engine.texted_pages().len(), 5, "not read again");
+}
+
+#[gpui::test]
+fn pages_read_later_add_their_matches_from_the_page_shown(cx: &mut TestAppContext) {
+    let (_dir, engine, mut vcx, viewer, pdf) = open_text(cx, &TEXTS);
+    vcx.update(|_, cx| viewer.update(cx, |v, cx| v.go_to_page(3, cx)));
+    draw(&mut vcx);
+    // Find opens and the query is typed before any text comes.
+    vcx.update(|window, cx| {
+        pdf.read(cx).focus_handle(cx).focus(window, cx);
+        window.dispatch_action(Box::new(crate::find::Find), cx);
+    });
+    vcx.update(|window, cx| {
+        let bar = pdf.read(cx).find_bar().cloned().expect("the popover");
+        bar.update(cx, |bar, cx| {
+            bar.set_query("alpha", window, cx);
+            cx.emit(crate::find::FindBarEvent::Changed);
+        });
+    });
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("No results"));
+    draw(&mut vcx);
+    // Read from the page shown on, then from the start; the first match
+    // at or after the page shown is the current one.
+    assert_eq!(engine.texted_pages(), [3, 4, 0, 1, 2]);
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("4 of 4"));
+    assert_eq!(current(&pdf, &mut vcx), Some((4, "alpha".to_owned())));
+    keys(&mut vcx, "enter");
+    assert_eq!(current(&pdf, &mut vcx), Some((0, "Alpha".to_owned())));
+    assert_eq!(pdf.read_with(&vcx, |p, _| p.current_page()), 0);
+}
+
+#[gpui::test]
+fn dragging_selects_text_that_ctrl_c_copies(cx: &mut TestAppContext) {
+    let (_dir, engine, mut vcx, _viewer, pdf) =
+        open_text(cx, &["Hello world\nSecond line", "Page two"]);
+    let page = vcx.debug_bounds("pdf-page-1").expect("page 1");
+    let ppt = pdf.read_with(&vcx, |p, _| p.effective_zoom()) * PX_PER_PT;
+    // Points on the page as window pixels (inside its 1 px frame).
+    let at = |x: f32, y: f32| {
+        point(
+            page.origin.x + px(1.0 + x * ppt),
+            page.origin.y + px(1.0 + y * ppt),
+        )
+    };
+    // From the left half of "H" to the right half of "d".
+    vcx.simulate_mouse_down(
+        at(73.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_move(
+        at(100.0, 80.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_move(
+        at(137.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_up(
+        at(137.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    draw(&mut vcx);
+    // The page's text was read for it (only that page).
+    assert_eq!(engine.texted_pages(), [0]);
+    assert_eq!(
+        pdf.read_with(&vcx, |p, _| p.selected_text()).as_deref(),
+        Some("Hello world")
+    );
+    assert!(vcx.debug_bounds("pdf-selection").is_some());
+    press(&pdf, &mut vcx, "ctrl-c");
+    let copied = vcx.read_from_clipboard().and_then(|c| c.text());
+    assert_eq!(copied.as_deref(), Some("Hello world"));
+
+    // Down to the next line, from "w".
+    vcx.simulate_mouse_down(
+        at(108.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_move(
+        at(85.0, 97.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_up(
+        at(85.0, 97.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    draw(&mut vcx);
+    assert_eq!(
+        pdf.read_with(&vcx, |p, _| p.selected_text()).as_deref(),
+        Some("world\nSe")
+    );
+
+    // A click drops the selection; Ctrl+A selects the page's text.
+    vcx.simulate_click(at(300.0, 400.0), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(pdf.read_with(&vcx, |p, _| p.selected_text()), None);
+    press(&pdf, &mut vcx, "ctrl-a");
+    press(&pdf, &mut vcx, "ctrl-c");
+    let copied = vcx.read_from_clipboard().and_then(|c| c.text());
+    assert_eq!(copied.as_deref(), Some("Hello world\nSecond line"));
+
+    // The selection fills the find field.
+    vcx.simulate_mouse_down(
+        at(73.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_move(
+        at(101.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.simulate_mouse_up(
+        at(101.0, 78.0),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    draw(&mut vcx);
+    press(&pdf, &mut vcx, "ctrl-f");
+    let bar = find_bar(&pdf, &mut vcx);
+    assert_eq!(bar.read_with(&vcx, |b, cx| b.query(cx)), "Hello");
+    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 1"));
 }

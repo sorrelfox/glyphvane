@@ -8,7 +8,8 @@
 //! - [`open`] and [`Session`]: a PDF read once and drawn page by page at a
 //!   scale (the PDF viewer). A session keeps hayro's caches (fonts,
 //!   glyphs, decoded resources) and one reused drawing context while the
-//!   parent draws pages of the same PDF.
+//!   parent draws pages of the same PDF. It also reads the text of its
+//!   pages ([`crate::text`]), with caches of its own.
 //!
 //! Limits: an image is at most [`MAX_SIDE`] (fit) or
 //! [`protocol::MAX_RENDER_SIDE`] pixels a side and
@@ -22,8 +23,8 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_interpret::util::TransformExt as _;
+use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::object::{Dict, Name, Stream};
 use hayro::hayro_syntax::page::Page;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
@@ -35,7 +36,7 @@ use hayro::{RenderCache, RenderSettings};
 
 use crate::protocol::{
     self, DocInfo, MAX_IMAGE_PIXELS, MAX_RENDER_PIXELS, MAX_RENDER_SIDE, PageImage, PageJob,
-    PageSize, RenderJob,
+    PageSize, PageText, RenderJob, TextJob,
 };
 
 /// The largest side of a page image fitted in a box, in pixels.
@@ -249,6 +250,8 @@ pub struct Session<'a> {
     pdf: &'a Pdf,
     cache: RenderCache<'a>,
     ctx: Option<RenderContext>,
+    /// The fonts and objects read for the pages' text.
+    text_cache: InterpreterCache<'a>,
     /// A panic left the caches in an unknown state: the session ends.
     pub broken: bool,
 }
@@ -268,8 +271,24 @@ impl<'a> Session<'a> {
             pdf,
             cache: RenderCache::new(),
             ctx: None,
+            text_cache: InterpreterCache::new(),
             broken: false,
         }
+    }
+
+    /// The text of page `job.page` and each character's box.
+    pub fn text(&mut self, job: &TextJob) -> Result<PageText, String> {
+        let pdf = self.pdf;
+        let pages = pdf.pages();
+        let page = pages
+            .get(job.page as usize)
+            .ok_or_else(|| format!("The PDF has no page {}.", job.page + 1))?;
+        let result = crate::text::extract_caught(page, &self.text_cache);
+        if result.is_err() {
+            self.broken = true;
+            self.ctx = None;
+        }
+        result
     }
 
     /// Draws page `job.page` at `job.scale` pixels per point, smaller when

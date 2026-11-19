@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gv_helper::protocol::{Fault, Job, Output};
-use gv_helper::{Helper, HelperConfig, HelperError, PdfJob};
+use gv_helper::{Helper, HelperConfig, HelperError, PdfJob, TextJob};
 
 fn config() -> HelperConfig {
     HelperConfig::new(env!("CARGO_BIN_EXE_glyphvane-helper"))
@@ -209,4 +209,40 @@ fn the_helper_draws_a_page_of_a_pdf() {
         .expect_err("not drawn");
     assert!(matches!(err, HelperError::Failed(_)), "{err}");
     assert_eq!(helper.pid(), pid);
+}
+
+#[test]
+fn the_helper_reads_the_text_of_an_exported_pdf() {
+    // Typst embeds a subset of the bundled font with a ToUnicode map, as
+    // most PDFs do.
+    let helper = Helper::new(config());
+    let job = PdfJob {
+        source: "#set page(width: 300pt, height: 200pt, margin: 20pt)\n\
+                 #set text(font: \"Inter Variable\", size: 12pt)\n\
+                 Find the office.\n\nSecond paragraph."
+            .into(),
+        fonts: vec!["Inter Variable".into()],
+        max_pages: 5,
+        ident: "text".into(),
+        ..PdfJob::default()
+    };
+    let pdf = helper
+        .pdf(job, 30 * SECOND, 1 << 20, &never())
+        .expect("a PDF")
+        .pdf;
+    helper.open(1, pdf, 30 * SECOND, &never()).expect("opens");
+    let text = helper
+        .text(TextJob { key: 1, page: 0 }, 30 * SECOND, &never())
+        .expect("read")
+        .expect("held");
+    // The "ffi" ligature, if Typst set one, reads as its letters.
+    assert_eq!(text.text, "Find the office.\nSecond paragraph.");
+    assert_eq!(text.boxes.len(), text.text.chars().count());
+    // Within the margins, in reading order.
+    let first = text.boxes[0];
+    assert!(first.x0 >= 19.0 && first.x0 < 25.0, "{first:?}");
+    assert!(first.y0 >= 15.0 && first.y1 < 45.0, "{first:?}");
+    let second = text.boxes[17];
+    assert!(second.y0 > first.y1 - 1.0, "{second:?}");
+    helper.shutdown();
 }

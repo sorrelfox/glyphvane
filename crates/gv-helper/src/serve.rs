@@ -5,9 +5,10 @@
 //!
 //! Requests are answered one at a time, in order. A [`Job::Open`] starts a
 //! session: the PDF and hayro's caches are kept while the next requests
-//! draw pages of it ([`Job::Render`] with its key); any other request ends
-//! the session and is answered as usual. A [`Job::Render`] outside its
-//! session is answered with [`Output::NoDocument`].
+//! draw pages of it and read their text ([`Job::Render`] and [`Job::Text`]
+//! with its key); any other request ends the session and is answered as
+//! usual. A [`Job::Render`] or [`Job::Text`] outside its session is
+//! answered with [`Output::NoDocument`].
 
 use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::time::Duration;
@@ -64,7 +65,7 @@ pub fn serve_on(input: &mut impl Read, output: &mut impl Write) -> io::Result<()
             },
             Request::Job {
                 id,
-                job: Job::Render(_),
+                job: Job::Render(_) | Job::Text(_),
                 ..
             } => Response::Done {
                 id,
@@ -93,8 +94,8 @@ fn next(input: &mut impl Read) -> io::Result<Option<Request>> {
     }
 }
 
-/// Draws pages of `pdf` (kept as `key`) until a request for something
-/// else comes, which is returned; `None` once the input ends.
+/// Draws pages of `pdf` (kept as `key`) and reads their text until a
+/// request for something else comes, which is returned; `None` once the input ends.
 fn session(
     pdf: &hayro::hayro_syntax::Pdf,
     key: u64,
@@ -118,6 +119,21 @@ fn session(
                         Err("The page image is too large.".to_owned())
                     } else {
                         Ok(Output::Page(image))
+                    }
+                });
+                protocol::send(output, &Response::Done { id, result })?;
+            }
+            Request::Job {
+                id,
+                max_output,
+                job: Job::Text(job),
+                ..
+            } if job.key == key && !session.broken => {
+                let result = session.text(&job).and_then(|text| {
+                    if text.bytes() > max_output {
+                        Err("The page has too much text.".to_owned())
+                    } else {
+                        Ok(Output::Text(text))
                     }
                 });
                 protocol::send(output, &Response::Done { id, result })?;
@@ -147,7 +163,7 @@ fn run(job: Job, max_output: u64) -> Result<Output, String> {
             Ok(Output::Page(image))
         }
         // Answered by `serve_on` and `session`.
-        Job::Open(_) | Job::Render(_) => Ok(Output::NoDocument),
+        Job::Open(_) | Job::Render(_) | Job::Text(_) => Ok(Output::NoDocument),
         Job::Fault(Fault::Sleep { ms }) => {
             std::thread::sleep(Duration::from_millis(ms));
             Ok(Output::Done)

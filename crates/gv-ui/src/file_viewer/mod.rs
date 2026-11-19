@@ -39,6 +39,7 @@
 pub mod pdf;
 #[cfg(test)]
 pub(crate) mod pdf_tests;
+mod pdf_text;
 #[cfg(test)]
 mod tests;
 

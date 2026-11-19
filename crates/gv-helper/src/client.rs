@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    self, DocInfo, Hello, Job, OpenJob, Output, PageImage, PageJob, PdfJob, PdfOutput, RenderJob,
-    Request, Response,
+    self, DocInfo, Hello, Job, OpenJob, Output, PageImage, PageJob, PageText, PdfJob, PdfOutput,
+    RenderJob, Request, Response, TextJob,
 };
 
 /// The helper executable's name.
@@ -361,6 +361,22 @@ impl Helper {
             Output::Page(image) => Ok(Some(image)),
             Output::NoDocument => Ok(None),
             _ => Err(HelperError::Protocol("no page image".into())),
+        }
+    }
+
+    /// The text of a page of the PDF [`Helper::open`] kept as `job.key`,
+    /// with each character's box; `None` when the helper does not hold it
+    /// (open it again).
+    pub fn text(
+        &self,
+        job: TextJob,
+        deadline: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<Option<PageText>, HelperError> {
+        match self.run(Job::Text(job), deadline, protocol::MAX_TEXT_BYTES, cancel)? {
+            Output::Text(text) => Ok(Some(text)),
+            Output::NoDocument => Ok(None),
+            _ => Err(HelperError::Protocol("no page text".into())),
         }
     }
 
