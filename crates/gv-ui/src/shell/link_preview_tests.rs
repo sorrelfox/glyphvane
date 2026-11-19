@@ -368,6 +368,40 @@ fn a_link_in_a_preview_has_its_own_preview_and_follows(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn a_query_context_line_in_a_preview_opens_its_note_there(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let long: String = (0..60)
+        .map(|i| format!("Paragraph {i} of a long note.\n\n"))
+        .collect();
+    std::fs::write(f.path("Long.md"), &long).expect("write");
+    let at = f.link_point("Exact");
+    f.rest(at, Modifiers::none(), DELAY);
+    let preview = f
+        .workspace
+        .read_with(&f.vcx, |ws, _| ws.preview_reader_for_tests(0))
+        .expect("a preview reader");
+    // A query block's line in the previewed note: its note, at the line.
+    let offset = long.find("Paragraph 40").expect("paragraph");
+    preview.update(&mut f.vcx, |_, cx| {
+        cx.emit(crate::reader::ReaderEvent::FollowLink(
+            crate::reader::LinkRequest {
+                destination: "Long.md".into(),
+                kind: gv_model::LinkKind::Wikilink,
+                disposition: crate::reader::Disposition::InPlace,
+                range: None,
+                from: None,
+                at: Some(offset),
+            },
+        ));
+    });
+    f.draw();
+    assert!(f.previewed().is_empty());
+    assert_eq!(f.active_path(), Some(f.path("Long.md")));
+    let top = f.reader().read_with(&f.vcx, |r, _| r.position());
+    assert_eq!(top, Some(crate::reader::ScrollTarget::Offset(offset)));
+}
+
+#[gpui::test]
 fn preview_link_under_caret_and_mod_hover(cx: &mut TestAppContext) {
     let mut f = fixture(cx);
     let editor = f.edit();

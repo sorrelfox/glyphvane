@@ -1724,6 +1724,19 @@ impl Workspace {
         )
     }
 
+    /// A query block's context line ([`LinkRequest::at`]): its note (a
+    /// vault path) and the place in it. `None` for any other link.
+    fn query_line_target(
+        &self,
+        request: &LinkRequest,
+        cx: &App,
+    ) -> Option<(PathBuf, ScrollTarget)> {
+        let at = request.at?;
+        let root = self.link_vault_root(cx)?;
+        let note = gv_vault::VaultPath::new(&request.destination).ok()?;
+        Some((note.to_fs_path(&root), ScrollTarget::Offset(at)))
+    }
+
     /// Follows a link clicked in a tab's Reading view.
     fn follow_link(
         &mut self,
@@ -1739,14 +1752,8 @@ impl Workspace {
         else {
             return;
         };
-        // A query block's context line: its note (a vault path), there.
-        if let Some(at) = request.at
-            && let Some(root) = self.link_vault_root(cx)
-            && let Ok(note) = gv_vault::VaultPath::new(&request.destination)
-        {
-            let scroll = Some(ScrollTarget::Offset(at));
-            let path = note.to_fs_path(&root);
-            self.open_link_target(index, path, scroll, request.disposition, window, cx);
+        if let Some((path, scroll)) = self.query_line_target(&request, cx) {
+            self.open_link_target(index, path, Some(scroll), request.disposition, window, cx);
             return;
         }
         let r = reader.read(cx);

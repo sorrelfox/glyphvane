@@ -540,6 +540,21 @@ impl Workspace {
         let Some(tab) = self.previews.stack.first().map(|p| p.tab) else {
             return;
         };
+        let handle = self.window_handle;
+        // A query block's context line: its note, there.
+        if let Some((path, scroll)) = self.query_line_target(&request, cx) {
+            let disposition = request.disposition;
+            cx.spawn(async move |this, cx| {
+                let _ = cx.update_window(handle, |_, window, cx| {
+                    this.update(cx, |ws, cx| {
+                        ws.close_previews(window, cx);
+                        ws.open_link_target(tab, path, Some(scroll), disposition, window, cx);
+                    })
+                });
+            })
+            .detach();
+            return;
+        }
         let r = reader.read(cx);
         let Some(file) = r.link_file(request.from.as_deref()) else {
             return;
@@ -555,7 +570,6 @@ impl Workspace {
             profile: r.profile(),
         };
         let disposition = request.disposition;
-        let handle = self.window_handle;
         // The click is handled inside the preview's view: follow once it
         // is done.
         cx.spawn(async move |this, cx| {
