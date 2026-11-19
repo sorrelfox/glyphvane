@@ -81,6 +81,10 @@ impl Workspace {
                 c.set_content(content, cx);
             });
         }
+        // Queries and bases in cards read the vault: the vault is needed.
+        if index == self.active {
+            self.ensure_vault(cx);
+        }
         Some(canvas)
     }
 
