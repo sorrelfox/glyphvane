@@ -54,6 +54,7 @@
 
 mod build;
 mod dump;
+mod emoji;
 mod find;
 mod footnote;
 mod html;
@@ -71,6 +72,7 @@ mod tree;
 pub use build::{
     CALLOUT_TITLE_GUTTER, MAX_EMBED_BYTES, MAX_EMBED_DEPTH, MAX_EMBED_NODES, MAX_FRAMES,
 };
+pub use emoji::emoji_shortcodes;
 pub use find::{FindError, FindIndex, Finder, Matches};
 pub use footnote::FootnoteIndex;
 pub use inline::MATH_DISPLAY_SCALE;

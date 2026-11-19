@@ -16,9 +16,10 @@ use gpui::{
 use gv_model::LinkKind;
 use gv_settings::{RemoteContent, WorkspaceTrust};
 
+use super::infobar::NoticeSource;
 use super::{OpenTarget, Workspace};
 use crate::chrome::WindowChrome;
-use crate::files::notice::Topic;
+use crate::files::notice::{NoticeAction, Topic};
 use crate::keymap::actions::workspace as commands;
 use crate::platform::Launcher;
 use crate::reader::Disposition;
@@ -100,6 +101,10 @@ impl Fixture {
     }
 
     fn follow_web_link(&mut self) {
+        self.follow("https://example.com/");
+    }
+
+    fn follow(&mut self, url: &str) {
         let file = self.dir.path().join("A.md");
         self.vcx.update(|window, cx| {
             self.workspace.update(cx, |ws, cx| {
@@ -107,7 +112,7 @@ impl Fixture {
                     file,
                     kind: LinkKind::Inline,
                     image: false,
-                    destination: "https://example.com/".into(),
+                    destination: url.into(),
                     range: None,
                     construct: None,
                     profile: gv_vault::ProfileId::Obsidian,
@@ -184,4 +189,53 @@ fn restricted_mode_confirms_links_that_leave_the_app(cx: &mut TestAppContext) {
         .workspace
         .read_with(&f.vcx, |ws, cx| ws.active_notice(cx).map(|(n, _)| n.topic));
     assert_eq!(topic, Some(Topic::Confirm));
+}
+
+/// `links.confirm_web_links`: the first web link to each site asks; once
+/// one opened, the site's links open at once. Mail links never ask.
+#[gpui::test]
+fn confirm_web_links_asks_once_per_site(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    f.vcx.update(|_, cx| {
+        let on = gv_settings::toml::Value::Boolean(true);
+        AppSettings::set_value(
+            cx,
+            crate::settings::Target::AllVaults,
+            "links.confirm_web_links",
+            &on,
+        )
+        .expect("set");
+    });
+    draw(&mut f.vcx);
+    let notice = |f: &mut Fixture| {
+        f.workspace
+            .read_with(&f.vcx, |ws, cx| ws.active_notice(cx).map(|(n, _)| n))
+    };
+    f.follow_web_link();
+    assert!(f.urls.0.borrow().is_empty(), "not opened without asking");
+    let asked = notice(&mut f).expect("a question");
+    assert_eq!(asked.topic, Topic::Confirm);
+    let open = NoticeAction::OpenUrl("https://example.com/".into());
+    assert!(asked.buttons.iter().any(|b| b.action == open));
+    f.vcx.update(|window, cx| {
+        f.workspace.update(cx, |ws, cx| {
+            ws.run_notice_action(&open, NoticeSource::Tab, window, cx);
+        });
+    });
+    draw(&mut f.vcx);
+    assert_eq!(*f.urls.0.borrow(), ["https://example.com/"]);
+    assert!(notice(&mut f).is_none());
+
+    // The same site again: no question.
+    f.follow("https://EXAMPLE.com/other");
+    assert_eq!(f.urls.0.borrow().len(), 2);
+    // Another site asks; a mail link does not.
+    f.follow("https://example.org/");
+    assert_eq!(f.urls.0.borrow().len(), 2);
+    assert_eq!(notice(&mut f).map(|n| n.topic), Some(Topic::Confirm));
+    f.follow("mailto:someone@example.org");
+    assert_eq!(
+        f.urls.0.borrow().last().map(String::as_str),
+        Some("mailto:someone@example.org")
+    );
 }

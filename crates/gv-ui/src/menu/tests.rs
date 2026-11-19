@@ -230,7 +230,6 @@ fn the_menus_follow_each_platform() {
                 "navigation.go_to_footnote",
                 "links.follow",
                 "links.open_in_new_tab",
-                "links.open_in_split",
                 "links.open_in_new_window",
                 "links.preview",
                 "links.list",
@@ -256,7 +255,6 @@ fn the_context_menus_hold_their_commands() {
         [
             "links.follow",
             "links.open_in_new_tab",
-            "links.open_in_split",
             "links.open_in_new_window",
             "links.copy_link",
             "links.copy_resolved_path",
@@ -875,9 +873,8 @@ fn the_menu_runs_commands_from_the_keyboard(cx: &mut TestAppContext) {
     f.keys("down down down right");
     assert!(f.bounds("app-menu-item:view.preview").is_some());
     // Preview, Edit, Split, Toggle Preview and Edit, Toggle split view,
-    // Live Preview, Toggle sidebar (Viewer mode has no handler yet and is
-    // skipped).
-    f.keys("down down down down down down enter");
+    // Live Preview, Viewer mode, Toggle sidebar.
+    f.keys("down down down down down down down enter");
     assert!(!f.is_open());
     assert!(f.sidebar_open());
     assert!(f.reader_focused());

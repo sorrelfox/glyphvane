@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# `:shortcode:` emoji, for the profiles that have them.
+emojis = "=0.9.1"
 gv-inline.workspace = true
 # The document macro pass over the formulas, in document order.
 gv-math.workspace = true

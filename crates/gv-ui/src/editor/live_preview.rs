@@ -404,26 +404,10 @@ fn is_image_path(path: &str) -> bool {
 
 /// The `:shortcode:` emoji of a text token: each code's range and emoji.
 fn emoji_in(text: &str, start: usize) -> Vec<(Range<usize>, &'static str)> {
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while let Some(open) = bytes[i..].iter().position(|&b| b == b':').map(|p| p + i) {
-        let code_len = bytes[open + 1..]
-            .iter()
-            .take_while(|&&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_+-".contains(&b))
-            .count();
-        let close = open + 1 + code_len;
-        if code_len > 0
-            && bytes.get(close) == Some(&b':')
-            && let Some(emoji) = emojis::get_by_shortcode(&text[open + 1..close])
-        {
-            out.push((start + open..start + close + 1, emoji.as_str()));
-            i = close + 1;
-            continue;
-        }
-        i = open + 1;
-    }
-    out
+    gv_render_tree::emoji_shortcodes(text)
+        .into_iter()
+        .map(|(code, emoji)| (start + code.start..start + code.end, emoji))
+        .collect()
 }
 
 fn inline_node(node: InlineNode<'_>, options: Options, push: &mut dyn FnMut(Found)) {

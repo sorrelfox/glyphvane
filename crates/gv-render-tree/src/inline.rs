@@ -18,6 +18,8 @@
 //! - Images of known size are boxes, sized to fit the column; others show
 //!   their alt text.
 //! - Raw inline HTML is shown as text until the HTML pipeline exists.
+//! - With the profile's `emoji` switch, a `:shortcode:` is its emoji, one
+//!   unit mapped to the whole code.
 //! - Strikethrough is a line through the text in its colour.
 //! - Inline and display math are formula boxes ([`BoxRef::Math`]) with an
 //!   estimated size; the view typesets them and sets the real size.
@@ -58,6 +60,8 @@ pub(crate) struct InlineCx<'a> {
     pub soft_breaks: bool,
     /// An image's alt text may end with `|W` or `|WxH`.
     pub alt_sizes: bool,
+    /// `:shortcode:` emoji are drawn as the emoji.
+    pub emoji: bool,
     /// A callout's title: bold, in this colour, after a gutter of this
     /// width for the type's icon.
     pub title: Option<(ColorToken, f32)>,
@@ -411,6 +415,13 @@ impl Builder<'_, '_> {
                 InlineKind::FootnoteRef => self.footnote_ref(&node, state),
                 InlineKind::CodeSpan => self.code_span(&node, state),
                 InlineKind::RawHtml => self.raw_html(&node, state),
+                InlineKind::Text
+                    if self.cx.emoji
+                        && node.text().len() == node.range().len()
+                        && !node.text().contains('\0') =>
+                {
+                    self.emoji_text(node.text(), node.range(), state);
+                }
                 InlineKind::Text => {
                     let r = node.range();
                     let text = node.text();
@@ -568,6 +579,25 @@ impl Builder<'_, '_> {
     /// Adds `text`, rendered from the (absolute) `source`, to the current
     /// run or a new one. `exact`: the text maps to the source byte for
     /// byte.
+    /// Text with `:shortcode:` emoji: each code is its emoji, one unit
+    /// that maps to the whole code.
+    fn emoji_text(&mut self, text: &str, range: Range<usize>, state: State) {
+        let key = self.key(state, InlineRole::Text);
+        let mut at = 0;
+        for (code, glyph) in crate::emoji::emoji_shortcodes(text) {
+            if code.start > at {
+                let r = range.start + at..range.start + code.start;
+                self.piece(&text[at..code.start], r, true, key);
+            }
+            let r = range.start + code.start..range.start + code.end;
+            self.piece(glyph, r, false, key);
+            at = code.end;
+        }
+        if at < text.len() || at == 0 {
+            self.piece(&text[at..], range.start + at..range.end, true, key);
+        }
+    }
+
     fn piece(&mut self, text: &str, source: Range<usize>, exact: bool, key: RunKey) {
         if self.run.as_ref().is_some_and(|r| r.key != key) {
             self.flush();

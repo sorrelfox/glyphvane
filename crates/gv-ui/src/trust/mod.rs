@@ -27,6 +27,10 @@
 //! run anyway). [`confirm_every_handoff`] and [`snippets_allowed`] are what
 //! the rest of the window asks.
 //!
+//! Apart from trust, `links.confirm_web_links` asks before the first web
+//! link to each site opens in the browser ([`web_site_to_confirm`]); the
+//! sites confirmed are remembered until the app quits ([`site_opened`]).
+//!
 //! Not designed: built as an information infobar with the infobar's
 //! metrics, a three-way choice made of infobar buttons, and flagged.
 
@@ -89,6 +93,45 @@ pub fn confirm_every_handoff(cx: &App) -> bool {
         let p = &s.settings().privacy_and_security;
         p.confirm_every_handoff || p.workspace_trust == WorkspaceTrust::Restricted
     })
+}
+
+/// The sites (hosts) whose web links were opened after a confirmation,
+/// in this run.
+#[derive(Default)]
+struct ConfirmedSites(std::collections::HashSet<String>);
+
+impl gpui::Global for ConfirmedSites {}
+
+/// The site of the web link `url` when it must be confirmed before it
+/// opens: `links.confirm_web_links` is on and no link to the site was
+/// opened since the app started. `None` for other URLs (`mailto:`).
+pub fn web_site_to_confirm(url: &str, cx: &App) -> Option<String> {
+    let on = cx
+        .try_global::<AppSettings>()
+        .is_some_and(|s| s.settings().links.confirm_web_links);
+    if !on {
+        return None;
+    }
+    let site = web_site(url)?;
+    let confirmed = cx
+        .try_global::<ConfirmedSites>()
+        .is_some_and(|sites| sites.0.contains(&site));
+    (!confirmed).then_some(site)
+}
+
+/// A confirmed link to `url` was handed off: links to the same site no
+/// longer ask (`links.confirm_web_links`).
+pub fn site_opened(url: &str, cx: &mut App) {
+    if let Some(site) = web_site(url) {
+        cx.default_global::<ConfirmedSites>().0.insert(site);
+    }
+}
+
+fn web_site(url: &str) -> Option<String> {
+    match gv_vault::url::classify(url) {
+        gv_vault::url::UrlClass::Web { host, .. } => Some(host.to_ascii_lowercase()),
+        _ => None,
+    }
 }
 
 /// Whether CSS snippets and plugin highlighters of the vault may be used

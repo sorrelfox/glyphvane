@@ -161,6 +161,33 @@ fn a_chip_click_unfolds(cx: &mut TestAppContext) {
     assert!(left.iter().all(|r| r.start < DOC.find("# Three").unwrap()));
 }
 
+/// Fold to heading levels 4 to 6: the headings above the level stay open.
+#[gpui::test]
+fn fold_deep_levels(cx: &mut TestAppContext) {
+    // Lines: 0 `####`, 4 `#####`, 8 `######`.
+    const DEEP: &str = "#### Four\n\nA.\n\n##### Five\n\nB.\n\n###### Six\n\nC.\n";
+    let (view, mut vcx) = pane(cx, DEEP);
+    vcx.dispatch_action(view_commands::FoldLevel6);
+    draw(&mut vcx);
+    assert_eq!(
+        chevrons(&view, &mut vcx),
+        [(0, false), (4, false), (8, true)]
+    );
+    vcx.dispatch_action(view_commands::FoldLevel5);
+    draw(&mut vcx);
+    assert_eq!(chevrons(&view, &mut vcx), [(0, false), (4, true)]);
+    vcx.dispatch_action(view_commands::FoldLevel4);
+    draw(&mut vcx);
+    assert_eq!(chevrons(&view, &mut vcx), [(0, true)]);
+    vcx.dispatch_action(view_commands::FoldLevel6);
+    draw(&mut vcx);
+    assert_eq!(
+        chevrons(&view, &mut vcx),
+        [(0, false), (4, false), (8, true)],
+        "a deeper level unfolds the higher sections"
+    );
+}
+
 #[gpui::test]
 fn fold_commands(cx: &mut TestAppContext) {
     let (view, mut vcx) = pane(cx, DOC);

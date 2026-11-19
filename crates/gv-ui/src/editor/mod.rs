@@ -1445,6 +1445,15 @@ fn fold_handlers(
     .on_action(cx.listener(|this, _: &view_commands::FoldLevel3, w, cx| {
         this.fold_command(FoldCommand::Level(3), w, cx);
     }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel4, w, cx| {
+        this.fold_command(FoldCommand::Level(4), w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel5, w, cx| {
+        this.fold_command(FoldCommand::Level(5), w, cx);
+    }))
+    .on_action(cx.listener(|this, _: &view_commands::FoldLevel6, w, cx| {
+        this.fold_command(FoldCommand::Level(6), w, cx);
+    }))
 }
 
 /// What an editing closure may ask of the view.

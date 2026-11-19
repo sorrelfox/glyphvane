@@ -37,7 +37,9 @@ show only the address), link cards on canvases, `<iframe>` elements in notes,
 and the link checker.
 
 Opening a web link hands it to your browser. In Restricted mode, and with the
-setting to confirm every hand-off, Glyphvane asks first.
+setting to confirm every hand-off, Glyphvane asks first. The
+`links.confirm_web_links` setting asks only before the first link to each
+site, until you quit.
 
 ## What Glyphvane stores
 

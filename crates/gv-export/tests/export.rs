@@ -295,6 +295,15 @@ fn github_profiles_drop_style() {
     );
 }
 
+/// `:shortcode:` emoji are exported as the emoji where the profile has
+/// them (GitHub), and as written elsewhere (CommonMark).
+#[test]
+fn emoji_shortcodes_follow_the_profile() {
+    let src = "Shipped :tada:\n";
+    assert!(export(src, ProfileId::GfmFile).contains("<p>Shipped 🎉</p>"));
+    assert!(export(src, ProfileId::CommonMark).contains("<p>Shipped :tada:</p>"));
+}
+
 #[test]
 fn unresolved_links_are_plain_text() {
     use gv_render_tree::{LinkStatus, LinkStatusSource, LinkTarget};

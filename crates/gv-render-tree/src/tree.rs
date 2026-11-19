@@ -90,6 +90,9 @@ pub struct RenderOptions {
     /// reads it (`![alt|300](x.png)`, `![alt|300x200](x.png)`); the
     /// profiles with note embeds.
     pub alt_sizes: bool,
+    /// `:shortcode:` emoji are drawn as the emoji (the profile's `emoji`
+    /// switch).
+    pub emoji: bool,
 }
 
 /// The macros in force for every formula of a tree, from one pass over
@@ -117,6 +120,7 @@ impl RenderOptions {
             obsidian_fences: false,
             soft_breaks: false,
             alt_sizes: false,
+            emoji: false,
         }
     }
 
@@ -130,6 +134,7 @@ impl RenderOptions {
             obsidian_fences: profile.switches.embeds,
             soft_breaks: profile.switches.soft_break == SoftBreak::Br,
             alt_sizes: profile.switches.embeds,
+            emoji: profile.switches.emoji,
             ..Self::commonmark()
         }
     }
@@ -143,6 +148,7 @@ impl RenderOptions {
             obsidian_fences: switches.embeds,
             soft_breaks: switches.soft_break == SoftBreak::Br,
             alt_sizes: switches.embeds,
+            emoji: switches.emoji,
             ..Self::commonmark()
         }
     }
@@ -158,6 +164,7 @@ impl RenderOptions {
             obsidian_fences: p.obsidian_fences,
             soft_breaks: p.soft_breaks,
             alt_sizes: p.alt_sizes,
+            emoji: p.emoji,
             ..self
         }
     }
@@ -379,6 +386,7 @@ impl RenderTree {
                     footnotes: Some(&index),
                     soft_breaks: self.opts.soft_breaks,
                     alt_sizes: self.opts.alt_sizes,
+                    emoji: self.opts.emoji,
                     title: None,
                     embed: None,
                 };
@@ -443,6 +451,7 @@ impl RenderTree {
                 footnotes: Some(index),
                 soft_breaks: self.opts.soft_breaks,
                 alt_sizes: self.opts.alt_sizes,
+                emoji: self.opts.emoji,
                 title: None,
                 embed: None,
             };

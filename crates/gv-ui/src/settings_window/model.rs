@@ -124,11 +124,26 @@ impl SectionId {
     }
 }
 
+/// The high-contrast setting, listed only once a high-contrast theme
+/// exists ([`HIGH_CONTRAST_THEMES`]).
+pub const HIGH_CONTRAST: &str = "appearance.high_contrast";
+
+/// Whether there is a high-contrast theme to switch to. There is none yet
+/// (the themes wait for their design), so [`HIGH_CONTRAST`] is not listed;
+/// the key is still read and kept in the file, for the version that has
+/// one.
+pub const HIGH_CONTRAST_THEMES: bool = false;
+
 /// Whether the window lists `spec`: not the automatic update check where
 /// this copy cannot check (package-manager builds, the Flatpak), as Help ▸
-/// Check for updates says.
+/// Check for updates says, and not high contrast while there is no
+/// high-contrast theme.
 pub fn shown(spec: &Spec) -> bool {
-    spec.path != crate::updates::SETTING || crate::updates::enabled()
+    match spec.path {
+        crate::updates::SETTING => crate::updates::enabled(),
+        HIGH_CONTRAST => HIGH_CONTRAST_THEMES,
+        _ => true,
+    }
 }
 
 /// A unit shown after a number field, from the key's suffix.
@@ -447,6 +462,11 @@ mod tests {
             // The rest of General stays.
             assert!(paths(SectionId::General).contains(&"general.viewer_mode"));
         }
+        // No high-contrast theme yet: the setting is neither listed nor
+        // found, but its key still reads.
+        assert!(!paths(SectionId::Appearance).contains(&HIGH_CONTRAST));
+        assert!(search("contrast").is_empty());
+        assert!(gv_settings::spec(HIGH_CONTRAST).is_some());
         let _flatpak = crate::updates::ForceFlatpak::new(false);
         assert_eq!(
             paths(SectionId::General).contains(&crate::updates::SETTING),

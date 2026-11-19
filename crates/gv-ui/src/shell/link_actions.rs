@@ -27,8 +27,8 @@
 //!   (the Link checker's rewrites for this link; several candidates open a
 //!   picker) and *Create note*. `links.preview` is the hover preview's
 //!   ([`super::link_preview`]); `links.list` and
-//!   `links.copy_link_to_heading` are [`super::link_list`]'s.
-//!   `links.open_in_split` has no handler (no pane splits yet).
+//!   `links.copy_link_to_heading` are [`super::link_list`]'s. There is no
+//!   *Open in split*: the window has one document pane (no pane splits).
 //!
 //! The popovers (trace, create, candidates) are not designed beyond the
 //! Create note row of SPEC § Popovers; they share the menu panel's look.
@@ -67,6 +67,9 @@ const PENDING_POLL: Duration = Duration::from_millis(50);
 
 /// Why a link that leaves the app is confirmed when every hand-off is.
 const HANDOFF_CONFIRMED: &str = "Every link that leaves Glyphvane is confirmed for this folder.";
+
+/// Why a web link asks first (`links.confirm_web_links`).
+const WEB_LINK_CONFIRMED: &str = "Web links are confirmed once per site.";
 
 /// Not designed: the popovers' widths and the Create note popover's
 /// padding (12) and gaps.
@@ -335,6 +338,10 @@ impl Workspace {
                     // Restricted mode, or the setting: every hand-off asks.
                     self.activate_tab(index, window, cx);
                     self.ask(Notice::confirm_url(&url, HANDOFF_CONFIRMED), cx);
+                } else if crate::trust::web_site_to_confirm(&url, cx).is_some() {
+                    // `links.confirm_web_links`: the first link to a site asks.
+                    self.activate_tab(index, window, cx);
+                    self.ask(Notice::confirm_url(&url, WEB_LINK_CONFIRMED), cx);
                 } else {
                     crate::platform::launcher(cx).open_url(&url, cx);
                 }

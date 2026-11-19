@@ -400,6 +400,7 @@ impl Workspace {
             }
             NoticeAction::OpenUrl(url) => {
                 close(self);
+                crate::trust::site_opened(url, cx);
                 platform::launcher(cx).open_url(url, cx);
             }
             NoticeAction::OpenExternally(path) => {

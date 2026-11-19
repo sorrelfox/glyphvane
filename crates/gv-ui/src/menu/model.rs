@@ -85,6 +85,8 @@ pub struct Item {
 pub enum Toggle {
     /// The active tab's editing style is Live Preview.
     LivePreview,
+    /// Viewer mode is on for the active tab.
+    ViewerMode,
 }
 
 /// A condition for an item to be enabled, besides its command having a
@@ -157,6 +159,8 @@ pub struct MenuState {
     pub in_vault: bool,
     /// The active tab's editing style is Live Preview.
     pub live_preview: bool,
+    /// Viewer mode is on for the active tab.
+    pub viewer_mode: bool,
 }
 
 impl MenuState {
@@ -165,6 +169,7 @@ impl MenuState {
         item.mode.is_some_and(|mode| mode == self.mode)
             || item.toggle.is_some_and(|toggle| match toggle {
                 Toggle::LivePreview => self.live_preview,
+                Toggle::ViewerMode => self.viewer_mode,
             })
     }
 
@@ -393,7 +398,7 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
                 "Live Preview",
                 Toggle::LivePreview,
             ),
-            item("view.toggle_viewer_mode", "Viewer mode"),
+            toggle_item("view.toggle_viewer_mode", "Viewer mode", Toggle::ViewerMode),
             SEPARATOR,
             item("workspace.toggle_sidebar", "Toggle sidebar"),
             item("workspace.toggle_panel", "Toggle right panel"),
@@ -441,7 +446,6 @@ pub fn app_menus(platform: Platform) -> Vec<Menu> {
             SEPARATOR,
             item("links.follow", "Follow link"),
             item("links.open_in_new_tab", "Open link in new tab"),
-            item("links.open_in_split", "Open link in split"),
             item("links.open_in_new_window", "Open link in new window"),
             item("links.preview", "Preview link"),
             item("links.list", "Links in this note…"),
@@ -511,7 +515,6 @@ pub fn context_menu(kind: ContextMenu) -> Menu {
             [
                 item("links.follow", "Open"),
                 item("links.open_in_new_tab", "Open in new tab"),
-                item("links.open_in_split", "Open in split"),
                 item("links.open_in_new_window", "Open in new window"),
                 SEPARATOR,
                 item("links.copy_link", "Copy link"),
@@ -620,7 +623,7 @@ pub fn context_menu(kind: ContextMenu) -> Menu {
                 item("links.list", "Links in this note…"),
                 SEPARATOR,
                 item("search.find", "Find"),
-                item("view.toggle_viewer_mode", "Viewer mode"),
+                toggle_item("view.toggle_viewer_mode", "Viewer mode", Toggle::ViewerMode),
                 SEPARATOR,
                 item("file.export_html", "Export as HTML…"),
                 item("file.export_pdf", "Export as PDF…"),

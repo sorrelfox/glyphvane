@@ -195,6 +195,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             footnotes: self.footnotes.as_deref(),
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
+            emoji: self.opts.emoji,
             title: self.title_cx,
             embed: self.embed.as_ref().map(|e| (&e.key, e.at)),
         }
@@ -463,6 +464,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             footnotes: footnotes.as_deref(),
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
+            emoji: self.opts.emoji,
             title: None,
             embed: embed.as_ref().map(|(k, at)| (k, *at)),
         };

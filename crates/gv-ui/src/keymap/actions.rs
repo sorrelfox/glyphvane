@@ -159,7 +159,6 @@ command_actions! {
     links {
         Follow = "links.follow",
         OpenInNewTab = "links.open_in_new_tab",
-        OpenInSplit = "links.open_in_split",
         OpenInNewWindow = "links.open_in_new_window",
         Preview = "links.preview",
         List = "links.list",

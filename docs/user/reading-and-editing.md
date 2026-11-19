@@ -15,7 +15,10 @@ view you can drag the divider between the two sides.
 **Viewer mode.** To protect documents from accidental edits, turn on
 *Viewer mode* in Settings ▸ General. Documents then open read-only, and Edit
 and Split are unavailable (untitled notes and files opened with `--wait` stay
-editable). The **Open files in** setting chooses whether files you open from
+editable). View ▸ Viewer mode (also in the title row's **⋯** menu and the
+command palette) switches viewer mode for the current tab only: turn it off
+to edit one document while the setting is on, or on to protect one document
+while the setting is off. The tab keeps that choice until you close it. The **Open files in** setting chooses whether files you open from
 your file manager or the command line start in Preview, in the editor, or in
 the mode you used last.
 
@@ -154,7 +157,7 @@ In the command palette you find every other editing command.
 You can fold heading sections, list items with more than one block, code
 blocks, quotes, front matter and HTML blocks. Use View ▸ Fold, Unfold, Fold
 all and Unfold all, or the command palette for *Fold to heading level 1* to
-*3*. In Split view, the gutter shows arrows to fold and unfold; click the
+*6*. In Split view, the gutter shows arrows to fold and unfold; click the
 `⋯` marker of a folded block to unfold it.
 
 ### Find and replace

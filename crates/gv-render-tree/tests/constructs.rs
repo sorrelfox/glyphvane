@@ -299,3 +299,28 @@ fn front_matter_is_a_properties_block() {
         ItemKind::Properties { .. }
     ));
 }
+
+/// `:shortcode:` emoji are drawn as the emoji in the profiles that have
+/// them (GitHub), one unit mapped to the whole code, and stay text in the
+/// others (CommonMark, Obsidian).
+#[test]
+fn emoji_shortcodes_follow_the_profile() {
+    let text = "Done :tada: and :nope: **:smile:**\n";
+    let d = gfm(text);
+    check(&d);
+    let shown = d.render.item_text(0);
+    assert_eq!(shown.text, "Done 🎉 and :nope: 😄");
+    let tada = text.find(":tada:").expect("code");
+    assert_eq!(shown.source_offset("Done ".len()), tada);
+    assert_eq!(shown.source_offset("Done 🎉".len()), tada + ":tada:".len());
+    for id in [ProfileId::CommonMark, ProfileId::Obsidian] {
+        let plain = build_with(
+            text,
+            ParseOptions::builtin(id),
+            RenderOptions::builtin(id),
+            Sources::default(),
+        );
+        check(&plain);
+        assert_eq!(text_of(&plain.render, 0), "Done :tada: and :nope: :smile:");
+    }
+}

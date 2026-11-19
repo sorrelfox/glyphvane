@@ -697,7 +697,6 @@ fn the_link_menu_commands_act_on_the_link_under_the_pointer(cx: &mut TestAppCont
         "context-menu-disabled:links.copy_resolved_path",
         "context-menu-disabled:links.reveal_in_tree",
         "context-menu-disabled:links.fix",
-        "context-menu-disabled:links.open_in_split",
         "context-menu-disabled:links.open_in_new_window",
     ] {
         assert!(f.has(dimmed), "{dimmed}");

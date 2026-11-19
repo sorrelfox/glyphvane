@@ -17,6 +17,8 @@ mod canvas_tabs;
 #[cfg(test)]
 mod canvas_tabs_tests;
 #[cfg(test)]
+mod command_handlers_tests;
+#[cfg(test)]
 mod conflict_markers_tests;
 mod controls;
 mod daily_notes;
@@ -151,7 +153,7 @@ use crate::chrome::WindowChrome;
 use crate::editor::{EditorFacts, EditorView};
 use crate::files::notice::Notice;
 use crate::files::watch::WatchHandle;
-use crate::keymap::actions::view::{ToggleLivePreview, ToggleSplit};
+use crate::keymap::actions::view::{ToggleLivePreview, ToggleSplit, ToggleViewerMode};
 use crate::keymap::actions::{file as file_commands, tabs as tab_commands};
 use crate::metrics::text;
 use crate::reader::follow::{self, Cause};
@@ -410,6 +412,9 @@ pub struct Tab {
     /// The tab was opened for an edit (`--wait`): viewer mode does not
     /// apply to it.
     edit_requested: bool,
+    /// Viewer mode switched for this tab only (`view.toggle_viewer_mode`):
+    /// on or off whatever the setting says. `None` follows the setting.
+    viewer_toggle: Option<bool>,
     /// The document's profile, detected for `path` when first needed.
     profile: Option<crate::profile::TabProfile>,
     /// The Split view's divider for when the Split view is made (a
@@ -454,6 +459,7 @@ impl Tab {
             history: History::default(),
             on_close: None,
             edit_requested: false,
+            viewer_toggle: None,
             profile: None,
             split_ratio: None,
             restored_folds: None,
@@ -1071,6 +1077,7 @@ impl Workspace {
         }
         // The caller waits for an edit: viewer mode gives way in this tab.
         tab.edit_requested = true;
+        tab.viewer_toggle = None;
         if let Some(editor) = tab.editor.clone() {
             editor.update(cx, |e, cx| e.set_read_only(false, cx));
         }
@@ -2028,9 +2035,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether tab `index` may be edited: viewer mode is off, or the tab
-    /// was opened for an edit (`--wait`), or holds an untitled document
-    /// (there is no file to protect, and it was made to be written).
+    /// Whether tab `index` may be edited: viewer mode is off for it (see
+    /// [`Self::viewer_mode_of`]).
     pub(crate) fn can_edit(&self, index: usize, cx: &App) -> bool {
         let Some(tab) = self.tabs.get(index) else {
             return false;
@@ -2044,7 +2050,37 @@ impl Workspace {
         if tab.is_viewer() && !tab.viewer_shows_text(cx) {
             return false;
         }
-        tab.edit_requested || tab.untitled.is_some() || !AppSettings::viewer_mode(cx)
+        !self.viewer_mode_of(index, cx)
+    }
+
+    /// Whether viewer mode is on for tab `index`: as switched for the tab
+    /// (`view.toggle_viewer_mode`), else as the setting says, except in a
+    /// tab opened for an edit (`--wait`) and an untitled document (there is
+    /// no file to protect, and it was made to be written).
+    pub(crate) fn viewer_mode_of(&self, index: usize, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        tab.viewer_toggle.unwrap_or_else(|| {
+            !tab.edit_requested && tab.untitled.is_none() && AppSettings::viewer_mode(cx)
+        })
+    }
+
+    /// `view.toggle_viewer_mode`: switches viewer mode for the active tab
+    /// only; the setting stays as it is for the other tabs. A tab that is
+    /// never edited (a canvas, a base, an image) is left alone. The tab
+    /// stays in its mode, or leaves Edit and Split for Preview.
+    pub(crate) fn toggle_viewer_mode(&mut self, cx: &mut Context<'_, Self>) {
+        let index = self.active;
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        if tab.is_canvas() || tab.is_base() || (tab.is_viewer() && !tab.viewer_shows_text(cx)) {
+            return;
+        }
+        let on = !self.viewer_mode_of(index, cx);
+        self.tabs[index].viewer_toggle = Some(on);
+        self.apply_viewer_mode(cx);
     }
 
     /// The status bar's facts from the Source view on screen.
@@ -2183,6 +2219,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| this.toggle_split(cx)))
             .on_action(cx.listener(|this, _: &ToggleLivePreview, _, cx| {
                 this.toggle_live_preview(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleViewerMode, _, cx| {
+                this.toggle_viewer_mode(cx);
             }))
             // Files dropped anywhere the document area does not take them
             // open ([`drag_drop`]).

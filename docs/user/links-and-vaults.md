@@ -77,7 +77,10 @@ how the link was resolved, and **Fix link…**. **Alt+Left** and **Alt+Right**
 take you back and forward.
 
 Web links open in your default browser. In Restricted mode (see
-[below](#trust-and-remote-content)), Glyphvane asks before opening them.
+[below](#trust-and-remote-content)), Glyphvane asks before opening them. With
+the **confirm_web_links** setting (Settings ▸ Links), it asks before the
+first link to each site; once you open one, other links to that site open
+without asking until you quit Glyphvane.
 Glyphvane never starts programs from notes: links to programs and launchers
 are only shown in the file manager.
 

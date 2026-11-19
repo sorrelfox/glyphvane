@@ -3,7 +3,7 @@
 
 //! The Appearance section, as designed (SPEC § Settings window, the
 //! `settings.*` screens): the theme picker, the light theme System uses,
-//! high contrast; the Text group (fonts and sizes, readable line width,
+//! high contrast (only once a high-contrast theme exists); the Text group (fonts and sizes, readable line width,
 //! how wide tables and diagrams too wide for the column get, zoom); the
 //! Code blocks group.
 //!
@@ -20,6 +20,7 @@ use toml::Value;
 use super::SettingsWindow;
 use super::controls::{self, Segment};
 use super::metrics::{field, row, theme_card};
+use super::model::HIGH_CONTRAST;
 use crate::appearance::Appearance;
 use crate::metrics::size::THEME_CARD_PREVIEW;
 use crate::metrics::{DISABLED_OPACITY, HAIRLINE, font, text};
@@ -28,7 +29,6 @@ use crate::theme::{Theme, ThemeChoice, ThemeId};
 
 const THEME: &str = "appearance.theme";
 const PREFERRED_LIGHT: &str = "appearance.preferred_light_theme";
-const HIGH_CONTRAST: &str = "appearance.high_contrast";
 const READABLE: &str = "appearance.readable_line_width";
 const READABLE_CHARS: &str = "appearance.readable_line_width_chars";
 const WIDE_FILL: &str = "appearance.fill_wide_blocks";
@@ -163,30 +163,28 @@ impl SettingsWindow {
             .into_any_element(),
         );
 
-        // High contrast (the themes themselves are not designed yet).
-        let spec = gv_settings::spec(HIGH_CONTRAST);
-        let current = settings.high_contrast.as_str();
-        let options = gv_settings::HighContrast::VARIANTS
-            .iter()
-            .map(|v| {
-                let label =
-                    spec.map_or_else(|| (*v).to_owned(), |s| super::model::variant_label(s, v));
-                ((*v).to_owned(), label)
-            })
-            .collect();
-        let select = self.select(HIGH_CONTRAST, current, options, true, theme, cx);
-        out.push(
-            controls::row(
-                "high-contrast",
-                "High contrast",
-                Some("Switches to the high-contrast theme when the system asks for it.".into()),
-                self.error(HIGH_CONTRAST, cx).map(SharedString::from),
-                vec![select],
-                theme,
-            )
-            .debug_selector(|| format!("settings-row-{HIGH_CONTRAST}"))
-            .into_any_element(),
-        );
+        // High contrast, once there is a high-contrast theme (none is
+        // designed yet).
+        if let Some(spec) = gv_settings::spec(HIGH_CONTRAST).filter(|s| super::model::shown(s)) {
+            let current = settings.high_contrast.as_str();
+            let options = gv_settings::HighContrast::VARIANTS
+                .iter()
+                .map(|v| ((*v).to_owned(), super::model::variant_label(spec, v)))
+                .collect();
+            let select = self.select(HIGH_CONTRAST, current, options, true, theme, cx);
+            out.push(
+                controls::row(
+                    "high-contrast",
+                    "High contrast",
+                    Some("Switches to the high-contrast theme when the system asks for it.".into()),
+                    self.error(HIGH_CONTRAST, cx).map(SharedString::from),
+                    vec![select],
+                    theme,
+                )
+                .debug_selector(|| format!("settings-row-{HIGH_CONTRAST}"))
+                .into_any_element(),
+            );
+        }
 
         // Text.
         out.push(controls::heading("Text", false, theme).into_any_element());

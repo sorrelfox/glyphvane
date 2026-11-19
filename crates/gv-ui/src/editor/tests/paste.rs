@@ -339,3 +339,60 @@ fn wait_overrides_viewer_mode_for_its_tab(cx: &mut TestAppContext) {
     draw(&mut vcx);
     assert_eq!(mode(&workspace, &mut vcx), ViewMode::Preview);
 }
+
+/// *Viewer mode* switches viewer mode for the active tab only, both ways.
+#[gpui::test]
+fn the_viewer_mode_command_switches_the_active_tab(cx: &mut TestAppContext) {
+    use crate::keymap::actions::view::ToggleViewerMode;
+    let dir = temp(&[("a.md", "alpha\n"), ("b.md", "beta\n")]);
+    let (window, workspace) = viewer_workspace(cx, dir.path(), &dir.path().join("a.md"));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let viewer = |vcx: &mut VisualTestContext| {
+        workspace.read_with(vcx, |ws, cx| !ws.mode_available(ViewMode::Edit, cx))
+    };
+    assert!(viewer(&mut vcx));
+
+    // Off for a.md: Edit works and the editor takes edits.
+    cx.dispatch_action(window, ToggleViewerMode);
+    draw(&mut vcx);
+    assert!(!viewer(&mut vcx));
+    vcx.simulate_keystrokes("secondary-e");
+    draw(&mut vcx);
+    assert_eq!(mode(&workspace, &mut vcx), ViewMode::Edit);
+    let editor = workspace
+        .read_with(&vcx, |ws, _| ws.active_tab().editor().cloned())
+        .expect("editor");
+    vcx.simulate_input("edited ");
+    assert_eq!(text_of(&editor, &mut vcx), "edited alpha\n");
+
+    // Another tab still follows the setting.
+    workspace.update_in(&mut vcx, |ws, window, cx| {
+        ws.open_tab(OpenTarget::new(dir.path().join("b.md")), window, cx);
+    });
+    draw(&mut vcx);
+    assert!(viewer(&mut vcx));
+    workspace.update_in(&mut vcx, |ws, window, cx| ws.activate_tab(0, window, cx));
+    draw(&mut vcx);
+
+    // On again: back to Preview, and the editor is read-only.
+    cx.dispatch_action(window, ToggleViewerMode);
+    draw(&mut vcx);
+    assert!(viewer(&mut vcx));
+    assert_eq!(mode(&workspace, &mut vcx), ViewMode::Preview);
+    assert!(editor.read_with(&vcx, |e, _| e.is_read_only()));
+
+    // With the setting off, the command turns viewer mode on for the tab.
+    let off = viewer_settings(dir.path(), false);
+    vcx.update(|_, cx| AppSettings::reload_global(cx, off));
+    draw(&mut vcx);
+    workspace.update_in(&mut vcx, |ws, window, cx| ws.activate_tab(1, window, cx));
+    draw(&mut vcx);
+    assert!(!viewer(&mut vcx));
+    cx.dispatch_action(window, ToggleViewerMode);
+    draw(&mut vcx);
+    assert!(viewer(&mut vcx));
+    vcx.simulate_keystrokes("secondary-e");
+    draw(&mut vcx);
+    assert_eq!(mode(&workspace, &mut vcx), ViewMode::Preview);
+}

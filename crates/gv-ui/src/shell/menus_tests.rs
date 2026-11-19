@@ -413,7 +413,7 @@ fn the_editor_menu_runs_table_commands(cx: &mut TestAppContext) {
 }
 
 /// In Preview a right-click on a link opens the link menu; elsewhere it
-/// opens nothing. The link commands that have no handler yet are dimmed.
+/// opens nothing. There is no *Open in split* (no pane splits).
 #[gpui::test]
 fn the_link_menu_opens_on_a_link(cx: &mut TestAppContext) {
     let link = "x".repeat(60);
@@ -431,7 +431,7 @@ fn the_link_menu_opens_on_a_link(cx: &mut TestAppContext) {
     assert_eq!(f.menu(), Some(ContextMenu::Link));
     assert!(f.has("context-menu-item:links.follow"));
     assert!(!f.has("context-menu-disabled:links.follow"));
-    assert!(f.has("context-menu-disabled:links.open_in_split"));
+    assert!(!f.has("context-menu-item:links.open_in_split"));
     f.keys("escape");
     assert!(f.reader_focused());
     // Below the text: no menu.

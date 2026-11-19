@@ -59,6 +59,7 @@ impl Workspace {
             misspelled: false,
             in_vault: false,
             live_preview: self.tabs.get(self.active).is_some_and(|t| t.live_preview),
+            viewer_mode: self.viewer_mode_of(self.active, cx),
         }
     }
 

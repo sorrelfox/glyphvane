@@ -88,8 +88,9 @@ extra information on code fences (a title, highlighted lines, line numbers).
   (the picture for the current light or dark theme), and a single `<audio>`,
   `<video>` or `<iframe>` (a card; nothing is loaded from the web). Other raw
   HTML is shown as its source text.
-- **Emoji shortcodes** are drawn as emoji in Live Preview and offered by
-  autocomplete, in profiles that have them.
+- **Emoji shortcodes** (`:tada:`) are drawn as emoji in the Reading view, in
+  Live Preview and in exports, and offered by autocomplete, in profiles that
+  have them. In other profiles they stay as typed.
 
 ## How the profile is chosen
 

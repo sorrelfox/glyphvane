@@ -168,7 +168,6 @@ const BUILTIN: &[Row] = &[
     ("links.follow", "Follow link", Category::Links, Some(DOCUMENT), &[("alt-enter", ALL)]),
     ("links.open_in_new_tab", "Open link in new tab", Category::Links, Some(DOCUMENT),
         &[("secondary-alt-enter", ALL)]),
-    ("links.open_in_split", "Open link in split", Category::Links, Some(DOCUMENT), &[]),
     ("links.open_in_new_window", "Open link in new window", Category::Links, Some(DOCUMENT), &[]),
     ("links.preview", "Preview link under caret", Category::Links, Some(DOCUMENT), &[]),
     ("links.list", "Links in this note", Category::Links, Some(DOCUMENT), &[]),

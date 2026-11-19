@@ -32,6 +32,8 @@
 //! someone waits for (`--wait`, which overrides viewer mode for that tab
 //! only) and in untitled documents. A tab in Edit or Split when viewer
 //! mode comes on, or restored in one, goes to Preview when it is shown.
+//! *Viewer mode* (`view.toggle_viewer_mode`) switches it for the active tab
+//! only, whatever the setting says, until the tab closes.
 
 use std::path::PathBuf;
 
