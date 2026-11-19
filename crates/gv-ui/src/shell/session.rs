@@ -16,8 +16,10 @@
 //! Source view's folds (byte ranges; restored only where they are still
 //! foldable regions) and the Reading view's folds (callouts and
 //! `<details>`, by kind, first source line and repeat, so they survive
-//! edits elsewhere; [`crate::reader::fold_state`]). Closed tabs are not
-//! kept.
+//! edits elsewhere; [`crate::reader::fold_state`]), viewer mode when
+//! switched for the tab, and, in a PDF, the page at the top, how far down
+//! it and the zoom (a page past the end comes back as the last page).
+//! Closed tabs are not kept.
 //!
 //! Every window that is not created for a file is a session window, so
 //! several windows (`workspace.new_window`, *Open folder* in a window
@@ -73,6 +75,7 @@ use super::history::HISTORY_LIMIT;
 use super::panels::SidebarPanel;
 use super::{FileLabel, History, HistoryEntry, ViewMode, Workspace, most_recent_window};
 use crate::chrome::WindowChrome;
+use crate::file_viewer::PdfPlace;
 use crate::reader::ScrollTarget;
 use crate::reader::fold_state::ReadingFold;
 
@@ -265,6 +268,13 @@ pub struct TabState {
     /// Edit mode's editing style: Live Preview (`true`) or Source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub live_preview: bool,
+    /// Viewer mode switched for this tab (`view.toggle_viewer_mode`); the
+    /// setting applies when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_mode: Option<bool>,
+    /// Where the PDF viewer was, for a PDF read past its start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<PdfPlace>,
 }
 
 /// A place in a tab's history.
@@ -365,6 +375,8 @@ impl TabState {
         let mut tab = super::Tab::new(Some(super::OpenTarget::new(self.path.clone())));
         tab.mode = self.mode;
         tab.live_preview = self.live_preview;
+        tab.viewer_toggle = self.viewer_mode;
+        tab.pdf_place = self.pdf.map(|p| (self.path.clone(), p.sanitized()));
         tab.scroll = self.anchor.map(Anchor::target);
         tab.history = history(&self.back, &self.forward);
         tab.split_ratio = self
@@ -425,6 +437,8 @@ pub(super) fn snapshot(workspace: &Workspace, cx: &App) -> WindowState {
             reading_folds: tab.reading_folds(cx),
             split_reading_folds: tab.split_reading_folds(cx),
             live_preview: tab.live_preview,
+            viewer_mode: tab.viewer_toggle,
+            pdf: tab.pdf_place(cx).filter(|p| !p.is_start()),
         });
     }
     WindowState {

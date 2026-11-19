@@ -266,6 +266,8 @@ mod tests {
                     reading_folds: Vec::new(),
                     split_reading_folds: Vec::new(),
                     live_preview: false,
+                    viewer_mode: None,
+                    pdf: None,
                 }],
                 active_tab: 0,
                 sidebar_open: true,

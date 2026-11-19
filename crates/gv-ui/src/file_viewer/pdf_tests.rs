@@ -524,3 +524,72 @@ fn the_pdf_viewer_names_its_pages_and_controls(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// A restored place comes back exactly (page, offset in the page, zoom);
+/// a page past the end is the last page.
+#[gpui::test]
+fn a_restored_place_comes_back(cx: &mut TestAppContext) {
+    use super::PdfPlace;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = pdf_file(dir.path());
+    let engine = Arc::new(FakePdf::pages(&[LETTER; 8]));
+    let (window, viewer) = open(cx, &file, Some(Arc::clone(&engine)), None);
+    let place = PdfPlace {
+        page: 3,
+        into: Some(120.0),
+        zoom: PdfZoom::Scale(1.5),
+    };
+    cx.update(|cx| viewer.update(cx, |v, _| v.restore_pdf(place)));
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let pdf = pdf_of(&viewer, &mut vcx);
+    pdf.read_with(&vcx, |p, _| {
+        assert_eq!(p.current_page(), 3);
+        assert_eq!(p.zoom(), PdfZoom::Scale(1.5));
+        let back = p.place();
+        assert_eq!(back.page, 3);
+        assert!(
+            (back.into.expect("an offset") - 120.0).abs() < 0.5,
+            "{back:?}"
+        );
+    });
+    assert_eq!(
+        engine.rendered_pages()[0],
+        3,
+        "the restored page is drawn first"
+    );
+
+    // The PDF is shorter now: the last page.
+    let viewer = vcx.update(|_, cx| FileViewer::open(file.clone(), None, cx));
+    viewer.update(&mut vcx, |v, _| {
+        v.restore_pdf(PdfPlace {
+            page: 20,
+            into: Some(50.0),
+            zoom: PdfZoom::FitWidth,
+        });
+    });
+    draw(&mut vcx);
+    let pdf = pdf_of(&viewer, &mut vcx);
+    pdf.read_with(&vcx, |p, _| assert_eq!(p.current_page(), 7));
+}
+
+#[test]
+fn a_place_from_a_damaged_session_is_made_usable() {
+    use super::PdfPlace;
+
+    let place = PdfPlace {
+        page: 2,
+        into: Some(f32::NAN),
+        zoom: PdfZoom::Scale(40.0),
+    }
+    .sanitized();
+    assert_eq!(place.into, None);
+    assert_eq!(place.zoom, PdfZoom::Scale(4.0));
+    let place = PdfPlace {
+        zoom: PdfZoom::Scale(f32::INFINITY),
+        ..place
+    };
+    assert_eq!(place.sanitized().zoom, PdfZoom::FitWidth);
+    assert!(PdfPlace::default().is_start());
+}

@@ -27,6 +27,9 @@
 //!   last page; `=`/`+` and `-` zoom, `0` fits the width, `1` shows
 //!   100 %; `view.zoom_in`, `view.zoom_out` and `view.zoom_reset` (fit
 //!   width) work too, and Ctrl-wheel (Cmd-wheel on macOS) zooms.
+//! - **Place.** The page at the top, how far down it and the zoom
+//!   ([`PdfPlace`]) are kept with the session and shown again when the
+//!   tab is restored, and when the PDF is read again after a change.
 //! - **Accessibility.** The pages are a list named "Pages"; each page laid
 //!   out is an image named "Page N of M" with its position in the list.
 //!
@@ -47,6 +50,7 @@ use gpui::{
     Pixels, Render, RenderImage, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Task, Window, canvas, div, img, point, px,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Live, Role, Toggled};
 use crate::appearance::Appearance;
@@ -146,14 +150,62 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 /// How large the pages are shown.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PdfZoom {
     /// The widest page fills the view's width.
+    #[default]
     FitWidth,
     /// The largest page fits in the view.
     FitPage,
     /// A scale: 1.0 is 100 % ([`PX_PER_PT`] pixels per point).
     Scale(f32),
+}
+
+impl PdfZoom {
+    fn is_fit_width(&self) -> bool {
+        *self == Self::FitWidth
+    }
+}
+
+/// Where a PDF was read (kept with the session): the page at the top,
+/// how far down it, and the zoom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PdfPlace {
+    /// From 0.
+    pub page: usize,
+    /// Points from the page's top to the view's top; the page's top with
+    /// the gap above it when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<f32>,
+    #[serde(default, skip_serializing_if = "PdfZoom::is_fit_width")]
+    pub zoom: PdfZoom,
+}
+
+impl PdfPlace {
+    /// The start of the PDF at the default zoom: nothing worth keeping.
+    pub fn is_start(&self) -> bool {
+        self.page == 0 && self.into.is_none_or(|i| i <= 0.0) && self.zoom.is_fit_width()
+    }
+
+    /// The place with what a damaged or edited session file may hold made
+    /// usable: an offset that is not a number dropped, a scale brought
+    /// into the zoom steps' range.
+    #[must_use]
+    pub fn sanitized(self) -> Self {
+        let zoom = match self.zoom {
+            PdfZoom::Scale(s) if s.is_finite() && s > 0.0 => {
+                PdfZoom::Scale(s.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]))
+            }
+            PdfZoom::Scale(_) => PdfZoom::FitWidth,
+            zoom => zoom,
+        };
+        Self {
+            page: self.page,
+            into: self.into.filter(|i| i.is_finite()),
+            zoom,
+        }
+    }
 }
 
 /// A drawn page.
@@ -215,8 +267,9 @@ pub struct PdfViewer {
     area: Rc<Cell<Bounds<Pixels>>>,
     /// The page shown (from 0), as last drawn.
     current: usize,
-    /// A page to go to once the view is laid out.
-    pending: Option<usize>,
+    /// A page to go to once the view is laid out, and how far down it
+    /// (points; the page's top with the gap above it when `None`).
+    pending: Option<(usize, Option<f32>)>,
     drawn: Vec<Drawn>,
     /// Pages that could not be drawn: the scale tried and why.
     failed: HashMap<usize, (f32, SharedString)>,
@@ -254,7 +307,8 @@ impl Drop for PdfViewer {
 impl PdfViewer {
     /// A viewer of the PDF at `path` (`bytes`, kept by `engine` as `key`)
     /// whose pages have `sizes` (points), at `zoom`, showing page `page`
-    /// (from 0) first.
+    /// (from 0) first, `into` points down it. A page past the end is the
+    /// last page.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: PathBuf,
@@ -263,7 +317,7 @@ impl PdfViewer {
         sizes: Vec<(f32, f32)>,
         engine: Arc<dyn PdfEngine>,
         zoom: PdfZoom,
-        page: Option<usize>,
+        page: Option<(usize, Option<f32>)>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let sizes = sizes
@@ -273,6 +327,14 @@ impl PdfViewer {
                 (ok(w), ok(h))
             })
             .collect::<Vec<_>>();
+        let last = sizes.len().saturating_sub(1);
+        let page = page.map(|(page, into)| {
+            if page > last {
+                (last, None)
+            } else {
+                (page, into)
+            }
+        });
         Self {
             path,
             bytes,
@@ -300,7 +362,30 @@ impl PdfViewer {
 
     /// The page shown, from 0.
     pub fn current_page(&self) -> usize {
-        self.pending.unwrap_or(self.current)
+        self.pending.map_or(self.current, |(page, _)| page)
+    }
+
+    /// Where the PDF is read, for the session.
+    pub fn place(&self) -> PdfPlace {
+        let (page, into) = match self.pending {
+            Some(pending) => pending,
+            None if self.view_size().0 > 0.0 => {
+                let layout = self.layout();
+                let into = layout
+                    .tops
+                    .get(self.current)
+                    .map(|top| (self.view_top() - top) / layout.ppt)
+                    .filter(|i| i.is_finite())
+                    .map(|i| (i * 100.0).round() / 100.0);
+                (self.current, into)
+            }
+            None => (self.current, None),
+        };
+        PdfPlace {
+            page,
+            into,
+            zoom: self.zoom,
+        }
     }
 
     pub fn zoom(&self) -> PdfZoom {
@@ -398,6 +483,12 @@ impl PdfViewer {
             .unwrap_or(0)
     }
 
+    /// The view's top that shows `page`, `into` points down it.
+    fn top_of(layout: &Layout, page: usize, into: Option<f32>) -> Option<f32> {
+        let top = layout.tops.get(page)?;
+        Some(top + into.map_or(-PAGE_GAP / 2.0, |pt| pt * layout.ppt))
+    }
+
     fn set_top(&self, top: f32) {
         self.scroll
             .set_offset(point(self.scroll.offset().x, px(-top.max(0.0))));
@@ -410,10 +501,12 @@ impl PdfViewer {
         let page = page.min(self.sizes.len().saturating_sub(1));
         let (aw, _) = self.view_size();
         if aw <= 0.0 {
-            self.pending = Some(page);
+            self.pending = Some((page, None));
         } else {
             let layout = self.layout();
-            self.set_top(layout.tops[page] - PAGE_GAP / 2.0);
+            if let Some(top) = Self::top_of(&layout, page, None) {
+                self.set_top(top);
+            }
             self.current = page;
             self.pending = None;
         }
@@ -841,12 +934,12 @@ impl Render for PdfViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = Appearance::theme(cx);
         let area = self.view_size();
-        if let Some(page) = self.pending
+        if let Some((page, into)) = self.pending
             && area.0 > 0.0
         {
             let layout = self.layout();
-            if let Some(top) = layout.tops.get(page) {
-                self.set_top(top - PAGE_GAP / 2.0);
+            if let Some(top) = Self::top_of(&layout, page, into) {
+                self.set_top(top);
             }
             self.current = page;
             self.pending = None;

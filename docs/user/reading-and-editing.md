@@ -18,7 +18,9 @@ and Split are unavailable (untitled notes and files opened with `--wait` stay
 editable). View ▸ Viewer mode (also in the title row's **⋯** menu and the
 command palette) switches viewer mode for the current tab only: turn it off
 to edit one document while the setting is on, or on to protect one document
-while the setting is off. The tab keeps that choice until you close it. The **Open files in** setting chooses whether files you open from
+while the setting is off. The tab keeps that choice until you close it, also
+when Glyphvane starts again with your last session. The **Open files in**
+setting chooses whether files you open from
 your file manager or the command line start in Preview, in the editor, or in
 the mode you used last.
 

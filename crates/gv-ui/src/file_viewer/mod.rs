@@ -42,7 +42,7 @@ pub(crate) mod pdf_tests;
 #[cfg(test)]
 mod tests;
 
-pub use pdf::{PdfViewer, PdfZoom};
+pub use pdf::{PdfPlace, PdfViewer, PdfZoom};
 
 use std::cell::Cell;
 use std::io::Read as _;
@@ -530,6 +530,8 @@ pub struct FileViewer {
     pdf: Option<gpui::Entity<PdfViewer>>,
     /// A page (from 0) to show once the PDF is read.
     pdf_page: Option<usize>,
+    /// Where to show the PDF once it is read (a restored session's).
+    pdf_restore: Option<PdfPlace>,
     _load: Option<Task<()>>,
 }
 
@@ -574,6 +576,7 @@ impl FileViewer {
                 pdf_cancel: Arc::new(AtomicBool::new(false)),
                 pdf: None,
                 pdf_page: None,
+                pdf_restore: None,
                 _load: None,
             };
             viewer.load(path, cx);
@@ -612,6 +615,21 @@ impl FileViewer {
         }
     }
 
+    /// Shows the PDF at `place` once it is read (a restored tab's place;
+    /// a page past the end is the last page).
+    pub fn restore_pdf(&mut self, place: PdfPlace) {
+        self.pdf_restore = Some(place);
+    }
+
+    /// Where the PDF is read: the PDF viewer's place, else the place it
+    /// will be shown at once read. `None` for other files.
+    pub fn pdf_place(&self, cx: &App) -> Option<PdfPlace> {
+        match (&self.status, &self.pdf) {
+            (ViewerStatus::Pdf { .. }, Some(pdf)) => Some(pdf.read(cx).place()),
+            _ => self.pdf_restore,
+        }
+    }
+
     /// The vault's folder is known.
     pub fn set_root(&mut self, root: Option<PathBuf>) {
         self.root = root;
@@ -623,6 +641,7 @@ impl FileViewer {
             self.zoom = ImageZoom::Fit;
             self.scroll.set_offset(Point::default());
             self.pdf = None;
+            self.pdf_restore = None;
         }
         self.path = path.clone();
         self.cancel.cancel();
@@ -696,15 +715,18 @@ impl FileViewer {
                 sizes,
                 engine,
             } => {
-                // Read again (changed on disk): the same zoom and page.
-                let (zoom, page) = match &self.pdf {
-                    Some(old) => {
-                        let old = old.read(cx);
-                        (old.zoom(), Some(old.current_page()))
-                    }
-                    None => (PdfZoom::FitWidth, None),
+                // Read again (changed on disk): the same zoom and place;
+                // a restored tab: its place.
+                let place = match (&self.pdf, self.pdf_restore.take()) {
+                    (_, Some(place)) => Some(place),
+                    (Some(old), None) => Some(old.read(cx).place()),
+                    (None, None) => None,
                 };
-                let page = self.pdf_page.take().or(page);
+                let zoom = place.map_or(PdfZoom::FitWidth, |p| p.zoom);
+                let page = match self.pdf_page.take() {
+                    Some(page) => Some((page, None)),
+                    None => place.map(|p| (p.page, p.into)),
+                };
                 let pages = sizes.len();
                 let path = self.path.clone();
                 let viewer =

@@ -431,6 +431,9 @@ pub struct Tab {
     restored_split_folds: Option<(PathBuf, Vec<crate::reader::fold_state::ReadingFold>)>,
     /// The editing style of Edit mode: Live Preview (`true`) or Source.
     live_preview: bool,
+    /// Where the PDF viewer was in this tab's file: restored (given to the
+    /// viewer once made), else as last seen.
+    pdf_place: Option<(PathBuf, crate::file_viewer::PdfPlace)>,
     /// The conflict-marker warning was dismissed; it comes back once the
     /// markers have gone and come back ([`infobar`]).
     markers_dismissed: std::cell::Cell<bool>,
@@ -466,6 +469,7 @@ impl Tab {
             restored_reading_folds: None,
             restored_split_folds: None,
             live_preview: false,
+            pdf_place: None,
             markers_dismissed: std::cell::Cell::new(false),
         }
     }
@@ -483,6 +487,24 @@ impl Tab {
         match &self.restored_folds {
             Some((p, folds)) if Some(p.as_path()) == path => folds.clone(),
             _ => Vec::new(),
+        }
+    }
+
+    /// Where the PDF viewer is in the tab's file, as the session keeps
+    /// it: the viewer's once it shows the file, else the one restored.
+    fn pdf_place(&self, cx: &App) -> Option<crate::file_viewer::PdfPlace> {
+        let path = self.path.as_deref()?;
+        if let Some(viewer) = &self.viewer {
+            let viewer = viewer.read(cx);
+            if viewer.path() == path
+                && let Some(place) = viewer.pdf_place(cx)
+            {
+                return Some(place);
+            }
+        }
+        match &self.pdf_place {
+            Some((p, place)) if p == path => Some(*place),
+            _ => None,
         }
     }
 
@@ -2081,6 +2103,7 @@ impl Workspace {
         let on = !self.viewer_mode_of(index, cx);
         self.tabs[index].viewer_toggle = Some(on);
         self.apply_viewer_mode(cx);
+        self.session_changed(cx);
     }
 
     /// The status bar's facts from the Source view on screen.

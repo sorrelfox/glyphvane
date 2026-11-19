@@ -17,7 +17,10 @@ the file manager.
 ## The PDF viewer
 
 The PDF viewer opens at the width of the window (**Fit width**). You can
-switch to **Fit page** or a zoom level from 25 % to 400 %.
+switch to **Fit page** or a zoom level from 25 % to 400 %. When Glyphvane
+starts again with your last session, a PDF tab comes back where you left it:
+the same page, scroll position and zoom (the last page if the PDF has since
+become shorter).
 
 | Key | What it does |
 |---|---|

@@ -35,6 +35,8 @@ fn tab(path: &str) -> TabState {
         reading_folds: Vec::new(),
         split_reading_folds: Vec::new(),
         live_preview: false,
+        viewer_mode: None,
+        pdf: None,
     }
 }
 
@@ -1015,4 +1017,168 @@ fn a_text_file_comes_back_in_edit(cx: &mut TestAppContext) {
     assert!(workspace.read_with(&vcx, |ws, _| ws.active_tab().viewer().is_some()));
     vcx.update(|_, cx| save_now(cx));
     assert_eq!(memory.last().windows[0].tabs[0].mode, ViewMode::Edit);
+}
+
+#[test]
+fn viewer_mode_and_the_pdf_place_are_stored_only_when_set() {
+    use crate::file_viewer::{PdfPlace, PdfZoom};
+
+    // A session from before: both missing.
+    let json = r#"{"path":"/n/paper.pdf","mode":"preview"}"#;
+    let tab: TabState = serde_json::from_str(json).expect("reads");
+    assert_eq!(tab.viewer_mode, None);
+    assert_eq!(tab.pdf, None);
+    let back = serde_json::to_string(&tab).expect("json");
+    assert!(
+        !back.contains("viewer_mode") && !back.contains("\"pdf\""),
+        "{back}"
+    );
+
+    let set = TabState {
+        viewer_mode: Some(false),
+        pdf: Some(PdfPlace {
+            page: 4,
+            into: Some(36.5),
+            zoom: PdfZoom::Scale(1.5),
+        }),
+        ..tab
+    };
+    let json = serde_json::to_string(&set).expect("json");
+    let back: TabState = serde_json::from_str(&json).expect("reads");
+    assert_eq!(back, set);
+
+    // Only the page: the page's top at fit width.
+    let json = r#"{"path":"/n/paper.pdf","pdf":{"page":2},"viewer_mode":true}"#;
+    let tab: TabState = serde_json::from_str(json).expect("reads");
+    assert_eq!(tab.viewer_mode, Some(true));
+    assert_eq!(
+        tab.pdf,
+        Some(PdfPlace {
+            page: 2,
+            into: None,
+            zoom: PdfZoom::FitWidth
+        })
+    );
+    let fit_page: PdfPlace =
+        serde_json::from_str(r#"{"page":1,"zoom":"fit-page"}"#).expect("reads");
+    assert_eq!(fit_page.zoom, PdfZoom::FitPage);
+}
+
+/// A PDF tab comes back at its page and zoom, and is saved where it is read.
+#[gpui::test]
+fn a_pdf_tab_comes_back_at_its_page(cx: &mut TestAppContext) {
+    use crate::file_viewer::pdf_tests::FakePdf;
+    use crate::file_viewer::{PdfPlace, PdfZoom};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let paper = dir.path().join("paper.pdf");
+    std::fs::write(&paper, b"%PDF-1.7\n%%EOF\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: paper.clone(),
+                pdf: Some(PdfPlace {
+                    page: 5,
+                    into: Some(80.0),
+                    zoom: PdfZoom::Scale(1.25),
+                }),
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 8]));
+    cx.update(|cx| {
+        crate::export::set_pdf_engine(cx, Some(engine as Arc<dyn crate::export::PdfEngine>));
+    });
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let pdf = loop {
+        draw(&mut vcx);
+        let viewer = workspace.read_with(&vcx, |ws, _| ws.active_tab().viewer().cloned());
+        if let Some(pdf) = viewer.and_then(|v| v.read_with(&vcx, |v, _| v.pdf().cloned())) {
+            break pdf;
+        }
+        assert!(std::time::Instant::now() < deadline, "the PDF viewer shows");
+    };
+    draw(&mut vcx);
+    pdf.read_with(&vcx, |p, _| {
+        assert_eq!(p.current_page(), 5);
+        assert_eq!(p.zoom(), PdfZoom::Scale(1.25));
+    });
+    vcx.update(|_, cx| save_now(cx));
+    let saved = memory.last().windows[0].tabs[0]
+        .pdf
+        .expect("the place is kept");
+    assert_eq!(saved.page, 5);
+    assert_eq!(saved.zoom, PdfZoom::Scale(1.25));
+    assert!(
+        (saved.into.expect("an offset") - 80.0).abs() < 0.5,
+        "{saved:?}"
+    );
+
+    // Read further: saved at the new page.
+    pdf.update(&mut vcx, |p, cx| p.go_to(2, cx));
+    draw(&mut vcx);
+    vcx.update(|_, cx| save_now(cx));
+    let saved = memory.last().windows[0].tabs[0]
+        .pdf
+        .expect("the place is kept");
+    assert_eq!(saved.page, 2);
+}
+
+/// Viewer mode switched for a tab comes back with it, and is saved when
+/// switched again.
+#[gpui::test]
+fn a_tab_viewer_mode_comes_back(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("a.md");
+    std::fs::write(&a, "# A\n").expect("write");
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                path: a.clone(),
+                viewer_mode: Some(true),
+                ..tab("")
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    let on = |vcx: &mut VisualTestContext| {
+        workspace.read_with(vcx, |ws, cx| ws.viewer_mode_of(ws.active, cx))
+    };
+    assert!(on(&mut vcx), "viewer mode, though the setting is off");
+    workspace.read_with(&vcx, |ws, cx| {
+        assert!(!ws.mode_available(ViewMode::Edit, cx));
+    });
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory.last().windows[0].tabs[0].viewer_mode, Some(true));
+    workspace.update(&mut vcx, |ws, cx| ws.toggle_viewer_mode(cx));
+    assert!(!on(&mut vcx));
+    vcx.update(|_, cx| save_now(cx));
+    assert_eq!(memory.last().windows[0].tabs[0].viewer_mode, Some(false));
 }

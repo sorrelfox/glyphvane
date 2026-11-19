@@ -96,9 +96,19 @@ impl Workspace {
     ) -> Option<Entity<FileViewer>> {
         let page = scroll.and_then(pdf_page);
         let tab = self.tabs.get(index)?;
+        // A restored tab's PDF place, unless a link names a page.
+        let restore = match &tab.pdf_place {
+            Some((p, place)) if page.is_none() && *p == path => Some(*place),
+            _ => None,
+        };
         if let Some(viewer) = tab.viewer.clone() {
             if viewer.read(cx).path() != path.as_path() {
-                viewer.update(cx, |v, cx| v.load(path.clone(), cx));
+                viewer.update(cx, |v, cx| {
+                    v.load(path.clone(), cx);
+                    if let Some(place) = restore {
+                        v.restore_pdf(place);
+                    }
+                });
                 self.track_file(&path, None, cx);
             }
             if let Some(page) = page {
@@ -111,6 +121,12 @@ impl Workspace {
         if let Some(page) = page {
             viewer.update(cx, |v, cx| v.go_to_page(page, cx));
         }
+        if let Some(place) = restore {
+            viewer.update(cx, |v, _| v.restore_pdf(place));
+        }
+        // A PDF read further, or zoomed: the session is saved with it.
+        cx.observe(&viewer, |this, viewer, cx| this.pdf_moved(&viewer, cx))
+            .detach();
         cx.subscribe_in(
             &viewer,
             window,
@@ -122,6 +138,30 @@ impl Workspace {
         self.tabs[index].viewer = Some(viewer.clone());
         self.track_file(&path, None, cx);
         Some(viewer)
+    }
+
+    /// Keeps where the PDF of `viewer`'s tab is read, and saves the
+    /// session when that changed.
+    fn pdf_moved(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<'_, Self>) {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.viewer.as_ref() == Some(viewer))
+        else {
+            return;
+        };
+        let viewer = viewer.read(cx);
+        let Some(place) = viewer.pdf_place(cx) else {
+            return;
+        };
+        let path = viewer.path().to_path_buf();
+        if tab.path.as_ref() != Some(&path)
+            || tab.pdf_place.as_ref() == Some(&(path.clone(), place))
+        {
+            return;
+        }
+        tab.pdf_place = Some((path, place));
+        self.session_changed(cx);
     }
 
     /// The vault (and so where SVG images may load files from) is known.
