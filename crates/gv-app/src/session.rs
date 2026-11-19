@@ -275,6 +275,7 @@ mod tests {
                 sidebar_panel: Some("search".into()),
                 vault: Some(PathBuf::from("/n")),
                 base: None,
+                files_sort: None,
             }],
             recent_files: vec![PathBuf::from("/n/a.md")],
             ..Session::default()
