@@ -11,8 +11,9 @@
 //!   link menu was opened on or the one under the Source view's caret,
 //!   which gives the preview the keyboard.
 //! - **Contents by target:** a note in a Reading view of its own (the
-//!   Split view's smaller type), scrolled to the heading or block the link
-//!   names; an image; another file (a PDF among them) says it opens in the
+//!   Split view's smaller type): only the section of the heading the link
+//!   names (to the next heading of the same or a higher level), else
+//!   scrolled to the block it names; an image; another file (a PDF among them) says it opens in the
 //!   default app; a web address shows the address and its domain, never
 //!   fetched; an unresolved link says so and offers *Create note*; an
 //!   ambiguous link lists its candidates; a pending link says the vault
@@ -34,8 +35,7 @@
 //!   deep at most.
 //!
 //! Not built: pinning a preview as a floating window (Should), the page
-//! of a PDF, cutting a heading's section at its end (the preview scrolls
-//! on into the rest of the note).
+//! of a PDF.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -509,6 +509,8 @@ impl Workspace {
                 reader.set_content(content, cx);
             }
             reader.set_hover_previews(nested.then_some(delay));
+            // A heading's section only (09 § Hover preview).
+            reader.show_sections_only();
             reader.open(path, scroll, cx);
             reader
         });

@@ -140,3 +140,47 @@ fn reading_views_get_each_content_snapshot(cx: &mut TestAppContext) {
         .expect("split preview");
     f.until_given(&preview, |_| true);
 }
+
+#[gpui::test]
+fn a_view_without_a_window_vault_is_woken_by_an_index_opening(cx: &mut TestAppContext) {
+    use gv_vault::content::{ContentIndexer, ContentOptions};
+    use gv_vault::{IndexConfig, PathIndex, ProfileId};
+
+    let mut f = fixture(cx);
+    let reader = f.reader();
+    assert_eq!(
+        reader.read_with(&f.vcx, |r, _| r.content_for_tests()),
+        (None, false)
+    );
+    // Another window's vault holding the file opens its content index.
+    // No time passes on the test clock: the view is woken, not polling.
+    let root = f.dir.path().to_path_buf();
+    let paths = PathIndex::build(&root, IndexConfig::default())
+        .expect("index")
+        .0;
+    let mut options = ContentOptions::for_profile(ProfileId::Obsidian);
+    options.overlay_debounce = Duration::ZERO;
+    let indexer = ContentIndexer::start(paths, options, |_| {}).expect("starts");
+    assert!(indexer.flush(Duration::from_secs(10)));
+    let built = indexer.snapshot().map(|s| s.generation());
+    assert!(built.is_some());
+    crate::files::overlay::register(&root, indexer.handle());
+    draw(&mut f.vcx);
+    assert_eq!(
+        reader.read_with(&f.vcx, |r, _| r.content_for_tests()),
+        (built, false)
+    );
+    // A newer snapshot, announced as that window's vault does.
+    let b = root.join("B.md");
+    crate::files::overlay::dirty(&b, &gv_text::TextSnapshot::new("No more.\n"));
+    assert!(indexer.flush(Duration::from_secs(10)));
+    let newer = indexer.snapshot().map(|s| s.generation());
+    assert_ne!(newer, built);
+    crate::files::overlay::content_changed();
+    draw(&mut f.vcx);
+    assert_eq!(
+        reader.read_with(&f.vcx, |r, _| r.content_for_tests()),
+        (newer, false)
+    );
+    crate::files::overlay::clean(&b);
+}

@@ -12,12 +12,15 @@
 //!
 //! The registry is process-wide: workers run on the background executor
 //! without an app context, and a file may be open in one window while
-//! another window's vault holds it.
+//! another window's vault holds it. Views whose window has no vault read
+//! the content index of the vault that holds their file ([`content_of`])
+//! and are woken when one opens or publishes a snapshot ([`subscribe`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gv_text::TextSnapshot;
 use gv_vault::VaultPath;
 use gv_vault::content::ContentHandle;
@@ -28,6 +31,14 @@ struct Hub {
     dirty: HashMap<PathBuf, TextSnapshot>,
     /// Content indexes by vault root.
     sinks: Vec<(PathBuf, ContentHandle)>,
+}
+
+thread_local! {
+    /// Views waiting for content indexes to open or change. Views, and the
+    /// vaults that announce snapshots, live on the app's thread (so tests,
+    /// each with its own app on its own thread, do not wake each other).
+    static WAITING: std::cell::RefCell<Vec<UnboundedSender<()>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 static HUB: LazyLock<Mutex<Hub>> = LazyLock::new(Mutex::default);
@@ -52,6 +63,24 @@ pub(crate) fn register(root: &Path, handle: ContentHandle) {
         }
     }
     hub.sinks.push((root.to_path_buf(), handle));
+    drop(hub);
+    content_changed();
+}
+
+/// A message each time a content index opens ([`register`]) or publishes
+/// a snapshot ([`content_changed`]), for a view that reads the index
+/// itself ([`content_of`]) because its window gives it none. Ends when
+/// the receiver is dropped.
+pub(crate) fn subscribe() -> UnboundedReceiver<()> {
+    let (tx, rx) = unbounded();
+    WAITING.with_borrow_mut(|w| w.push(tx));
+    rx
+}
+
+/// A content index opened or published a snapshot: wakes the views that
+/// [`subscribe`]d.
+pub(crate) fn content_changed() {
+    WAITING.with_borrow_mut(|w| w.retain(|w| w.unbounded_send(()).is_ok()));
 }
 
 /// The content index of the vault that holds `path` (the deepest one when

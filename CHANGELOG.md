@@ -33,7 +33,10 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Ctrl+Alt+Shift+click on a link opens it in a new window, in the Reading
   view and the editor, and on canvas cards, base rows and links, search
   results, query blocks and hover previews.
-
+- Query blocks mark the matched words in their context lines, as the
+  Search panel does.
+- The hover preview of a link to a heading shows only that heading's
+  section, up to the next heading of the same or a higher level.
 ### Documentation
 
 - A sample vault (`docs/sample-vault`) tours the features with one short
@@ -106,6 +109,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Screen readers reading the editor line by line no longer stop about a
   screen past the visible lines: the lines around the caret are always
   described, also when the view was scrolled away from it.
+- Performance: query blocks and bases in a window without a vault pick up
+  the vault's content index as soon as it opens or changes, instead of
+  checking every 2 seconds.
 
 ## [1.2.0] - 2026-11-19
 

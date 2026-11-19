@@ -357,6 +357,13 @@ fn a_query_lists_its_results_and_opens_them(cx: &mut TestAppContext) {
     // The document itself has the word (in its query).
     assert_eq!(names, ["Doc.md", "Fruit.md", "Pie.md"]);
     assert_eq!(q.count(), "3 notes");
+    // The context lines mark their matches, as the Search panel does.
+    let marks = v.st().borrow().geometry.query_marks.clone();
+    assert!(!marks.is_empty(), "no marks drawn");
+    assert!(
+        marks.iter().all(|m| m.eq_ignore_ascii_case("apple")),
+        "{marks:?}"
+    );
     // The box holds its rows: the notes with their lines.
     let line = crate::metrics::text::PREVIEW_BODY.line;
     #[allow(clippy::cast_precision_loss)]

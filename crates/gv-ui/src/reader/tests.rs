@@ -507,6 +507,50 @@ fn fragments_and_lines_scroll_the_document(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_heading_fragment_shows_only_its_section_when_asked(cx: &mut TestAppContext) {
+    // Hover previews (09 § Hover preview): "the heading section", up to
+    // the next heading of the same or a higher level.
+    let note = "# S\n\nIntro.\n\n## One\n\nFirst part.\n\n## Two\n\nSecond part.\n\n\
+                ### Deeper\n\nStill two.\n\n## Three\n\nThird part.\n";
+    let dir = temp(&[("a.md", "# A\n"), ("S.md", note)]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    let path = dir.path().join("S.md");
+    let shown = |fragment: &str, vcx: &mut VisualTestContext| {
+        let target = super::ScrollTarget::Fragment(gv_vault::Fragment::from_wikilink(fragment));
+        reader.update(vcx, |r, cx| r.open(path.clone(), Some(target), cx));
+        draw(vcx);
+        draw(vcx);
+        reader
+            .read_with(vcx, |r, _| r.plain_text())
+            .expect("the note is shown")
+    };
+    // Not asked: the whole note, scrolled.
+    let text = shown("Two", &mut vcx);
+    assert!(
+        text.contains("First part") && text.contains("Third part"),
+        "{text:?}"
+    );
+    reader.update(&mut vcx, |r, _| r.show_sections_only());
+    let text = shown("Two", &mut vcx);
+    assert!(
+        text.contains("Second part") && text.contains("Still two"),
+        "{text:?}"
+    );
+    assert!(
+        !text.contains("First part") && !text.contains("Third part"),
+        "{text:?}"
+    );
+    // A heading it does not have: the whole note.
+    let text = shown("Nowhere", &mut vcx);
+    assert!(
+        text.contains("First part") && text.contains("Third part"),
+        "{text:?}"
+    );
+}
+
+#[gpui::test]
 fn dragging_selects_across_items_and_copy_takes_the_text(cx: &mut TestAppContext) {
     let text = "# Title\n\nHello brave new world.\n\nSecond paragraph here.\n";
     let dir = temp(&[("a.md", text)]);

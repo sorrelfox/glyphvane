@@ -392,6 +392,8 @@ impl WindowVault {
         let fresh = self.content_pending.swap(false, Ordering::AcqRel);
         if fresh {
             cx.emit(ContentUpdated);
+            // Views in windows without a vault read the index themselves.
+            crate::files::overlay::content_changed();
         }
         fresh
     }

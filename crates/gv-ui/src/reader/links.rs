@@ -636,6 +636,23 @@ pub(crate) fn fragment_item(
     }
 }
 
+/// The section of the heading a fragment names: from the heading to the
+/// next heading of the same or a higher level. `None` for a fragment that
+/// names no heading.
+pub(crate) fn fragment_section(
+    fragment: &Fragment,
+    params: &ProfileParams,
+    model: &DocModel,
+) -> Option<std::ops::Range<usize>> {
+    let FragmentKind::Heading(parts) = &fragment.kind else {
+        return None;
+    };
+    match model.match_fragment(parts, params.anchoring) {
+        FragmentMatch::Heading { index, .. } => model.section(index),
+        FragmentMatch::Top | FragmentMatch::Missing => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

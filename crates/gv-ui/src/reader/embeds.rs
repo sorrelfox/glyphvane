@@ -41,8 +41,9 @@
 //!   `this` the embedding note): it scrolls and its clicks open files; the
 //!   Reading view leaves pointer input over it to it.
 //! - **Query**: a note per row (a click opens it) with up to
-//!   [`QUERY_SNIPPETS`] context lines under it, at most [`QUERY_FILES`]
-//!   notes and a line saying how many more there are.
+//!   [`QUERY_SNIPPETS`] context lines under it, their matches marked as
+//!   in the Search panel ([`query_line`]), at most [`QUERY_FILES`] notes
+//!   and a line saying how many more there are.
 //! - **Media**: a line saying what the file or page is, and the action
 //!   (*Open externally*, *Open in PDF viewer*, *Open in browser*) on the
 //!   header's right; a click anywhere on the card follows it.
@@ -181,6 +182,31 @@ impl QueryShown {
         let what = if self.matched == 1 { "note" } else { "notes" };
         format!("{n}{plus} {what}")
     }
+}
+
+/// A query block's context line as its row shows it: the line trimmed,
+/// an ellipsis first where the line goes on before it, and the matches
+/// as byte ranges of that text (marked as in the Search panel).
+pub(crate) fn query_line(snippet: &gv_search::Snippet) -> (String, Vec<std::ops::Range<usize>>) {
+    let lead = snippet.text.len() - snippet.text.trim_start().len();
+    let body = snippet.text.trim();
+    let mut text = String::with_capacity(body.len() + 3);
+    if snippet.clipped_start {
+        text.push('\u{2026}');
+    }
+    let shift = text.len();
+    text.push_str(body);
+    let marks = snippet
+        .highlights
+        .iter()
+        .filter_map(|r| {
+            let start = r.start.saturating_sub(lead).min(body.len());
+            let end = r.end.saturating_sub(lead).min(body.len());
+            (start < end && body.is_char_boundary(start) && body.is_char_boundary(end))
+                .then_some(start + shift..end + shift)
+        })
+        .collect();
+    (text, marks)
 }
 
 /// The height of a live block's box showing `shown`, in px: `reserve` (the
@@ -547,16 +573,20 @@ impl Reader {
         st.stale.extend(items);
     }
 
-    /// Starts checking the vault's content index for new snapshots, every
-    /// [`CONTENT_POLL`], while the window gives none.
+    /// Starts following the vault's content index for new snapshots, while
+    /// the window gives none: checked now and each time a content index
+    /// opens or publishes one ([`crate::files::overlay::subscribe`]).
     fn watch_content(&mut self, cx: &mut Context<'_, Self>) {
         if self.content_given || self._content_poll.is_some() {
             return;
         }
+        let mut changed = crate::files::overlay::subscribe();
         self.poll_content(cx);
         self._content_poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(CONTENT_POLL).await;
+            use futures::StreamExt as _;
+            while changed.next().await.is_some() {
+                // One check for a burst of snapshots.
+                while changed.try_recv().is_ok() {}
                 if this.update(cx, |r, cx| r.poll_content(cx)).is_err() {
                     break;
                 }
@@ -801,10 +831,6 @@ impl Reader {
     }
 }
 
-/// How often the view checks the vault's content index for a new
-/// snapshot while the window gives none (a window without a vault).
-pub(crate) const CONTENT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// The link a click on a live block (or on its result `row`: a note, and
 /// one of its context lines) follows. A context line opens the note there.
 /// A block inside a note embed follows its link from the embedded note.
@@ -867,6 +893,37 @@ mod tests {
                 _ => None,
             })
             .expect("a live block")
+    }
+
+    #[test]
+    fn a_context_line_keeps_its_matches_where_it_is_trimmed_and_clipped() {
+        let snippet =
+            |text: &str, highlights: Vec<std::ops::Range<usize>>, clipped| gv_search::Snippet {
+                line: 0,
+                range: 0..text.len(),
+                text: text.to_owned(),
+                highlights,
+                clipped_start: clipped,
+                clipped_end: false,
+            };
+        // Leading space trimmed: the match moves with the text.
+        let (text, marks) = query_line(&snippet(
+            "  An apple a day. ",
+            std::iter::once(5..10).collect(),
+            false,
+        ));
+        assert_eq!(text, "An apple a day.");
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0], 3..8);
+        assert_eq!(&text[marks[0].clone()], "apple");
+        // An ellipsis first: after it.
+        let (text, marks) = query_line(&snippet("apple pie", vec![0..5, 6..9], true));
+        assert_eq!(text, "\u{2026}apple pie");
+        assert_eq!(&text[marks[0].clone()], "apple");
+        assert_eq!(&text[marks[1].clone()], "pie");
+        // A match in the trimmed space at the end is dropped.
+        let (_, marks) = query_line(&snippet("pie  ", std::iter::once(3..5).collect(), false));
+        assert!(marks.is_empty());
     }
 
     #[test]

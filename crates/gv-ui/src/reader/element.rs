@@ -420,6 +420,43 @@ fn bounds_of(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 }
 
 /// Shapes a one-line label.
+/// `text` shaped as one line in `colors.0`, its `marks` (sorted byte
+/// ranges on character boundaries) in `colors.1`.
+fn shape_marked(
+    window: &Window,
+    text: &str,
+    font: gpui::Font,
+    size: f32,
+    colors: (Hsla, Hsla),
+    marks: &[std::ops::Range<usize>],
+) -> ShapedLine {
+    let run = |len: usize, color: Hsla| TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut runs = Vec::with_capacity(2 * marks.len() + 1);
+    let mut at = 0;
+    for r in marks {
+        if r.start > at {
+            runs.push(run(r.start - at, colors.0));
+        }
+        if r.end > r.start.max(at) {
+            runs.push(run(r.end - r.start.max(at), colors.1));
+        }
+        at = at.max(r.end);
+    }
+    if text.len() > at || runs.is_empty() {
+        runs.push(run(text.len() - at, colors.0));
+    }
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_owned()), px(size), &runs, None)
+}
+
 fn shape(window: &Window, text: &str, font: gpui::Font, size: f32, color: Hsla) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
@@ -3148,18 +3185,47 @@ fn paint_live(
                             bounds_of(x + s.border, row_y, w - 2.0 * s.border, line),
                             Some((i, Some(j))),
                         );
-                        let mut text = String::new();
-                        if snip.clipped_start {
-                            text.push('\u{2026}');
-                        }
-                        text.push_str(snip.text.trim());
-                        text_line(
-                            o,
-                            &text,
-                            (x + 3.0 * pad, row_y),
-                            s.label_font,
-                            Token::TextSecondary,
+                        // Its matches marked as in the Search panel.
+                        let (text, marks) = super::embeds::query_line(snip);
+                        let at_x = x + 3.0 * pad;
+                        let fitted = fit_text(&text, x + w - pad - at_x, s.body.size);
+                        let kept = if fitted == text {
+                            text.len()
+                        } else {
+                            fitted.len() - '\u{2026}'.len_utf8()
+                        };
+                        let marks: Vec<std::ops::Range<usize>> = marks
+                            .into_iter()
+                            .filter_map(|r| {
+                                let end = r.end.min(kept);
+                                (r.start < end).then_some(r.start..end)
+                            })
+                            .collect();
+                        let shaped = shape_marked(
+                            window,
+                            &fitted,
+                            s.label_font.clone(),
+                            s.body.size,
+                            (color(Token::TextSecondary), color(Token::TextPrimary)),
+                            &marks,
                         );
+                        for r in &marks {
+                            let x0 = f32::from(shaped.x_for_index(r.start));
+                            let x1 = f32::from(shaped.x_for_index(r.end));
+                            o.out.under.push(Op::Rect {
+                                bounds: bounds_of(at_x + x0, row_y, x1 - x0, line),
+                                color: color(Token::AccentTint),
+                                radius: px(0.0),
+                            });
+                        }
+                        o.geometry
+                            .query_marks
+                            .extend(marks.iter().map(|r| fitted[r.clone()].to_owned()));
+                        o.out.over.push(Op::Text {
+                            line: Box::new(shaped),
+                            origin: point(px(at_x), px(row_y)),
+                            line_height: px(line),
+                        });
                     }
                     QueryRow::More(n) => {
                         let what = if n == 1 { "note" } else { "notes" };

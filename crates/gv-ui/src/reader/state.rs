@@ -325,6 +325,8 @@ pub(crate) struct Geometry {
     pub hosts: Vec<Bounds<Pixels>>,
     /// The front matter keys drawn, with the window y of their baselines.
     pub property_keys: Vec<(String, f32)>,
+    /// The matched text marked in query blocks' context lines drawn.
+    pub query_marks: Vec<String>,
 }
 
 /// Frame timings, for the log and the debug benchmark.

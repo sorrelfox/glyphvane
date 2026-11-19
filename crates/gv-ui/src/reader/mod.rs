@@ -120,7 +120,7 @@ pub use state::ReaderLayout;
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use expanded::{ExpandedEvent, ExpandedTable};
 pub use find::DEBUG_FIND_ENV;
-pub(crate) use links::{Navigation, NewNote, Resolver, navigation, resolver_kind};
+pub(crate) use links::{Navigation, NewNote, Resolver, navigation, new_note, resolver_kind};
 
 /// Copy the selection as plain text (`editor.copy`) or as Markdown
 /// (`editor.copy_as_markdown`), and select the whole document
@@ -347,6 +347,9 @@ pub struct Reader {
     /// A Live Preview block's view: the part of the text it shows, the
     /// rest being its context ([`Reader::open_block`]).
     crop: Option<std::ops::Range<usize>>,
+    /// A fragment naming a heading shows only that heading's section
+    /// ([`Reader::show_sections_only`]).
+    section_only: bool,
 }
 
 impl std::fmt::Debug for Reader {
@@ -406,6 +409,7 @@ impl Reader {
             }),
             _load_once: cx.observe_global::<remote::LoadOnce>(|this, cx| this.sync_remote(cx)),
             crop: None,
+            section_only: false,
             code_line: None,
         }
     }
@@ -612,6 +616,10 @@ impl Reader {
         self.path = Some(path.clone());
         self.status = LoadStatus::Loading;
         self.target = target;
+        if self.section_only {
+            // The section is chosen again once the note is in.
+            self.crop = None;
+        }
         self._refresh = None;
         self.live.forget();
         let resolver = Resolver::statuses(&path, self.index.as_ref(), self.profile.id);
@@ -686,6 +694,21 @@ impl Reader {
         self._load = None;
         match result {
             Ok(doc) => {
+                // A heading's section only: the note again, cropped to it.
+                if self.section_only
+                    && self.crop.is_none()
+                    && let Some(ScrollTarget::Fragment(fragment)) = &self.target
+                    && let Some(range) = links::fragment_section(
+                        fragment,
+                        &ProfileParams::for_profile(doc.profile),
+                        &doc.model,
+                    )
+                    && range.len() < doc.text.len()
+                {
+                    self.target = None;
+                    self.open_block(doc.path.clone(), Arc::clone(&doc.text), range, cx);
+                    return;
+                }
                 if let Some(why) = &doc.lossy {
                     tracing::warn!(path = %doc.path.display(), "{why}");
                 }
@@ -950,6 +973,15 @@ impl Reader {
         let st = self.state.borrow();
         st.doc.as_ref()?;
         Some(st.engine.total() as f32)
+    }
+
+    /// From now on, a document opened at a fragment that names a heading
+    /// shows only that heading's section, up to the next heading of the
+    /// same or a higher level (hover previews, 09 § Hover preview: "the
+    /// heading section"); the rest of the note is kept for its footnotes,
+    /// references and macros, as a Live Preview block's is.
+    pub(crate) fn show_sections_only(&mut self) {
+        self.section_only = true;
     }
 
     /// Shows `crop` of `text` (a Live Preview block's source, with the
