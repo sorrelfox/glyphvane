@@ -25,6 +25,11 @@ runtime: org.freedesktop.Platform
 runtime-version: "26.08"
 sdk: org.freedesktop.Sdk
 command: glyphvane
+# A bundle file needs no AppStream catalogue (that is for repositories such
+# as Flathub), and the compose step of Ubuntu 24.04's x86_64 appstream fails
+# on this app with "file-read-error". The metainfo is still validated in
+# the release workflow.
+appstream-compose: false
 
 finish-args:
   # Windows: Wayland, with X11 where there is no Wayland.

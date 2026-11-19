@@ -347,8 +347,7 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH to the commit time
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      # flatpak-builder installs the runtime and SDK from Flathub and runs
-      # AppStream compose on the metadata.
+      # flatpak-builder installs the runtime and SDK from Flathub.
       - name: Build
         run: |
           cp "linux/glyphvane-$VERSION-${{ matrix.target }}.tar.gz" packaging/flatpak/glyphvane.tar.gz
@@ -361,7 +360,6 @@ jobs:
           files="$RUNNER_TEMP/build-dir/files"
           appstreamcli validate --no-net --explain "$files/share/metainfo/$APP_ID.metainfo.xml"
           desktop-file-validate "$files/share/applications/$APP_ID.desktop"
-          ls "$files/share/app-info/xmls/$APP_ID.xml.gz"
 
       - name: Bundle
         run: |
