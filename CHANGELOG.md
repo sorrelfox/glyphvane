@@ -43,6 +43,8 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A callout written `[!type|meta]` shows as its type; the metadata is no
   longer part of its name or title.
 - An image that cannot be drawn shows its alt text without the `|300` size.
+- Property values chosen from autocomplete are quoted when YAML needs it
+  (a `: `, a leading `#` or `[`, list separators in `[a, b]` lists).
 
 ## [1.2.0] - 2026-11-19
 

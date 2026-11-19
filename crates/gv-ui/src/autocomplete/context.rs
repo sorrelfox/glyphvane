@@ -81,8 +81,13 @@ pub(crate) enum Kind {
     Footnote,
     /// A front matter key.
     PropertyName,
-    /// A front matter value of `key`.
-    PropertyValue { key: String },
+    /// A front matter value of `key`, after the quote that opened it (if
+    /// any), in a flow list (`[a, b]`) or not.
+    PropertyValue {
+        key: String,
+        quote: Option<char>,
+        flow: bool,
+    },
 }
 
 /// A completion the text asks for, and the text an accepted item replaces.
@@ -402,9 +407,14 @@ fn property(before: &str, after: &str, list_key: Option<&str>) -> Option<Trigger
             return None;
         }
         let key = list_key?.to_owned();
+        let quote = opening_quote(value);
         let value = value.trim_start_matches(['"', '\'']);
         return Some(plain(
-            Kind::PropertyValue { key },
+            Kind::PropertyValue {
+                key,
+                quote,
+                flow: false,
+            },
             0,
             caret - value.len()..caret,
             0,
@@ -421,6 +431,7 @@ fn property(before: &str, after: &str, list_key: Option<&str>) -> Option<Trigger
         return None;
     }
     // In a flow list (`[a, b`), the item being typed.
+    let flow = value.starts_with('[');
     let value = match value.strip_prefix('[') {
         Some(list) => list
             .rsplit(',')
@@ -429,15 +440,23 @@ fn property(before: &str, after: &str, list_key: Option<&str>) -> Option<Trigger
             .trim_start_matches(' '),
         None => value,
     };
+    let quote = opening_quote(value);
     let value = value.trim_start_matches(['"', '\'']);
     Some(plain(
         Kind::PropertyValue {
             key: key.to_owned(),
+            quote,
+            flow,
         },
         0,
         caret - value.len()..caret,
         0,
     ))
+}
+
+/// The quote a front matter value being typed starts with.
+fn opening_quote(value: &str) -> Option<char> {
+    value.chars().next().filter(|c| matches!(c, '"' | '\''))
 }
 
 #[cfg(test)]
@@ -577,14 +596,33 @@ mod tests {
         assert_eq!(
             t.kind,
             Kind::PropertyValue {
-                key: "status".into()
+                key: "status".into(),
+                quote: None,
+                flow: false,
             }
         );
         assert_eq!(query("status: dr", &t), "dr");
         let t = detect("tags: [a, b", "", &fm(None), ALL).expect("trigger");
         assert_eq!(query("tags: [a, b", &t), "b");
+        assert!(matches!(t.kind, Kind::PropertyValue { flow: true, .. }));
+        let t = detect("title: 'My", "", &fm(None), ALL).expect("trigger");
+        assert_eq!(query("title: 'My", &t), "My");
+        assert!(matches!(
+            t.kind,
+            Kind::PropertyValue {
+                quote: Some('\''),
+                ..
+            }
+        ));
         let t = detect("  - wo", "", &fm(Some("tags")), ALL).expect("trigger");
-        assert_eq!(t.kind, Kind::PropertyValue { key: "tags".into() });
+        assert_eq!(
+            t.kind,
+            Kind::PropertyValue {
+                key: "tags".into(),
+                quote: None,
+                flow: false,
+            }
+        );
         assert_eq!(query("  - wo", &t), "wo");
         assert_eq!(detect("  - wo", "", &fm(None), ALL), None);
         assert_eq!(detect("status:", "", &fm(None), ALL), None);

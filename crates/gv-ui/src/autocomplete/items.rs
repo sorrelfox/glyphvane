@@ -249,7 +249,7 @@ pub(crate) fn items(trigger: &Trigger, query: &str, s: &Sources<'_>) -> Vec<Item
         Kind::Fence => languages(query),
         Kind::Footnote => footnotes(query, s),
         Kind::PropertyName => property_names(query, s),
-        Kind::PropertyValue { key } => property_values(key, query, s),
+        Kind::PropertyValue { key, .. } => property_values(key, query, s),
     };
     items.truncate(MAX_ITEMS);
     items
@@ -751,6 +751,51 @@ impl AcceptEnv<'_> {
     }
 }
 
+/// `value` written as a front matter value: inside the quote the user
+/// opened, escaped for it; else as it is when YAML reads it back as
+/// written (a plain scalar), double-quoted when it would not.
+fn yaml_value(value: &str, quote: Option<char>, flow: bool) -> String {
+    let double = || {
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    };
+    match quote {
+        Some('\'') => value.replace('\'', "''"),
+        Some(_) => double(),
+        None if plain_scalar(value, flow) => value.to_owned(),
+        None => format!("\"{}\"", double()),
+    }
+}
+
+/// Whether YAML reads `value`, written as it is, back as that text: no
+/// indicator at its start, no `: ` or ` #` inside, no space at either end
+/// and, in a flow list, none of `,[]{}`.
+fn plain_scalar(value: &str, flow: bool) -> bool {
+    let flow_char = |c: char| matches!(c, ',' | '[' | ']' | '{' | '}');
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let starts_ok = match first {
+        // `-1`, `:x`, `?x` are plain; `- x`, `: x`, `? x` are not.
+        '-' | '?' | ':' => chars
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && !(flow && flow_char(c))),
+        '[' | ']' | '{' | '}' | ',' | '#' | '&' | '*' | '!' | '|' | '>' | '\'' | '"' | '%'
+        | '@' | '`' => false,
+        c => !c.is_whitespace(),
+    };
+    starts_ok
+        && !value.ends_with(char::is_whitespace)
+        && !value.ends_with(':')
+        && !value.contains(": ")
+        && !value.contains(" #")
+        && !value.contains(['\n', '\r'])
+        && !(flow && value.contains(flow_char))
+}
+
 /// `![` for embeds, `[` otherwise.
 fn open_bracket(t: &Trigger) -> &'static str {
     if t.embed { "![" } else { "[" }
@@ -763,7 +808,12 @@ pub(crate) fn complete(t: &Trigger, item: &Item, env: &AcceptEnv<'_>) -> Complet
 
 fn draft(t: &Trigger, item: &Item, env: &AcceptEnv<'_>) -> Draft {
     match &item.pick {
-        Pick::Text(text) => Draft::one(t.query.start..t.end, text.clone()),
+        Pick::Text(text) => match t.kind {
+            Kind::PropertyValue { quote, flow, .. } => {
+                Draft::one(t.query.start..t.end, yaml_value(text, quote, flow))
+            }
+            _ => Draft::one(t.query.start..t.end, text.clone()),
+        },
         Pick::File { path, alias, title } => match t.kind {
             Kind::LinkPath => {
                 let done = Draft::one(t.query.start..t.end, env.markdown_dest(path));
@@ -935,6 +985,43 @@ mod tests {
             ]
         );
         assert_eq!(done.caret, 12);
+    }
+
+    #[test]
+    fn property_values_are_quoted_when_yaml_needs_it() {
+        let value = |text: &str, quote: Option<char>, flow: bool| {
+            let t = trigger(
+                Kind::PropertyValue {
+                    key: "k".into(),
+                    quote,
+                    flow,
+                },
+                0,
+                0,
+                3..3,
+                3,
+            );
+            complete(&t, &item(Pick::Text(text.into())), &env()).edits[0]
+                .1
+                .clone()
+        };
+        assert_eq!(value("draft", None, false), "draft");
+        assert_eq!(value("-1", None, false), "-1");
+        assert_eq!(value("a, b", None, false), "a, b");
+        assert_eq!(value("Part 1: Intro", None, false), "\"Part 1: Intro\"");
+        assert_eq!(value("#idea", None, false), "\"#idea\"");
+        assert_eq!(
+            value("say \"hi\" #now", None, false),
+            "\"say \\\"hi\\\" #now\""
+        );
+        assert_eq!(value("- item", None, false), "\"- item\"");
+        assert_eq!(value("[x]", None, false), "\"[x]\"");
+        // In a flow list, its separators too.
+        assert_eq!(value("a, b", None, true), "\"a, b\"");
+        assert_eq!(value("draft", None, true), "draft");
+        // After an opening quote: escaped for it, the user closes it.
+        assert_eq!(value("it's: ok", Some('\''), false), "it''s: ok");
+        assert_eq!(value("a \"b\"", Some('"'), false), "a \\\"b\\\"");
     }
 
     #[test]
