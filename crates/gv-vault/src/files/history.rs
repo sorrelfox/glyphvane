@@ -44,9 +44,12 @@
 //!
 //! # Several processes
 //!
-//! One store serialises its own writers. Two processes writing the same
-//! note's log at the same moment can lose one of the two new versions;
-//! neither log nor objects are damaged.
+//! One store serialises its own writers, and every writer holds an
+//! exclusive lock on the store's `lock` file meanwhile ([`fs::File::lock`]),
+//! so two processes saving the same note at the same moment keep both
+//! versions. Where the file system has no locks, writers go on without
+//! (two processes may then lose one of two versions written at the same
+//! moment; neither log nor objects are damaged).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -66,6 +69,8 @@ pub const HISTORY_FOLDER: &str = "history";
 
 const OBJECTS: &str = "objects";
 const LOGS: &str = "logs";
+/// The file writers of all processes lock.
+const LOCK_FILE: &str = "lock";
 const LOG_HEADER: &str = "glyphvane-history 1";
 const MAGIC: &[u8; 4] = b"GVH1";
 const CODEC_STORED: u8 = 0;
@@ -139,6 +144,13 @@ pub enum HistoryError {
     InvalidVaultId(#[from] InvalidVaultId),
 }
 
+/// A writer's hold on a store: the process's lock and the lock file's
+/// (released when the file closes).
+struct WriteLock<'a> {
+    _guard: std::sync::MutexGuard<'a, ()>,
+    _file: Option<fs::File>,
+}
+
 /// The version history of the documents of one vault.
 #[derive(Debug)]
 pub struct HistoryStore {
@@ -195,7 +207,7 @@ impl HistoryStore {
         if text.len() as u64 > self.policy.max_file_bytes {
             return Ok(Recorded::TooLarge);
         }
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.write_lock();
         let hash = ContentHash::of(text);
         let log = self.log_path(path);
         let mut versions = read_log(&log)?;
@@ -263,7 +275,7 @@ impl HistoryStore {
     /// Moves the history of `from` to `to` (a rename or move). Versions
     /// `to` already had are kept beside them, in time order.
     pub fn moved(&self, from: &Path, to: &Path) -> io::Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.write_lock();
         let (old, new) = (self.log_path(from), self.log_path(to));
         if old == new {
             return Ok(());
@@ -283,7 +295,7 @@ impl HistoryStore {
 
     /// Forgets every version of `path`.
     pub fn forget(&self, path: &Path) -> io::Result<()> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.write_lock();
         let log = self.log_path(path);
         let versions = read_log(&log)?;
         remove_file(&log)?;
@@ -306,7 +318,7 @@ impl HistoryStore {
     /// crash, both only when older than an hour (`now` is the current
     /// time). Returns how many files were removed.
     pub fn collect_garbage(&self, now: SystemTime) -> io::Result<usize> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.write_lock();
         let referenced = self.referenced()?;
         let old = |modified: Option<SystemTime>| {
             modified.is_some_and(|m| now.duration_since(m).unwrap_or_default() >= GARBAGE_GRACE)
@@ -333,6 +345,23 @@ impl HistoryStore {
     }
 
     // ----- inside ---------------------------------------------------------------
+
+    /// Holds off the other writers of the store, in this process and in
+    /// others (the lock file), until dropped.
+    fn write_lock(&self) -> WriteLock<'_> {
+        let guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.dir.join(LOCK_FILE))
+            .and_then(|f| f.lock().map(|()| f));
+        WriteLock {
+            _guard: guard,
+            _file: file.ok(),
+        }
+    }
 
     fn log_path(&self, path: &Path) -> PathBuf {
         // Rebuilt from its components, so `a/./b`, `a//b` and (on Windows)
@@ -908,6 +937,31 @@ mod tests {
         let again = HistoryStore::open(dir.path(), HistoryPolicy::default()).expect("store");
         assert_eq!(again.stored_bytes().expect("size"), size);
         assert_eq!(texts(&again, Path::new("/v/a.md")), vec!["text"]);
+    }
+
+    #[test]
+    fn two_stores_on_one_folder_keep_every_version() {
+        // Two processes' stores of the same vault, saving one note at once.
+        let policy = HistoryPolicy {
+            keep_last: 1000,
+            ..HistoryPolicy::default()
+        };
+        let (dir, first) = store(policy);
+        let second = HistoryStore::open(dir.path().join("h"), policy).expect("store opens");
+        let note = Path::new("/vault/a.md");
+        std::thread::scope(|s| {
+            for (k, store) in [&first, &second].into_iter().enumerate() {
+                s.spawn(move || {
+                    for i in 0..40u64 {
+                        let text = format!("store {k} save {i}");
+                        let at = t0() + Duration::from_millis(i * 2 + k as u64);
+                        store.record(note, text.as_bytes(), at).expect("record");
+                    }
+                });
+            }
+        });
+        assert_eq!(first.versions(note).expect("versions").len(), 80);
+        assert!(dir.path().join("h").join(LOCK_FILE).is_file());
     }
 
     #[test]

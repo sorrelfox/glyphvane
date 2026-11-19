@@ -75,6 +75,8 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A heading written over several lines (setext) can be renamed.
 - Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
   the view.
+- Two Glyphvane windows of separate processes saving the same note at the
+  same moment both keep their version in the file history.
 - Performance: `[[##` and `[[^^` autocomplete gather the vault's headings
   and block IDs once per index update instead of on every key.
 - Performance: a PDF page the viewer stopped waiting for no longer
