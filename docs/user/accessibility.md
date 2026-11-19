@@ -35,7 +35,24 @@ Windows).
 - **The editor** exposes its text, the cursor and the selection, and
   scrolls when a screen reader asks: up and down, sideways on long lines
   without soft wrap, or to a position.
-- **Canvases** expose their cards as a list.
+- **Canvases** are a group named after the file, with their cards as a
+  list in reading order (top to bottom, left to right). Each card is named
+  after its kind and title, and its description says which group holds it,
+  which cards it links to and which link to it, and its problems. The
+  selected card is reported as the focus moves with **Tab** or the arrow
+  keys. On a canvas with more than 500 cards, the list holds the 500 around
+  the selected card (or around the cards in view); each card still says its
+  place among all of them.
+- **Bases** are a group named after the file. A table view is a table with
+  column headers, rows and cells, and the row and column counts; cards and
+  list views are lists. With the base focused, the arrow keys move over the
+  rows and cells (see [Canvas and Bases](canvas-and-bases.md#bases)), and
+  the screen reader reads the cell under the cursor with its row and
+  column, or the list item.
+- **Lists that keep the keyboard in a text field** (the command palette,
+  the quick switcher, Go to, and autocomplete in the editor) expose their
+  rows as options and announce the highlighted one, with its place in the
+  list, as it changes.
 - **Announcements:** information bars are announced when they appear
   (warnings and errors at once, other bars politely), and so are the number
   of matches in the find bar and other status changes such as a base's

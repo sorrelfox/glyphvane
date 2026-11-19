@@ -2,18 +2,26 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The popover: rows, footer and placement (SPEC § Popovers).
+//!
+//! Assistive technology gets a list box of options (the rows drawn), each
+//! with its place among all the suggestions. The editor keeps the
+//! keyboard and the popover is not inside it, so the highlighted option
+//! cannot be the editor's active descendant; a polite live region says
+//! it instead as it changes, as the command palette's does.
 
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    Pixels, Point, SharedString, Size, Styled as _, Window, div, point, px, size,
+    Pixels, Point, SharedString, Size, StatefulInteractiveElement as _, Styled as _, Window, div,
+    point, px, size,
 };
 
 use super::Open;
 use super::context::Kind;
 use super::items::ItemIcon;
+use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::icons::Icon;
 use crate::metrics::size::{AUTOCOMPLETE_WIDTH, MENU_ROW};
 use crate::metrics::spacing::menu::EDGE;
@@ -131,6 +139,10 @@ pub(crate) fn panel(
         let selector = format!("autocomplete-row:{}", item.label);
         div()
             .id(("autocomplete-row", n))
+            .a11y_option(spoken(item), selected, n, open.items.len())
+            .when(!item.detail.is_empty(), |row| {
+                row.aria_description(item.detail.clone())
+            })
             .debug_selector(move || selector.clone())
             .w_full()
             .h(px(MENU_ROW))
@@ -170,6 +182,7 @@ pub(crate) fn panel(
                         .child(item.detail.clone()),
                 )
             })
+            .accessible()
     });
     let footer = div()
         .flex()
@@ -219,9 +232,39 @@ pub(crate) fn panel(
                 wheel(rows, window, cx);
             }
         })
-        .child(div().flex().flex_col().p(px(LIST_PAD)).children(rows))
+        .child(
+            div()
+                .id("autocomplete-options")
+                .a11y_group(Role::ListBox, "Suggestions")
+                .flex()
+                .flex_col()
+                .p(px(LIST_PAD))
+                .children(rows)
+                .accessible(),
+        )
+        .child(crate::a11y::announcer(
+            "autocomplete-status",
+            announcement(open),
+        ))
         .child(footer)
         .into_any_element()
+}
+
+/// A row's accessible name: its label and what follows it (an alias's
+/// target).
+fn spoken(item: &super::Item) -> String {
+    format!("{}{}", item.label, item.suffix)
+}
+
+/// What the popover's live region says: the highlighted suggestion and
+/// where it is.
+pub(crate) fn announcement(open: &Open) -> String {
+    crate::a11y::option_announcement(
+        open.items.get(open.selected).map(spoken).as_deref(),
+        open.selected,
+        open.items.len(),
+        "No suggestions",
+    )
 }
 
 #[cfg(test)]

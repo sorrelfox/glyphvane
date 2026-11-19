@@ -55,6 +55,19 @@ Conventional Commits, and versions follow Semantic Versioning.
   another window, or changed since its blocks were listed, is left
   alone and the link is not written.
 
+### Accessibility
+
+- Bases tables and lists can be read row by row: with the base focused (it
+  is now a Tab stop), the arrow keys, Home, End, Page Up and Page Down move
+  over the rows and Left and Right over a table's cells, and Enter opens the
+  row's file. Screen readers read the cell under the cursor with its row
+  and column; the base is a named group.
+- Canvases list their cards for screen readers only while one is running,
+  and a canvas with very many cards lists those around the selected card
+  (or the cards in view), so large canvases stay fast.
+- The autocomplete popover is a list box of options for screen readers,
+  and the highlighted suggestion is announced as it changes.
+
 ### Documentation
 
 - A sample vault (`docs/sample-vault`) tours the features with one short

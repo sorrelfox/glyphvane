@@ -52,16 +52,25 @@
 //! # Keys
 //!
 //! `]` and `[` switch to the next and the previous view. The view tabs and
-//! the problems chip are Tab stops (Enter or Space presses them).
+//! the problems chip are Tab stops (Enter or Space presses them); so is
+//! the view itself, except in an embed. With the view focused, the arrow
+//! keys, Home, End, Page Up and Page Down move over the rows of a table
+//! or a list and Left and Right over a table's columns ([`cursor`]);
+//! Enter opens the row's file (Mod+Enter in a new tab). The cards of the
+//! cards layout are Tab stops of their own.
 //!
 //! # Accessibility
 //!
-//! The views are a tab list; the results count is a polite live status;
-//! the problems chip a button that says whether its panel is open, the
-//! panel a list. The table is a table of rows and cells with column
-//! headers ([`table`]); the cards and the list layouts are lists whose
+//! The view is a group named after the base. The views are a tab list;
+//! the results count is a polite live status; the problems chip a button
+//! that says whether its panel is open, the panel a list. The table is a
+//! table of rows and cells with column headers, row and column indices
+//! and counts ([`table`]); the cards and the list layouts are lists whose
 //! items are named after the file's first property, a card describing
-//! its other properties.
+//! its other properties. The keyboard's row is selected and its cell (a
+//! list's item) is the view's active descendant ([`cursor`]). The rows
+//! are a virtual list, so only the rows in view (and their cells) are
+//! described, however long the base.
 //!
 //! # Not designed (built plainly, flagged)
 //!
@@ -70,6 +79,7 @@
 
 mod cards;
 mod cells;
+mod cursor;
 mod panel;
 mod table;
 #[cfg(test)]
@@ -114,6 +124,26 @@ gpui::actions!(
         NextView,
         /// Show the base's previous view.
         PreviousView,
+        /// Move the keyboard to the next row.
+        NextRow,
+        /// Move the keyboard to the previous row.
+        PreviousRow,
+        /// Move the keyboard to the first row.
+        FirstRow,
+        /// Move the keyboard to the last row.
+        LastRow,
+        /// Move the keyboard a page of rows down.
+        PageDownRows,
+        /// Move the keyboard a page of rows up.
+        PageUpRows,
+        /// Move the keyboard to the next column of the table.
+        NextColumn,
+        /// Move the keyboard to the previous column of the table.
+        PreviousColumn,
+        /// Open the keyboard row's file.
+        OpenRow,
+        /// Open the keyboard row's file in a new tab.
+        OpenRowInNewTab,
     ]
 );
 
@@ -123,6 +153,24 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("]", NextView, c),
         KeyBinding::new("[", PreviousView, c),
+        KeyBinding::new("down", NextRow, c),
+        KeyBinding::new("up", PreviousRow, c),
+        KeyBinding::new("home", FirstRow, c),
+        KeyBinding::new("end", LastRow, c),
+        KeyBinding::new("pagedown", PageDownRows, c),
+        KeyBinding::new("pageup", PageUpRows, c),
+        KeyBinding::new("right", NextColumn, c),
+        KeyBinding::new("left", PreviousColumn, c),
+        KeyBinding::new("enter", OpenRow, c),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-enter"
+            } else {
+                "ctrl-enter"
+            },
+            OpenRowInNewTab,
+            c,
+        ),
     ]
 }
 
@@ -266,6 +314,11 @@ pub struct BasesView {
     lines: Rc<Vec<Line>>,
     /// Each line's position among the rows (the list's item numbers).
     row_numbers: Rc<Vec<Option<usize>>>,
+    /// The keyboard's row (a line of `lines`) and table column
+    /// ([`cursor`]), and the row's file, which it follows when the base
+    /// is evaluated again.
+    cursor: Option<(usize, usize)>,
+    cursor_path: Option<Arc<str>>,
     table_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
     cards_list: ListState,
@@ -399,6 +452,8 @@ impl BasesView {
             problems_open: false,
             lines: Rc::default(),
             row_numbers: Rc::default(),
+            cursor: None,
+            cursor_path: None,
             table_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             cards_list: ListState::new(0, ListAlignment::Top, px(400.0)),
@@ -567,9 +622,101 @@ impl BasesView {
         self.evaluations += 1;
         self.lines = Rc::new(table::lines(&result));
         self.row_numbers = Rc::new(table::row_numbers(&self.lines));
+        self.cursor = self.cursor_path.as_ref().and_then(|path| {
+            let line = self.lines.iter().position(
+                |l| matches!(*l, Line::Row(g, r) if result.groups[g].rows[r].path == *path),
+            )?;
+            let column = self
+                .cursor
+                .map_or(0, |(_, c)| c.min(result.columns.len().saturating_sub(1)));
+            Some((line, column))
+        });
+        if self.cursor.is_none() {
+            self.cursor_path = None;
+        }
         self.result = Some(Arc::new(result));
         self.card_columns = 0;
         cx.notify();
+    }
+
+    /// The keyboard's row and table column, once a key has moved it.
+    #[cfg(test)]
+    pub(crate) fn cursor(&self) -> Option<(usize, usize)> {
+        self.cursor
+    }
+
+    /// The file of line `line`, when it is a row.
+    fn line_path(&self, line: usize) -> Option<Arc<str>> {
+        let result = self.result.as_ref()?;
+        match self.lines.get(line)? {
+            Line::Row(g, r) => Some(result.groups[*g].rows[*r].path.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether the shown layout has a keyboard cursor (a table or a list;
+    /// cards are Tab stops of their own).
+    fn has_cursor_layout(&self) -> bool {
+        self.result
+            .as_ref()
+            .is_some_and(|r| r.view == self.view && r.matched > 0 && r.kind != ViewKind::Cards)
+    }
+
+    /// Moves the keyboard's row; `false` when there is nothing to move.
+    fn move_row(&mut self, step: cursor::Step, cx: &mut Context<'_, Self>) -> bool {
+        if !self.has_cursor_layout() {
+            return false;
+        }
+        let Some(line) = cursor::step_row(&self.lines, self.cursor.map(|(l, _)| l), step) else {
+            return false;
+        };
+        let column = self.cursor.map_or(0, |(_, c)| c);
+        self.cursor = Some((line, column));
+        self.cursor_path = self.line_path(line);
+        let scroll = if self
+            .result
+            .as_ref()
+            .is_some_and(|r| r.kind == ViewKind::List)
+        {
+            &self.list_scroll
+        } else {
+            &self.table_scroll
+        };
+        scroll.scroll_to_item(line, gpui::ScrollStrategy::Nearest);
+        cx.notify();
+        true
+    }
+
+    /// Moves the keyboard's column in a table; `false` outside a table or
+    /// before the first row move.
+    fn move_column(&mut self, forward: bool, cx: &mut Context<'_, Self>) -> bool {
+        let Some(result) = self.result.as_ref() else {
+            return false;
+        };
+        if !self.has_cursor_layout() || result.kind == ViewKind::List {
+            return false;
+        }
+        let Some((line, column)) = self.cursor else {
+            return false;
+        };
+        self.cursor = Some((
+            line,
+            cursor::step_column(column, result.columns.len(), forward),
+        ));
+        cx.notify();
+        true
+    }
+
+    /// Opens the keyboard row's file; `false` without one.
+    fn open_row(&mut self, disposition: Disposition, cx: &mut Context<'_, Self>) -> bool {
+        if !self.has_cursor_layout() {
+            return false;
+        }
+        let Some(path) = self.cursor.and_then(|(line, _)| self.line_path(line)) else {
+            return false;
+        };
+        self.open_file(&path, disposition, cx);
+        true
     }
 
     /// The `.base` file shown (none for an embedded base).
@@ -631,6 +778,8 @@ impl BasesView {
         let count = self.compiled.as_ref().map_or(0, |b| b.base().views.len());
         if index < count && index != self.view {
             self.view = index;
+            self.cursor = None;
+            self.cursor_path = None;
             self.table_scroll = UniformListScrollHandle::new();
             self.list_scroll = UniformListScrollHandle::new();
             self.cards_list = ListState::new(0, ListAlignment::Top, px(400.0));
@@ -1051,10 +1200,16 @@ impl Render for BasesView {
         let theme = Appearance::theme(cx);
         let colors = Colors::of(theme);
         self.rows_drawn.set(0);
+        let embedded = matches!(self.source, Some(Source::Embedded));
+        let name = match self.path().and_then(Path::file_stem) {
+            Some(stem) => format!("Base {}", stem.to_string_lossy()),
+            None => "Base".to_owned(),
+        };
         let mut root = div()
             .id("bases-view")
+            .a11y_group(Role::Group, name)
             .key_context(KEY_CONTEXT)
-            .track_focus(&self.focus)
+            .track_focus(&self.focus.clone().tab_index(0).tab_stop(!embedded))
             .size_full()
             .flex()
             .flex_col()
@@ -1064,13 +1219,63 @@ impl Render for BasesView {
             .text_size(px(text::UI.size))
             .text_color(colors.text)
             .on_action(cx.listener(|this, _: &NextView, _, cx| this.step_view(true, cx)))
-            .on_action(cx.listener(|this, _: &PreviousView, _, cx| this.step_view(false, cx)));
+            .on_action(cx.listener(|this, _: &PreviousView, _, cx| this.step_view(false, cx)))
+            // The cursor's keys act while the view itself has the keyboard;
+            // on a tab, the chip or a card they do what those do.
+            .on_action(cx.listener(|this, _: &NextRow, window, cx| {
+                this.row_key(cursor::Step::Next, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousRow, window, cx| {
+                this.row_key(cursor::Step::Previous, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FirstRow, window, cx| {
+                this.row_key(cursor::Step::First, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LastRow, window, cx| {
+                this.row_key(cursor::Step::Last, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PageDownRows, window, cx| {
+                this.row_key(cursor::Step::PageDown, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PageUpRows, window, cx| {
+                this.row_key(cursor::Step::PageUp, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextColumn, window, cx| {
+                if !this.focus.is_focused(window) || !this.move_column(true, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousColumn, window, cx| {
+                if !this.focus.is_focused(window) || !this.move_column(false, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenRow, window, cx| {
+                if !this.focus.is_focused(window) || !this.open_row(Disposition::InPlace, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenRowInNewTab, window, cx| {
+                if !this.focus.is_focused(window) || !this.open_row(Disposition::NewTab, cx) {
+                    cx.propagate();
+                }
+            }));
         if self.compiled.is_some() {
             root = root.child(self.render_tabs(&colors, cx));
             if self.problems_open {
                 root = root.child(self.render_problems(&colors));
             }
         }
-        root.child(self.render_body(&colors, cx))
+        root.child(self.render_body(&colors, cx)).accessible()
+    }
+}
+
+impl BasesView {
+    /// A row key: moves the cursor while the view has the keyboard, else
+    /// lets the key go on.
+    fn row_key(&mut self, step: cursor::Step, window: &Window, cx: &mut Context<'_, Self>) {
+        if !self.focus.is_focused(window) || !self.move_row(step, cx) {
+            cx.propagate();
+        }
     }
 }

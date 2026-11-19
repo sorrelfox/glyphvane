@@ -13,11 +13,14 @@
 //! Assistive technology gets a table: the header row's cells are column
 //! headers, each line a row (numbered from 2, after the header) with a
 //! cell per column named after the cell's text; group headers and
-//! summary lines are rows too. The list layout is a list of items.
+//! summary lines are rows too. The list layout is a list of items. The
+//! keyboard's row is selected and its cell (a list's item) is the active
+//! descendant ([`super::cursor`]).
 
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px, uniform_list,
@@ -231,10 +234,13 @@ impl BasesView {
         let Some(result) = self.result.clone() else {
             return Vec::new();
         };
-        let colors = Colors::of(crate::appearance::Appearance::theme(cx));
+        let theme = crate::appearance::Appearance::theme(cx);
+        let colors = Colors::of(theme);
+        let ring = crate::a11y::focus_ring(theme);
         let widths = widths(&result.columns);
         let total: f32 = widths.iter().sum::<f32>().max(1.0);
         let lines = self.lines.clone();
+        let cursor = self.cursor;
         let mut out = Vec::with_capacity(range.len());
         for ix in range {
             let Some(line) = lines.get(ix).copied() else {
@@ -266,11 +272,14 @@ impl BasesView {
                         .map(cell_text)
                         .filter(|t| !t.is_empty())
                         .unwrap_or_else(|| row.path.to_string());
+                    let active = cursor.filter(|&(line, _)| line == ix).map(|(_, c)| c);
                     let mut el = div()
                         .id(("bases-row", ix))
                         .role(Role::Row)
                         .aria_label(name)
                         .aria_row_index(ix + 2)
+                        .aria_selected(active.is_some())
+                        .when(active.is_some(), |row| row.bg(colors.accent_tint))
                         .flex()
                         .h(px(ROW_HEIGHT))
                         .w(px(total))
@@ -286,12 +295,19 @@ impl BasesView {
                             &colors,
                             cx,
                         );
+                        let here = active == Some(c);
                         el = el.child(
                             div()
                                 .id(ElementId::Name(format!("bases-cell:{ix}:{c}").into()))
                                 .role(Role::Cell)
                                 .aria_label(cell_text(&value))
+                                .aria_row_index(ix + 2)
                                 .aria_column_index(c + 1)
+                                .when(here, |cell| {
+                                    cell.aria_selected(true)
+                                        .aria_active_descendant()
+                                        .shadow(ring.clone())
+                                })
                                 .flex_none()
                                 .w(px(*w))
                                 .h_full()
@@ -397,6 +413,7 @@ impl BasesView {
         };
         let colors = Colors::of(crate::appearance::Appearance::theme(cx));
         let lines = self.lines.clone();
+        let cursor = self.cursor.map(|(line, _)| line);
         let mut out = Vec::with_capacity(range.len());
         for ix in range {
             let Some(line) = lines.get(ix).copied() else {
@@ -425,9 +442,14 @@ impl BasesView {
                         texts.join(", ")
                     };
                     let position = self.row_numbers.get(ix).copied().flatten().unwrap_or(0);
+                    let here = cursor == Some(ix);
                     let mut el = div()
                         .id(("bases-list-item", ix))
                         .a11y_list_item(name, position, result.shown)
+                        .aria_selected(here)
+                        .when(here, |item| {
+                            item.aria_active_descendant().bg(colors.accent_tint)
+                        })
                         .flex()
                         .items_center()
                         .gap(px(8.0))

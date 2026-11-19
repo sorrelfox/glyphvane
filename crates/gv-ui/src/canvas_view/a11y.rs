@@ -12,20 +12,34 @@
 //! of the focused canvas, so a screen reader announces it as the focus
 //! moves (Tab, the arrows). A click action on an item selects and opens
 //! its card.
+//!
+//! The cards are list items rather than articles or groups: AccessKit's
+//! list items carry their place in the list ("3 of 40"), screen readers
+//! move through a list item by item, and the reading order the keyboard
+//! follows is the list's order.
+//!
+//! The list is built only while assistive technology is listening. A
+//! canvas with more than [`MAX_LISTED`] cards lists a window of them in
+//! reading order around the selected card (or, with none, around the
+//! first card in view), so a large canvas costs a bounded amount per
+//! frame; each item still says its place among all the cards. The edges
+//! are indexed once per frame, not once per card.
 
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
 };
-use gv_canvas::NodeKind;
+use std::ops::Range;
+
+use gv_canvas::{ItemId, NodeKind};
 
 use super::{CanvasView, Doc};
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::reader::Disposition;
 
-/// The most cards the list names; a larger canvas lists the first ones in
-/// reading order.
-pub(crate) const MAX_LISTED: usize = 2_000;
+/// The most cards the list names; a larger canvas lists a window of
+/// them ([`listed_range`]).
+pub(crate) const MAX_LISTED: usize = 500;
 /// The longest title taken from a text card.
 const MAX_TITLE: usize = 80;
 
@@ -74,9 +88,43 @@ fn reference(doc: &Doc, node: usize) -> String {
     }
 }
 
+/// The edges of each node, by index into the canvas's edges, in the
+/// file's order: the ones going out and the ones coming in (loops left
+/// out).
+pub(crate) struct Links {
+    out: Vec<Vec<usize>>,
+    incoming: Vec<Vec<usize>>,
+}
+
+impl Links {
+    pub(crate) fn of(doc: &Doc) -> Self {
+        let n = doc.canvas.nodes().len();
+        let mut out = vec![Vec::new(); n];
+        let mut incoming = vec![Vec::new(); n];
+        for (i, e) in doc.canvas.edges().iter().enumerate() {
+            if e.from == e.to {
+                continue;
+            }
+            if let Some(o) = out.get_mut(e.from) {
+                o.push(i);
+            }
+            if let Some(o) = incoming.get_mut(e.to) {
+                o.push(i);
+            }
+        }
+        Self { out, incoming }
+    }
+}
+
 /// The accessible description of card `node`: its group, its edges and
 /// its problems.
+#[cfg(test)]
 pub(crate) fn card_description(doc: &Doc, node: usize) -> String {
+    describe(doc, &Links::of(doc), node)
+}
+
+/// [`card_description`] with the edges already indexed.
+fn describe(doc: &Doc, links: &Links, node: usize) -> String {
     let mut parts = Vec::new();
     if let Some(g) = doc.layout.parent_group(node) {
         parts.push(format!("In {}", reference(doc, g)));
@@ -89,22 +137,23 @@ pub(crate) fn card_description(doc: &Doc, node: usize) -> String {
                 format!(" ({})", l.split_whitespace().collect::<Vec<_>>().join(" "))
             })
     };
-    let out: Vec<String> = doc
-        .canvas
-        .edges()
+    let edges = doc.canvas.edges();
+    let out: Vec<String> = links.out[node]
         .iter()
-        .filter(|e| e.from == node && e.to != node)
-        .map(|e| format!("{}{}", reference(doc, e.to), labelled(&e.label)))
+        .map(|&i| {
+            let e = &edges[i];
+            format!("{}{}", reference(doc, e.to), labelled(&e.label))
+        })
         .collect();
     if !out.is_empty() {
         parts.push(format!("Links to {}", out.join(", ")));
     }
-    let incoming: Vec<String> = doc
-        .canvas
-        .edges()
+    let incoming: Vec<String> = links.incoming[node]
         .iter()
-        .filter(|e| e.to == node && e.from != node)
-        .map(|e| format!("{}{}", reference(doc, e.from), labelled(&e.label)))
+        .map(|&i| {
+            let e = &edges[i];
+            format!("{}{}", reference(doc, e.from), labelled(&e.label))
+        })
         .collect();
     if !incoming.is_empty() {
         parts.push(format!("Linked from {}", incoming.join(", ")));
@@ -114,6 +163,19 @@ pub(crate) fn card_description(doc: &Doc, node: usize) -> String {
         parts.push(format!("Problems: {}", issues.join("; ")));
     }
     parts.join(". ")
+}
+
+/// The places in reading order of the `count` cards that the list names:
+/// all of them up to `max`, else `max` of them centred on `anchor` (the
+/// selected card's place, or the first one in view), kept inside the
+/// list.
+pub(crate) fn listed_range(count: usize, anchor: Option<usize>, max: usize) -> Range<usize> {
+    if count <= max {
+        return 0..count;
+    }
+    let anchor = anchor.unwrap_or(0).min(count - 1);
+    let start = anchor.saturating_sub(max / 2).min(count - max);
+    start..start + max
 }
 
 /// A text card's first line without Markdown markers, shortened.
@@ -162,9 +224,11 @@ impl CanvasView {
             .left_0()
             .size_0()
             .overflow_hidden();
-        for (pos, &node) in order.iter().enumerate().take(MAX_LISTED) {
+        let range = listed_range(count, self.list_anchor(doc), MAX_LISTED);
+        let links = Links::of(doc);
+        for (pos, &node) in order.iter().enumerate().take(range.end).skip(range.start) {
             let selected = self.selected == Some(node);
-            let description = card_description(doc, node);
+            let description = describe(doc, &links, node);
             list = list.child(
                 div()
                     .id(("canvas-card", node))
@@ -180,5 +244,31 @@ impl CanvasView {
             );
         }
         list.accessible().into_any_element()
+    }
+
+    /// The place in reading order the listed window centres on: the
+    /// selected card's, else the first card in view's. Only worked out
+    /// when the canvas has more cards than the list names.
+    fn list_anchor(&self, doc: &Doc) -> Option<usize> {
+        let order = doc.layout.reading_order();
+        if order.len() <= MAX_LISTED {
+            return None;
+        }
+        if let Some(s) = self.selected
+            && let Some(pos) = order.iter().position(|&n| n == s)
+        {
+            return Some(pos);
+        }
+        let mut place = vec![usize::MAX; doc.canvas.nodes().len()];
+        for (pos, &n) in order.iter().enumerate() {
+            place[n] = pos;
+        }
+        self.visible_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                ItemId::Node(n) => place.get(n).copied().filter(|&p| p != usize::MAX),
+                ItemId::Edge(_) => None,
+            })
+            .min()
     }
 }

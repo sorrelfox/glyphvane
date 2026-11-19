@@ -774,6 +774,82 @@ fn cards_are_a_list_in_reading_order(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn a_large_canvas_lists_a_window_of_its_cards() {
+    use super::a11y::listed_range;
+    // Small enough: all of them.
+    assert_eq!(listed_range(3, None, 10), 0..3);
+    assert_eq!(listed_range(10, Some(9), 10), 0..10);
+    // Larger: `max` of them around the anchor, inside the list.
+    assert_eq!(listed_range(100, None, 10), 0..10);
+    assert_eq!(listed_range(100, Some(50), 10), 45..55);
+    assert_eq!(listed_range(100, Some(2), 10), 0..10);
+    assert_eq!(listed_range(100, Some(99), 10), 90..100);
+    assert_eq!(listed_range(100, Some(500), 10), 90..100);
+}
+
+#[gpui::test]
+fn a_large_canvas_lists_the_cards_around_the_selection(cx: &mut TestAppContext) {
+    use super::a11y::MAX_LISTED;
+    let total = MAX_LISTED + 100;
+    let nodes: Vec<String> = (0..total)
+        .map(|i| {
+            format!(
+                r#"{{"id":"n{i}","type":"text","x":0,"y":{},"width":100,"height":40,"text":"card {i}"}}"#,
+                i * 60
+            )
+        })
+        .collect();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("big.canvas");
+    std::fs::write(&file, format!(r#"{{"nodes":[{}]}}"#, nodes.join(","))).expect("write");
+    let (window, view) = open(cx, &file, dir.path());
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    let list = testing::named(&mut vcx, &format!("{total} cards"));
+    assert_eq!(list.role, Some(Role::List));
+    let items = testing::with_role(&mut vcx, Role::ListItem);
+    assert_eq!(items.len(), MAX_LISTED);
+    // Each says its place among all the cards.
+    assert!(
+        items
+            .iter()
+            .all(|i| i.position.is_some_and(|(_, n)| n == total))
+    );
+
+    // Selecting the last card moves the window to the end of the list.
+    let last = node(&view, &mut vcx, &format!("n{}", total - 1));
+    view.update(&mut vcx, |v, cx| v.select(Some(last), cx));
+    draw(&mut vcx);
+    let items = testing::with_role(&mut vcx, Role::ListItem);
+    assert_eq!(items.len(), MAX_LISTED);
+    let item = testing::named(&mut vcx, &format!("Text card: card {}", total - 1));
+    assert_eq!(item.selected, Some(true));
+    assert_eq!(item.position, Some((total, total)));
+    assert!(!testing::has(&mut vcx, "Text card: card 0"));
+}
+
+#[gpui::test]
+fn card_descriptions_index_the_edges_once(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, "board.canvas");
+    let t1 = node(&view, &mut vcx, "t1");
+    let im = node(&view, &mut vcx, "im");
+    let (a, b) = view.read_with(&vcx, |v, _| {
+        let doc = v.doc.clone().expect("loaded");
+        (
+            super::a11y::card_description(&doc, t1),
+            super::a11y::card_description(&doc, im),
+        )
+    });
+    assert_eq!(
+        a,
+        "In group Group A. Links to Note.md#Second (refers), img.png"
+    );
+    assert_eq!(b, "In group Group A. Linked from Hello");
+}
+
 #[gpui::test]
 fn problems_zoom_and_minimap_are_named(cx: &mut TestAppContext) {
     let (_dir, view, mut vcx) = shown(cx, "board.canvas");

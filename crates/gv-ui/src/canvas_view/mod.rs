@@ -1841,7 +1841,11 @@ impl Render for CanvasView {
 
         match (&self.status, self.doc.clone()) {
             (CanvasStatus::Ready, Some(doc)) => {
-                root = root.child(self.card_list(&doc, cx));
+                // Only while assistive technology listens (always in
+                // tests, which have no adapter).
+                if window.is_a11y_active() || cfg!(test) {
+                    root = root.child(self.card_list(&doc, cx));
+                }
                 if viewport.width > 0.0 {
                     let visible = self.visible_items();
                     let overlays = self.overlays(&doc, &visible, &palette, &colors, cx);

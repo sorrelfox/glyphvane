@@ -92,6 +92,18 @@ A base can appear:
 - in the right panel, as the [sidebar base](#the-sidebar-base).
 
 Press **]** and **[** to switch to the next or previous view of the base.
+
+| Key (with the base focused) | What it does |
+|---|---|
+| **Up** / **Down** | Previous / next row of a table or list |
+| **Home** / **End** | First / last row |
+| **Page Up** / **Page Down** | Ten rows up / down |
+| **Left** / **Right** | Previous / next cell of the row (tables) |
+| **Enter** | Open the row's file |
+| **Ctrl+Enter** | Open the row's file in a new tab |
+
+The base itself is a Tab stop (except a base embedded in a note); in the
+cards layout each card is a Tab stop, and **Enter** opens it.
 Click a link, a file or a web address in a cell to open it (**Ctrl+click**
 for a new tab, **Ctrl+Alt+Shift+click** for a new window, middle click for a
 background tab).

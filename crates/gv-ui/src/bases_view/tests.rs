@@ -993,3 +993,155 @@ fn remote_covers_wait_for_load_once(cx: &mut TestAppContext) {
         assert!(allow.is_empty());
     });
 }
+
+#[test]
+fn the_cursor_moves_over_rows_only() {
+    use super::cursor::{PAGE, Step, step_column, step_row};
+    let lines = [
+        Line::Group(0),
+        Line::Row(0, 0),
+        Line::Row(0, 1),
+        Line::GroupSummary(0),
+        Line::Group(1),
+        Line::Row(1, 0),
+    ];
+    // The first move goes to the first row (End to the last).
+    assert_eq!(step_row(&lines, None, Step::Next), Some(1));
+    assert_eq!(step_row(&lines, None, Step::Previous), Some(1));
+    assert_eq!(step_row(&lines, None, Step::Last), Some(5));
+    // Group headers and summaries are passed over; the ends stop it.
+    assert_eq!(step_row(&lines, Some(1), Step::Next), Some(2));
+    assert_eq!(step_row(&lines, Some(2), Step::Next), Some(5));
+    assert_eq!(step_row(&lines, Some(5), Step::Next), Some(5));
+    assert_eq!(step_row(&lines, Some(5), Step::Previous), Some(2));
+    assert_eq!(step_row(&lines, Some(1), Step::Previous), Some(1));
+    assert_eq!(step_row(&lines, Some(5), Step::First), Some(1));
+    assert_eq!(step_row(&lines, Some(1), Step::PageDown), Some(5));
+    assert_eq!(step_row(&lines, Some(5), Step::PageUp), Some(1));
+    // From a line that is no longer a row: the next row.
+    assert_eq!(step_row(&lines, Some(3), Step::Previous), Some(2));
+    // No rows, no cursor.
+    assert_eq!(step_row(&[Line::Group(0)], None, Step::Next), None);
+    // Pages of PAGE rows.
+    let many: Vec<Line> = (0..30).map(|r| Line::Row(0, r)).collect();
+    assert_eq!(step_row(&many, Some(0), Step::PageDown), Some(PAGE));
+    assert_eq!(step_row(&many, Some(25), Step::PageDown), Some(29));
+    // Columns stop at the ends.
+    assert_eq!(step_column(0, 3, false), 0);
+    assert_eq!(step_column(0, 3, true), 1);
+    assert_eq!(step_column(2, 3, true), 2);
+    assert_eq!(step_column(0, 0, true), 0);
+}
+
+/// The selected cells' names.
+fn selected_cells(vcx: &mut VisualTestContext) -> Vec<String> {
+    labels(
+        &testing::with_role(vcx, Role::Cell)
+            .into_iter()
+            .filter(|c| c.selected == Some(true))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The selected rows' names.
+fn selected_rows(vcx: &mut VisualTestContext, role: Role) -> Vec<String> {
+    labels(
+        &testing::with_role(vcx, role)
+            .into_iter()
+            .filter(|c| c.selected == Some(true))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[gpui::test]
+fn the_keyboard_moves_over_the_table(cx: &mut TestAppContext) {
+    let (dir, view, mut vcx) = shown(cx, LIBRARY, Some(library()));
+    let seen = events(&view, &mut vcx);
+    // The view is a named group that takes the keyboard.
+    let root = role_named(&mut vcx, Role::Group, "Base Library");
+    assert!(root.focusable);
+    // No row is selected before a key moves the cursor.
+    assert!(selected_rows(&mut vcx, Role::Row).is_empty());
+    assert!(selected_cells(&mut vcx).is_empty());
+
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Emma.md"]);
+    assert_eq!(selected_cells(&mut vcx), ["Emma.md"]);
+    // The cell knows its row and column.
+    let cell = testing::with_role(&mut vcx, Role::Cell)
+        .into_iter()
+        .find(|c| c.selected == Some(true))
+        .expect("the cursor's cell");
+    assert_eq!(cell.label.as_deref(), Some("Emma.md"));
+
+    vcx.simulate_keystrokes("right");
+    draw(&mut vcx);
+    assert_eq!(selected_cells(&mut vcx), ["474"]);
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Dune.md"]);
+    assert_eq!(selected_cells(&mut vcx), ["412"]);
+    vcx.simulate_keystrokes("left left left");
+    draw(&mut vcx);
+    assert_eq!(selected_cells(&mut vcx), ["Dune.md"]);
+    vcx.simulate_keystrokes("end");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Notes.md"]);
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Notes.md"]);
+
+    // Enter opens the row's file.
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        seen.borrow().last(),
+        Some(&BasesEvent::OpenFile {
+            path: dir.path().join("Books").join("Notes.md"),
+            fragment: None,
+            disposition: Disposition::InPlace,
+        })
+    );
+
+    // A new evaluation keeps the cursor on its file.
+    vcx.simulate_keystrokes("home");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Emma.md"]);
+    view.update(&mut vcx, |v, cx| v.set_data(library(), cx));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    assert_eq!(selected_rows(&mut vcx, Role::Row), ["Emma.md"]);
+
+    // Another view starts afresh; a list's item is selected.
+    view.update(&mut vcx, |v, cx| v.select_view_named("Plain", cx));
+    for _ in 0..3 {
+        draw(&mut vcx);
+    }
+    assert_eq!(view.read_with(&vcx, |v, _| v.cursor()), None);
+    assert!(selected_rows(&mut vcx, Role::ListItem).is_empty());
+    vcx.simulate_keystrokes("down down");
+    draw(&mut vcx);
+    assert_eq!(selected_rows(&mut vcx, Role::ListItem), ["Emma, Austen"]);
+    // Left and Right do nothing in a list.
+    vcx.simulate_keystrokes("right");
+    draw(&mut vcx);
+    assert_eq!(view.read_with(&vcx, |v, _| v.cursor()), Some((1, 0)));
+}
+
+#[gpui::test]
+fn row_keys_leave_the_tabs_alone(cx: &mut TestAppContext) {
+    let (_dir, view, mut vcx) = shown(cx, LIBRARY, Some(library()));
+    let seen = events(&view, &mut vcx);
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    // Tab to the view tabs: Enter there is the tab's, not the row's.
+    vcx.simulate_keystrokes("tab");
+    draw(&mut vcx);
+    assert_eq!(testing::focused(&mut vcx), Some(Some("All".to_owned())));
+    vcx.simulate_keystrokes("enter down");
+    draw(&mut vcx);
+    assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+    assert_eq!(view.read_with(&vcx, |v, _| v.cursor()), Some((0, 0)));
+}
