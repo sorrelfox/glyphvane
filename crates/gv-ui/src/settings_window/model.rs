@@ -111,7 +111,7 @@ impl SectionId {
         match self.table() {
             Some(table) => gv_settings::specs()
                 .iter()
-                .filter(|s| s.section == table)
+                .filter(|s| s.section == table && shown(s))
                 .collect(),
             None => Vec::new(),
         }
@@ -122,6 +122,13 @@ impl SectionId {
         let table = path.split_once('.')?.0;
         Self::ALL.into_iter().find(|s| s.table() == Some(table))
     }
+}
+
+/// Whether the window lists `spec`: not the automatic update check where
+/// this copy cannot check (package-manager builds, the Flatpak), as Help ▸
+/// Check for updates says.
+pub fn shown(spec: &Spec) -> bool {
+    spec.path != crate::updates::SETTING || crate::updates::enabled()
 }
 
 /// A unit shown after a number field, from the key's suffix.
@@ -423,6 +430,28 @@ mod tests {
         );
         assert_eq!(field_text(&Value::Float(12.5)), "12.5");
         assert_eq!(field_text(&Value::Float(15.0)), "15");
+    }
+
+    #[test]
+    fn the_flatpak_lists_no_update_check() {
+        let paths =
+            |section: SectionId| -> Vec<&str> { section.specs().iter().map(|s| s.path).collect() };
+        {
+            let _flatpak = crate::updates::ForceFlatpak::new(true);
+            assert!(!paths(SectionId::General).contains(&crate::updates::SETTING));
+            assert!(
+                search("check for updates")
+                    .iter()
+                    .all(|h| h.path != crate::updates::SETTING)
+            );
+            // The rest of General stays.
+            assert!(paths(SectionId::General).contains(&"general.viewer_mode"));
+        }
+        let _flatpak = crate::updates::ForceFlatpak::new(false);
+        assert_eq!(
+            paths(SectionId::General).contains(&crate::updates::SETTING),
+            crate::updates::enabled_by_build()
+        );
     }
 
     #[test]

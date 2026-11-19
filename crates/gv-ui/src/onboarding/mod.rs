@@ -15,6 +15,8 @@
 //!   daily update check (`general.check_for_updates`), local crash reports
 //!   (`privacy_and_security.crash_reports`) and remote images
 //!   (`privacy_and_security.remote_content`). The two opt-ins start off.
+//!   Where this copy cannot check (package-manager builds, the Flatpak),
+//!   the update check is not offered.
 //! - **Default app**: the offer to open Markdown files with Glyphvane
 //!   ([`crate::integration::default_app`]).
 //!
@@ -487,7 +489,7 @@ impl Render for OnboardingWindow {
             &[("ask", "Ask"), ("allow", "Allow"), ("block", "Block")],
             cx,
         );
-        let privacy_rows = vec![
+        let mut privacy_rows = vec![
             row(
                 "onboarding-updates-row",
                 "Check for updates",
@@ -540,6 +542,10 @@ impl Render for OnboardingWindow {
             )
             .into_any_element(),
         ];
+        if !crate::updates::enabled() {
+            // The first row, the update check: this copy cannot check.
+            privacy_rows.remove(0);
+        }
 
         let default_label = match default_app::offer() {
             Offer::SetDirectly => Some("Make default"),

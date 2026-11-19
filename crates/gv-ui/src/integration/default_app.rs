@@ -12,6 +12,9 @@
 //!   the user choose.
 //! - **macOS:** no API without extra frameworks: the onboarding explains
 //!   Finder's *Get Info ▸ Open with ▸ Change All*.
+//! - **Flatpak:** the sandbox has no `xdg-mime`, and the Flatpak's desktop
+//!   file already lists the Markdown types: the onboarding explains that
+//!   the desktop's *Open with* settings choose the default.
 
 use gpui::{App, AppContext as _};
 
@@ -22,7 +25,7 @@ pub enum Offer {
     SetDirectly,
     /// Glyphvane can open the system's own settings (Windows).
     OpenSystemSettings,
-    /// Only an explanation (macOS).
+    /// Only an explanation (macOS, Flatpak).
     Explain,
 }
 
@@ -30,7 +33,7 @@ pub enum Offer {
 pub fn offer() -> Offer {
     if cfg!(target_os = "windows") {
         Offer::OpenSystemSettings
-    } else if cfg!(target_os = "macos") {
+    } else if cfg!(target_os = "macos") || crate::updates::in_flatpak() {
         Offer::Explain
     } else {
         Offer::SetDirectly
@@ -45,6 +48,10 @@ pub fn description() -> &'static str {
         }
         Offer::OpenSystemSettings => {
             "Windows lets you choose the app for .md files in Settings ▸ Default apps."
+        }
+        Offer::Explain if crate::updates::in_flatpak() => {
+            "Glyphvane's desktop file offers it for .md files. To make it the default, \
+             choose Glyphvane in your desktop's Open with or default apps settings."
         }
         Offer::Explain => {
             "In Finder, select a .md file, choose File ▸ Get Info, pick Glyphvane under \
@@ -134,6 +141,40 @@ mod tests {
             });
             cx.run_until_parked();
             assert!(view.read_with(cx, |v, _| v.0.is_some()), "{offer:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn the_flatpak_only_explains(cx: &mut TestAppContext) {
+        let _flatpak = crate::updates::ForceFlatpak::new(true);
+        if cfg!(target_os = "windows") {
+            assert_eq!(offer(), Offer::OpenSystemSettings);
+            return;
+        }
+        assert_eq!(offer(), Offer::Explain);
+        if cfg!(target_os = "linux") {
+            assert!(description().contains("desktop file"));
+        }
+        // The explanation is the answer; xdg-mime is never run.
+        let view = cx.new(|_| View(None));
+        view.update(cx, |_, cx| {
+            let weak = cx.entity().downgrade();
+            apply(cx, move |result, cx| {
+                let _ = weak.update(cx, |this, _| this.0 = result.ok());
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |v, _| v.0.clone()).as_deref(),
+            Some(description())
+        );
+    }
+
+    #[test]
+    fn outside_the_flatpak_linux_sets_directly() {
+        let _flatpak = crate::updates::ForceFlatpak::new(false);
+        if cfg!(target_os = "linux") {
+            assert_eq!(offer(), Offer::SetDirectly);
         }
     }
 }

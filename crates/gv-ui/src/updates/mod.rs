@@ -70,8 +70,38 @@ pub fn enabled() -> bool {
 
 /// Whether this copy runs inside a Flatpak sandbox (`/.flatpak-info`).
 pub fn in_flatpak() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCED_FLATPAK.get() {
+        return forced;
+    }
     static IN_FLATPAK: OnceLock<bool> = OnceLock::new();
     *IN_FLATPAK.get_or_init(|| cfg!(target_os = "linux") && flatpak_info_in(Path::new("/")))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`in_flatpak`]'s answer while a [`ForceFlatpak`] lives on this thread.
+    static FORCED_FLATPAK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Makes [`in_flatpak`] answer `inside` on this thread until dropped
+/// (GPUI tests run on one thread, so parallel tests do not see it).
+#[cfg(test)]
+#[must_use]
+pub(crate) struct ForceFlatpak(Option<bool>);
+
+#[cfg(test)]
+impl ForceFlatpak {
+    pub(crate) fn new(inside: bool) -> Self {
+        Self(FORCED_FLATPAK.replace(Some(inside)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForceFlatpak {
+    fn drop(&mut self) {
+        FORCED_FLATPAK.set(self.0);
+    }
 }
 
 /// Whether `root` holds the file Flatpak puts at the root of every sandbox.

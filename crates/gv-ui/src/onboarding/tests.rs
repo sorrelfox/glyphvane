@@ -184,6 +184,38 @@ fn the_default_app_offer_answers(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_flatpak_explains_the_default_app_and_offers_no_update_check(cx: &mut TestAppContext) {
+    let _flatpak = crate::updates::ForceFlatpak::new(true);
+    let _f = setup(cx);
+    let mut vcx = opened(cx);
+    assert!(
+        vcx.debug_bounds("onboarding-switch-general.check_for_updates")
+            .is_none()
+    );
+    assert!(
+        vcx.debug_bounds("onboarding-switch-privacy_and_security.crash_reports")
+            .is_some()
+    );
+    if cfg!(target_os = "linux") {
+        // No button that would run xdg-mime; the row explains instead.
+        assert_eq!(default_app::offer(), Offer::Explain);
+        assert!(vcx.debug_bounds("onboarding-default-app").is_none());
+    }
+}
+
+#[gpui::test]
+fn outside_the_flatpak_the_update_check_is_offered(cx: &mut TestAppContext) {
+    let _flatpak = crate::updates::ForceFlatpak::new(false);
+    let _f = setup(cx);
+    let mut vcx = opened(cx);
+    assert_eq!(
+        vcx.debug_bounds("onboarding-switch-general.check_for_updates")
+            .is_some(),
+        crate::updates::enabled_by_build()
+    );
+}
+
+#[gpui::test]
 fn safe_mode_never_shows_it(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::init(cx, AppSettings::new(None, None).with_safe_mode());
