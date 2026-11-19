@@ -421,6 +421,33 @@ fn creates_notes(cx: &mut TestAppContext) {
     assert_eq!(twins, 1, "no case twin is made");
 }
 
+/// A bare name is created where the vault's `newFileLocation` says; a
+/// query that names folders keeps them.
+#[gpui::test]
+fn creates_notes_where_the_vault_says(cx: &mut TestAppContext) {
+    let files = [
+        (
+            ".obsidian/app.json",
+            "{\"newFileLocation\": \"folder\", \"newFileFolderPath\": \"Inbox/\"}",
+        ),
+        ("Start.md", "# Start\n"),
+    ];
+    let mut f = fixture(cx, &files, Some("Start.md"), &[]);
+    f.toggle();
+    f.until_listed("Start");
+    f.type_text("Fresh idea");
+    f.keys("shift-enter");
+    let made = f.path("Inbox/Fresh idea.md");
+    f.until(|f| f.active_path() == Some(f.path("Inbox/Fresh idea.md")));
+    assert!(made.is_file());
+
+    f.toggle();
+    f.type_text("Elsewhere/Other");
+    f.keys("shift-enter");
+    f.until(|f| f.active_path() == Some(f.path("Elsewhere/Other.md")));
+    assert!(f.path("Elsewhere/Other.md").is_file());
+}
+
 /// A window without a vault lists its open tabs and the recent files, and
 /// opens them; it offers to create nothing.
 #[gpui::test]

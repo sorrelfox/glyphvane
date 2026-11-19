@@ -12,9 +12,10 @@
 //!   window when the window shows nothing yet, else of a new window. The
 //!   folder joins the recent folders and the Files panel shows it.
 //! - **New note** (Mod+N) creates `Untitled.md` (then `Untitled 1.md`, …,
-//!   checked without regard to case so a vault stays portable) in the root
-//!   of the window's vault, the plan's default `newFileLocation`, and opens
-//!   it in Edit mode. A window without a vault gets an untitled document
+//!   checked without regard to case so a vault stays portable) where the
+//!   vault's `newFileLocation` says (the root by default, the active note's
+//!   folder, or `newFileFolderPath`, made when missing), and opens it in
+//!   Edit mode. A window without a vault gets an untitled document
 //!   instead, which lives in the journal until Save As (as New tab does).
 //! - **New window** opens an empty window that belongs to the session.
 //! - **Revert** takes the file on disk again as one undoable edit. With
@@ -236,9 +237,15 @@ impl Workspace {
             return;
         };
         let handle = self.window_handle;
+        let current = self.active_tab().path.clone();
         let task = cx.background_spawn({
-            let folder = folder.clone();
-            async move { create_note(&folder, NEW_NOTE_NAME) }
+            let root = folder.clone();
+            async move {
+                let rel = crate::reader::new_note_folder(&root, current.as_deref());
+                let folder = rel.split('/').fold(root, |path, part| path.join(part));
+                std::fs::create_dir_all(&folder)?;
+                create_note(&folder, NEW_NOTE_NAME)
+            }
         });
         cx.spawn(async move |this, cx| {
             let created = task.await;

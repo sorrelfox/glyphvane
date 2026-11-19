@@ -52,9 +52,9 @@
 //!   its line. On a note that does not exist yet, or when nothing matches,
 //!   Enter creates it.
 //! - **Mod+Enter** opens it in a new tab.
-//! - **Shift+Enter** creates a note named after the query: in the vault's
-//!   root (the default `newFileLocation`), or in the folders the query
-//!   names (`Projects/Plan`); a name that exists already opens instead.
+//! - **Shift+Enter** creates a note named after the query: where the
+//!   vault's `newFileLocation` says (the root by default), or in the
+//!   folders the query names (`Projects/Plan`); a name that exists already opens instead.
 //!   The name loses the characters no file system or wikilink allows
 //!   ([`model::new_note_path`]). Without a vault nothing is created.
 

@@ -565,6 +565,53 @@ fn new_note_creates_untitled_notes_in_the_vault(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn new_note_goes_where_the_vaults_new_file_location_says(cx: &mut TestAppContext) {
+    let mut f = fixture(
+        cx,
+        &[
+            (
+                "vault/.obsidian/app.json",
+                "{\"newFileLocation\": \"current\"}",
+            ),
+            ("vault/sub/a.md", NOTE),
+        ],
+        None,
+    );
+    let folder = f.path("vault");
+    f.answer(Ok(Some(vec![folder])));
+    f.dispatch(file_commands::OpenFolder);
+    f.settle();
+    f.answer(Ok(Some(vec![f.path("vault/sub/a.md")])));
+    f.dispatch(file_commands::Open);
+    f.settle();
+    // `current`: the active note's folder.
+    f.dispatch(file_commands::NewNote);
+    f.settle();
+    assert_eq!(f.active_path(), Some(f.path("vault/sub/Untitled.md")));
+    // `folder`: `newFileFolderPath`, made when missing.
+    std::fs::write(
+        f.path("vault/.obsidian/app.json"),
+        "{\"newFileLocation\": \"folder\", \"newFileFolderPath\": \"Inbox/Ideas\"}",
+    )
+    .expect("write");
+    f.dispatch(file_commands::NewNote);
+    f.settle();
+    assert_eq!(
+        f.active_path(),
+        Some(f.path("vault/Inbox/Ideas/Untitled.md"))
+    );
+    // A folder outside the vault: the root.
+    std::fs::write(
+        f.path("vault/.obsidian/app.json"),
+        "{\"newFileLocation\": \"folder\", \"newFileFolderPath\": \"../out\"}",
+    )
+    .expect("write");
+    f.dispatch(file_commands::NewNote);
+    f.settle();
+    assert_eq!(f.active_path(), Some(f.path("vault/Untitled.md")));
+}
+
+#[gpui::test]
 fn new_note_without_a_vault_is_untitled(cx: &mut TestAppContext) {
     let mut f = fixture(cx, &[("a.md", NOTE)], Some("a.md"));
     f.dispatch(file_commands::NewNote);

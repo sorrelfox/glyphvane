@@ -163,14 +163,24 @@ impl Workspace {
         }
     }
 
-    /// Creates the note at `path` (vault-relative) and opens it in Edit
-    /// mode; a note of that name (in any letter case) opens instead.
+    /// Creates the note at `path` (vault-relative; a bare name goes where
+    /// the vault's `newFileLocation` says) and opens it in Edit mode; a
+    /// note of that name (in any letter case) opens instead.
     fn create_from_switcher(&mut self, path: &str, new_tab: bool, cx: &mut Context<'_, Self>) {
         let Some(root) = self.vault.as_ref().map(|v| v.read(cx).root().to_path_buf()) else {
             return;
         };
         let handle = self.window_handle;
-        let rel = path.to_owned();
+        let folder = if path.contains('/') {
+            String::new()
+        } else {
+            crate::reader::new_note_folder(&root, self.active_tab().path.as_deref())
+        };
+        let rel = if folder.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{folder}/{path}")
+        };
         let task = cx.background_spawn({
             let root = root.clone();
             async move { create_named_note(&root, &rel) }

@@ -78,7 +78,7 @@ name in any order; `proj/read` finds `Projects/Readme.md`. The list includes:
 | Key | What it does |
 |---|---|
 | **Enter** | Open the file; on a note that does not exist yet, or when nothing matches, create it |
-| **Shift+Enter** | Create a note named after what you typed, also in folders (`Projects/Plan`) |
+| **Shift+Enter** | Create a note named after what you typed, also in folders (`Projects/Plan`); a bare name goes to the vault's default location for new notes (Obsidian's *Files and links* setting) |
 | **Ctrl+Enter** | Open in a new tab |
 
 Start the query with `#` to list headings, or `^` to list block IDs, across

@@ -34,6 +34,12 @@ Conventional Commits, and versions follow Semantic Versioning.
   note each, plus a base, a canvas, an image and a PDF; the user guide
   says how to open it.
 
+### Fixes
+
+- New note (Ctrl+N) and notes created from the quick switcher go to the
+  vault's default location for new notes (Obsidian's `newFileLocation`:
+  the vault folder, the current note's folder, or a chosen folder).
+
 ## [1.2.0] - 2026-11-19
 
 ### PDF

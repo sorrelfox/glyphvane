@@ -423,6 +423,34 @@ fn new_file_location(root: &Path) -> Option<NewFileLocation> {
     }
 }
 
+/// The vault folder a new note made from nothing but a name goes to (New
+/// note, the quick switcher), by the vault's `newFileLocation`: its root
+/// (also when unset), the folder of `current` (a file in the vault), or
+/// `newFileFolderPath`. Vault-relative and `/`-separated, empty for the
+/// root; a folder that would leave the vault is the root.
+pub(crate) fn new_note_folder(root: &Path, current: Option<&Path>) -> String {
+    let folder = match new_file_location(root) {
+        Some(NewFileLocation::Folder(f)) => f.trim_matches('/').to_owned(),
+        Some(NewFileLocation::Current) => current
+            .and_then(|file| file.parent()?.strip_prefix(root).ok())
+            .map(|rel| {
+                rel.components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .unwrap_or_default(),
+        Some(NewFileLocation::Root) | None => String::new(),
+    };
+    if folder
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return String::new();
+    }
+    folder
+}
+
 /// The string value of `"key"` in a flat JSON object (enough for the two
 /// settings above: `\"`, `\\` and `\/` are unescaped, other escapes kept).
 fn json_string(text: &str, key: &str) -> Option<String> {
