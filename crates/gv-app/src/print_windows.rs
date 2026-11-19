@@ -91,28 +91,38 @@ struct Prepared {
     ranges: Vec<(u32, u32)>,
 }
 
-/// A copy of the dialog's `DEVMODEW` (which ends in driver data, so its
-/// size is the global block's), aligned for the structure.
+/// A copy of the dialog's `DEVMODEW` (which ends in driver data), aligned
+/// for the structure.
 struct DevMode {
+    /// The whole global block, which may be longer than the device mode.
     words: Vec<u64>,
+    /// The device mode's own length: `dmSize + dmDriverExtra`.
     len: usize,
 }
 
 impl DevMode {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut words = vec![0u64; bytes.len().div_ceil(8)];
-        // SAFETY: `words` holds at least `bytes.len()` bytes.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                words.as_mut_ptr().cast::<u8>(),
-                bytes.len(),
-            );
+    /// A copy of the device mode at the start of `bytes`: `None` unless
+    /// `bytes` holds a whole `DEVMODEW` and the driver data its header
+    /// announces.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let field = |offset: usize| {
+            let at = bytes.get(offset..offset + 2)?;
+            Some(usize::from(u16::from_ne_bytes([at[0], at[1]])))
+        };
+        let size = field(std::mem::offset_of!(DEVMODEW, dmSize))?;
+        let len = size + field(std::mem::offset_of!(DEVMODEW, dmDriverExtra))?;
+        if bytes.len() < std::mem::size_of::<DEVMODEW>() || size == 0 || len > bytes.len() {
+            return None;
         }
-        Self {
-            words,
-            len: bytes.len(),
-        }
+        let words = bytes
+            .chunks(8)
+            .map(|chunk| {
+                let mut word = [0u8; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                u64::from_ne_bytes(word)
+            })
+            .collect();
+        Some(Self { words, len })
     }
 
     fn as_ptr(&self) -> *const DEVMODEW {
@@ -197,7 +207,10 @@ struct Apartment(bool);
 
 impl Apartment {
     fn enter(kind: COINIT) -> Self {
-        // SAFETY: plain COM initialisation of a thread this module owns.
+        // SAFETY: COM initialisation of a thread this module spawned; the
+        // reserved argument is null. Success (including S_FALSE) is
+        // balanced by `CoUninitialize` on drop, after the work, which
+        // releases its COM objects before it returns.
         Self(unsafe { CoInitializeEx(None, kind) }.is_ok())
     }
 }
@@ -241,15 +254,19 @@ fn show_dialog(owner: HWND) -> Result<Option<(Prepared, Option<PageSetup>)>, Str
         nStartPage: START_PAGE_GENERAL,
         ..Default::default()
     };
-    // SAFETY: `dialog` is initialised as the API asks; `ranges` outlives
-    // the call.
+    // SAFETY: `lStructSize` is the structure's size, the owner is a live
+    // window (of another thread, whose loop keeps pumping), every other
+    // handle and pointer is null, and `lpPageRanges` points to
+    // `nMaxPageRanges` entries in `ranges`, which outlives the call. This
+    // thread is in a single-threaded apartment, as the dialog requires.
     unsafe { PrintDlgExW(&mut dialog) }.map_err(failed("the print dialog could not be shown"))?;
     let result = if dialog.dwResultAction == PD_RESULT_PRINT {
         read_choice(&dialog, &ranges)
     } else {
         Ok(None)
     };
-    // SAFETY: the dialog allocated both blocks for the caller to free.
+    // SAFETY: the dialog allocated both blocks (or left them null) for the
+    // caller to free; neither is locked or used after this.
     unsafe {
         if !dialog.hDevMode.is_invalid() {
             let _ = GlobalFree(Some(dialog.hDevMode));
@@ -269,33 +286,32 @@ fn read_choice(
     if dialog.hDevNames.is_invalid() || dialog.hDevMode.is_invalid() {
         return Err("the print dialog returned no printer".to_owned());
     }
-    // SAFETY: DEVNAMES holds offsets, in UTF-16 units from its start, to
-    // NUL-terminated strings inside the same global block.
+    // SAFETY: the dialog's DEVNAMES block is `GlobalSize` bytes (read as
+    // whole UTF-16 units), locked while it is read; GlobalLock's memory is
+    // aligned for any type. `device_name` checks the header, the name's
+    // offset and its terminator against the block, so nothing past it is
+    // read.
     let printer = unsafe {
+        let units = GlobalSize(dialog.hDevNames) / 2;
         let names = GlobalLock(dialog.hDevNames) as *const DEVNAMES;
         if names.is_null() {
             return Err("the print dialog returned no printer".to_owned());
         }
-        let start = names.cast::<u16>().add(usize::from((*names).wDeviceOffset));
-        let len = (0..).take_while(|&i| *start.add(i) != 0).count();
-        let name = String::from_utf16_lossy(std::slice::from_raw_parts(start, len));
+        let name = device_name(std::slice::from_raw_parts(names.cast::<u16>(), units));
         let _ = GlobalUnlock(dialog.hDevNames);
-        name
+        name.ok_or("the print dialog returned no printer")?
     };
-    // SAFETY: the device mode block is `GlobalSize` bytes long.
+    // SAFETY: the device mode block is `GlobalSize` bytes, locked while it
+    // is copied (`DevMode` checks what it holds).
     let devmode = unsafe {
         let size = GlobalSize(dialog.hDevMode);
         let bytes = GlobalLock(dialog.hDevMode) as *const u8;
         if bytes.is_null() {
             return Err("the print dialog returned no device mode".to_owned());
         }
-        if size < std::mem::size_of::<DEVMODEW>() {
-            let _ = GlobalUnlock(dialog.hDevMode);
-            return Err("the print dialog returned no device mode".to_owned());
-        }
         let devmode = DevMode::from_bytes(std::slice::from_raw_parts(bytes, size));
         let _ = GlobalUnlock(dialog.hDevMode);
-        devmode
+        devmode.ok_or("the print dialog returned no device mode")?
     };
     let ranges = if dialog.Flags.contains(PD_PAGENUMS) {
         page_ranges(&ranges[..(dialog.nPageRanges as usize).min(ranges.len())])
@@ -313,6 +329,22 @@ fn read_choice(
     )))
 }
 
+/// The device name in a DEVNAMES block (as UTF-16 units): `None` when the
+/// block is shorter than its header, or the name's offset or terminator is
+/// outside it.
+fn device_name(block: &[u16]) -> Option<String> {
+    // The header: four offsets or flags of one unit each.
+    let header = std::mem::size_of::<DEVNAMES>() / 2;
+    let field = std::mem::offset_of!(DEVNAMES, wDeviceOffset) / 2;
+    let offset = usize::from(*block.get(..header)?.get(field)?);
+    if offset < header {
+        return None;
+    }
+    let rest = block.get(offset..)?;
+    let len = rest.iter().position(|&unit| unit == 0)?;
+    Some(String::from_utf16_lossy(&rest[..len]))
+}
+
 /// The dialog's page ranges as inclusive pairs, in order.
 fn page_ranges(ranges: &[PRINTPAGERANGE]) -> Vec<(u32, u32)> {
     ranges
@@ -327,8 +359,10 @@ fn page_ranges(ranges: &[PRINTPAGERANGE]) -> Vec<(u32, u32)> {
 /// size, custom sizes and orientation the dialog set.
 fn paper(printer: &str, devmode: &DevMode) -> Option<PageSetup> {
     let name = wide(printer);
-    // SAFETY: an information context for the named printer with the
-    // dialog's device mode, deleted below.
+    // SAFETY: the printer name is NUL-terminated and the device mode is a
+    // whole DEVMODEW with its driver data (`DevMode`), both outliving the
+    // call; the information context is deleted on the only path that has
+    // one.
     unsafe {
         let ic = CreateICW(
             PCWSTR::null(),
@@ -367,19 +401,26 @@ fn page_from_device(width: i32, height: i32, dpi_x: i32, dpi_y: i32) -> Option<P
 /// Spools `pdf` to the chosen printer as a vector job named `title`.
 fn spool(pdf: &[u8], title: &str, prepared: &Prepared) -> Result<u32, String> {
     let printer = wide(&prepared.printer);
-    // SAFETY: Win32/COM calls with arguments built here; every pointer
-    // outlives its call.
+    let devmode_len = u32::try_from(prepared.devmode.len)
+        .map_err(|_| "the printer's settings are too large".to_owned())?;
+    // SAFETY: Win32 and COM calls on this thread's (multi-threaded)
+    // apartment. The wide strings are NUL-terminated and outlive their
+    // calls; the device mode pointer is aligned and valid for `len` bytes,
+    // the length its header gives (`DevMode`); the provider is closed on
+    // every path once opened; the COM objects are released when this
+    // function returns, before the apartment is left.
     unsafe {
-        // The device mode as a job print ticket (XML) in a memory stream.
-        let provider = PTOpenProvider(PCWSTR(printer.as_ptr()), 1)
-            .map_err(failed("the printer's settings could not be read"))?;
+        // The device mode as a job print ticket (XML) in a memory stream,
+        // made first so that no early return leaves the provider open.
         let ticket = CreateStreamOnHGlobal(HGLOBAL::default(), true)
             .map_err(failed("the print ticket could not be made"))?;
+        let provider = PTOpenProvider(PCWSTR(printer.as_ptr()), 1)
+            .map_err(failed("the printer's settings could not be read"))?;
         // windows-rs types this parameter as DEVMODEA; the function takes
         // the Unicode DEVMODE the print dialog returned.
         let converted = PTConvertDevModeToPrintTicket(
             provider,
-            prepared.devmode.len as u32,
+            devmode_len,
             prepared.devmode.as_ptr().cast::<DEVMODEA>(),
             kPTJobScope,
             &ticket,
@@ -495,7 +536,8 @@ struct CancelJob<'a>(Option<&'a IPrintDocumentPackageTarget>);
 impl Drop for CancelJob<'_> {
     fn drop(&mut self) {
         if let Some(target) = self.0 {
-            // SAFETY: a plain COM call on a live target.
+            // SAFETY: `target` is a live COM reference borrowed from
+            // `spool`, used on the thread that made it.
             if let Err(e) = unsafe { target.Cancel() } {
                 tracing::debug!("print: the job could not be cancelled: {e}");
             }
@@ -513,8 +555,9 @@ fn wanted(ranges: &[(u32, u32)], page: u32) -> bool {
 fn d3d_device() -> windows::core::Result<ID3D11Device> {
     let make = |driver: D3D_DRIVER_TYPE| {
         let mut device = None;
-        // SAFETY: plain device creation; the out pointer lives on this
-        // stack frame.
+        // SAFETY: device creation with no adapter, module, feature levels
+        // or immediate context; the device out pointer is a local that
+        // outlives the call.
         unsafe {
             D3D11CreateDevice(
                 None,
@@ -559,6 +602,45 @@ mod tests {
         assert!(page.landscape);
         assert_eq!(page.margin_mm, None);
         assert_eq!(page_from_device(0, 4961, 600, 600), None);
+    }
+
+    #[test]
+    fn the_device_name_stays_inside_its_block() {
+        let header = std::mem::size_of::<DEVNAMES>() / 2;
+        let mut block = vec![0u16; header];
+        block[1] = header as u16;
+        block.extend("Printer".encode_utf16().chain(Some(0)));
+        assert_eq!(device_name(&block).as_deref(), Some("Printer"));
+        // No terminator, an offset past the end, a short header.
+        assert_eq!(device_name(&block[..block.len() - 1]), None);
+        block[1] = 1000;
+        assert_eq!(device_name(&block), None);
+        block[1] = 0;
+        assert_eq!(device_name(&block), None);
+        assert_eq!(device_name(&block[..header - 1]), None);
+    }
+
+    #[test]
+    fn the_device_mode_has_the_length_its_header_gives() {
+        let size = std::mem::size_of::<DEVMODEW>();
+        let mut bytes = vec![0u8; size + 16];
+        let put = |bytes: &mut Vec<u8>, offset: usize, value: usize| {
+            let value = u16::try_from(value).expect("fits").to_ne_bytes();
+            bytes[offset..offset + 2].copy_from_slice(&value);
+        };
+        put(&mut bytes, std::mem::offset_of!(DEVMODEW, dmSize), size);
+        put(&mut bytes, std::mem::offset_of!(DEVMODEW, dmDriverExtra), 8);
+        let devmode = DevMode::from_bytes(&bytes).expect("a device mode");
+        assert_eq!(devmode.len, size + 8);
+        assert!(devmode.words.len() * 8 >= bytes.len());
+        // Driver data past the block, or a block shorter than DEVMODEW.
+        put(
+            &mut bytes,
+            std::mem::offset_of!(DEVMODEW, dmDriverExtra),
+            17,
+        );
+        assert!(DevMode::from_bytes(&bytes).is_none());
+        assert!(DevMode::from_bytes(&bytes[..size - 1]).is_none());
     }
 
     #[test]
