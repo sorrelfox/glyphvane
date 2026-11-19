@@ -6,59 +6,48 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Glyphvane</name>
-  <summary>Read and edit Markdown notes and vaults</summary>
+  <summary>Markdown editor for linked notes</summary>
   <description>
-    <p>Glyphvane is a fast, native Markdown editor and viewer. It opens a
-      single file or a whole folder of notes, follows links between them,
-      and renders each document as CommonMark, GitHub Flavored Markdown or
-      Obsidian define it.</p>
+    <p>Glyphvane is a fast, native Markdown editor for notes that link to each other. Open a single file or a whole folder of notes, write with Live Preview, and follow links across everything you have written.</p>
     <ul>
-      <li>Reading view, Source view, Split view and Live Preview, which
-        hides markup away from the cursor and draws images, math, tables,
-        code and diagrams in place</li>
-      <li>Relative links, wikilinks, heading links and block references
-        across the folder, with hover previews, backlinks and a link
-        checker; renaming or moving a note updates its links</li>
-      <li>Tables, footnotes, callouts, math, Mermaid diagrams, highlighted
-        code, front matter and embeds</li>
-      <li>Files panel, outline, tags, bookmarks, search with a query
-        language, quick switcher and command palette</li>
-      <li>Obsidian canvases and bases, read-only</li>
-      <li>Export to HTML and PDF, printing, and copy as rich text</li>
-      <li>Autosave, crash recovery with compare and merge, version history
-        and remote content only with your consent</li>
+      <li>Live Preview hides Markdown markup away from the cursor and shows images, math, tables, code and diagrams right where you type</li>
+      <li>Reading, Source and Split views, with scrolling kept in step</li>
+      <li>Wikilinks, heading links and block references that work across the whole folder, with hover previews and backlinks</li>
+      <li>Renaming or moving a note updates every link to it</li>
+      <li>Renders CommonMark, GitHub Flavored Markdown and Obsidian notes the way each defines them, with callouts, footnotes, math and Mermaid diagrams</li>
+      <li>Search with a query language, tags, bookmarks, an outline, a quick switcher and a command palette</li>
+      <li>Opens Obsidian canvases and bases</li>
+      <li>Exports to HTML and PDF, and prints</li>
+      <li>Autosave, crash recovery and version history keep your writing safe</li>
     </ul>
-    <p>Why Glyphvane asks for these permissions:</p>
+    <p>Glyphvane is free software and works offline. It sends no telemetry and needs no account.</p>
+    <p>Why it asks for these permissions:</p>
     <ul>
-      <li><em>Your home folder (read and write).</em> Notes link to other
-        notes, images and attachments anywhere in your home folder, not only
-        inside the folder you opened. Glyphvane reads those files to follow
-        links and show embeds, and writes when you save, rename, move or
-        delete a note; a rename or move also updates the links in your
-        other notes. It reads the folder you open to index its notes, and
-        does not touch other files unless you open or link to them.</li>
-      <li><em>Network.</em> Only to load images and media that a note links
-        from the web, and only after you allow them for that folder or
-        site. You can block remote content completely in Restricted mode.
-        Glyphvane sends no telemetry, needs no account, and its update check
-        is off in the Flatpak, where Flatpak keeps it up to date.</li>
-      <li><em>Sound.</em> To play audio files embedded in notes. Glyphvane
-        never records audio.</li>
-      <li><em>Graphics card.</em> The window and your documents are drawn on
-        the GPU for smooth scrolling.</li>
-      <li><em>Display (Wayland, with X11 as a fallback).</em> To show its
-        windows.</li>
+      <li><em>Home folder:</em> to follow links and show images in notes anywhere in your home folder, and to update links in other notes when you rename or move one</li>
+      <li><em>Network:</em> only to load images and media a note links from the web, after you allow them</li>
+      <li><em>Sound:</em> to play audio embedded in notes; it never records</li>
+      <li><em>Graphics card and display:</em> to draw its windows smoothly</li>
     </ul>
-    <p>Choosing files, printing, opening web links in your browser and
-      following your desktop's light or dark style go through the desktop
-      portals and need no extra permission. Settings, file history and
-      recovery data stay on your computer, in the app's own folder.</p>
   </description>
   <developer id="io.github.sorrelfox">
     <name>Glyphvane contributors</name>
   </developer>
+  <branding>
+    <color type="primary" scheme_preference="light">#CCEEEF</color>
+    <color type="primary" scheme_preference="dark">#104042</color>
+  </branding>
+  <keywords>
+    <keyword>markdown</keyword>
+    <keyword>notes</keyword>
+    <keyword>wikilinks</keyword>
+    <keyword>obsidian</keyword>
+    <keyword>commonmark</keyword>
+    <keyword>knowledge base</keyword>
+    <keyword>zettelkasten</keyword>
+  </keywords>
   <url type="homepage">https://github.com/sorrelfox/glyphvane</url>
   <url type="bugtracker">https://github.com/sorrelfox/glyphvane/issues</url>
+  <url type="vcs-browser">https://github.com/sorrelfox/glyphvane</url>
   <launchable type="desktop-id">io.github.sorrelfox.Glyphvane.desktop</launchable>
   <screenshots>
     <screenshot type="default">

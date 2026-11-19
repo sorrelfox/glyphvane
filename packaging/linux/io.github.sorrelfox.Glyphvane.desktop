@@ -4,7 +4,7 @@
 Type=Application
 Name=Glyphvane
 GenericName=Markdown Editor
-Comment=Read and edit Markdown notes and vaults
+Comment=Markdown editor for linked notes
 Exec=glyphvane %F
 TryExec=glyphvane
 Icon=io.github.sorrelfox.Glyphvane

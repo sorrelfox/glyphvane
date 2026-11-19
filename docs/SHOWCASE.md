@@ -283,10 +283,11 @@ Before submitting:
 - Verify the app ID on Flathub: an `io.github.sorrelfox.*` ID is verified
   by signing in to Flathub with the `sorrelfox` GitHub account, which gives
   the listing the "verified" check mark.
-- Optionally shorten the summary to the 35-character line above (the
-  current one, "Read and edit Markdown notes and vaults", passes
-  validation).
-- Add `<branding>` colours and `<keywords>`.
+- The metainfo already has the 35-character summary, `<branding>` colours
+  (light `#CCEEEF`, dark `#104042`, which frame the dark icon), keywords and
+  a short description with one line per item. Keep each `<li>` and `<p>` on
+  one line: GNOME Software shows the line-break indentation as gaps when an
+  item mixes `<em>` and plain text.
 - Check Flathub's current quality guidelines for screenshots and texts.
 - Flathub builds from source: its manifest needs vendored Cargo sources
   (the bundle manifest in `packaging/flatpak/` repackages release binaries).
