@@ -8,6 +8,8 @@ documents (relative links, wikilinks, headings and block references across a
 folder of notes) and renders each document according to a selectable flavor
 profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
+![Glyphvane showing a note in the Reading view, with a table, highlighted code, math and a diagram](docs/screenshots/01-reading-view.png)
+
 **Status:** 1.1 released. Download it from
 [GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
 `.rpm`, AppImage, Flatpak bundle and `.tar.gz` for Linux (x86_64 and arm64),
@@ -23,6 +25,18 @@ sudo pacman -U glyphvane-<version>-1-x86_64.pkg.tar.zst      # Arch Linux
 The Flatpak has access to your home folder, so links between notes keep
 working outside the opened vault; it leaves updates to Flatpak and keeps its
 settings in `~/.var/app/io.github.sorrelfox.Glyphvane/`.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Live Preview: markup hides away from the cursor, and images, math, tables and code render in place](docs/screenshots/02-live-preview.png)<br>Live Preview: markup hides away from the cursor, and images, math, tables and code render in place | ![Source and preview side by side, scrolling together](docs/screenshots/03-split-view.png)<br>Source and preview side by side, scrolling together |
+| ![Work with a folder of notes: files, outline, backlinks and link previews](docs/screenshots/04-vault-links.png)<br>Work with a folder of notes: files, outline, backlinks and link previews | ![Render each document as CommonMark, GitHub Flavored Markdown, Obsidian or Extended](docs/screenshots/05-flavor-profiles.png)<br>Render each document as CommonMark, GitHub Flavored Markdown, Obsidian or Extended |
+| ![Search the whole folder with a query language](docs/screenshots/06-search.png)<br>Search the whole folder with a query language | ![Open Obsidian canvases with cards, groups, edges and a minimap](docs/screenshots/07-canvas.png)<br>Open Obsidian canvases with cards, groups, edges and a minimap |
+| ![Bases show notes as tables, grouped and computed from their properties](docs/screenshots/08-bases.png)<br>Bases show notes as tables, grouped and computed from their properties | ![Export to HTML or PDF with page options and a live preview](docs/screenshots/09-export-pdf.png)<br>Export to HTML or PDF with page options and a live preview |
+| ![Recover unsaved work after a crash and merge it with the file on disk](docs/screenshots/10-recovery.png)<br>Recover unsaved work after a crash and merge it with the file on disk | ![Every command is in the palette, in light or dark](docs/screenshots/11-dark-palette.png)<br>Every command is in the palette, in light or dark |
+
+More about each feature, and texts for stores, in [docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 ## Building from source
 

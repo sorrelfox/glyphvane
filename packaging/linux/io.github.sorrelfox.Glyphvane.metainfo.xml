@@ -8,7 +8,26 @@
   <name>Glyphvane</name>
   <summary>Read and edit Markdown notes and vaults</summary>
   <description>
-    <p>Glyphvane is a native Markdown viewer and editor.</p>
+    <p>Glyphvane is a fast, native Markdown editor and viewer. It opens a
+      single file or a whole folder of notes, follows links between them,
+      and renders each document as CommonMark, GitHub Flavored Markdown or
+      Obsidian define it.</p>
+    <ul>
+      <li>Reading view, Source view, Split view and Live Preview, which
+        hides markup away from the cursor and draws images, math, tables,
+        code and diagrams in place</li>
+      <li>Relative links, wikilinks, heading links and block references
+        across the folder, with hover previews, backlinks and a link
+        checker; renaming or moving a note updates its links</li>
+      <li>Tables, footnotes, callouts, math, Mermaid diagrams, highlighted
+        code, front matter and embeds</li>
+      <li>Files panel, outline, tags, bookmarks, search with a query
+        language, quick switcher and command palette</li>
+      <li>Obsidian canvases and bases, read-only</li>
+      <li>Export to HTML and PDF, printing, and copy as rich text</li>
+      <li>Autosave, crash recovery with compare and merge, version history
+        and remote content only with your consent</li>
+    </ul>
   </description>
   <developer id="io.github.sorrelfox">
     <name>Glyphvane contributors</name>
@@ -16,6 +35,52 @@
   <url type="homepage">https://github.com/sorrelfox/glyphvane</url>
   <url type="bugtracker">https://github.com/sorrelfox/glyphvane/issues</url>
   <launchable type="desktop-id">io.github.sorrelfox.Glyphvane.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A note in the Reading view, with a table, highlighted code, math and a Mermaid diagram</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/01-reading-view.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Live Preview: markup hides away from the cursor, and images, math, tables and code render in place</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/02-live-preview.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Source and preview side by side, scrolling together</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/03-split-view.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Work with a folder of notes: files, outline, backlinks and link previews</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/04-vault-links.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Render each document as CommonMark, GitHub Flavored Markdown, Obsidian or Extended</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/05-flavor-profiles.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Search the whole folder with a query language</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/06-search.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Open Obsidian canvases with cards, groups, edges and a minimap</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/07-canvas.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Bases show notes as tables, grouped and computed from their properties</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/08-bases.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Export to HTML or PDF with page options and a live preview</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/09-export-pdf.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Recover unsaved work after a crash and merge it with the file on disk</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/10-recovery.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Every command is in the palette, in light or dark</caption>
+      <image>https://raw.githubusercontent.com/sorrelfox/glyphvane/4ae35af761925def87d0f2feefccd2830aeea892/docs/screenshots/11-dark-palette.png</image>
+    </screenshot>
+  </screenshots>
   <provides>
     <binary>glyphvane</binary>
     <mediatype>text/markdown</mediatype>
