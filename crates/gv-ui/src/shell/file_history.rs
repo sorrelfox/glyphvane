@@ -182,7 +182,8 @@ impl Workspace {
     /// follows it when the file still holds the text of its newest
     /// version ([`HistoryStore::moved_from_outside`]), since a rename the
     /// watcher matched by file identity may be another file that reused a
-    /// deleted one's identity.
+    /// deleted one's identity. A path with a history of its own keeps it,
+    /// and swaps or cycles among the renames move nothing.
     ///
     /// [`HistoryStore::moved_from_outside`]: gv_vault::files::history::HistoryStore::moved_from_outside
     pub(super) fn carry_history_from_outside(
@@ -215,12 +216,22 @@ impl Workspace {
             return;
         }
         let task = cx.background_spawn(async move {
-            for (from, to) in with_folder_contents(pairs) {
-                let result = if outside {
-                    store.moved_from_outside(&from, &to).map(|_| ())
-                } else {
-                    store.moved(&from, &to)
-                };
+            let pairs = with_folder_contents(pairs);
+            // Outside renames go as one batch, so that swaps and cycles
+            // are seen and left alone.
+            let results: Vec<std::io::Result<()>> = if outside {
+                store
+                    .moved_all_from_outside(&pairs)
+                    .into_iter()
+                    .map(|r| r.map(|_| ()))
+                    .collect()
+            } else {
+                pairs
+                    .iter()
+                    .map(|(from, to)| store.moved(from, to))
+                    .collect()
+            };
+            for ((from, to), result) in pairs.iter().zip(results) {
                 if let Err(err) = result {
                     tracing::warn!(
                         "version history: cannot follow {} to {}: {err}",

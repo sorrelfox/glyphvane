@@ -289,12 +289,15 @@ impl HistoryStore {
     /// file with the same file identity), but only when the file now at
     /// `to` holds the text of `from`'s newest version: file identities are
     /// reused (a deleted file's inode goes to the next new file), so only
-    /// the text shows the file is the same note. Returns whether the
-    /// history moved.
+    /// the text shows the file is the same note. A path that has a history
+    /// of its own keeps it unmixed: nothing moves (a swap of two notes
+    /// would otherwise merge their logs). Returns whether the history
+    /// moved. For several renames at once, see
+    /// [`Self::moved_all_from_outside`].
     pub fn moved_from_outside(&self, from: &Path, to: &Path) -> io::Result<bool> {
         let _guard = self.write_lock();
         let (old, new) = (self.log_path(from), self.log_path(to));
-        if old == new {
+        if old == new || !read_log(&new)?.is_empty() {
             return Ok(false);
         }
         let versions = read_log(&old)?;
@@ -306,6 +309,68 @@ impl HistoryStore {
         }
         self.move_log(&old, &new, versions)?;
         Ok(true)
+    }
+
+    /// [`Self::moved_from_outside`] for a batch of renames seen together,
+    /// one result per pair. A rename into a path another pair leaves runs
+    /// after that one (`b`→`c` before `a`→`b`); renames that form a cycle
+    /// (a swap `a`→`b`, `b`→`a`) move nothing, since which note is which
+    /// cannot be told apart safely.
+    pub fn moved_all_from_outside(&self, pairs: &[(PathBuf, PathBuf)]) -> Vec<io::Result<bool>> {
+        let logs: Vec<(PathBuf, PathBuf)> = pairs
+            .iter()
+            .map(|(from, to)| (self.log_path(from), self.log_path(to)))
+            .collect();
+        let by_from: HashMap<&Path, usize> = logs
+            .iter()
+            .enumerate()
+            .map(|(i, (old, _))| (old.as_path(), i))
+            .collect();
+        // The pair that must run first: the one leaving `to`.
+        let blocker = |j: usize| -> Option<usize> {
+            by_from
+                .get(logs[j].1.as_path())
+                .copied()
+                .filter(|&i| i != j)
+        };
+        let mut results: Vec<Option<io::Result<bool>>> = pairs.iter().map(|_| None).collect();
+        for start in 0..pairs.len() {
+            // Follow the blockers to a pair already done, one without a
+            // blocker, or back into this chain (a cycle).
+            let mut chain = vec![start];
+            let mut cycle_from = None;
+            let mut at = start;
+            while results[at].is_none() {
+                let Some(next) = blocker(at) else {
+                    break;
+                };
+                if let Some(pos) = chain.iter().position(|&c| c == next) {
+                    cycle_from = Some(pos);
+                    break;
+                }
+                if results[next].is_some() {
+                    break;
+                }
+                chain.push(next);
+                at = next;
+            }
+            if let Some(pos) = cycle_from {
+                for &c in &chain[pos..] {
+                    results[c] = Some(Ok(false));
+                }
+                chain.truncate(pos);
+            }
+            for &c in chain.iter().rev() {
+                if results[c].is_none() {
+                    let (from, to) = &pairs[c];
+                    results[c] = Some(self.moved_from_outside(from, to));
+                }
+            }
+        }
+        results
+            .into_iter()
+            .map(|r| r.unwrap_or(Ok(false)))
+            .collect()
     }
 
     /// Whether the file at `path` holds the text of `version`: its bytes,
@@ -1070,6 +1135,46 @@ mod tests {
         // A path without a history has nothing to move.
         assert!(!store.moved_from_outside(&a, &b).expect("checked"));
         assert_eq!(texts(&store, &b), vec!["two", "one"]);
+    }
+
+    #[test]
+    fn outside_renames_never_mix_two_histories() {
+        let (dir, store) = store(HistoryPolicy::default());
+        let vault = dir.path().join("vault");
+        fs::create_dir(&vault).expect("vault folder");
+        let (a, b, c) = (vault.join("a.md"), vault.join("b.md"), vault.join("c.md"));
+        store.record(&a, b"alpha", t0()).expect("record");
+        store.record(&b, b"beta", t0() + HOUR).expect("record");
+
+        // A swap, seen as a→b and b→a: each history stays where it was.
+        fs::write(&a, "beta").expect("write");
+        fs::write(&b, "alpha").expect("write");
+        let pairs = vec![(a.clone(), b.clone()), (b.clone(), a.clone())];
+        let moved: Vec<bool> = store
+            .moved_all_from_outside(&pairs)
+            .into_iter()
+            .map(|r| r.expect("checked"))
+            .collect();
+        assert_eq!(moved, [false, false]);
+        assert_eq!(texts(&store, &a), vec!["alpha"]);
+        assert_eq!(texts(&store, &b), vec!["beta"]);
+        // One at a time: the destination's own history is not merged into.
+        assert!(!store.moved_from_outside(&a, &b).expect("checked"));
+        assert_eq!(texts(&store, &b), vec!["beta"]);
+
+        // A chain a→b, b→c in one batch (listed in either order): b leaves
+        // first, then a takes its place.
+        fs::write(&c, "beta").expect("write");
+        let pairs = vec![(a.clone(), b.clone()), (b.clone(), c.clone())];
+        let moved: Vec<bool> = store
+            .moved_all_from_outside(&pairs)
+            .into_iter()
+            .map(|r| r.expect("checked"))
+            .collect();
+        assert_eq!(moved, [true, true]);
+        assert!(store.versions(&a).expect("versions").is_empty());
+        assert_eq!(texts(&store, &b), vec!["alpha"]);
+        assert_eq!(texts(&store, &c), vec!["beta"]);
     }
 
     #[test]
