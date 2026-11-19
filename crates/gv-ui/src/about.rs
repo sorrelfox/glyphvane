@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! About Glyphvane (`app.about`), the third-party licences (`app.licenses`,
-//! NFR-LIC-03) and Copy debug info (`app.copy_debug_info`, FR-PLAT-06).
+//! NFR-LIC-03), Copy debug info (`app.copy_debug_info`, FR-PLAT-06) and
+//! Documentation (`app.open_documentation`).
 //!
 //! - **The About window** shows the name, version, copyright, the licence
 //!   and the source repository, with buttons for the third-party licences,
@@ -15,6 +16,9 @@
 //!   with, the theme, zoom and safe mode, the active document's profile and
 //!   which settings differ from the defaults (names only, never values,
 //!   paths or document contents).
+//! - **Documentation** opens the user guide in the repository in the
+//!   browser, through the same launcher as external links (the desktop
+//!   portal inside a Flatpak).
 //!
 //! For assistive technology the window is a dialog named by its page,
 //! the name a level-1 heading, the buttons named Tab stops, and the
@@ -42,7 +46,7 @@ use gpui::{
 
 use crate::a11y::{A11yExt as _, AccessibleExt as _, Role};
 use crate::appearance::Appearance;
-use crate::keymap::actions::app::{About, CopyDebugInfo, Licenses};
+use crate::keymap::actions::app::{About, CopyDebugInfo, Licenses, OpenDocumentation};
 use crate::metrics::font;
 use crate::metrics::size::infobar;
 use crate::metrics::spacing::infobar as infobar_spacing;
@@ -65,6 +69,10 @@ pub const LICENSE: &str = "Licensed under the GNU General Public License, versio
 
 /// Where the source code is.
 pub const REPOSITORY: &str = "https://github.com/sorrelfox/glyphvane";
+
+/// The user guide, which Help > Documentation opens.
+pub const DOCUMENTATION: &str =
+    "https://github.com/sorrelfox/glyphvane/blob/HEAD/docs/user/README.md";
 
 /// The key context of the About window.
 pub const KEY_CONTEXT: &str = "AboutWindow";
@@ -125,12 +133,15 @@ struct OpenWindow {
 impl Global for OpenWindow {}
 
 /// Installs the window's keys and the handlers of `app.about`,
-/// `app.licenses` and `app.copy_debug_info`.
+/// `app.licenses`, `app.copy_debug_info` and `app.open_documentation`.
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT))]);
     cx.on_action(|_: &About, cx| show(Page::About, cx));
     cx.on_action(|_: &Licenses, cx| show(Page::Licenses, cx));
     cx.on_action(|_: &CopyDebugInfo, cx| copy_debug_info(cx));
+    cx.on_action(|_: &OpenDocumentation, cx| {
+        crate::platform::launcher(cx).open_url(DOCUMENTATION, cx);
+    });
 }
 
 fn show(page: Page, cx: &mut App) {

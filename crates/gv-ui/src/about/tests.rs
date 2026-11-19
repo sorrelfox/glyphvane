@@ -4,6 +4,7 @@
 //! The About window in a headless window: `app.about` and `app.licenses`
 //! open it on their pages, Copy debug info fills the clipboard, Escape
 //! closes it. The debug info's text and the settings summary.
+//! Documentation opens the user guide.
 
 use gpui::{TestAppContext, VisualTestContext};
 
@@ -85,6 +86,19 @@ fn licenses_opens_on_the_notices(cx: &mut TestAppContext) {
     draw(&mut vcx);
     assert_eq!(page(&mut vcx), Some(Page::About));
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+}
+
+#[gpui::test]
+fn documentation_opens_the_user_guide(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::init(cx, AppSettings::new(None, Some(ThemeChoice::Light)));
+        assert!(cx.is_action_available(&OpenDocumentation));
+        cx.dispatch_action(&OpenDocumentation);
+    });
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sorrelfox/glyphvane/blob/HEAD/docs/user/README.md")
+    );
 }
 
 #[gpui::test]

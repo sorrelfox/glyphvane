@@ -8,6 +8,8 @@ documents (relative links, wikilinks, headings and block references across a
 folder of notes) and renders each document according to a selectable flavor
 profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
+**Documentation:** the [user guide](docs/user/README.md) explains how to install and use Glyphvane.
+
 ![Glyphvane showing a note in the Reading view, with a table, highlighted code, math and a diagram](docs/screenshots/01-reading-view.png)
 
 **Status:** 1.1 released. Download it from
