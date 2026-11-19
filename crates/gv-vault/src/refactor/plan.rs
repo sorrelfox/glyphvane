@@ -110,8 +110,8 @@ pub fn plan_moves(
         plan_canvas(root, &moved, &entry.path, &mut edits, &mut skipped);
     }
 
-    // Bases name files in `link("…")` and `file("…")` literals: those
-    // follow the moves too, by byte ranges.
+    // Bases name files in `link("…")` and `file("…")` literals, folders in
+    // `.inFolder("…")` ones: those follow the moves too, by byte ranges.
     for entry in paths.iter() {
         if entry.kind.is_dir()
             || !entry
@@ -337,10 +337,16 @@ fn plan_note(
             reason: reason.to_owned(),
         };
         let written = path_part(link.kind, &link.raw);
-        let Some(path) = generate(link.kind, written, new_source, new_target, post, params) else {
+        let Some(mut path) = generate(link.kind, written, new_source, new_target, post, params)
+        else {
             skipped.push(skip("no link to the new place could be written"));
             continue;
         };
+        // In front matter the link sits in a YAML scalar: escaped for its
+        // quotes.
+        if link.front_matter {
+            path = yaml_escaped(&path, yaml_quote_at(&text, link.span.start as usize));
+        }
         match rewrite_link(construct, link.kind, &link.raw, &path) {
             Some(new) if new != construct => changes.push(LinkChange {
                 span: link.span,
@@ -370,6 +376,52 @@ fn plan_note(
         after,
         changes,
     });
+}
+
+/// The quote of the YAML scalar that holds byte `at` of `text` (in front
+/// matter), `None` for a plain scalar. Read from the start of `at`'s
+/// line: a quote opens a scalar only where one can start (the line start,
+/// or after `:`, `-`, `[`, `{` or `,` and spaces), so a quoted scalar
+/// running over several lines reads as plain.
+pub(crate) fn yaml_quote_at(text: &str, at: usize) -> Option<char> {
+    let at = at.min(text.len());
+    let b = text.as_bytes();
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let mut quote: Option<u8> = None;
+    // The last byte other than a space outside quotes.
+    let mut prev: Option<u8> = None;
+    let mut i = start;
+    while i < at {
+        let c = b[i];
+        match quote {
+            Some(b'"') if c == b'\\' => i += 1,
+            Some(b'\'') if c == b'\'' && b.get(i + 1) == Some(&b'\'') => i += 1,
+            Some(q) if c == q => {
+                quote = None;
+                prev = Some(c);
+            }
+            Some(_) => {}
+            None if (c == b'"' || c == b'\'')
+                && prev.is_none_or(|p| matches!(p, b':' | b'-' | b'[' | b'{' | b',')) =>
+            {
+                quote = Some(c);
+            }
+            None if c == b' ' || c == b'\t' => {}
+            None => prev = Some(c),
+        }
+        i += 1;
+    }
+    quote.map(char::from)
+}
+
+/// `path` as it is written inside a YAML scalar quoted with `quote`:
+/// `''` for `'` in single quotes; `\\` and `\"` in double quotes.
+fn yaml_escaped(path: &str, quote: Option<char>) -> String {
+    match quote {
+        Some('\'') => path.replace('\'', "''"),
+        Some('"') => path.replace('\\', "\\\\").replace('"', "\\\""),
+        _ => path.to_owned(),
+    }
 }
 
 /// The link reference definitions of `text` with their document ranges.
@@ -486,19 +538,22 @@ fn plan_canvas(
     });
 }
 
-/// A file named by a Bases function in a `.base` file: the literal of
-/// `link("…")` or `file("…")`.
+/// A file or folder named by a Bases function in a `.base` file: the
+/// literal of `link("…")` or `file("…")`, or of `.inFolder("…")`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BaseRef {
     /// The bytes of the literal's text, between its quotes.
     pub range: std::ops::Range<usize>,
     /// The quote it is written in.
     pub quote: char,
+    /// A folder (`inFolder`), not a file.
+    pub folder: bool,
     /// Why it cannot be rewritten in place (escapes, YAML-doubled quotes).
     pub unsafe_reason: Option<&'static str>,
 }
 
-/// The `link("…")` and `file("…")` literals of a `.base` file's text.
+/// The `link("…")` and `file("…")` literals, and the `.inFolder("…")`
+/// ones, of a `.base` file's text.
 ///
 /// The file is YAML whose scalars hold expressions, so a literal may sit
 /// inside a quoted YAML scalar. Only literals whose bytes are exactly the
@@ -509,22 +564,32 @@ pub(crate) fn base_refs(text: &str) -> Vec<BaseRef> {
     let mut refs = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
-        let Some(rel) = text[at..].find(['l', 'f']) else {
+        let Some(rel) = text[at..].find(['l', 'f', 'i']) else {
             break;
         };
         let start = at + rel;
         at = start + 1;
-        if !(text[start..].starts_with("link(") || text[start..].starts_with("file(")) {
-            continue;
-        }
-        // A function, not the end of a longer name or a method.
-        if start > 0 {
-            let prev = bytes[start - 1];
-            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' {
+        let prev = start.checked_sub(1).map(|i| bytes[i]);
+        let folder = text[start..].starts_with("inFolder(");
+        if folder {
+            // A method: `file.inFolder(…)`.
+            if prev != Some(b'.') {
                 continue;
             }
+        } else if text[start..].starts_with("link(") || text[start..].starts_with("file(") {
+            // A function, not the end of a longer name or a method.
+            if prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
+                continue;
+            }
+        } else {
+            continue;
         }
-        let mut i = start + "link(".len();
+        let mut i = start
+            + if folder {
+                "inFolder(".len()
+            } else {
+                "link(".len()
+            };
         while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
             i += 1;
         }
@@ -569,6 +634,7 @@ pub(crate) fn base_refs(text: &str) -> Vec<BaseRef> {
         refs.push(BaseRef {
             range: open + 1..close,
             quote: q as char,
+            folder,
             unsafe_reason,
         });
         at = close + 1;
@@ -588,7 +654,8 @@ fn fits_base_literal(value: &str, quote: char) -> bool {
 
 /// Plans the edits of the base file `source`: every `link("…")` or
 /// `file("…")` literal that resolves (as a wikilink of the base) to a
-/// moved file gets the moved file's new path, touching only the bytes of
+/// moved file gets the moved file's new path, and every `.inFolder("…")`
+/// literal naming a moved folder its new path, touching only the bytes of
 /// the literal.
 #[allow(clippy::too_many_arguments)]
 fn plan_base(
@@ -609,7 +676,7 @@ fn plan_base(
     let Ok(text) = String::from_utf8(bytes) else {
         return;
     };
-    if !text.contains("link(") && !text.contains("file(") {
+    if !text.contains("link(") && !text.contains("file(") && !text.contains("inFolder(") {
         return;
     }
     let new_source = moved.get(source).unwrap_or(source);
@@ -625,6 +692,45 @@ fn plan_base(
     let mut changes = Vec::new();
     for r in base_refs(&text) {
         let value = &text[r.range.clone()];
+        if r.folder {
+            // A path from the vault root, maybe with a slash at its end.
+            let trimmed = value.trim_end_matches('/');
+            let Some(new_folder) = VaultPath::new(trimmed)
+                .ok()
+                .filter(|f| {
+                    pre.entry_by_path(f.as_str())
+                        .is_some_and(|e| e.kind.is_dir())
+                })
+                .and_then(|f| moved.get(&f))
+            else {
+                continue;
+            };
+            let new = format!("{}{}", new_folder.as_str(), &value[trimmed.len()..]);
+            let line = line_of(&text, r.range.start);
+            if let Some(reason) = r.unsafe_reason {
+                skipped.push(Skipped {
+                    source: source.clone(),
+                    line,
+                    link: value.to_owned(),
+                    reason: reason.to_owned(),
+                });
+            } else if !fits_base_literal(&new, r.quote) {
+                skipped.push(Skipped {
+                    source: source.clone(),
+                    line,
+                    link: value.to_owned(),
+                    reason: "the new path needs quoting in the base: update it by hand".to_owned(),
+                });
+            } else if new != value {
+                changes.push(LinkChange {
+                    span: Span::of(r.range.clone()),
+                    line,
+                    old: value.to_owned(),
+                    new,
+                });
+            }
+            continue;
+        }
         let (path_text, fragment) = match value.find('#') {
             Some(i) => (&value[..i], &value[i..]),
             None => (value, ""),

@@ -58,6 +58,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 - The trust prompt names plugins, themes, snippets and shared settings
   added to the folder while it shows.
 - Find in a PDF scrolls sideways to a match off the side of a zoomed page.
+- Moving or renaming a folder updates `file.inFolder("…")` in bases.
+- Renaming a note keeps the front matter valid YAML: a new name with `'`
+  in a single-quoted link is written `''` (and escaped in double quotes).
 
 ## [1.2.0] - 2026-11-19
 

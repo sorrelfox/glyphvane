@@ -125,6 +125,36 @@ fn obsidian_links_by_name_keep_working_after_a_move() {
     assert!(plan.edits.is_empty(), "{:?}", plan.edits);
 }
 
+/// Links in front matter are rewritten as their YAML scalar needs: a
+/// `'` doubled in single quotes.
+#[test]
+fn front_matter_links_keep_their_yaml_valid() {
+    let dir = vault(&[
+        ("Old.md", "# Old"),
+        (
+            "a.md",
+            "---\nup: '[[Old]]'\ndown: \"[[Old]]\"\nrel: ['[[Old]]', \"[[Old]]\"]\n---\n[[Old]]\n",
+        ),
+    ]);
+    let root = dir.path();
+    rename_and_apply(root, ProfileId::Obsidian, &[mv("Old.md", "Bob's.md")]);
+    assert_eq!(
+        read(root, "a.md"),
+        "---\nup: '[[Bob''s]]'\ndown: \"[[Bob's]]\"\nrel: ['[[Bob''s]]', \"[[Bob's]]\"]\n---\n[[Bob's]]\n"
+    );
+}
+
+#[test]
+fn yaml_quotes_are_read_from_the_line_start() {
+    let quote = |line: &str| plan::yaml_quote_at(line, line.find("[[").expect("a link"));
+    assert_eq!(quote("up: '[[A]]'"), Some('\''));
+    assert_eq!(quote("up: \"see [[A]]\""), Some('"'));
+    assert_eq!(quote("- '[[A]]'"), Some('\''));
+    assert_eq!(quote("up: it's [[A]]"), None);
+    assert_eq!(quote("x: ['a''b', \"c\\\"d\", [[A]]]"), None);
+    assert_eq!(quote("\"k\": '[[A]]'"), Some('\''));
+}
+
 #[test]
 fn renaming_a_folder_updates_links_into_and_out_of_it() {
     let dir = vault(&[
@@ -567,9 +597,47 @@ fn renaming_a_note_rewrites_base_literals_by_byte_range() {
 
 #[test]
 fn base_refs_finds_link_and_file_literals_only() {
-    let text = r#"a: 'link("x") + file('y') + mylink("z") + f.file("w") + link(other)'"#;
+    let text = r#"a: 'link("x") + file('y') + mylink("z") + f.file("w") + link(other) + file.inFolder("d") + inFolder("e")'"#;
     let refs = plan::base_refs(text);
-    let values: Vec<_> = refs.iter().map(|r| &text[r.range.clone()]).collect();
-    assert_eq!(values, ["x", "y"]);
+    let values: Vec<_> = refs
+        .iter()
+        .map(|r| (&text[r.range.clone()], r.folder))
+        .collect();
+    assert_eq!(values, [("x", false), ("y", false), ("d", true)]);
     assert!(refs.iter().all(|r| r.unsafe_reason.is_none()));
+}
+
+/// Moving a folder rewrites the `inFolder` literals that name it or a
+/// folder inside it; renaming a note leaves them.
+#[test]
+fn moving_a_folder_rewrites_base_in_folder_literals() {
+    let base = "filters:\n  or:\n    - file.inFolder(\"notes\")\n    - 'file.inFolder(\"notes/sub/\")'\n    - file.inFolder(\"other\")\n    - file.inFolder(\"note\")\n";
+    let dir = vault(&[
+        ("notes/a.md", "# A"),
+        ("notes/sub/b.md", "# B"),
+        ("other/c.md", ""),
+        ("archive/d.md", ""),
+        ("books.base", base),
+    ]);
+    let root = dir.path();
+    let renamed = plan(root, ProfileId::Obsidian, &[mv("notes/a.md", "notes/z.md")]).expect("plan");
+    assert!(renamed.edits.iter().all(|e| e.path != p("books.base")));
+    let moved = plan(root, ProfileId::Obsidian, &[mv("notes", "archive/notes")]).expect("plan");
+    let edit = moved
+        .edits
+        .iter()
+        .find(|e| e.path == p("books.base"))
+        .expect("base edit");
+    let changes: Vec<_> = edit
+        .changes
+        .iter()
+        .map(|c| (c.old.as_str(), c.new.as_str()))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("notes", "archive/notes"),
+            ("notes/sub/", "archive/notes/sub/")
+        ]
+    );
 }
