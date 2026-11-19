@@ -644,7 +644,7 @@ pub(crate) fn base_refs(text: &str) -> Vec<BaseRef> {
 
 /// Whether `value` can stand in a base literal written in `quote`
 /// without changing what the YAML around it means.
-fn fits_base_literal(value: &str, quote: char) -> bool {
+pub(super) fn fits_base_literal(value: &str, quote: char) -> bool {
     !value.is_empty()
         && !value.contains(['"', '\'', '\\', '\n', '\r'])
         && !value.contains(" #")

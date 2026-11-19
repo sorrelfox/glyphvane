@@ -61,7 +61,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Moving or renaming a folder updates `file.inFolder("…")` in bases.
 - Renaming a note keeps the front matter valid YAML: a new name with `'`
   in a single-quoted link is written `''` (and escaped in double quotes).
+- Renaming a heading or block ID updates `link("Note#Heading")` in bases.
 - Screen readers can scroll the editor sideways and to a position.
+- A heading written over several lines (setext) can be renamed.
 - Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
   the view.
 

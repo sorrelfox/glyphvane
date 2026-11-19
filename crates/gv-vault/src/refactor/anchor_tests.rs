@@ -236,6 +236,50 @@ fn canvas_subpaths_follow() {
 }
 
 #[test]
+fn base_link_literals_follow() {
+    let base = "filters:\n  or:\n    - file.hasLink(link(\"Note#Old\"))\n    - file.hasLink(link('Other#Old'))\n    - file.hasLink(link(\"Note#^blk\"))\n    - \"file.hasLink(link(\\\"Note#Old\\\"))\"\n";
+    let dir = vault(&[
+        ("Note.md", "# Old\n\ntext ^blk\n"),
+        ("Other.md", "# Old\n"),
+        ("tasks.base", base),
+    ]);
+    let root = dir.path();
+    let heading = plan(
+        root,
+        ProfileId::Obsidian,
+        "Note.md",
+        AnchorTarget::Heading(0),
+        "Fresh name",
+    )
+    .expect("plan");
+    // The literal inside an escaped YAML string is listed, not rewritten.
+    assert_eq!(
+        heading.others.skipped.len(),
+        1,
+        "{:?}",
+        heading.others.skipped
+    );
+    let applied = apply_all(root, &heading);
+    assert_eq!(
+        read(root, "tasks.base"),
+        base.replacen("link(\"Note#Old\")", "link(\"Note#Fresh name\")", 1)
+    );
+    undo(&applied, None).expect("undo");
+    assert_eq!(read(root, "tasks.base"), base);
+    fs::write(root.join("Note.md"), "# Old\n\ntext ^blk\n").expect("restore");
+    let block = plan(
+        root,
+        ProfileId::Obsidian,
+        "Note.md",
+        AnchorTarget::Block("blk".into()),
+        "b2",
+    )
+    .expect("plan");
+    apply_all(root, &block);
+    assert!(read(root, "tasks.base").contains("link(\"Note#^b2\")"));
+}
+
+#[test]
 fn unchanged_missing_and_bad_headings_are_refused() {
     let dir = vault(&[("Note.md", "# Same\n\nSetext\n======\n")]);
     let root = dir.path();
@@ -258,6 +302,33 @@ fn unchanged_missing_and_bad_headings_are_refused() {
     ));
     let setext = go(AnchorTarget::Heading(1), "Renamed").expect("setext");
     assert_eq!(setext.own.after, "# Same\n\nRenamed\n======\n");
+}
+
+#[test]
+fn a_setext_heading_over_several_lines_is_renamed_whole() {
+    let note = "# Top\n\nFirst line\nsecond line\n---\n\n> Quoted one\n> quoted two\n> ===\n";
+    let dir = vault(&[("Note.md", note)]);
+    let root = dir.path();
+    let go = |i, new: &str| {
+        plan(
+            root,
+            ProfileId::Obsidian,
+            "Note.md",
+            AnchorTarget::Heading(i),
+            new,
+        )
+        .expect("plan")
+    };
+    let plain = go(1, "One line");
+    assert_eq!(
+        plain.own.after,
+        "# Top\n\nOne line\n---\n\n> Quoted one\n> quoted two\n> ===\n"
+    );
+    let quoted = go(2, "Quoted");
+    assert_eq!(
+        quoted.own.after,
+        "# Top\n\nFirst line\nsecond line\n---\n\n> Quoted\n> ===\n"
+    );
 }
 
 #[test]

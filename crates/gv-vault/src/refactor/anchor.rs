@@ -6,8 +6,8 @@
 //! [`plan_anchor_rename`] takes the note's current text (its editor
 //! buffer, saved or not) and finds the links that name the heading or the
 //! block: the note's own links and those of the notes that link to it
-//! (the content index's backlinks), embeds included, and the `subpath` of
-//! canvas file cards. A link is rewritten only when its fragment would no
+//! (the content index's backlinks), embeds included, the `subpath` of
+//! canvas file cards, and the fragment of `link("…#…")` literals in bases. A link is rewritten only when its fragment would no
 //! longer land on the same heading, and then in its own style:
 //!
 //! - a part that matched by **heading text** (Obsidian) gets the new
@@ -129,11 +129,16 @@ pub fn validate_heading_text(text: &str) -> Result<(), RefactorError> {
 
 /// The byte range of the text of heading `h` in `text`: what a rename
 /// replaces (the `#` marks, a closing sequence and a setext underline
-/// stay). `None` for a heading whose text spans lines or is empty.
+/// stay). A setext heading's text over several lines is replaced whole,
+/// from its first line's text to its last line's end. `None` for a
+/// heading whose text is empty or not found as indexed.
 #[must_use]
 pub fn heading_text_range(text: &str, h: &IndexedHeading) -> Option<Range<usize>> {
-    if h.source.is_empty() || h.source.contains('\n') {
+    if h.source.is_empty() {
         return None;
+    }
+    if h.source.contains('\n') {
+        return setext_text_range(text, h);
     }
     let line = line_range(text, h.line as usize)?;
     let line_text = &text[line.clone()];
@@ -153,6 +158,25 @@ pub fn heading_text_range(text: &str, h: &IndexedHeading) -> Option<Range<usize>
     };
     let at = from + line_text[from..].find(&*h.source)?;
     Some(line.start + at..line.start + at + h.source.len())
+}
+
+/// [`heading_text_range`] of a setext heading whose text spans lines:
+/// each line of its source must be on the matching line of `text`.
+fn setext_text_range(text: &str, h: &IndexedHeading) -> Option<Range<usize>> {
+    let parts: Vec<&str> = h.source.split('\n').map(str::trim).collect();
+    let first = h.line as usize;
+    let mut start = None;
+    let mut end = None;
+    for (k, part) in parts.iter().enumerate() {
+        let line = line_range(text, first + k)?;
+        let at = line.start + text[line.clone()].rfind(part)?;
+        if k == 0 {
+            start = Some(line.start + text[line].find(part)?);
+        }
+        end = Some(at + part.len());
+    }
+    let (start, end) = (start?, end?);
+    (start < end).then_some(start..end)
 }
 
 /// The byte range of the `^id` marker of block id `id` (the `^`
@@ -289,16 +313,21 @@ pub fn plan_anchor_rename(
         None => warnings
             .push("The link index is not ready: links in other notes were not updated.".to_owned()),
     }
-    for entry in paths.iter() {
-        if entry.kind.is_dir()
-            || !entry
-                .path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
-        {
-            continue;
+    for entry in paths.iter().filter(|e| !e.kind.is_dir()) {
+        let ext = entry.path.extension();
+        if ext.is_some_and(|e| e.eq_ignore_ascii_case("canvas")) {
+            plan_canvas(root, note, &entry.path, &ctx, &mut edits, &mut skipped);
+        } else if ext.is_some_and(|e| e.eq_ignore_ascii_case("base")) {
+            plan_base(
+                root,
+                paths,
+                params,
+                &entry.path,
+                &ctx,
+                &mut edits,
+                &mut skipped,
+            );
         }
-        plan_canvas(root, note, &entry.path, &ctx, &mut edits, &mut skipped);
     }
 
     Ok(AnchorPlan {
@@ -813,6 +842,108 @@ fn plan_canvas(
         });
         return;
     };
+    edits.push(FileEdit {
+        path: source.clone(),
+        moved_to: source.clone(),
+        before_hash: ContentHash::of(text.as_bytes()),
+        before: text,
+        after,
+        changes,
+    });
+}
+
+/// Plans the edits of base `source`: the fragment of every `link("…#…")`
+/// or `file("…#…")` literal that names the renamed heading or block of the
+/// note, touching only the bytes of the literal.
+fn plan_base(
+    root: &Path,
+    paths: &PathIndex,
+    params: &ProfileParams,
+    source: &VaultPath,
+    ctx: &Ctx<'_>,
+    edits: &mut Vec<FileEdit>,
+    skipped: &mut Vec<Skipped>,
+) {
+    let Ok(bytes) = std::fs::read(source.to_fs_path(root)) else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    if !text.contains('#') {
+        return;
+    }
+    let mut changes = Vec::new();
+    for r in super::plan::base_refs(&text) {
+        let value = &text[r.range.clone()];
+        let Some(hash) = value.find('#').filter(|_| !r.folder) else {
+            continue;
+        };
+        // The literal is read as a wikilink of the base.
+        let lref = LinkRef::new(LinkKind::Wikilink, value, source.clone(), params.profile);
+        let resolved = resolve(paths, &lref, params);
+        if !resolved.status.is_resolved() {
+            continue;
+        }
+        let target = resolved
+            .target
+            .and_then(|id| paths.get(id))
+            .map(|e| e.path.clone())
+            .or(resolved.target_path);
+        if target.as_ref() != Some(ctx.note) {
+            continue;
+        }
+        let fragment = Fragment::from_wikilink(&value[hash + 1..]);
+        let line = line_of(&text, r.range.start);
+        let skip = |reason: &str, skipped: &mut Vec<Skipped>| {
+            skipped.push(Skipped {
+                source: source.clone(),
+                line,
+                link: value.to_owned(),
+                reason: reason.to_owned(),
+            });
+        };
+        let new_fragment = match new_fragment(&fragment, Style::Wiki, ctx) {
+            None => continue,
+            Some(Err(reason)) => {
+                skip(reason, skipped);
+                continue;
+            }
+            Some(Ok(new)) => new,
+        };
+        if let Some(reason) = r.unsafe_reason {
+            skip(reason, skipped);
+            continue;
+        }
+        if !lands_right(
+            Some(&Fragment::from_wikilink(&new_fragment)),
+            &fragment,
+            ctx,
+        ) {
+            skip("no link to the new name could be written", skipped);
+            continue;
+        }
+        let new = format!("{}{new_fragment}", &value[..=hash]);
+        if !super::plan::fits_base_literal(&new, r.quote) {
+            skip(
+                "the new name needs quoting in the base: update it by hand",
+                skipped,
+            );
+            continue;
+        }
+        if new != value {
+            changes.push(LinkChange {
+                span: Span::of(r.range.clone()),
+                line,
+                old: value.to_owned(),
+                new,
+            });
+        }
+    }
+    if changes.is_empty() {
+        return;
+    }
+    let after = super::plan::apply_changes(&text, &changes);
     edits.push(FileEdit {
         path: source.clone(),
         moved_to: source.clone(),

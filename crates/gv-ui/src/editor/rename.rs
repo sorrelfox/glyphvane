@@ -109,7 +109,7 @@ impl EditorView {
         {
             return Some(AnchorAtCaret {
                 target: AnchorTarget::Heading(i),
-                name: h.source.to_string(),
+                name: one_line(&h.source),
             });
         }
         for b in &note.block_ids {
@@ -129,7 +129,7 @@ impl EditorView {
             .rfind(|(_, h)| h.span.start as usize <= caret)?;
         Some(AnchorAtCaret {
             target: AnchorTarget::Heading(i),
-            name: h.source.to_string(),
+            name: one_line(&h.source),
         })
     }
 
@@ -543,4 +543,14 @@ fn preview_request(plan: AnchorPlan, editor: gpui::WeakEntity<EditorView>) -> Pr
             let _ = editor.update(cx, |e, cx| e.apply_anchor_plan(plan, cx));
         }),
     }
+}
+
+/// A heading's source as the prompt offers it: a setext heading's lines
+/// joined by a space (the new name is one line).
+fn one_line(source: &str) -> String {
+    source
+        .split('\n')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

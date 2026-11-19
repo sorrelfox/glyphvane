@@ -146,3 +146,27 @@ fn the_caret_picks_the_heading_block_or_section(cx: &mut TestAppContext) {
     draw(&mut vcx);
     assert!(view.read_with(&vcx, |v, _| v.notice().is_some()));
 }
+
+#[gpui::test]
+fn a_setext_heading_over_two_lines_is_offered_as_one_line(cx: &mut TestAppContext) {
+    let note = "First line\nsecond line\n---\n\ntext\n";
+    let v = vault(&[("Note.md", note)]);
+    let (view, mut vcx) = editor_in(cx, &v, "Note.md", ProfileId::Obsidian);
+    caret_at(&view, &mut vcx, note.find("second").expect("heading"));
+    let anchor = view.update(&mut vcx, |v, _| v.anchor_at_caret());
+    assert_eq!(
+        anchor.map(|a| (a.target, a.name)),
+        Some((
+            AnchorTarget::Heading(0),
+            "First line second line".to_owned()
+        ))
+    );
+    vcx.dispatch_action(RenameHeading);
+    draw(&mut vcx);
+    let prompt = prompt(&mut vcx);
+    vcx.update(|window, cx| prompt.update(cx, |p, cx| p.set_text("Joined", window, cx)));
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    settle(&mut vcx);
+    assert_eq!(text_of(&view, &mut vcx), "Joined\n---\n\ntext\n");
+}
