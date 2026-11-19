@@ -8,8 +8,9 @@
 //! wrap gives a line several), split at [`MAX_RUN`] characters, for the
 //! lines on screen, a margin of lines above and below them (one screen,
 //! [`MARGIN`] lines at least and [`MAX_MARGIN`] at most, so that reading
-//! by line goes on past the screen's edges) and the primary caret's line
-//! when it is outside them.
+//! by line goes on past the screen's edges) and as many lines around the
+//! primary caret's line ([`around`]), so that moving the caret by line
+//! never runs out of described lines wherever it is.
 //! A run's characters are grapheme clusters of what the row shows: Live
 //! Preview's hidden markers are not there, a hard tab is one `\t`, and the
 //! last row of a line ends in `\n` (one character, as AccessKit wants,
@@ -64,6 +65,47 @@ pub(crate) const MAX_MARGIN: usize = 200;
 /// How many lines to describe above and below `on_screen` lines.
 pub(crate) fn margin(on_screen: usize) -> usize {
     on_screen.clamp(MARGIN, MAX_MARGIN)
+}
+
+/// The buffer lines to describe besides the screen's: up from
+/// [`Around::from`] and down to [`Around::to`] at least (the walks also
+/// go a margin of display lines each way), and the caret's own lines when
+/// they are apart from those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Around {
+    /// The first line to describe above the screen, at the latest.
+    pub from: usize,
+    /// The line after the last to describe below it, at the earliest.
+    pub to: usize,
+    /// The lines around the caret's, when they neither overlap nor touch
+    /// the screen's and its margins.
+    pub caret: Option<Range<usize>>,
+}
+
+/// What to describe for the lines `screen` on screen, the primary caret
+/// on line `caret`, `lines` lines in all and a margin of `margin` lines:
+/// the screen with a margin each side, and the caret's line with a margin
+/// each side of its own. A caret moved by line past the screen's margin
+/// (a screen reader's selection, a key press, a scroll that left it
+/// behind) is thus always amid described lines, its next line too, and
+/// the description re-centres on it.
+pub(crate) fn around(screen: Range<usize>, caret: usize, lines: usize, margin: usize) -> Around {
+    let caret = caret.min(lines.saturating_sub(1));
+    let reach = screen.start.saturating_sub(margin)..(screen.end + margin).min(lines);
+    let own = caret.saturating_sub(margin)..(caret + margin + 1).min(lines);
+    if own.start <= reach.end && reach.start <= own.end {
+        Around {
+            from: own.start.min(reach.start),
+            to: own.end.max(reach.end),
+            caret: None,
+        }
+    } else {
+        Around {
+            from: reach.start,
+            to: reach.end,
+            caret: Some(own),
+        }
+    }
 }
 
 /// One text run.

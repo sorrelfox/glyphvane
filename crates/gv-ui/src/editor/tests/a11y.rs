@@ -184,11 +184,16 @@ fn the_caret_line_off_screen_is_described(cx: &mut TestAppContext) {
         }
         cx.notify();
     });
+    let margin = crate::editor::source_a11y::margin(on_screen(&view, &mut vcx).len());
     let (runs, selection) = described(&view, &mut vcx);
     let last = runs.len() - 1;
     assert_eq!(runs[0].0, "line 0\n");
-    assert_eq!(runs[last].0, "line 300\n");
-    assert_eq!(selection, Some(((last, 5), (last, 5))));
+    // The caret's line amid a margin of its own.
+    assert_eq!(runs[last].0, format!("line {}\n", 300 + margin));
+    let at = last - margin;
+    assert_eq!(runs[at].0, "line 300\n");
+    assert_eq!(runs[at - margin].0, format!("line {}\n", 300 - margin));
+    assert_eq!(selection, Some(((at, 5), (at, 5))));
 }
 
 #[gpui::test]
@@ -257,13 +262,13 @@ fn lines_past_the_screen_are_described(cx: &mut TestAppContext) {
         format!("line {}\n", shown.end + margin - 1)
     );
     // In the middle: a margin above too, in order, after the caret's
-    // line (at the top of the file).
+    // line (at the top of the file) and its margin.
     view.update(&mut vcx, |v, cx| v.scroll_to_line(500, cx));
     let shown = on_screen(&view, &mut vcx);
     assert_eq!(shown.start, 500);
     let (runs, selection) = described(&view, &mut vcx);
     let runs: Vec<String> = runs.into_iter().map(|r| r.0).collect();
-    let mut expected = vec!["line 0\n".to_owned()];
+    let mut expected: Vec<String> = (0..=margin).map(|i| format!("line {i}\n")).collect();
     expected.extend((500 - margin..shown.end + margin).map(|i| format!("line {i}\n")));
     assert_eq!(runs, expected);
     assert_eq!(selection, Some(((0, 0), (0, 0))));
@@ -541,11 +546,17 @@ fn a_big_document_is_described_around_the_screen_only(cx: &mut TestAppContext) {
         cx.notify();
     });
     let (runs, selection) = described(&view, &mut vcx);
-    // The screen, a margin each side and the caret's line: no more.
-    assert_eq!(runs.len(), shown.len() + 2 * margin + 1);
+    // The screen and a margin each side, the caret's line with a margin
+    // above it and the empty line after the last newline: no more.
+    assert_eq!(runs.len(), shown.len() + 3 * margin + 2);
     assert_eq!(runs[0].0, format!("line {}\n", shown.start - margin));
-    let last = runs.len() - 1;
+    let last = runs.len() - 2;
     assert_eq!(runs[last].0, format!("line {}\n", lines - 1));
+    assert_eq!(runs[last + 1].0, "");
+    assert_eq!(
+        runs[last - margin].0,
+        format!("line {}\n", lines - 1 - margin)
+    );
     let caret = runs[last].0.len() - 3;
     assert_eq!(selection, Some(((last, caret), (last, caret))));
     // A selection from the top of the screen to the caret: its anchor
@@ -562,6 +573,89 @@ fn a_big_document_is_described_around_the_screen_only(cx: &mut TestAppContext) {
     });
     let (_, selection) = described(&view, &mut vcx);
     assert_eq!(selection, Some(((margin, 0), (last, caret))));
+}
+
+#[test]
+fn the_described_lines_follow_the_caret() {
+    use crate::editor::source_a11y::{Around, around};
+    // The caret on screen, or within the margin: the screen and its
+    // margins.
+    let plain = Around {
+        from: 450,
+        to: 580,
+        caret: None,
+    };
+    assert_eq!(around(500..530, 510, 1000, 50), plain);
+    // Moved by line past the last described line: the description
+    // reaches a margin past it, so its next line is described.
+    let moved = around(500..530, 580, 1000, 50);
+    assert_eq!(moved.to, 631);
+    assert_eq!(moved.from, 450);
+    assert_eq!(moved.caret, None);
+    for caret in 450..700 {
+        let a = around(500..530, caret, 1000, 50);
+        let described = |l: usize| {
+            (a.from..a.to).contains(&l) || a.caret.as_ref().is_some_and(|c| c.contains(&l))
+        };
+        assert!(described(caret) && described(caret + 1), "{caret}: {a:?}");
+        assert!(caret == 0 || described(caret - 1), "{caret}: {a:?}");
+    }
+    // Above the screen likewise.
+    assert_eq!(around(500..530, 420, 1000, 50).from, 370);
+    // Far from the screen: its own lines, a margin each side.
+    assert_eq!(
+        around(500..530, 900, 1000, 50),
+        Around {
+            from: 450,
+            to: 580,
+            caret: Some(850..951),
+        }
+    );
+    // Clamped to the text.
+    assert_eq!(around(500..530, 5, 1000, 50).caret, Some(0..56));
+    assert_eq!(around(0..30, 2000, 1000, 50).caret, Some(949..1000));
+    assert_eq!(
+        around(0..30, 10, 40, 50),
+        Around {
+            from: 0,
+            to: 40,
+            caret: None,
+        }
+    );
+}
+
+#[gpui::test]
+fn moving_the_caret_by_line_keeps_the_next_line_described(cx: &mut TestAppContext) {
+    let text = numbered(1000);
+    let (view, mut vcx) = editor(cx, &text);
+    // The view scrolled away from the caret, as scroll actions leave it.
+    view.update(&mut vcx, |v, cx| v.scroll_to_line(500, cx));
+    let shown = on_screen(&view, &mut vcx);
+    assert_eq!(shown.start, 500);
+    // A screen reader reads on by line from the caret: each next line is
+    // described, and the selection points at it.
+    for line in 0..120 {
+        let runs = run_texts(&view, &mut vcx);
+        let next = runs
+            .iter()
+            .position(|r| *r == format!("line {}\n", line + 1))
+            .unwrap_or_else(|| panic!("line {} described", line + 1));
+        select(&view, &mut vcx, (next, 0), (next, 0));
+        let (runs, selection) = described(&view, &mut vcx);
+        let at = runs
+            .iter()
+            .position(|r| r.0 == format!("line {}\n", line + 1))
+            .expect("still described");
+        assert_eq!(selection, Some(((at, 0), (at, 0))));
+    }
+    // By key presses too.
+    for _ in 0..120 {
+        vcx.simulate_keystrokes("down");
+    }
+    let head = selections(&view, &mut vcx)[0].1;
+    let line = text[..head].matches('\n').count();
+    let runs = run_texts(&view, &mut vcx);
+    assert!(runs.contains(&format!("line {}\n", line + 1)), "{line}");
 }
 
 /// A run of single-byte characters at `start`, for the description's

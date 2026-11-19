@@ -919,13 +919,20 @@ impl EditorView {
             }
         }
         // The lines above and below the screen, so that reading by line
-        // goes on past its edges, and the caret's line when it is outside
-        // them, so that the selection has a run to point into.
+        // goes on past its edges, and the lines around the caret's, so
+        // that the selection has a run to point into and moving the caret
+        // by line always finds the next line described (next to the
+        // screen's lines they extend them; apart, they come on their own).
         if a11y_on {
             let margin = source_a11y::margin(visuals.len());
+            let screen = visuals.first().map_or(0, |(_, v)| v.first)
+                ..visuals.last().map_or(0, |(_, v)| v.last + 1);
+            let caret_line = text.line_of_offset(wanted[1].min(text.len())).unwrap_or(0);
+            let around = source_a11y::around(screen.clone(), caret_line, lines, margin);
             let mut above: Vec<(usize, VisualLine)> = Vec::new();
             let mut row = visuals.first().map_or(first_row, |(r, _)| *r);
-            while above.len() < margin && row > 0 {
+            let mut top = screen.start;
+            while (above.len() < margin || top > around.from) && row > 0 {
                 let Some(visual) = VisualLine::new(&text, replace, map.line_of_row(row - 1)) else {
                     break;
                 };
@@ -934,30 +941,40 @@ impl EditorView {
                     break;
                 }
                 row = first;
+                top = visual.first;
                 above.push((row, visual));
             }
             above.reverse();
             let mut below: Vec<(usize, VisualLine)> = Vec::new();
             let mut next = visuals.last().map_or(lines, |(_, v)| v.last + 1);
-            while below.len() < margin && next < lines {
+            while (below.len() < margin || next < around.to) && next < lines {
                 let Some(visual) = VisualLine::new(&text, replace, next) else {
                     break;
                 };
                 next = visual.last + 1;
                 below.push((map.first_row(visual.first), visual));
             }
-            let described = above.first().map_or(visible.start, |(_, v)| v.range.start)
-                ..below.last().map_or(visible.end, |(_, v)| v.range.end);
-            let head = wanted[1];
-            if a11y_found[1].is_none() && (head < described.start || head > described.end) {
-                let line = text.line_of_offset(head.min(text.len())).unwrap_or(0);
-                if let Some(visual) = VisualLine::new(&text, replace, line) {
-                    let row = map.first_row(visual.first);
-                    if head < described.start {
-                        above.insert(0, (row, visual));
-                    } else {
-                        below.push((row, visual));
+            if let Some(own) = around.caret {
+                // Described from the first visual line that reaches into
+                // them, without the lines already described.
+                let described = above.first().map_or(screen.start, |(_, v)| v.first)
+                    ..below.last().map_or(screen.end, |(_, v)| v.last + 1);
+                let mut lines_around = Vec::new();
+                let mut line = map.line_of_row(map.first_row(own.start));
+                while line < own.end && line < lines {
+                    let Some(visual) = VisualLine::new(&text, replace, line) else {
+                        break;
+                    };
+                    line = visual.last + 1;
+                    if visual.last < described.start || visual.first >= described.end {
+                        lines_around.push((map.first_row(visual.first), visual));
                     }
+                }
+                if own.start < described.start {
+                    lines_around.append(&mut above);
+                    above = lines_around;
+                } else {
+                    below.append(&mut lines_around);
                 }
             }
             let mut styled: Vec<usize> = above

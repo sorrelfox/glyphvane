@@ -103,6 +103,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Windows: files on ReFS volumes are told apart by their full 128-bit file
   ID, so renames by other programs and replaced files are recognised
   there as on NTFS.
+- Screen readers reading the editor line by line no longer stop about a
+  screen past the visible lines: the lines around the caret are always
+  described, also when the view was scrolled away from it.
 
 ## [1.2.0] - 2026-11-19
 
