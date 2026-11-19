@@ -1,0 +1,22 @@
+{
+	"nodes":[
+		{"id":"group-start","type":"group","x":-460,"y":-300,"width":520,"height":560,"label":"Start here","color":"5"},
+		{"id":"text-hello","type":"text","text":"# A canvas\n\nCards hold **Markdown**, like this one.\n\nUse the mouse wheel or drag to pan, and **Ctrl+wheel** to zoom.","x":-430,"y":-260,"width":460,"height":200},
+		{"id":"file-welcome","type":"file","file":"Welcome.md","x":-430,"y":-20,"width":460,"height":250},
+		{"id":"group-notes","type":"group","x":140,"y":-300,"width":520,"height":560,"label":"Notes and parts of notes","color":"4"},
+		{"id":"file-macros","type":"file","file":"Math.md","subpath":"#Macros","x":170,"y":-260,"width":460,"height":240},
+		{"id":"text-math","type":"text","text":"> [!tip] Formulas in cards\n> $\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}$","x":170,"y":10,"width":460,"height":110,"color":"3"},
+		{"id":"text-todo","type":"text","text":"- [x] Look at the cards\n- [ ] Follow an arrow\n- [ ] Click a file card to open it","x":170,"y":140,"width":460,"height":100},
+		{"id":"file-image","type":"file","file":"attachments/weathervane.svg","x":-430,"y":320,"width":200,"height":200},
+		{"id":"file-pdf","type":"file","file":"attachments/sample.pdf","x":-200,"y":320,"width":260,"height":340},
+		{"id":"link-site","type":"link","url":"https://example.org","x":170,"y":320,"width":460,"height":120},
+		{"id":"text-query","type":"text","text":"**Projects still open**\n\n```query\ntag:#project -[status:done]\n```","x":170,"y":470,"width":460,"height":190,"color":"6"}
+	],
+	"edges":[
+		{"id":"edge-1","fromNode":"text-hello","fromSide":"bottom","toNode":"file-welcome","toSide":"top","label":"then"},
+		{"id":"edge-2","fromNode":"file-welcome","fromSide":"right","toNode":"file-macros","toSide":"left","label":"links to","color":"1"},
+		{"id":"edge-3","fromNode":"file-macros","fromSide":"bottom","toNode":"text-math","toSide":"top"},
+		{"id":"edge-4","fromNode":"file-welcome","fromSide":"bottom","toNode":"file-image","toSide":"top","fromEnd":"arrow","toEnd":"arrow","label":"both ways","color":"#2a9d8f"},
+		{"id":"edge-5","fromNode":"text-todo","fromSide":"bottom","toNode":"link-site","toSide":"top","toEnd":"none","color":"2"}
+	]
+}

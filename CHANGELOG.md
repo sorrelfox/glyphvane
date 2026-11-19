@@ -28,6 +28,12 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A text or code file switched between the viewer and Edit keeps the line
   at the top, both ways, edited or not.
 
+### Documentation
+
+- A sample vault (`docs/sample-vault`) tours the features with one short
+  note each, plus a base, a canvas, an image and a PDF; the user guide
+  says how to open it.
+
 ## [1.2.0] - 2026-11-19
 
 ### PDF

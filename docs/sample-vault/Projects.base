@@ -1,0 +1,58 @@
+filters:
+  and:
+    - file.inFolder("Projects")
+    - file.ext == "md"
+formulas:
+  days_left: if(due, (date(due) - today()).days.round(0), "")
+  open: status != "done"
+properties:
+  file.name:
+    displayName: Project
+  note.status:
+    displayName: Status
+  note.priority:
+    displayName: Priority
+  note.due:
+    displayName: Due
+  formula.days_left:
+    displayName: Days left
+views:
+  - type: table
+    name: All projects
+    order:
+      - file.name
+      - status
+      - priority
+      - due
+      - formula.days_left
+    sort:
+      - property: note.priority
+        direction: DESC
+    summaries:
+      priority: Average
+  - type: table
+    name: By status
+    groupBy:
+      property: note.status
+      direction: ASC
+    order:
+      - file.name
+      - priority
+      - due
+  - type: cards
+    name: Cards
+    order:
+      - file.name
+      - status
+      - due
+    image: note.cover
+    imageFit: contain
+    cardSize: 180
+  - type: list
+    name: Still open
+    filters:
+      and:
+        - formula.open
+    order:
+      - file.name
+      - due

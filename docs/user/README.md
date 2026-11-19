@@ -31,6 +31,19 @@ are the same on Linux and Windows. macOS is not supported.
 | [Privacy](privacy.md) | When Glyphvane uses the network, what it stores, Flatpak permissions |
 | [Troubleshooting](troubleshooting.md) | Graphics problems and safe mode, Flatpak, SmartScreen, fonts, logs, reporting a bug |
 
+## Sample vault
+
+The [sample vault](../sample-vault/Welcome.md) is a small folder of notes
+for trying Glyphvane out: one short note per feature (links and backlinks,
+embeds, callouts, math, code, diagrams, tasks, tags and properties, tables,
+footnotes, a daily note, search queries, a base, a canvas, an image and a
+PDF), each showing the syntax and what to try. To open it, get the
+`docs/sample-vault` folder (clone the repository, or download its source
+archive from GitHub), choose File ▸ Open folder… and pick that folder, or
+run `glyphvane docs/sample-vault`. Then start with `Welcome.md`. The vault
+uses the Obsidian flavor, set by the `.glyphvane.toml` file in it, and is
+safe to edit.
+
 ## Help inside the app
 
 - **Help ▸ Documentation** opens this guide.

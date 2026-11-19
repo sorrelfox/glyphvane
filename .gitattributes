@@ -8,6 +8,7 @@
 *.ico binary
 *.ttf binary
 *.bin binary
+*.pdf binary
 
 # Test inputs and expected outputs are compared byte for byte, and some hold
 # CRLF on purpose: never convert their line endings.

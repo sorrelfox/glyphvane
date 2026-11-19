@@ -1,0 +1,4 @@
+# This folder is a vault of its own, written in Obsidian's flavor of
+# Markdown (callouts, #tags, ^block-ids and %%comments%% need it).
+profile = "obsidian"
+root = true
