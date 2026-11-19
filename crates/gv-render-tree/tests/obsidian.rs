@@ -822,3 +822,189 @@ fn embedded_blocks_keep_the_node_and_byte_budgets() {
         ]
     );
 }
+
+#[test]
+fn embedded_footnotes_jump_both_ways_within_the_embed() {
+    let mut vault = Vault::default();
+    vault.notes.insert(
+        "N",
+        "One[^a] two[^b] one again[^a].\n\n[^a]: Note A.\n[^b]: Note B.\n",
+    );
+    let d = build_with(
+        "Host[^h].\n\n![[N]]\n\n[^h]: Host note.\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources {
+            links: &vault,
+            images: &Images,
+        },
+    );
+    let rt = &d.render;
+    let texts = outline(rt);
+    let refs = texts
+        .iter()
+        .position(|t| t.starts_with("One"))
+        .expect("embedded paragraph");
+    let a = texts
+        .iter()
+        .position(|t| t.starts_with("Note A."))
+        .expect("entry a");
+    let b = texts
+        .iter()
+        .position(|t| t.starts_with("Note B."))
+        .expect("entry b");
+    // A reference jumps to its entry in the embed's list.
+    assert_eq!(rt.embed_footnote_item(refs, 1), Some(a), "{texts:#?}");
+    assert_eq!(rt.embed_footnote_item(refs, 2), Some(b));
+    // Each entry has a backreference per reference, back to them.
+    let backrefs = |ix: usize| {
+        rt.item_inline(ix)
+            .map(|c| {
+                c.spans
+                    .iter()
+                    .filter(|s| matches!(s.role, InlineRole::FootnoteBackref(_)))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!((backrefs(a), backrefs(b)), (2, 1), "{}", rt.dump());
+    assert_eq!(rt.embed_footnote_refs(a), [refs, refs]);
+    assert_eq!(rt.embed_footnote_refs(b), [refs]);
+    // The host's footnotes stay separate.
+    assert_eq!(rt.footnote_refs("a"), []);
+    let host = rt.footnote_item("h").expect("host footnote");
+    assert!(texts[host].starts_with("Host note."));
+    assert_eq!(rt.embed_footnote_refs(host), Vec::<usize>::new());
+    assert_eq!(rt.embed_footnote_item(0, 1), None);
+}
+
+#[test]
+fn embedded_ids_are_stable_and_unique() {
+    let callout_id = |rt: &RenderTree, nth: usize| {
+        rt.nodes()
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::CalloutTitle { .. }))
+            .nth(nth)
+            .map(|n| n.id)
+            .expect("callout title")
+    };
+    let mut vault = Vault::default();
+    vault.notes.insert("N", "> [!tip]- T\n> x\n");
+    let before = ob_with("![[N]]\n\n![[N]]\n", &vault);
+    // Blocks added before a callout in the embedded note: its id stays.
+    vault
+        .notes
+        .insert("N", "Extra\n\n```\ncode\n```\n\n> [!tip]- T\n> x\n");
+    let mut d = ob_with("![[N]]\n\n![[N]]\n", &vault);
+    assert_eq!(callout_id(&before.render, 1), callout_id(&d.render, 1));
+    // No two items share an id, the two embeds included.
+    let unique = |rt: &RenderTree| {
+        let mut ids: Vec<_> = rt.items().iter().map(|it| it.id).collect();
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        ids.len() == n
+    };
+    assert!(unique(&d.render), "{}", d.render.dump());
+    // The second embed built again (an edit in its line): same ids.
+    let second = callout_id(&d.render, 1);
+    let at = d.text.rfind("]]").expect("second embed");
+    d.edit(
+        at..at,
+        " ",
+        Sources {
+            links: &vault,
+            images: &Images,
+        },
+    );
+    check(&d);
+    assert_eq!(callout_id(&d.render, 1), second, "{}", d.render.dump());
+    assert!(unique(&d.render), "{}", d.render.dump());
+}
+
+/// Every image has the same size, set by the test.
+struct SizedImages(ImageSize);
+
+impl ImageSizeSource for SizedImages {
+    fn size(&self, _: &LinkTarget<'_>) -> ImageSize {
+        self.0
+    }
+}
+
+#[test]
+fn embedded_images_refresh_in_place() {
+    let mut vault = Vault::default();
+    vault
+        .notes
+        .insert("N", "Text ![pic](https://x.test/p.png) here.\n\nMore.\n");
+    let pending = SizedImages(ImageSize::Pending);
+    let mut d = build_with(
+        "Host\n\n![[N]]\n\nAfter\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources {
+            links: &vault,
+            images: &pending,
+        },
+    );
+    let ids: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    let image = |rt: &RenderTree| {
+        rt.nodes()
+            .iter()
+            .filter_map(|n| n.inline())
+            .flat_map(|c| c.images.iter())
+            .map(|i| (i.size, i.from.clone()))
+            .next()
+            .expect("image")
+    };
+    assert_eq!(image(&d.render).0, ImageSize::Pending);
+    let known = SizedImages(ImageSize::Known {
+        width: 20.0,
+        height: 10.0,
+    });
+    let sources = Sources {
+        links: &vault,
+        images: &known,
+    };
+    // Only the embedded image (known by its note) is asked again.
+    let report = d
+        .render
+        .refresh_where(&d.tree, d.text.as_str(), sources, &|t| {
+            t.image && t.from == Some("N.md")
+        });
+    assert!(!report.changed.is_empty());
+    assert_eq!(
+        image(&d.render),
+        (
+            ImageSize::Known {
+                width: 20.0,
+                height: 10.0
+            },
+            Some(Arc::from("N.md"))
+        )
+    );
+    // In place: the same items, in the same order.
+    let after: Vec<_> = d.render.items().iter().map(|it| it.id).collect();
+    assert_eq!(ids, after);
+    assert!(report.changed.iter().all(|id| ids.contains(id)));
+    check(&d);
+}
+
+#[test]
+fn embedded_html_blocks_know_their_note() {
+    let mut vault = Vault::default();
+    vault
+        .notes
+        .insert("N", "<div><img src=\"img/a.png\"></div>\n");
+    let d = ob_with("<p>host</p>\n\n![[N]]\n", &vault);
+    let froms: Vec<Option<&str>> = d
+        .render
+        .nodes()
+        .iter()
+        .filter_map(|n| match &n.kind {
+            NodeKind::Html { from, .. } => Some(from.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(froms, [None, Some("N.md")]);
+}

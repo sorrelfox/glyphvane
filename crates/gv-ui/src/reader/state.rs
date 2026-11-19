@@ -193,6 +193,13 @@ pub(crate) enum FootnoteHit {
     Ref { label: Arc<str> },
     /// A footnote's `↩` back to its reference `k` (0-based).
     Back { label: Arc<str>, k: u32 },
+    /// A reference's number inside a note embed (item `item`, footnote
+    /// `number` of the embed): jumps to the footnote in the list at the
+    /// embed's end.
+    EmbedRef { item: usize, number: u32 },
+    /// The `↩` of an entry (item `item`) of the list of footnotes at a
+    /// note embed's end, back to its reference `k` (0-based) in the embed.
+    EmbedBack { item: usize, k: u32 },
 }
 
 /// What is under the pointer.
@@ -668,8 +675,15 @@ impl State {
                 let f = content.footnotes.get(i as usize)?;
                 // A note embed's footnote: listed at the embed's end, not
                 // in the document's footnote section.
-                (!f.embedded).then(|| FootnoteHit::Ref {
-                    label: f.label.clone(),
+                Some(if f.embedded {
+                    FootnoteHit::EmbedRef {
+                        item: g.ix,
+                        number: f.number,
+                    }
+                } else {
+                    FootnoteHit::Ref {
+                        label: f.label.clone(),
+                    }
                 })
             }
             InlineRole::FootnoteBackref(k) => {
@@ -677,8 +691,11 @@ impl State {
                 let label = item.context.iter().find_map(|f| match &f.kind {
                     FrameKind::Footnote { label, .. } => Some(label.clone()),
                     _ => None,
-                })?;
-                Some(FootnoteHit::Back { label, k })
+                });
+                Some(match label {
+                    Some(label) => FootnoteHit::Back { label, k },
+                    None => FootnoteHit::EmbedBack { item: g.ix, k },
+                })
             }
             _ => None,
         }
@@ -697,6 +714,12 @@ impl State {
                 .footnote_refs(label)
                 .get(*k as usize)
                 .map(|(ix, _)| *ix),
+            FootnoteHit::EmbedRef { item, number } => doc.tree.embed_footnote_item(*item, *number),
+            FootnoteHit::EmbedBack { item, k } => doc
+                .tree
+                .embed_footnote_refs(*item)
+                .get(*k as usize)
+                .copied(),
         };
         let Some(ix) = target else {
             return false;

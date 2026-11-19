@@ -341,6 +341,9 @@ pub enum NodeKind {
         /// Always true for now: the block waits for the HTML pipeline.
         raw_html_pending: bool,
         code: Arc<CodeBlock>,
+        /// Inside a note embed: the embedded note's key, which relative
+        /// URLs in the HTML resolve from. `None`: the document's.
+        from: Option<Arc<str>>,
     },
     /// Front matter, shown as a properties placeholder: its raw lines
     /// (typed properties come with the model's front matter).

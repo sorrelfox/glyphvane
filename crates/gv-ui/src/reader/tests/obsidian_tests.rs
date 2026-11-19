@@ -425,3 +425,118 @@ fn callout_folds_are_named_for_the_session_and_come_back_after_an_edit(cx: &mut 
     assert_eq!(renamed[0].line, "Renamed?");
     assert!(renamed[0].open);
 }
+
+/// The centre of the first painted piece of role `role` (by `pick`) in
+/// any item, and the item.
+fn piece_where(st: &State, pick: impl Fn(InlineRole) -> bool) -> (usize, Point<Pixels>) {
+    let doc = st.doc.as_ref().expect("loaded");
+    for g in &st.geometry.items {
+        let Some(content) = doc.tree.item_inline(g.ix) else {
+            continue;
+        };
+        let Some(piece) = content.spans.iter().position(|s| pick(s.role)) else {
+            continue;
+        };
+        let block = g.text.as_ref().expect("text").borrow();
+        let layout = block.layout().expect("laid out");
+        let origin = block.bounds().expect("painted").origin;
+        let r = layout.item_rects(piece)[0];
+        return (
+            g.ix,
+            origin + point(px(r.x + r.width / 2.0), px(r.y + r.height / 2.0)),
+        );
+    }
+    panic!("no such piece on screen");
+}
+
+#[gpui::test]
+fn footnotes_inside_a_note_embed_jump_to_its_list_and_back(cx: &mut TestAppContext) {
+    use crate::reader::state::FootnoteHit;
+
+    let dir = vault(&[
+        ("a.md", "# A\n\n![[b]]\n\nAfter.\n"),
+        ("b.md", "Text[^x] here.\n\n[^x]: The note.\n"),
+    ]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    settle(&mut vcx);
+    let st = state(&reader, &mut vcx);
+    let st = st.borrow_mut();
+    let (from, at) = piece_where(&st, |r| matches!(r, InlineRole::FootnoteRef(_)));
+    let hit = st.footnote_at(at).expect("a reference");
+    assert_eq!(
+        hit,
+        FootnoteHit::EmbedRef {
+            item: from,
+            number: 1
+        }
+    );
+    let (entry, back) = piece_where(&st, |r| matches!(r, InlineRole::FootnoteBackref(_)));
+    let tree = &st.doc.as_ref().expect("loaded").tree;
+    assert!(tree.item_text(entry).text.starts_with("The note."));
+    assert_eq!(tree.embed_footnote_item(from, 1), Some(entry));
+    let back_hit = st.footnote_at(back).expect("a backreference");
+    assert_eq!(back_hit, FootnoteHit::EmbedBack { item: entry, k: 0 });
+    assert_eq!(tree.embed_footnote_refs(entry), [from]);
+    // The host's footnote section is not involved.
+    assert_eq!(tree.footnote_item("x"), None);
+    drop(st);
+    let st = state(&reader, &mut vcx);
+    assert!(st.borrow_mut().follow_footnote(&hit));
+    assert!(st.borrow_mut().follow_footnote(&back_hit));
+}
+
+#[gpui::test]
+fn callout_folds_inside_a_note_embed_are_named_for_the_session(cx: &mut TestAppContext) {
+    use crate::reader::fold_state::{FoldKind, ReadingFold};
+
+    let dir = vault(&[
+        ("a.md", "![[b]]\n\nAfter.\n"),
+        ("b.md", "> [!faq]- Question?\n> The answer.\n"),
+    ]);
+    let path = dir.path().join("a.md");
+    let (window, workspace) = open(cx, &path);
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    settle(&mut vcx);
+    let at = {
+        let st = state(&reader, &mut vcx);
+        let st = st.borrow();
+        st.geometry
+            .controls
+            .iter()
+            .find(|c| matches!(c.kind, ControlKind::Details { .. }))
+            .map(|c| c.bounds.center())
+            .expect("the embedded callout's title row folds")
+    };
+    vcx.simulate_click(at, Modifiers::none());
+    settle(&mut vcx);
+    let folds = reader.read_with(&vcx, |r, _| r.reading_folds());
+    assert_eq!(
+        folds,
+        [ReadingFold {
+            kind: FoldKind::Callout,
+            line: "![[b]] \u{203a} Question?".into(),
+            nth: 0,
+            open: true,
+            at: Some([0, 1]),
+        }]
+    );
+    // The embedded note changed above the callout, the document is read
+    // again: the fold comes back.
+    std::fs::write(
+        dir.path().join("b.md"),
+        "Added.\n\n> [!faq]- Question?\n> The answer.\n",
+    )
+    .expect("write");
+    state(&reader, &mut vcx).borrow_mut().cache.folds.clear();
+    reader.update(&mut vcx, |r, cx| {
+        r.open(path.clone(), None, cx);
+        r.restore_reading_folds(&path, folds.clone(), cx);
+    });
+    settle(&mut vcx);
+    let texts = painted(&reader, &mut vcx);
+    assert!(texts.iter().any(|t| t == "The answer."), "{texts:?}");
+    assert_eq!(reader.read_with(&vcx, |r, _| r.reading_folds()), folds);
+}

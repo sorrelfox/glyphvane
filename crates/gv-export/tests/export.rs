@@ -882,3 +882,71 @@ fn blocks_inside_note_embeds_export_like_the_documents() {
     assert!(doc.source.contains("#super[#\"1\";]"), "{}", doc.source);
     assert!(doc.source.contains("#table("), "{}", doc.source);
 }
+
+#[test]
+fn raw_html_inside_note_embeds_resolves_from_the_embedded_note() {
+    use gv_render_tree::{EmbedFetch, ImageSize, LinkStatus, LinkStatusSource, LinkTarget};
+    struct Vault;
+    impl LinkStatusSource for Vault {
+        fn status(&self, _: &LinkTarget<'_>) -> LinkStatus {
+            LinkStatus::Exact
+        }
+        fn embed(&self, destination: &str, _: Option<&str>) -> EmbedFetch {
+            if destination != "Raw" {
+                return EmbedFetch::Unavailable;
+            }
+            EmbedFetch::Note {
+                key: "sub/Raw.md".into(),
+                title: "Raw".into(),
+                text: "<div><img src=\"img/p.png\" alt=\"pic\"> \
+                       <a href='Other.md'>other</a> <a href=\"#top\">top</a> \
+                       <a href=\"https://example.com/x\">web</a></div>\n"
+                    .into(),
+            }
+        }
+    }
+    let sizes = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 1.0,
+        height: 1.0,
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("sub/img")).expect("mkdir");
+    std::fs::copy(
+        fixtures().join("img/dot.png"),
+        dir.path().join("sub/img/p.png"),
+    )
+    .expect("png");
+    let src = "<div><a href=\"Here.md\">here</a></div>\n\n![[Raw]]\n";
+    let id = ProfileId::Obsidian;
+    let syntax = gv_syntax::parse_with(src, ParseOptions::builtin(id));
+    let model = DocModel::build(&syntax, src);
+    let t = RenderTree::build(
+        &syntax,
+        &model,
+        src,
+        RenderOptions::builtin(id),
+        Sources {
+            links: &Vault,
+            images: &sizes,
+        },
+    );
+    let mut opts = options(&dir.path().join("doc.md"));
+    opts.root = Some(dir.path().to_path_buf());
+    let out = export_html(&t, &opts);
+    let html = &out.html;
+    // The image is the embedded note's (embedded), the links go through
+    // its folder; the document's own HTML, fragments and URLs stay.
+    for needle in [
+        "data:image/png;base64,",
+        "href=\"sub/Other.html\"",
+        "href=\"Here.html\"",
+        "href=\"https://example.com/x\"",
+    ] {
+        assert!(html.contains(needle), "missing {needle:?} in\n{html}");
+    }
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    opts.images = ImageMode::Assets;
+    let out = export_html(&t, &opts);
+    assert_eq!(out.assets.len(), 1, "{:?}", out.notes);
+    assert!(out.assets[0].source.ends_with("sub/img/p.png"));
+}

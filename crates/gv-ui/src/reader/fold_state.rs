@@ -6,7 +6,8 @@
 //! named by what it is, the first line of its rendered source (the
 //! callout's title text, the `<details>` block's first line) and how many
 //! with the same line come before it. Block ids change when the text is
-//! read again; these names survive edits elsewhere in the note.
+//! read again; these names survive edits elsewhere in the note. A callout
+//! inside a note embed is named by the embed's line and its title.
 //!
 //! A fold also keeps its place among the blocks of its kind and how many
 //! there were. When its name is gone (the callout's title was renamed),
@@ -23,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::Context;
-use gv_render_tree::{NodeKind, RenderTree};
+use gv_render_tree::{BlockNode, FrameKind, ItemId, NodeKind, RenderTree};
 use gv_syntax::BlockId;
 use serde::{Deserialize, Serialize};
 
@@ -91,15 +92,20 @@ fn names(tree: &RenderTree, text: &str) -> Vec<Named> {
                 NodeKind::CalloutTitle { .. } => FoldKind::Callout,
                 _ => return None,
             };
-            let source = text.get(node.source.clone()).unwrap_or_default();
-            let line: String = source
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .chars()
-                .take(LINE_MAX)
-                .collect();
+            let line: String = match embedded_line(tree, text, node) {
+                Some(line) => line,
+                None => text
+                    .get(node.source.clone())
+                    .unwrap_or_default()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+            }
+            .chars()
+            .take(LINE_MAX)
+            .collect();
             let count = seen.entry((kind, line.clone())).or_default();
             let nth = *count;
             *count += 1;
@@ -113,6 +119,33 @@ fn names(tree: &RenderTree, text: &str) -> Vec<Named> {
             })
         })
         .collect()
+}
+
+/// The name of a callout inside a note embed (its source is the embed's
+/// line): the embed's line, then the callout's title.
+fn embedded_line(tree: &RenderTree, text: &str, node: &BlockNode) -> Option<String> {
+    let NodeKind::CalloutTitle { title, .. } = &node.kind else {
+        return None;
+    };
+    let embed = node
+        .context
+        .iter()
+        .find(|f| matches!(f.kind, FrameKind::Embed { .. }))?;
+    let ix = tree.index_of(ItemId {
+        block: embed.id,
+        chunk: 0,
+    })?;
+    let line = tree.node_of(ix)?;
+    let source = text.get(line.source.clone()).unwrap_or_default();
+    let source = source.lines().next().unwrap_or_default().trim();
+    // The title's text without its icon's placeholder.
+    let title: String = title
+        .paragraph
+        .text()
+        .chars()
+        .filter(|&c| c != '\u{fffc}')
+        .collect();
+    Some(format!("{source} \u{203a} {}", title.trim()))
 }
 
 impl State {

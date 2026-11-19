@@ -215,6 +215,7 @@ fn dump_node(node: &BlockNode, out: &mut String) {
             kind,
             raw_html_pending,
             code,
+            ..
         } => {
             let _ = writeln!(
                 out,

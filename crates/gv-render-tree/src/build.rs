@@ -33,6 +33,7 @@ use crate::tree::{FrontMatterDisplay, RenderOptions};
 mod obsidian;
 
 pub use obsidian::{CALLOUT_TITLE_GUTTER, MAX_EMBED_BYTES, MAX_EMBED_DEPTH, MAX_EMBED_NODES};
+pub(crate) use obsidian::{EmbedAgain, is_embed_notes};
 
 pub const MAX_FRAMES: usize = 32;
 
@@ -127,8 +128,14 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     /// The paragraph that gets footnote backreferences: its block and the
     /// number of references.
     pub backrefs: Option<(BlockId, u32)>,
-    /// Synthetic block ids made for embedded blocks so far.
+    /// Synthetic block ids made for embedded blocks so far (in the
+    /// outermost note embed being built).
     pub(crate) synthetic: u64,
+    /// Callout titles given synthetic ids so far (likewise).
+    pub(crate) callouts: u64,
+    /// The outermost note embed being built: its line's block id, which
+    /// the synthetic ids made for it carry.
+    pub(crate) embed_base: u64,
     /// While a callout's title is built: its colour and icon gutter.
     pub(crate) title_cx: Option<(crate::style::ColorToken, f32)>,
     /// Building the blocks of an embedded note (see [`obsidian`]).
@@ -171,6 +178,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             details: Vec::new(),
             backrefs: None,
             synthetic: 0,
+            callouts: 0,
+            embed_base: 0,
             title_cx: None,
             embed: None,
             budget: obsidian::Budget::default(),
@@ -386,6 +395,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                             kind,
                             raw_html_pending: true,
                             code,
+                            from: self.embed.as_ref().map(|e| Arc::clone(&e.key)),
                         },
                         range.start,
                         None,

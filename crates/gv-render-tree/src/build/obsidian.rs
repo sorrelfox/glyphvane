@@ -15,9 +15,10 @@
 //! [`crate::ImageInfo::from`]); headings are paragraphs in a heading's
 //! type (not anchors of the document). Their sources are in another file:
 //! every embedded node, and everything in it, maps to the end of the
-//! embed's line, and every block gets a synthetic id. The footnotes the
-//! embedded part refers to are numbered from 1 and listed at the embed's
-//! end; inline footnotes show in place.
+//! embed's line, and every block gets a synthetic id (the same each time
+//! the embed is built). The footnotes the embedded part refers to are
+//! numbered from 1 and listed at the embed's end, each with backreferences
+//! to its references there; inline footnotes show in place.
 //! Embeds inside the embedded note are shown the same way, up to the
 //! budgets: [`MAX_EMBED_DEPTH`] nested embeds, [`MAX_EMBED_NODES`] blocks
 //! and [`MAX_EMBED_BYTES`] of embedded text per outermost embed. A cycle
@@ -34,7 +35,9 @@ use std::sync::Arc;
 
 use gv_model::{Anchoring, BlockMatch, DocModel, FragmentMatch};
 use gv_syntax::inline::{InlineInput, InlineKind, InlineOptions, parse_inlines_with};
-use gv_syntax::{BlockId, CalloutFold, Container, ContainerKind, Leaf, SyntaxTree, Visitor};
+use gv_syntax::{
+    BlockId, CalloutFold, Container, ContainerKind, Leaf, LeafKind, SyntaxTree, Visitor,
+};
 use gv_text::TextSource;
 
 use super::{NodeBuilder, Open};
@@ -60,7 +63,32 @@ pub const MAX_EMBED_BYTES: usize = 2 << 20;
 pub const CALLOUT_TITLE_GUTTER: f32 = 22.0;
 
 /// Synthetic block ids have this bit set (the parser's ids never do).
+/// Below it: a tag ([`NOTES_LIST`], [`CALLOUT`]), the block id of the
+/// outermost embed's line, and a number counted within that embed, so
+/// building an embed again gives its blocks the same ids (callout folds
+/// are kept by id) and two embeds never share one.
 const SYNTHETIC: u64 = 1 << 63;
+/// The tag of the list of an embed's footnotes (its frame's id).
+const NOTES_LIST: u64 = 1 << 62;
+/// The tag of a callout title's id: numbered by callout within the
+/// outermost embed, so it stays when other blocks there come and go.
+const CALLOUT: u64 = 1 << 61;
+/// Bits of the number counted within an embed.
+const COUNT_BITS: u32 = 24;
+/// Bits of the embed line's block id kept.
+const BASE_MASK: u64 = (1 << (61 - COUNT_BITS)) - 1;
+
+/// A synthetic id: `tag`, the outermost embed's `base` and `n`.
+fn synthetic_id(tag: u64, base: u64, n: u64) -> BlockId {
+    BlockId(SYNTHETIC | tag | ((base & BASE_MASK) << COUNT_BITS) | (n & ((1 << COUNT_BITS) - 1)))
+}
+
+/// Whether `frame` is the list of footnotes at a note embed's end.
+pub(crate) fn is_embed_notes(frame: &Frame) -> bool {
+    frame.id.0 & (SYNTHETIC | NOTES_LIST) == SYNTHETIC | NOTES_LIST
+        && frame.id.0 & CALLOUT == 0
+        && matches!(frame.kind, FrameKind::List { ordered: true, .. })
+}
 
 /// What one outermost embed has used of the budgets.
 #[derive(Default)]
@@ -208,6 +236,9 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             self.push(n, None);
         }
         if outermost {
+            self.synthetic = 0;
+            self.callouts = 0;
+            self.embed_base = leaf.id.0;
             self.budget = Budget::default();
             if let Some((key, title)) = self.sources.links.document_key() {
                 self.budget.chain.push((key, title, None));
@@ -436,9 +467,15 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
                 inner: &mut sub,
             });
         }
+        let mut sections = std::mem::take(&mut sub.sections);
+        if let Some(index) = sub.footnotes.clone() {
+            for def in sections.iter_mut().filter(|d| d.number.is_some()) {
+                let count = index.references(&def.label);
+                sub.embed_backrefs(&tree, def, count);
+            }
+        }
         self.budget = std::mem::take(&mut sub.budget);
         let nodes = std::mem::take(&mut sub.nodes);
-        let sections = std::mem::take(&mut sub.sections);
         drop(sub);
         if self.splice(nodes, at) {
             self.embed_footnotes(sections, at);
@@ -458,11 +495,11 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         if defs.is_empty() {
             return;
         }
-        self.synthetic += 1;
+        let id = self.next_synthetic();
         let context = self.context();
         self.push(
             BlockNode {
-                id: BlockId(SYNTHETIC | self.synthetic),
+                id,
                 kind: NodeKind::ThematicBreak,
                 source: at..at,
                 context,
@@ -475,7 +512,7 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         );
         // One list (its frame's id is mapped like the others, once).
         let list = Frame {
-            id: BlockId(SYNTHETIC),
+            id: BlockId(SYNTHETIC | NOTES_LIST),
             kind: FrameKind::List {
                 ordered: true,
                 tight: true,
@@ -505,6 +542,67 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         self.splice(nodes, at);
     }
 
+    /// The backreferences of footnote `def` of an embedded note (whose
+    /// syntax tree is `tree`), referenced `count` times there: after its
+    /// last paragraph, else on a line of their own.
+    fn embed_backrefs(&mut self, tree: &SyntaxTree, def: &mut super::Section, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let paragraph = def
+            .nodes
+            .last()
+            .filter(|n| {
+                matches!(n.kind, NodeKind::Paragraph(_))
+                    && n.context.len() == 1
+                    && n.id.0 & SYNTHETIC == 0
+            })
+            .map(|n| (n.id, n.block.clone()));
+        if let Some((id, block)) = paragraph {
+            self.backrefs = Some((id, count));
+            let mut again = BuildLeaf {
+                id,
+                builder: self,
+                found: None,
+            };
+            tree.walk_range(block, &mut again);
+            let found = again.found;
+            self.backrefs = None;
+            if let (Some(mut node), Some(last)) = (found, def.nodes.last_mut()) {
+                node.context = last.context.clone();
+                node.top = last.top.clone();
+                *last = node;
+                return;
+            }
+        }
+        let at = def.range.end;
+        let context = def.nodes.first().map_or_else(
+            || {
+                Context::from(vec![Frame {
+                    id: def.id,
+                    kind: FrameKind::Footnote {
+                        number: def.number.unwrap_or(0),
+                        label: Arc::clone(&def.label),
+                    },
+                }])
+            },
+            |n| Context::from(&n.context[..1]),
+        );
+        let id = self.next_synthetic();
+        let cx = self.inline_cx(def.id);
+        let content = inline::build_backrefs_only(at, count, &cx);
+        def.nodes.push(BlockNode {
+            id,
+            kind: NodeKind::Paragraph(Arc::new(content)),
+            source: at..at,
+            context,
+            block: at..at,
+            top: def.range.clone(),
+            lookups: None,
+            table: false,
+        });
+    }
+
     /// Pushes the nodes of an embedded note (built by another builder)
     /// inside the frames open here, every source mapped to `at` and every
     /// block id replaced by a synthetic one. False when the node budget
@@ -513,11 +611,26 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         let mut ids: HashMap<BlockId, BlockId> = HashMap::new();
         let mut contexts: HashMap<usize, Context> = HashMap::new();
         let outer = self.frames.clone();
+        let base = self.embed_base;
+        // Callout titles (and the fold frames on their ids) are numbered
+        // by callout.
+        for n in &nodes {
+            if matches!(n.kind, NodeKind::CalloutTitle { .. }) && !ids.contains_key(&n.id) {
+                self.callouts += 1;
+                ids.insert(n.id, synthetic_id(CALLOUT, base, self.callouts));
+            }
+        }
         let mut synthetic = self.synthetic;
         let mut map = |id: BlockId| {
             *ids.entry(id).or_insert_with(|| {
                 synthetic += 1;
-                BlockId(SYNTHETIC | synthetic)
+                // The footnote list keeps its tag.
+                let tag = if id.0 & (SYNTHETIC | NOTES_LIST | CALLOUT) == SYNTHETIC | NOTES_LIST {
+                    NOTES_LIST
+                } else {
+                    0
+                };
+                synthetic_id(tag, base, synthetic)
             })
         };
         let mut ok = true;
@@ -566,10 +679,15 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         ok
     }
 
+    /// A new synthetic block id.
+    fn next_synthetic(&mut self) -> BlockId {
+        self.synthetic += 1;
+        synthetic_id(0, self.embed_base, self.synthetic)
+    }
+
     /// A notice in an embed (a cycle, a budget, a missing section).
     fn notice(&mut self, text: &str, at: usize) {
-        self.synthetic += 1;
-        let id = BlockId(SYNTHETIC | self.synthetic);
+        let id = self.next_synthetic();
         let cx = self.inline_cx(id);
         let content = Arc::new(inline::build_plain(text, at..at, at, TextRole::Body, &cx));
         let context = self.context();
@@ -608,10 +726,12 @@ fn collapse(kind: NodeKind) -> NodeKind {
             kind,
             raw_html_pending,
             code,
+            from,
         } => NodeKind::Html {
             kind,
             raw_html_pending,
             code: collapse_code(code),
+            from,
         },
         NodeKind::Table(t) => {
             let mut t = (*t).clone();
@@ -643,6 +763,57 @@ fn collapse_code(code: Arc<CodeBlock>) -> Arc<CodeBlock> {
         l.start = 0;
     }
     Arc::new(c)
+}
+
+/// Builds a note embed again: its line (paragraph `id`) and its blocks,
+/// inside the `outer` frames it was in.
+pub(crate) struct EmbedAgain<'a, S: TextSource + ?Sized> {
+    id: BlockId,
+    outer: Vec<Frame>,
+    builder: NodeBuilder<'a, S>,
+    done: bool,
+}
+
+impl<'a, S: TextSource + ?Sized> EmbedAgain<'a, S> {
+    pub(crate) fn new(id: BlockId, outer: Vec<Frame>, builder: NodeBuilder<'a, S>) -> Self {
+        Self {
+            id,
+            outer,
+            builder,
+            done: false,
+        }
+    }
+
+    /// The nodes built.
+    pub(crate) fn into_nodes(self) -> Vec<BlockNode> {
+        self.builder.nodes
+    }
+}
+
+impl<S: TextSource + ?Sized> Visitor for EmbedAgain<'_, S> {
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if leaf.id == self.id && leaf.kind == LeafKind::Paragraph && !self.done {
+            self.done = true;
+            self.builder.frames.clone_from(&self.outer);
+            self.builder.ctx = None;
+            Visitor::leaf(&mut self.builder, leaf);
+        }
+    }
+}
+
+/// Builds the paragraph `id` again (with what the builder is set to).
+struct BuildLeaf<'b, 'a, S: TextSource + ?Sized> {
+    id: BlockId,
+    builder: &'b mut NodeBuilder<'a, S>,
+    found: Option<BlockNode>,
+}
+
+impl<S: TextSource + ?Sized> Visitor for BuildLeaf<'_, '_, S> {
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if leaf.id == self.id && leaf.kind == LeafKind::Paragraph && self.found.is_none() {
+            self.found = self.builder.build_leaf(leaf);
+        }
+    }
 }
 
 /// Feeds a builder the footnote definitions outside an embed's part that

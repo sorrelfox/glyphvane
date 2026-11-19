@@ -666,3 +666,42 @@ fn an_unplayable_audio_file_falls_back_to_the_card(cx: &mut TestAppContext) {
     );
     assert!(v.st().borrow().geometry.hosts.is_empty());
 }
+
+#[gpui::test]
+fn html_audio_inside_a_note_embed_resolves_next_to_the_embedded_note(cx: &mut TestAppContext) {
+    let dir = vault(&[
+        ("Doc.md", "![[notes/b]]\n"),
+        // `./`: beside the note that holds it (in this profile).
+        (
+            "notes/b.md",
+            "<audio controls src=\"./rec/memo.ogg\">\n</audio>\n",
+        ),
+        ("notes/rec/memo.ogg", "ogg"),
+    ]);
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    v.settle();
+    let st = v.st();
+    let st = st.borrow();
+    let doc = st.doc.as_ref().expect("loaded");
+    let live = doc
+        .tree
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.kind {
+            NodeKind::Live(l) if l.html.is_some() => Some(Arc::clone(l)),
+            _ => None,
+        })
+        .expect("the embedded audio block");
+    assert_eq!(live.host.as_deref(), Some("notes/b.md"));
+    let shown = st.cache.live.get(live.key).cloned().expect("asked for");
+    let Some(memo) = shown.card().cloned() else {
+        panic!("{shown:?}");
+    };
+    // Beside the embedded note, not beside the document.
+    assert_eq!(memo.title, "memo.ogg");
+    assert_eq!(memo.detail, "OGG audio \u{b7} 3 bytes");
+}

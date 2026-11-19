@@ -278,7 +278,12 @@ pub(crate) fn media_source(block: &LiveBlock, resolver: &Resolver, building: boo
         }
     }
     let res = if html {
-        resolver.resolve(resolver_kind(gv_model::LinkKind::Inline, true), target)
+        // Inside a note embed: from the embedded note.
+        resolver.resolve_from(
+            resolver_kind(gv_model::LinkKind::Inline, true),
+            target,
+            block.host.as_deref(),
+        )
     } else {
         resolver.resolve_embed(target, block.host.as_deref())
     };

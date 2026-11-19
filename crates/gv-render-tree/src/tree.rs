@@ -527,6 +527,78 @@ impl RenderTree {
         out
     }
 
+    /// Inside a note embed: the first item of the entry of footnote
+    /// `number` in the list of footnotes at the end of the embed that item
+    /// `ix` (a reference to it) is in.
+    pub fn embed_footnote_item(&self, ix: usize, number: u32) -> Option<usize> {
+        use crate::node::{FrameKind, ListMarker};
+        let ctx = &self.items.get(ix)?.context;
+        let p = ctx
+            .iter()
+            .rposition(|f| matches!(f.kind, FrameKind::Embed { .. }))?;
+        let embed = ctx[p].id;
+        self.items.iter().position(|it| {
+            it.context.get(p).is_some_and(|f| f.id == embed)
+                && it
+                    .context
+                    .get(p + 1)
+                    .is_some_and(crate::build::is_embed_notes)
+                && it.context.get(p + 2).is_some_and(|f| {
+                    matches!(f.kind, FrameKind::Item {
+                        marker: ListMarker::Ordered { number: n, .. },
+                    } if n == u64::from(number))
+                })
+        })
+    }
+
+    /// Inside the list of footnotes at a note embed's end: the items of
+    /// the references (in the embed) to the footnote whose entry item `ix`
+    /// is in, in order.
+    pub fn embed_footnote_refs(&self, ix: usize) -> Vec<usize> {
+        use crate::node::{FrameKind, ListMarker};
+        let Some(item) = self.items.get(ix) else {
+            return Vec::new();
+        };
+        let ctx = &item.context;
+        let Some(p) = (0..ctx.len().saturating_sub(2)).rev().find(|&p| {
+            matches!(ctx[p].kind, FrameKind::Embed { .. })
+                && crate::build::is_embed_notes(&ctx[p + 1])
+        }) else {
+            return Vec::new();
+        };
+        let FrameKind::Item {
+            marker: ListMarker::Ordered { number, .. },
+        } = ctx[p + 2].kind
+        else {
+            return Vec::new();
+        };
+        let embed = ctx[p].id;
+        let mut out = Vec::new();
+        for (i, it) in self.items.iter().enumerate() {
+            let c = &it.context;
+            let innermost = c
+                .iter()
+                .rposition(|f| matches!(f.kind, FrameKind::Embed { .. }));
+            if innermost != Some(p) || c[p].id != embed {
+                continue;
+            }
+            let Some(content) = self
+                .nodes
+                .get(it.node)
+                .and_then(|n| n.item_inline(&it.kind))
+            else {
+                continue;
+            };
+            let n = content
+                .footnotes
+                .iter()
+                .filter(|f| f.embedded && u64::from(f.number) == number)
+                .count();
+            out.extend(std::iter::repeat_n(i, n));
+        }
+        out
+    }
+
     /// Updates the tree after a reparse: `tree` is the new syntax tree,
     /// `model` its model, `text` the new text and `changes` the reparse's
     /// report (consecutive reports composed with [`Changes::compose`] if
@@ -615,7 +687,12 @@ impl RenderTree {
         // Old nodes and items of the region.
         let a = self.nodes.partition_point(|n| n.source.start < s);
         let b = self.nodes.partition_point(|n| n.source.start < old_end);
-        let b = b.max(a);
+        let mut b = b.max(a);
+        // The blocks of a note embed map to the end of its line: at the
+        // region's end (the document's), they are the region's.
+        while b > a && b < self.nodes.len() && self.nodes[b].source == (old_end..old_end) {
+            b += 1;
+        }
         let ia = self.items.partition_point(|it| it.node < a);
         let ib = self.items.partition_point(|it| it.node < b);
 
@@ -715,11 +792,9 @@ impl RenderTree {
                     })
                 })
                 .collect();
+            let mut embeds = std::collections::HashSet::new();
             for k in stale {
-                if self.rebuild_node(k, tree, text, sources) {
-                    report.nodes_built += 1;
-                    self.push_changed(k, &mut report.changed);
-                }
+                self.rebuild_stale(k, tree, text, sources, &mut embeds, &mut report);
             }
         }
         self.assign_anchors(model);
@@ -785,7 +860,7 @@ impl RenderTree {
                             title: i.title.as_deref(),
                             range: n.to_document(i.source.start)..n.to_document(i.source.end),
                             block: n.id,
-                            from: None,
+                            from: i.from.as_deref(),
                         };
                         which(&target) && sources.images.size(&target) != i.size
                     })
@@ -797,13 +872,117 @@ impl RenderTree {
             }
         }
         let mut report = UpdateReport::default();
+        let mut embeds = std::collections::HashSet::new();
         for k in stale {
-            if self.rebuild_node(k, tree, text, sources) {
-                report.nodes_built += 1;
-                self.push_changed(k, &mut report.changed);
-            }
+            self.rebuild_stale(k, tree, text, sources, &mut embeds, &mut report);
         }
         report
+    }
+
+    /// Rebuilds node `k` in place, or (a node inside a note embed) the
+    /// embed it is in, unless that was rebuilt already (`embeds`); the
+    /// rebuilt nodes and their items go to `report`.
+    fn rebuild_stale<S: TextSource + ?Sized>(
+        &mut self,
+        k: usize,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+        embeds: &mut std::collections::HashSet<BlockId>,
+        report: &mut UpdateReport,
+    ) {
+        if self.rebuild_node(k, tree, text, sources) {
+            report.nodes_built += 1;
+            self.push_changed(k, &mut report.changed);
+            return;
+        }
+        let embed = self.nodes[k]
+            .context
+            .iter()
+            .find(|f| matches!(f.kind, crate::node::FrameKind::Embed { .. }))
+            .map(|f| f.id);
+        if let Some(embed) = embed
+            && embeds.insert(embed)
+            && let Some(nodes) = self.rebuild_embed(k, tree, text, sources)
+        {
+            report.nodes_built += nodes.len();
+            for j in nodes {
+                self.push_changed(j, &mut report.changed);
+            }
+        }
+    }
+
+    /// Builds the outermost note embed node `k` is in again, in place (a
+    /// node of an embedded note cannot be built alone), and returns its
+    /// nodes. `None` when `k` is in no embed or the number of its nodes or
+    /// items would change.
+    fn rebuild_embed<S: TextSource + ?Sized>(
+        &mut self,
+        k: usize,
+        tree: &SyntaxTree,
+        text: &S,
+        sources: Sources<'_>,
+    ) -> Option<Range<usize>> {
+        let ctx = Arc::clone(&self.nodes[k].context);
+        let p = ctx
+            .iter()
+            .position(|f| matches!(f.kind, crate::node::FrameKind::Embed { .. }))?;
+        let embed = ctx[p].id;
+        let inside = |n: &BlockNode| n.context.get(p).is_some_and(|f| f.id == embed);
+        let mut a = k;
+        while a > 0 && inside(&self.nodes[a - 1]) {
+            a -= 1;
+        }
+        let mut b = k + 1;
+        while b < self.nodes.len() && inside(&self.nodes[b]) {
+            b += 1;
+        }
+        if self.nodes[a].id != embed {
+            return None;
+        }
+        let refs = self.refs.clone().unwrap_or_else(|| tree.ref_map(text));
+        let mut builder = NodeBuilder::new(
+            text,
+            refs,
+            &self.opts,
+            tree.options().inline(),
+            sources,
+            None,
+        );
+        builder.parse_opts = Some(tree.options());
+        builder.footnotes = self.footnotes.clone();
+        builder.divert = false;
+        let mut again = crate::build::EmbedAgain::new(embed, ctx[..p].to_vec(), builder);
+        gv_syntax::walk_range(tree, self.nodes[a].block.clone(), &mut again);
+        let mut nodes = again.into_nodes();
+        if nodes.len() != b - a {
+            return None;
+        }
+        let ia = self.items.partition_point(|it| it.node < a);
+        let ib = self.items.partition_point(|it| it.node < b);
+        let mut items = Vec::new();
+        let flat = self.flattener();
+        for (j, (node, old)) in nodes.iter_mut().zip(&self.nodes[a..b]).enumerate() {
+            node.top = old.top.clone();
+            flat.node_items(node, a + j, &mut items);
+        }
+        if items.len() != ib - ia {
+            return None;
+        }
+        for (slot, node) in self.nodes[a..b].iter_mut().zip(nodes) {
+            *slot = node;
+        }
+        self.macros = OnceLock::new();
+        self.index = OnceLock::new();
+        for (slot, new) in self.items[ia..ib].iter_mut().zip(items) {
+            *slot = Item {
+                gap_before: slot.gap_before,
+                opens: slot.opens,
+                closes: slot.closes,
+                ..new
+            };
+        }
+        Some(a..b)
     }
 
     /// Soft-wraps code block `block` (a code or HTML block) or makes it

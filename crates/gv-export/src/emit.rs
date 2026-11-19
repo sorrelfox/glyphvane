@@ -453,9 +453,12 @@ impl Emitter<'_> {
             }
             NodeKind::Table(t) => self.table(ix, node, t),
             NodeKind::ThematicBreak => self.out.push_str("<hr>\n"),
-            NodeKind::Html { code, .. } => {
+            NodeKind::Html { code, from, .. } => {
                 // Raw HTML as written; the sanitizer decides what stays.
-                self.raw_html(&code.text);
+                // Inside a note embed its relative URLs are the embedded
+                // note's.
+                let html = self.embedded_html(&code.text, from.as_deref());
+                self.raw_html(&html);
                 self.out.push('\n');
             }
             NodeKind::Properties { props, .. } => {
@@ -507,7 +510,8 @@ impl Emitter<'_> {
                 if let (Some(_), Some(c)) = (&live.html, &live.code) {
                     // An `<audio>`, `<video>` or `<iframe>` block: raw
                     // HTML, as written; the sanitizer decides what stays.
-                    self.raw_html(&c.text);
+                    let html = self.embedded_html(&c.text, live.host.as_deref());
+                    self.raw_html(&html);
                     self.out.push('\n');
                 } else if let Some(c) = &live.label {
                     self.out.push_str("<p>");
@@ -517,6 +521,17 @@ impl Emitter<'_> {
                     self.code(node, c);
                 }
             }
+        }
+    }
+
+    /// Raw HTML of the note `from` (inside a note embed; `None`: the
+    /// document's) with its relative URLs rebased onto the document.
+    fn embedded_html<'h>(&self, html: &'h str, from: Option<&str>) -> std::borrow::Cow<'h, str> {
+        match from {
+            None => std::borrow::Cow::Borrowed(html),
+            Some(from) => std::borrow::Cow::Owned(rebase_html(html, |url| {
+                embedded_image_src(self.opts, Some(from), url)
+            })),
         }
     }
 
@@ -1255,6 +1270,124 @@ pub(crate) fn embedded_image_src(opts: &ExportOptions, from: Option<&str>, dest:
     match relative_path(host, note_dir) {
         Some(prefix) => format!("{prefix}/{trimmed}"),
         None => dest.to_owned(),
+    }
+}
+
+/// `html` with the URLs of its `src`, `href`, `poster` and `srcset`
+/// attributes passed through `rebase` (which gets each URL as written,
+/// entities included, and returns it unchanged or with a path before it).
+pub(crate) fn rebase_html(html: &str, rebase: impl Fn(&str) -> String) -> String {
+    let b = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + 16);
+    let mut copied = 0;
+    let mut i = 0;
+    while let Some(lt) = html[i..].find('<').map(|p| i + p) {
+        if html[lt..].starts_with("<!--") {
+            i = html[lt..].find("-->").map_or(b.len(), |p| lt + p + 3);
+            continue;
+        }
+        let mut j = lt + 1;
+        if !b.get(j).is_some_and(u8::is_ascii_alphabetic) {
+            i = j;
+            continue;
+        }
+        while b
+            .get(j)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        {
+            j += 1;
+        }
+        // Attributes up to the tag's end.
+        loop {
+            while b
+                .get(j)
+                .is_some_and(|c| c.is_ascii_whitespace() || *c == b'/')
+            {
+                j += 1;
+            }
+            match b.get(j) {
+                None | Some(b'>') => break,
+                _ => {}
+            }
+            let name_start = j;
+            while b
+                .get(j)
+                .is_some_and(|c| !c.is_ascii_whitespace() && !matches!(c, b'=' | b'>' | b'/'))
+            {
+                j += 1;
+            }
+            let name = html[name_start..j].to_ascii_lowercase();
+            if name_start == j {
+                j += 1;
+                continue;
+            }
+            let mut k = j;
+            while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+                k += 1;
+            }
+            if b.get(k) != Some(&b'=') {
+                continue;
+            }
+            k += 1;
+            while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+                k += 1;
+            }
+            let (value, end) = match b.get(k) {
+                Some(&q) if q == b'"' || q == b'\'' => {
+                    let close = html[k + 1..].find(q as char).map_or(b.len(), |p| k + 1 + p);
+                    (k + 1..close, (close + 1).min(b.len()))
+                }
+                _ => {
+                    let mut e = k;
+                    while b
+                        .get(e)
+                        .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'>')
+                    {
+                        e += 1;
+                    }
+                    (k..e, e)
+                }
+            };
+            j = end;
+            let value_text = &html[value.clone()];
+            let new = match name.as_str() {
+                "src" | "href" | "poster" => rebase_one(value_text, &rebase),
+                "srcset" => value_text
+                    .split(',')
+                    .map(|c| {
+                        let lead = c.len() - c.trim_start().len();
+                        let t = c.trim_start();
+                        let url_end = t.find(char::is_whitespace).unwrap_or(t.len());
+                        format!(
+                            "{}{}{}",
+                            &c[..lead],
+                            rebase_one(&t[..url_end], &rebase),
+                            &t[url_end..]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                _ => continue,
+            };
+            if new != value_text {
+                out.push_str(&html[copied..value.start]);
+                out.push_str(&new);
+                copied = value.end;
+            }
+        }
+        i = j;
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
+/// One URL of [`rebase_html`]: what `rebase` puts before it, escaped.
+fn rebase_one(url: &str, rebase: &impl Fn(&str) -> String) -> String {
+    let trimmed = url.trim();
+    let new = rebase(url);
+    match new.strip_suffix(trimmed) {
+        Some(prefix) if new != url => format!("{}{trimmed}", escaped(prefix)),
+        _ => url.to_owned(),
     }
 }
 
