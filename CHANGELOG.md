@@ -47,6 +47,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   (a `: `, a leading `#` or `[`, list separators in `[a, b]` lists).
 - A PDF embed whose page cannot be drawn is not asked for again on every
   refresh.
+- Screen readers read a Live Preview task checkbox as `[ ]` or `[x]`
+  instead of a space.
 
 ## [1.2.0] - 2026-11-19
 

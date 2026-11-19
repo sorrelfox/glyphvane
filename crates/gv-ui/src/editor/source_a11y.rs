@@ -53,8 +53,8 @@ const MAX_CHAR: usize = 255;
 
 /// A box widget's text (an image, inline math) is the object replacement
 /// character; screen readers take that for an embedded object, so it is
-/// reported as what the widget stands for (its alt text, its TeX), or as
-/// a space (a task's checkbox).
+/// reported as what the widget stands for (its alt text, its TeX, a task
+/// checkbox's `[ ]` or `[x]`), or as a space.
 const OBJECT_REPLACEMENT: &str = "\u{fffc}";
 
 /// The fewest and the most lines described above and below the screen.

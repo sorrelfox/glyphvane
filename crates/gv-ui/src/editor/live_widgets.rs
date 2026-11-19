@@ -398,6 +398,8 @@ impl Widgets {
             } else {
                 Arc::clone(alt)
             }),
+            // A checkbox reads as the source it stands for.
+            WidgetSpec::Task { checked } => Some(Arc::from(if *checked { "[x]" } else { "[ ]" })),
             _ => None,
         };
         if let Some(spoken) = spoken {
@@ -554,6 +556,15 @@ mod tests {
             widgets.paint(widget.id),
             Some((WidgetPaint::Task { checked: true }, WidgetClick::Task))
         ));
+    }
+
+    #[test]
+    fn task_boxes_read_as_their_source() {
+        let mut widgets = Widgets::default();
+        for (checked, spoken) in [(true, "[x]"), (false, "[ ]")] {
+            let widget = widgets.widget(&WidgetSpec::Task { checked }, &sizes(), None, true, None);
+            assert_eq!(widgets.spoken(widget.id).as_deref(), Some(spoken));
+        }
     }
 
     #[test]
