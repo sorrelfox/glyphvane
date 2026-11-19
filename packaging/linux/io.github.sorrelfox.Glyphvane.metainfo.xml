@@ -102,6 +102,13 @@
   <content_rating type="oars-1.1"/>
   <!-- Add an entry for every release, newest first. -->
   <releases>
+    <release version="1.3.0" date="2026-11-19">
+      <description>
+        <p>PDF text selection across pages, reading order for two-column pages, and find across lines, pages and hyphenated words.</p>
+        <p>Live results in canvas cards, a keyboard cursor in bases, block links into other notes, opening links in a new window, and search matches highlighted in the opened note.</p>
+        <p>Many fixes for renames, history, new-note locations and screen readers.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-11-19">
       <description>
         <p>A built-in PDF viewer with find, text selection and copying, which reopens where you left off.</p>

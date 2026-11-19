@@ -12,7 +12,7 @@ profile, such as CommonMark, GitHub Flavored Markdown or Obsidian.
 
 ![Glyphvane showing a note in the Reading view, with a table, highlighted code, math and a diagram](docs/screenshots/01-reading-view.png)
 
-**Status:** 1.2 released. Download it from
+**Status:** 1.3 released. Download it from
 [GitHub Releases](https://github.com/sorrelfox/glyphvane/releases): `.deb`,
 `.rpm`, AppImage, Flatpak bundle and `.tar.gz` for Linux (x86_64 and arm64),
 an Arch Linux package (x86_64), and `.msi` and `.zip` for Windows (x64 and

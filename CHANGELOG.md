@@ -3,149 +3,125 @@
 All notable changes to Glyphvane are listed here. The format follows
 Conventional Commits, and versions follow Semantic Versioning.
 
-## [Unreleased]
+## [1.3.0] - 2026-11-19
 
 ### PDF
 
 - Text selection in the PDF viewer runs across pages: drag or Shift+click
-  from one page to another to select and copy the text between; pages in
+  from one page to another to select and copy the text between. Pages in
   two columns are read column by column, so find, selection and copying
   follow the reading order.
 - Find in a PDF matches across line ends, page ends and a hyphen at a line
-  end: a phrase continuing on the next line or page is found (and
-  highlighted on both pages), and "infor-" followed by "mation" is found
-  as "information".
-  Copying joins words split at a soft hyphen.
+  end: a phrase continuing on the next line or page is found and
+  highlighted on both pages, and "infor-" followed by "mation" is found
+  as "information". Copying joins words split at a soft hyphen.
+- Ctrl+wheel zooms at the pointer, and find scrolls sideways to a match
+  off the side of a zoomed page.
+- A PDF embed's page is drawn again, sharper, after zooming in, and a page
+  that cannot be drawn is not asked for again on every refresh.
 
-### Reading
+### Canvas and Bases
 
 - Canvas cards show query results, base tables and media cards instead of
-  placeholders, filled in off the UI thread and kept up to date with the
-  vault; a click on a result opens it. Embedded canvases stay placeholders.
+  placeholders, kept up to date with the vault; a click on a result opens
+  it. Embedded canvases stay placeholders.
+- Bases tables and lists have a keyboard cursor: with the base focused (it
+  is now a Tab stop), the arrow keys, Home, End, Page Up and Page Down move
+  over the rows, Left and Right over a table's cells, and Enter opens the
+  row's file.
+- `file.ctime` in bases is the file's creation time.
+- Moving a folder updates `file.inFolder("…")` in bases, and renaming a
+  heading or block ID updates `link("Note#Heading")`.
+
+### Links and navigation
+
+- Ctrl+Alt+Shift+click on a link opens it in a new window, in the Reading
+  view and the editor, and on canvas cards, base rows, search results,
+  query blocks and hover previews.
+- A note opened from a Search panel result shows the matches of that line
+  highlighted, in the Reading view and in the editor, until the next
+  click, Esc, edit or search.
+- Query blocks mark the matched words in their context lines, and a click
+  on a matching line opens the note at that line.
+- The hover preview of a link to a heading shows only that heading's
+  section.
+- New note (Ctrl+N), notes created from the quick switcher and the link
+  checker's *Create note* follow the vault's `newFileLocation` (the vault
+  folder, the current note's folder, or a chosen folder). A folder setting
+  that would leave the vault is never followed.
+- For an unresolved link whose name is not valid on every platform, the
+  link checker offers to create the note under the cleaned name and
+  rewrite the link to it.
+- Renaming or moving a note or folder, and renaming a heading or block ID,
+  update the `href` of HTML links (`<a href="Note.md#Heading">`). As in
+  Obsidian, they are still not counted as links in backlinks.
+- A heading written over several lines (setext) can be renamed, and a
+  renamed note's links in front matter stay valid YAML.
 
 ### Editing
 
+- Block link autocomplete lists the blocks of other notes (`[[Note#^`)
+  and of every note (`[[^^`). Choosing a block without an ID adds one to
+  that note where Obsidian puts it: in its tab when it is open, else in
+  its file. A note with unsaved changes in another window, or changed
+  since its blocks were listed, is left alone.
+- Property values chosen from autocomplete are quoted when YAML needs it,
+  and the mouse wheel scrolls the autocomplete list.
 - A text or code file switched between the viewer and Edit keeps the line
-  at the top, both ways, edited or not.
+  at the top.
 
-### Features
+### Reading
 
-- Ctrl+Alt+Shift+click on a link opens it in a new window, in the Reading
-  view and the editor, and on canvas cards, base rows and links, search
-  results, query blocks and hover previews.
-- Query blocks mark the matched words in their context lines, as the
-  Search panel does.
-- The hover preview of a link to a heading shows only that heading's
-  section, up to the next heading of the same or a higher level.
-- For an unresolved link whose name is not valid on every platform, the
-  link checker offers to create the note under the cleaned name and
-  rewrite the link to it, as following the link does.
-- The Files panel sorts by created time (new to old, or old to new), as
-  Obsidian does; where the file system keeps no creation time, the
-  modified time stands in.
-- A note opened from a Search panel result shows the matches of that
-  line highlighted, in the Reading view and in the editor (which scrolls
-  to them in Edit mode), until the next click, Esc, edit or search.
-- Block link autocomplete lists the blocks of other notes (`[[Note#^`,
-  `[[Note^`) and of every note (`[[^^`): paragraphs, list items, tables,
-  code and math blocks, quotes and headings. Choosing a block that has no
-  ID adds a new one to that note where Obsidian puts it (at the end of the
-  line, or on its own line after a table, code block or quote): in its
-  tab when it is open, else in its file. A note with unsaved changes in
-  another window, or changed since its blocks were listed, is left
-  alone and the link is not written.
+- In the Obsidian profile white space collapses as in Obsidian: a run of
+  spaces or tabs shows as one space; code spans and `&nbsp;` keep theirs.
+- A `%%…%%` comment that runs over a line break inside a paragraph is
+  hidden.
+- A callout written `[!type|meta]` shows as its type.
+- Formulas in backlink context lines and search results use the math
+  macros their note defines.
+- An image that cannot be drawn shows its alt text without the `|300`
+  size; images in inline footnotes and `<picture>` blocks take their size
+  in place; without a vault, an image changed on disk shows its new
+  version.
+
+### Files and history
+
+- The Files panel sorts by created time, and its sort order is kept with
+  the session.
+- A note renamed or moved by another program keeps its version history
+  when the file still holds the note's last kept version; two histories
+  are never mixed.
+- Two processes saving the same note at the same moment both keep their
+  version in the file history.
+- The Bookmarks panel follows changes to Obsidian's `bookmarks.json`, and
+  the trust prompt names items added to the folder while it shows.
+- Windows: files on ReFS volumes are told apart by their full 128-bit
+  file ID.
+- Windows: the print dialog's printer data is read within its bounds.
 
 ### Accessibility
 
-- Bases tables and lists can be read row by row: with the base focused (it
-  is now a Tab stop), the arrow keys, Home, End, Page Up and Page Down move
-  over the rows and Left and Right over a table's cells, and Enter opens the
-  row's file. Screen readers read the cell under the cursor with its row
-  and column; the base is a named group.
-- Canvases list their cards for screen readers only while one is running,
-  and a canvas with very many cards lists those around the selected card
-  (or the cards in view), so large canvases stay fast.
-- The autocomplete popover is a list box of options for screen readers,
-  and the highlighted suggestion is announced as it changes.
+- Screen readers reading the editor line by line no longer stop past the
+  visible lines, and can scroll the editor sideways.
+- Live Preview task checkboxes read as `[ ]` or `[x]`.
+- Bases read the cell under the cursor with its row and column; canvases
+  list their cards only while a screen reader runs, bounded for large
+  canvases; the autocomplete popover announces the highlighted
+  suggestion.
+
+### Performance
+
+- Query blocks stop their search when they leave the view, and windows
+  without a vault pick up the content index as soon as it opens instead
+  of checking every 2 seconds.
+- `[[##` and `[[^^` autocomplete gather headings and block IDs once per
+  index update.
+- A cancelled PDF page no longer restarts the helper.
 
 ### Documentation
 
-- A sample vault (`docs/sample-vault`) tours the features with one short
-  note each, plus a base, a canvas, an image and a PDF; the user guide
+- A sample vault (`docs/sample-vault`) tours the features; the user guide
   says how to open it.
-
-### Fixes
-
-- A note renamed or moved by another program (a file manager, `git mv`,
-  a sync client) keeps its version history when the vault watcher sees
-  the rename and the file still holds the note's last kept version.
-- New note (Ctrl+N) and notes created from the quick switcher go to the
-  vault's default location for new notes (Obsidian's `newFileLocation`:
-  the vault folder, the current note's folder, or a chosen folder).
-- The Files panel's sort order is kept with the session.
-- A callout written `[!type|meta]` shows as its type; the metadata is no
-  longer part of its name or title.
-- An image that cannot be drawn shows its alt text without the `|300` size.
-- Property values chosen from autocomplete are quoted when YAML needs it
-  (a `: `, a leading `#` or `[`, list separators in `[a, b]` lists).
-- A PDF embed whose page cannot be drawn is not asked for again on every
-  refresh.
-- Screen readers read a Live Preview task checkbox as `[ ]` or `[x]`
-  instead of a space.
-- The link checker's *Create note* puts a note named by a bare link where
-  the vault's `newFileLocation` says, as following the link does.
-- A `%%…%%` comment that runs over a line break inside a paragraph is
-  hidden in the Reading view, and its markers in Live Preview, as on one
-  line.
-- The mouse wheel scrolls the autocomplete list.
-- The trust prompt names plugins, themes, snippets and shared settings
-  added to the folder while it shows.
-- Find in a PDF scrolls sideways to a match off the side of a zoomed page.
-- Moving or renaming a folder updates `file.inFolder("…")` in bases.
-- Renaming a note keeps the front matter valid YAML: a new name with `'`
-  in a single-quoted link is written `''` (and escaped in double quotes).
-- Renaming a heading or block ID updates `link("Note#Heading")` in bases.
-- A click on a matching line of a query block opens the note at that line.
-- A canvas, base or media card inside an embedded note opens its file as
-  linked from the embedded note.
-- Screen readers can scroll the editor sideways and to a position.
-- A heading written over several lines (setext) can be renamed.
-- Ctrl+wheel in the PDF viewer zooms at the pointer instead of the top of
-  the view.
-- An image inside an inline footnote (`^[…]`) takes its size in the
-  footnote section when the size is known after the note is shown.
-- Without a vault, an image that changes on disk shows its new version
-  even while the Reading view is idle.
-- A PDF embed's page is drawn again, sharper, after zooming in.
-- The Bookmarks panel follows changes to Obsidian's `bookmarks.json`.
-- In the Obsidian profile the Reading view collapses white space as
-  Obsidian does: a run of spaces or tabs shows as one space, also around
-  a hidden `%%…%%` comment; code spans and `&nbsp;` keep theirs.
-- Two Glyphvane windows of separate processes saving the same note at the
-  same moment both keep their version in the file history.
-- Performance: a remote image in a `<picture>` takes its place without
-  building the whole document again.
-- Performance: a query block stops its search when it leaves the view or
-  another document opens.
-- Performance: `[[##` and `[[^^` autocomplete gather the vault's headings
-  and block IDs once per index update instead of on every key.
-- Performance: a PDF page the viewer stopped waiting for no longer
-  restarts the helper (and reopens the file) when it ends soon after.
-- Renaming or moving a note or folder, and renaming a heading or block ID,
-  update the `href` of HTML links (`<a href="Note.md#Heading">`), written
-  as a URL (`%20` for a space). As in Obsidian, they are still not counted
-  as links in backlinks or the link checker.
-- Formulas in backlink context lines and search results use the math
-  macros (`\newcommand`, `\def`) their note defines before them.
-- Windows: files on ReFS volumes are told apart by their full 128-bit file
-  ID, so renames by other programs and replaced files are recognised
-  there as on NTFS.
-- Screen readers reading the editor line by line no longer stop about a
-  screen past the visible lines: the lines around the caret are always
-  described, also when the view was scrolled away from it.
-- Performance: query blocks and bases in a window without a vault pick up
-  the vault's content index as soon as it opens or changes, instead of
-  checking every 2 seconds.
 
 ## [1.2.0] - 2026-11-19
 
