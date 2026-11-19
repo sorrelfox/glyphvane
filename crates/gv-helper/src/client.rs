@@ -8,7 +8,9 @@
 //! - Every job has a deadline. The parent enforces it: on timeout, on
 //!   cancellation, or when the helper dies or answers nonsense, the parent
 //!   kills its own child ([`Child::kill`], the PID it spawned), reaps it,
-//!   and the next job starts a new one.
+//!   and the next job starts a new one. A cancelled job that ends within
+//!   [`CANCEL_GRACE`] keeps the helper (and the document it holds open):
+//!   waiting is cheaper than starting a new helper and opening it again.
 //! - The helper runs with a bounded thread pool and malloc arena count, so
 //!   its address-space limit (Linux) measures real use.
 
@@ -33,6 +35,10 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 
 /// How often a waiting job looks at its cancel flag.
 const POLL: Duration = Duration::from_millis(25);
+
+/// How long a cancelled job may still take to end before the helper is
+/// killed.
+pub const CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 /// Finds the helper next to the running executable, never through `PATH`:
 ///
@@ -404,12 +410,21 @@ impl Helper {
             max_output,
             job,
         };
+        let started = Instant::now();
         let result = Self::exchange(&mut running, &request, id, deadline, cancel);
         state.last_use = Instant::now();
         match &result {
             Ok(_) | Err(HelperError::Failed(_)) => state.running = Some(running),
             Err(HelperError::Crashed(_)) => {
                 let _ = running.child.wait();
+            }
+            Err(HelperError::Cancelled) => {
+                let left = deadline.saturating_sub(started.elapsed());
+                if Self::drain(&running, id, CANCEL_GRACE.min(left)) {
+                    state.running = Some(running);
+                } else {
+                    running.kill();
+                }
             }
             Err(_) => running.kill(),
         }
@@ -449,6 +464,28 @@ impl Helper {
                 Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => {
                     return Err(HelperError::Crashed(running.reap()));
                 }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Waits up to `grace` for the answer to cancelled job `id`: whether
+    /// it came (the helper is free again; else it is to be killed).
+    fn drain(running: &Running, id: u64, grace: Duration) -> bool {
+        let end = Instant::now() + grace;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            match running.frames.recv_timeout(left) {
+                Ok(Ok(frame)) => {
+                    return matches!(
+                        protocol::decode::<Response>(&frame),
+                        Ok(Response::Done { id: got, .. }) if got == id
+                    );
+                }
+                Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => return false,
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }

@@ -77,6 +77,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   the view.
 - Performance: `[[##` and `[[^^` autocomplete gather the vault's headings
   and block IDs once per index update instead of on every key.
+- Performance: a PDF page the viewer stopped waiting for no longer
+  restarts the helper (and reopens the file) when it ends soon after.
 
 ## [1.2.0] - 2026-11-19
 

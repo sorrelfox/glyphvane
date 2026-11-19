@@ -114,6 +114,31 @@ fn a_job_can_be_cancelled() {
 }
 
 #[test]
+fn a_cancelled_job_that_ends_soon_keeps_the_helper() {
+    let helper = Helper::new(config());
+    helper.run(sleep(0), 30 * SECOND, 1, &never()).expect("ok");
+    let pid = helper.pid().expect("running");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        flag.store(true, Ordering::Relaxed);
+    });
+    // Cancelled, then done within the grace time: not killed.
+    let err = helper
+        .run(sleep(300), 30 * SECOND, 1, &cancel)
+        .expect_err("cancelled");
+    canceller.join().expect("thread");
+    assert!(matches!(err, HelperError::Cancelled), "{err}");
+    assert_eq!(helper.pid(), Some(pid), "the same helper");
+    assert_eq!(
+        helper.run(sleep(0), 30 * SECOND, 1, &never()).expect("ok"),
+        Output::Done
+    );
+    assert_eq!(helper.pid(), Some(pid));
+}
+
+#[test]
 fn a_crash_is_reported_and_the_next_job_runs() {
     let helper = Helper::new(config());
     let err = helper
