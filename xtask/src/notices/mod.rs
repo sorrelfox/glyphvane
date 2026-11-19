@@ -207,7 +207,17 @@ fn generate(root: &Path) -> Result<Notices> {
 /// (which resolves features as the release build does).
 fn linked_crates(root: &Path, target: &str) -> Result<BTreeSet<(String, String)>> {
     let mut cmd = Command::new(cargo());
-    cmd.args(["tree", "--locked", "-e", "normal", "--target", target]);
+    // Proc macros run in the compiler on the build machine: they and what
+    // only they use are not linked, and their dependencies would follow the
+    // build machine rather than `target`.
+    cmd.args([
+        "tree",
+        "--locked",
+        "-e",
+        "normal,no-proc-macro",
+        "--target",
+        target,
+    ]);
     for p in ROOTS {
         cmd.args(["-p", p]);
     }
