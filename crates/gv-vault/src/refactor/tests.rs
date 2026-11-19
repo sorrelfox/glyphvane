@@ -641,3 +641,65 @@ fn moving_a_folder_rewrites_base_in_folder_literals() {
         ]
     );
 }
+
+#[test]
+fn html_hrefs_follow_a_rename_and_a_folder_move() {
+    let dir = vault(&[
+        ("Old.md", "# Old\n"),
+        (
+            "a.md",
+            "<div>\n<a href=\"Old.md#Old\">block</a> <a href=\"https://e.com/Old.md\">web</a>\n</div>\n\n\
+             Inline <a class=\"x\" href='./Old.md'>i</a> and [[Old]].\n",
+        ),
+        (
+            "notes/n.md",
+            "<a href=\"../Old.md\">up</a> <a href=\"m.md\">same</a>\n",
+        ),
+        ("notes/m.md", "x\n"),
+        ("archive/x.txt", ""),
+    ]);
+    let root = dir.path();
+    let content = {
+        let paths = PathIndex::build(root, IndexConfig::default())
+            .expect("index")
+            .0;
+        let options = ContentOptions::for_profile(ProfileId::Obsidian);
+        let source = DiskSource::new(root, &options);
+        ContentSnapshot::build(paths, options, &source, &AtomicBool::new(false)).expect("content")
+    };
+    // Not backlinks (as in Obsidian): only the wikilink counts.
+    let backlinks = content.backlinks(&p("Old.md"));
+    assert_eq!(backlinks.len(), 1, "{backlinks:?}");
+    assert_eq!(content.backlink_sources(&p("Old.md")), [p("a.md")]);
+
+    // A rename: the path is percent-encoded, the fragment kept.
+    let plan = plan(
+        root,
+        ProfileId::Obsidian,
+        &[mv("Old.md", "New 'name' & co.md")],
+    )
+    .expect("plan");
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+    let applied = apply(&plan, None).expect("apply");
+    assert_eq!(
+        read(root, "a.md"),
+        "<div>\n<a href=\"New%20%27name%27%20%26%20co.md#Old\">block</a> <a href=\"https://e.com/Old.md\">web</a>\n</div>\n\n\
+         Inline <a class=\"x\" href='./New%20%27name%27%20%26%20co.md'>i</a> and [[New 'name' & co]].\n"
+    );
+    assert_eq!(
+        read(root, "notes/n.md"),
+        "<a href=\"../New%20%27name%27%20%26%20co.md\">up</a> <a href=\"m.md\">same</a>\n"
+    );
+    undo(&applied, None).expect("undo");
+    assert_eq!(
+        read(root, "notes/n.md"),
+        "<a href=\"../Old.md\">up</a> <a href=\"m.md\">same</a>\n"
+    );
+
+    // A folder move: the moved note's own relative hrefs follow too.
+    rename_and_apply(root, ProfileId::Obsidian, &[mv("notes", "archive/notes")]);
+    assert_eq!(
+        read(root, "archive/notes/n.md"),
+        "<a href=\"../../Old.md\">up</a> <a href=\"m.md\">same</a>\n"
+    );
+}

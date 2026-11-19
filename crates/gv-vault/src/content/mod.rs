@@ -42,6 +42,7 @@
 pub mod check;
 mod extract;
 mod frontmatter;
+mod html;
 mod query;
 mod record;
 mod service;

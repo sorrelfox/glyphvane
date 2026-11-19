@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::{FileEdit, LinkChange, Move, RefactorError, RefactorPlan, Skipped};
-use crate::content::check::{encode_segment, path_part, rewrite_link};
+use crate::content::check::{encode_href_segment, encode_segment, path_part, rewrite_link};
 use crate::content::{ContentSnapshot, Span, extract};
 use crate::files::ContentHash;
 use crate::index::{Change, PathIndex};
@@ -75,6 +75,11 @@ pub fn plan_moves(
         if let Some(content) = content {
             sources.extend(content.backlink_sources(from));
         }
+    }
+    if let Some(content) = content {
+        sources.extend(html_href_sources(content, paths, params, |p| {
+            moved.contains_key(p)
+        }));
     }
     if content.is_none() {
         warnings
@@ -362,11 +367,62 @@ fn plan_note(
             })),
         }
     }
+    // `<a href>`s: not links to Obsidian (see `NoteData::html_links`),
+    // but rewritten all the same so they keep working. The attribute's
+    // value is the construct; its path part is replaced, percent-encoded.
+    for link in &data.html_links {
+        let (status, Some(target)) = target_of(pre, link.kind, &link.raw, source) else {
+            continue;
+        };
+        if !matches!(status.0, Status::Exact | Status::CaseFold | Status::Loose) {
+            continue;
+        }
+        let new_target = moved.get(&target).unwrap_or(&target);
+        if new_source == source && *new_target == target {
+            continue;
+        }
+        let (post_status, post_target) = target_of(post, link.kind, &link.raw, new_source);
+        if post_status == status && post_target.as_ref() == Some(new_target) {
+            continue;
+        }
+        let Some(value) = text.get(link.span.range()) else {
+            continue;
+        };
+        let skip = |reason: &str| Skipped {
+            source: source.clone(),
+            line: link.line,
+            link: value.to_owned(),
+            reason: reason.to_owned(),
+        };
+        if value != &*link.raw {
+            skipped.push(skip("the link has character references: update it by hand"));
+            continue;
+        }
+        let written = path_part(link.kind, &link.raw);
+        if written.is_empty() {
+            continue;
+        }
+        let Some(path) = generate(link.kind, written, new_source, new_target, post, params) else {
+            skipped.push(skip("no link to the new place could be written"));
+            continue;
+        };
+        let new = format!("{path}{}", &value[written.len()..]);
+        if new != value {
+            changes.push(LinkChange {
+                span: link.span,
+                line: link.line,
+                old: value.to_owned(),
+                new,
+            });
+        }
+    }
     if changes.is_empty() {
         return;
     }
     changes.sort_by_key(|c| c.span.start);
-    changes.dedup_by_key(|c| c.span);
+    // One change per span; an `<a href>` inside a rewritten link (in its
+    // text) goes with that link's change.
+    changes.dedup_by(|c, kept| c.span.start < kept.span.end || c.span == kept.span);
     let after = apply_changes(&text, &changes);
     edits.push(FileEdit {
         path: source.clone(),
@@ -376,6 +432,33 @@ fn plan_note(
         after,
         changes,
     });
+}
+
+/// The notes with an `<a href>` that resolves (in `index`) to an entry
+/// `is_target` accepts. Those are not backlinks (see
+/// [`crate::content::NoteData::html_links`]), so the records are searched;
+/// only notes with an `<a href>` are resolved.
+pub(super) fn html_href_sources(
+    content: &ContentSnapshot,
+    index: &PathIndex,
+    params: &ProfileParams,
+    is_target: impl Fn(&VaultPath) -> bool,
+) -> BTreeSet<VaultPath> {
+    content
+        .notes()
+        .into_iter()
+        .filter(|record| {
+            record.data.html_links.iter().any(|l| {
+                let lref = LinkRef::new(l.kind, &*l.raw, record.path.clone(), params.profile);
+                let r = resolve(index, &lref, params);
+                r.status.is_resolved()
+                    && r.target
+                        .and_then(|id| index.get(id))
+                        .is_some_and(|e| is_target(&e.path))
+            })
+        })
+        .map(|record| record.path.clone())
+        .collect()
 }
 
 /// The quote of the YAML scalar that holds byte `at` of `text` (in front
@@ -886,13 +969,17 @@ fn generate(
         }
         return None;
     }
-    // Markdown links: percent-encoded unless the old one had literal spaces.
-    let encode = !written.contains(' ');
+    // Markdown links: percent-encoded unless the old one had literal
+    // spaces. An HTML `href` is a URL: always encoded, quotes and `&` too.
+    let href = kind == LinkKind::HtmlHref;
+    let encode = href || !written.contains(' ');
     let join = |parts: &[&str]| {
         parts
             .iter()
             .map(|s| {
-                if encode {
+                if href {
+                    encode_href_segment(s)
+                } else if encode {
                     encode_segment(s)
                 } else {
                     (*s).to_owned()

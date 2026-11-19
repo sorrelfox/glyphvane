@@ -1085,6 +1085,24 @@ fn encode_path(path: &str) -> String {
         .join("/")
 }
 
+/// `segment` as written in an HTML `href`: [`encode_segment`], and the
+/// characters an attribute value cannot hold as they are (quotes, `&`,
+/// a backtick, white space) percent-encoded too.
+pub(crate) fn encode_href_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for c in encode_segment(segment).chars() {
+        match c {
+            '"' => out.push_str("%22"),
+            '\'' => out.push_str("%27"),
+            '&' => out.push_str("%26"),
+            '`' => out.push_str("%60"),
+            '\t' => out.push_str("%09"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for c in segment.chars() {

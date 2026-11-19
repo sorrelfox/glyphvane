@@ -138,14 +138,16 @@ list of every link before and after; press **Enter** to apply it. Links keep
 their style (wikilink or Markdown, relative or not), and the file's
 [version history](files-and-safety.md#version-history) moves with it.
 Afterwards an infobar offers **Undo**, which reverts the move and every link
-change in one step.
+change in one step. Links in HTML (`<a href="Note.md">`) are updated too,
+written as URLs (`My%20Note.md`), although, as in Obsidian, they do not
+count as links: they are not backlinks and the link checker skips them.
 
 To rename a heading or a block ID and update every link to it, put the cursor
 on it in the editor and run **Rename heading or block ID** from the command
-palette. Links in other notes, embeds, canvas cards and `link("Note#Heading")`
-in bases are updated the same way, with a preview and **Undo**. A heading
-written over several lines (underlined with `===` or `---`) becomes one
-line.
+palette. Links in other notes, embeds, HTML links, canvas cards and
+`link("Note#Heading")` in bases are updated the same way, with a preview
+and **Undo**. A heading written over several lines (underlined with `===`
+or `---`) becomes one line.
 
 Files with unsaved changes cannot be renamed or moved; save them first.
 

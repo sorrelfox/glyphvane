@@ -362,3 +362,55 @@ fn a_second_heading_with_the_same_text_warns() {
     // The link would land on the first "B", the renamed heading: kept.
     assert_eq!(plan.others.edits[0].after, "[[Note#B]]\n");
 }
+
+#[test]
+fn heading_rename_rewrites_html_hrefs() {
+    let note = "# Top\n\n## Old Head\n\n<a href=\"#Old%20Head\">here</a>\n";
+    let dir = vault(&[
+        ("Note.md", note),
+        (
+            "a.md",
+            "<p><a href=\"Note.md#Old%20Head\">x</a> <a href=\"Note.md#Top\">t</a></p>\n\n\
+             Inline <a href='Note.md#old head'>y</a>\n",
+        ),
+    ]);
+    let root = dir.path();
+    let plan = plan(
+        root,
+        ProfileId::Obsidian,
+        "Note.md",
+        AnchorTarget::Heading(1),
+        "Q&A \"New\"",
+    )
+    .expect("plan");
+    assert!(plan.others.skipped.is_empty(), "{:?}", plan.others.skipped);
+    assert_eq!(
+        plan.own.after,
+        "# Top\n\n## Q&A \"New\"\n\n<a href=\"#Q%26A%20%22New%22\">here</a>\n"
+    );
+    apply_all(root, &plan);
+    assert_eq!(
+        read(root, "a.md"),
+        "<p><a href=\"Note.md#Q%26A%20%22New%22\">x</a> <a href=\"Note.md#Top\">t</a></p>\n\n\
+         Inline <a href='Note.md#Q%26A%20%22New%22'>y</a>\n"
+    );
+}
+
+#[test]
+fn block_rename_rewrites_html_hrefs() {
+    let dir = vault(&[
+        ("Note.md", "Para ^old1\n"),
+        ("a.md", "<a href=\"Note.md#^old1\">b</a>\n"),
+    ]);
+    let root = dir.path();
+    let plan = plan(
+        root,
+        ProfileId::Obsidian,
+        "Note.md",
+        AnchorTarget::Block("old1".into()),
+        "new2",
+    )
+    .expect("plan");
+    apply_all(root, &plan);
+    assert_eq!(read(root, "a.md"), "<a href=\"Note.md#^new2\">b</a>\n");
+}

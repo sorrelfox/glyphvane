@@ -6,8 +6,10 @@
 //! [`plan_anchor_rename`] takes the note's current text (its editor
 //! buffer, saved or not) and finds the links that name the heading or the
 //! block: the note's own links and those of the notes that link to it
-//! (the content index's backlinks), embeds included, the `subpath` of
-//! canvas file cards, and the fragment of `link("…#…")` literals in bases. A link is rewritten only when its fragment would no
+//! (the content index's backlinks), embeds included, the `href` of `<a>`
+//! tags in raw HTML (not links to Obsidian, but kept working), the
+//! `subpath` of canvas file cards, and the fragment of `link("…#…")`
+//! literals in bases. A link is rewritten only when its fragment would no
 //! longer land on the same heading, and then in its own style:
 //!
 //! - a part that matched by **heading text** (Obsidian) gets the new
@@ -34,7 +36,7 @@ use std::path::Path;
 use gv_model::slug::obsidian::heading_key;
 
 use super::{FileEdit, LinkChange, RefactorError, RefactorPlan, Skipped};
-use crate::content::check::{encode_segment, heading_chain, heading_slugs};
+use crate::content::check::{encode_href_segment, encode_segment, heading_chain, heading_slugs};
 use crate::content::{ContentSnapshot, IndexedHeading, NoteData, RecordKind, Span, extract};
 use crate::files::ContentHash;
 use crate::fragment::{Fragment, FragmentKind};
@@ -297,7 +299,15 @@ pub fn plan_anchor_rename(
     let mut edits = Vec::new();
     match content {
         Some(content) => {
-            for source in content.backlink_sources(note) {
+            let mut sources: std::collections::BTreeSet<VaultPath> =
+                content.backlink_sources(note).into_iter().collect();
+            sources.extend(super::plan::html_href_sources(
+                content,
+                paths,
+                params,
+                |p| p == note,
+            ));
+            for source in sources {
                 if source == *note {
                     continue;
                 }
@@ -449,7 +459,10 @@ fn link_changes(
     skipped: &mut Vec<Skipped>,
 ) -> Vec<LinkChange> {
     let mut changes = Vec::new();
-    for link in &data.links {
+    // `<a href>`s too: their value is the construct (see
+    // `NoteData::html_links`).
+    for link in data.links.iter().chain(&data.html_links) {
+        let html = link.kind == LinkKind::HtmlHref;
         let lref = LinkRef::new(link.kind, &*link.raw, source.clone(), params.profile);
         let r = resolve(paths, &lref, params);
         if !r.status.is_resolved() {
@@ -477,9 +490,15 @@ fn link_changes(
         };
         let style = if link.kind.is_wiki() {
             Style::Wiki
+        } else if html {
+            Style::Href
         } else {
             Style::Markdown
         };
+        if html && construct != &*link.raw {
+            skipped.push(skip("the link has character references: update it by hand"));
+            continue;
+        }
         let new_fragment = match new_fragment(&fragment, style, ctx) {
             None => continue,
             Some(Err(reason)) => {
@@ -507,7 +526,9 @@ fn link_changes(
             skipped.push(skip("no link to the new name could be written"));
             continue;
         }
-        let at = if link.kind.is_wiki() {
+        let at = if html {
+            Some(0)
+        } else if link.kind.is_wiki() {
             construct.find("[[").map(|o| o + 2)
         } else {
             construct.find("](").map(|o| o + 2)
@@ -535,7 +556,9 @@ fn link_changes(
         }
     }
     changes.sort_by_key(|c| c.span.start);
-    changes.dedup_by_key(|c| c.span);
+    // One change per span; an `<a href>` inside a rewritten link goes
+    // with that link's change.
+    changes.dedup_by(|c, kept| c.span.start < kept.span.end || c.span == kept.span);
     changes
 }
 
@@ -546,6 +569,8 @@ enum Style {
     Wiki,
     /// A Markdown link: percent-encoded.
     Markdown,
+    /// An HTML `href`: percent-encoded, literal spaces never kept.
+    Href,
 }
 
 /// The new text of `fragment` (after its `#`), `None` when the rename
@@ -694,6 +719,7 @@ fn piece_text(
         // Literal spaces stay literal (an angle-bracket destination).
         Style::Markdown if written.contains(' ') && !text.contains(['<', '>']) => text,
         Style::Markdown => encode_segment(&text),
+        Style::Href => encode_href_segment(&text),
     })
 }
 

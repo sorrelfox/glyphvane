@@ -13,6 +13,9 @@
 //! inline cache, which the model filled), so code, math and HTML never
 //! yield links or tags. The profile's switches decide which constructs
 //! exist.
+//!
+//! The `href` of `<a>` tags in HTML blocks and inline HTML go to
+//! [`NoteData::html_links`], apart from the links (see there why).
 
 use std::sync::Arc;
 
@@ -23,6 +26,7 @@ use gv_syntax::{
 };
 
 use super::frontmatter;
+use super::html::a_hrefs;
 use super::record::{
     IndexedBlockId, IndexedHeading, IndexedLink, IndexedTag, IndexedTask, NoteData, Span,
     TitleSource,
@@ -135,6 +139,7 @@ pub fn extract(text: &str, profile: ProfileId) -> NoteData {
 
     data.links
         .sort_by_key(|l| (!l.front_matter, l.span.start, l.span.end));
+    data.html_links.sort_by_key(|l| l.span.start);
     data.skip.sort();
     data.tasks.sort_by_key(|t| t.span.start);
     data.shrink();
@@ -247,9 +252,12 @@ impl Visitor for Scan<'_> {
                 self.prose(leaf);
             }
             LeafKind::Table => self.table(leaf),
+            LeafKind::Html { .. } => {
+                self.data.skip.push(Span::of(leaf.range.clone()));
+                self.html(leaf.range.clone());
+            }
             LeafKind::FencedCode
             | LeafKind::IndentedCode
-            | LeafKind::Html { .. }
             | LeafKind::MathBlock
             | LeafKind::Comment => {
                 self.data.skip.push(Span::of(leaf.range.clone()));
@@ -285,7 +293,7 @@ impl Scan<'_> {
         let interesting = leaf.lines.iter().filter(|l| l.has_content).any(|l| {
             self.text.as_bytes()[l.content.clone()]
                 .iter()
-                .any(|b| matches!(b, b'[' | b'#' | b'^' | b'`' | b'%'))
+                .any(|b| matches!(b, b'[' | b'#' | b'^' | b'`' | b'%' | b'<'))
         });
         if !interesting {
             return;
@@ -399,6 +407,34 @@ impl Scan<'_> {
                 span: Some(Span::of(range)),
             });
         }
+        for node in tree.nodes() {
+            if node.kind() == InlineKind::RawHtml {
+                self.html(node.range());
+            }
+        }
+    }
+
+    /// The `<a href>`s of the raw HTML at `range`.
+    fn html(&mut self, range: std::ops::Range<usize>) {
+        let Some(html) = self.text.get(range.clone()) else {
+            return;
+        };
+        if !html
+            .as_bytes()
+            .windows(4)
+            .any(|w| w.eq_ignore_ascii_case(b"href"))
+        {
+            return;
+        }
+        for href in a_hrefs(html, range.start) {
+            self.data.html_links.push(IndexedLink {
+                kind: LinkKind::HtmlHref,
+                raw: href.value.into(),
+                line: self.lines.line_of(href.range.start),
+                span: Span::of(href.range),
+                front_matter: false,
+            });
+        }
     }
 }
 
@@ -508,6 +544,31 @@ mod tests {
         let d = obs("$[[NoMath]]$ [x](y.md \"[[NoTitle]]\") [[Yes]]\n");
         let raws: Vec<&str> = d.links.iter().map(|l| &*l.raw).collect();
         assert_eq!(raws, ["y.md", "Yes"]);
+    }
+
+    #[test]
+    fn html_hrefs_are_kept_apart_from_links() {
+        let text = "<div>\n<a href=\"Block.md#Part\">b</a> <a href=\"https://e.com\">e</a>\n</div>\n\n\
+                    Inline <a href='My%20Note.md'>m</a> and [md](x.md).\n\n\
+                    | <a href=\"Cell.md\">c</a> |\n|---|\n\n\
+                    `<a href=\"Code.md\">`\n";
+        let d = obs(text);
+        let raws: Vec<&str> = d.links.iter().map(|l| &*l.raw).collect();
+        assert_eq!(raws, ["x.md"]);
+        let html: Vec<(&str, &str, u32)> = d
+            .html_links
+            .iter()
+            .map(|l| (&*l.raw, &text[l.span.range()], l.line))
+            .collect();
+        assert_eq!(
+            html,
+            [
+                ("Block.md#Part", "Block.md#Part", 1),
+                ("My%20Note.md", "My%20Note.md", 4),
+                ("Cell.md", "Cell.md", 6),
+            ]
+        );
+        assert!(d.html_links.iter().all(|l| l.kind == LinkKind::HtmlHref));
     }
 
     #[test]

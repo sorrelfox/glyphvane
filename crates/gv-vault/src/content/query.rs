@@ -514,7 +514,7 @@ impl ContentSnapshot {
                             }
                     })
                     .sum::<usize>()
-                + d.links.len() * size_of::<IndexedLink>()
+                + (d.links.len() + d.html_links.len()) * size_of::<IndexedLink>()
                 + d.tags.len() * size_of::<super::IndexedTag>()
                 + strs(&d.aliases)
                 + strs(&d.cssclasses)

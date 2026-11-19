@@ -43,6 +43,12 @@
 //! get its new path, with only the bytes of that string replaced
 //! (`gv_canvas::patch`).
 //! Notes that are not UTF-8 are listed as skipped.
+//!
+//! The `href` of `<a>` tags in raw HTML is rewritten too (percent-encoded,
+//! as a URL), although it is not a link to Obsidian and so not a backlink
+//! (see [`crate::content::NoteData::html_links`]): the notes holding one
+//! are found by resolving the records' `html_links`. An `href` written
+//! with character references (`&amp;`) is listed as skipped.
 
 mod anchor;
 #[cfg(test)]

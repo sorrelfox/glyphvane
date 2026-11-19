@@ -196,6 +196,17 @@ pub struct NoteData {
     pub headings: Vec<IndexedHeading>,
     /// Links and embeds in text order (front matter links first).
     pub links: Vec<IndexedLink>,
+    /// The local `href`s of `<a>` tags in raw HTML (HTML blocks and inline
+    /// HTML), in text order: kind [`LinkKind::HtmlHref`], `span` the
+    /// attribute's value without its quotes, `raw` the value with
+    /// character references decoded.
+    ///
+    /// Kept apart from `links` on purpose: Obsidian does not count
+    /// `<a href>` as a link (no backlink, no graph edge, no unresolved
+    /// link), so neither do the backlinks, the graph or the link checker
+    /// here. Renames and moves of notes and folders, and heading and
+    /// block-id renames, still rewrite them so they keep working.
+    pub html_links: Vec<IndexedLink>,
     /// Tags: front matter tags first, then inline tags in text order.
     pub tags: Vec<IndexedTag>,
     /// Front matter `aliases`.
@@ -222,6 +233,7 @@ impl NoteData {
     pub(crate) fn shrink(&mut self) {
         self.headings.shrink_to_fit();
         self.links.shrink_to_fit();
+        self.html_links.shrink_to_fit();
         self.tags.shrink_to_fit();
         self.aliases.shrink_to_fit();
         self.cssclasses.shrink_to_fit();

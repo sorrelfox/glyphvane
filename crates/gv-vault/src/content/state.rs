@@ -163,7 +163,7 @@ impl Interner {
     }
 
     fn data(&mut self, d: &mut NoteData) {
-        for l in &mut d.links {
+        for l in d.links.iter_mut().chain(&mut d.html_links) {
             self.intern(&mut l.raw);
         }
         for t in &mut d.tags {

@@ -91,6 +91,10 @@ Conventional Commits, and versions follow Semantic Versioning.
   and block IDs once per index update instead of on every key.
 - Performance: a PDF page the viewer stopped waiting for no longer
   restarts the helper (and reopens the file) when it ends soon after.
+- Renaming or moving a note or folder, and renaming a heading or block ID,
+  update the `href` of HTML links (`<a href="Note.md#Heading">`), written
+  as a URL (`%20` for a space). As in Obsidian, they are still not counted
+  as links in backlinks or the link checker.
 
 ## [1.2.0] - 2026-11-19
 

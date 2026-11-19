@@ -12,7 +12,7 @@
 //! | Part | Contents |
 //! |---|---|
 //! | Header | magic `GVCONTNT`, format version (`u32`), extract version (`u32`), profile id (string), root (string), written-at time (`i64`, ns since the epoch) |
-//! | Records | count (`u32`), then per note: path, size (`u64`), mtime (`Option<i64>`), CRC-32 (`u32`), flags (`u8`: bit 0 doubt), kind (`u8`), and for indexed notes its [`NoteData`] |
+//! | Records | count (`u32`), then per note: path, size (`u64`), mtime (`Option<i64>`), CRC-32 (`u32`), flags (`u8`: bit 0 doubt), kind (`u8`), and for indexed notes its [`NoteData`] (its `html_links` follow its links in one list, told apart by their kind) |
 //! | Link graph | `u8` present; then the fingerprint of the resolver parameters and walk settings (`u64`), the path index's entries (count, then path and kind: 0 file, 1 folder), and the resolved links per note (count, then the source's entry index, its distinct targets as entry indices, per link status, candidate count and target, and its lookup keys) |
 //! | Trailer | CRC-32 of everything before it (`u32`) |
 //!
@@ -63,7 +63,7 @@ const MAGIC: &[u8; 8] = b"GVCONTNT";
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The extraction version: bump whenever extracted records would change.
-pub const EXTRACT_VERSION: u32 = 2;
+pub const EXTRACT_VERSION: u32 = 3;
 
 /// The cache file's extension.
 pub const CACHE_EXTENSION: &str = "gvci";
@@ -522,8 +522,10 @@ fn data(e: &mut Enc, d: &NoteData) {
         e.span(h.span);
         e.u32(h.line);
     }
-    e.len(d.links.len());
-    for l in &d.links {
+    // The `<a href>`s follow the links in the same list (kind code 6),
+    // and are told apart again when read.
+    e.len(d.links.len() + d.html_links.len());
+    for l in d.links.iter().chain(&d.html_links) {
         e.u8(link_code(l.kind) | if l.front_matter { 0x80 } else { 0 });
         e.str(&l.raw);
         e.span(l.span);
@@ -719,6 +721,7 @@ fn read_data(d: &mut Dec<'_>) -> Result<NoteData, LoadError> {
     }
     let n = d.len()?;
     let mut links = Vec::with_capacity(n);
+    let mut html_links = Vec::new();
     for _ in 0..n {
         let code = d.u8()?;
         let kind = match code & 0x7f {
@@ -733,13 +736,18 @@ fn read_data(d: &mut Dec<'_>) -> Result<NoteData, LoadError> {
             8 => LinkKind::HtmlCard,
             _ => return Err(LoadError::Corrupt("bad link kind")),
         };
-        links.push(IndexedLink {
+        let link = IndexedLink {
             kind,
             raw: d.arc()?,
             span: d.span()?,
             line: d.u32()?,
             front_matter: code & 0x80 != 0,
-        });
+        };
+        if kind == LinkKind::HtmlHref {
+            html_links.push(link);
+        } else {
+            links.push(link);
+        }
     }
     let n = d.len()?;
     let mut tags = Vec::with_capacity(n);
@@ -801,6 +809,7 @@ fn read_data(d: &mut Dec<'_>) -> Result<NoteData, LoadError> {
         title_source,
         headings,
         links,
+        html_links,
         tags,
         aliases,
         cssclasses,
@@ -818,7 +827,7 @@ mod tests {
     use super::*;
 
     fn sample() -> Vec<NoteRecord> {
-        let text = "---\ntitle: T\ntags: [a]\naliases: [Al]\nn: 3\nup: \"[[P]]\"\n---\n# H\n\n- [x] done ^b1\n\n[[A#x|y]] ![[i.png]] [m](b.md) #t `code`\n\n[^f]: note\n";
+        let text = "---\ntitle: T\ntags: [a]\naliases: [Al]\nn: 3\nup: \"[[P]]\"\n---\n# H\n\n- [x] done ^b1\n\n[[A#x|y]] ![[i.png]] [m](b.md) #t `code` <a href=\"c.md#h\">c</a>\n\n[^f]: note\n";
         let data = super::super::extract::extract(text, ProfileId::Obsidian);
         vec![
             NoteRecord {
@@ -861,6 +870,7 @@ mod tests {
         let file = dir.path().join("x").join("v.gvci");
         let records = sample();
         assert!(!records[0].data.links.is_empty() && !records[0].data.tasks.is_empty());
+        assert_eq!(records[0].data.html_links.len(), 1);
         save(&file, &header(), &state(records.clone())).expect("save");
         let loaded = load(&file, ProfileId::Obsidian, "/v", 9).expect("load");
         // No path index yet: no graph.
