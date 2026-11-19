@@ -158,6 +158,30 @@ fn alt_size(alt: &str) -> Option<((u32, Option<u32>), usize)> {
     Some((size, alt[..at].trim_end().len()))
 }
 
+/// Where the `|` before an image's alt-text size is in the source: the
+/// last `|` in the alt text's plain text runs.
+fn alt_size_start(image: &InlineNode<'_>) -> Option<usize> {
+    let mut last = None;
+    let mut stack = vec![image.children()];
+    while let Some(children) = stack.last_mut() {
+        let Some(child) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        if child.kind() == InlineKind::Text {
+            let (text, range) = (child.text(), child.range());
+            if text.len() == range.len()
+                && let Some(at) = text.rfind('|')
+            {
+                last = last.max(Some(range.start + at));
+            }
+        } else {
+            stack.push(child.children());
+        }
+    }
+    last
+}
+
 /// Inline content of plain text (no Markdown): a `<details>` summary.
 pub(crate) fn build_plain(
     text: &str,
@@ -276,6 +300,9 @@ struct Builder<'c, 'a> {
     raw_html: bool,
     math: Vec<MathInfo>,
     footnotes: Vec<FootnoteRefInfo>,
+    /// While an image's alt text is shown in its place: where its `|300`
+    /// size starts in the source (not shown).
+    alt_cut: Option<usize>,
 }
 
 impl<'c, 'a> Builder<'c, 'a> {
@@ -296,6 +323,7 @@ impl<'c, 'a> Builder<'c, 'a> {
             raw_html: false,
             math: Vec::new(),
             footnotes: Vec::new(),
+            alt_cut: None,
         }
     }
 
@@ -415,6 +443,23 @@ impl Builder<'_, '_> {
                 InlineKind::FootnoteRef => self.footnote_ref(&node, state),
                 InlineKind::CodeSpan => self.code_span(&node, state),
                 InlineKind::RawHtml => self.raw_html(&node, state),
+                // An image's alt text shown in its place stops before its
+                // `|300` size.
+                InlineKind::Text
+                    if state.alt.is_some()
+                        && self.alt_cut.is_some_and(|cut| node.range().end > cut) =>
+                {
+                    let r = node.range();
+                    let text = node.text();
+                    let cut = self.alt_cut.unwrap_or(r.end);
+                    if r.start < cut && text.len() == r.len() {
+                        let kept = text[..cut - r.start].trim_end();
+                        if !kept.is_empty() {
+                            let key = self.key(state, InlineRole::Text);
+                            self.piece(kept, r.start..r.start + kept.len(), true, key);
+                        }
+                    }
+                }
                 InlineKind::Text
                     if self.cx.emoji
                         && node.text().len() == node.range().len()
@@ -911,6 +956,7 @@ impl Builder<'_, '_> {
         if let Some((_, at)) = wanted {
             alt.truncate(at);
         }
+        self.alt_cut = wanted.and_then(|_| alt_size_start(node));
         let index = u32::try_from(self.images.len()).unwrap_or(u32::MAX);
         let source = self.rel(l.range.clone());
         self.images.push(ImageInfo {

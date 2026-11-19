@@ -42,6 +42,7 @@ Conventional Commits, and versions follow Semantic Versioning.
 - The Files panel's sort order is kept with the session.
 - A callout written `[!type|meta]` shows as its type; the metadata is no
   longer part of its name or title.
+- An image that cannot be drawn shows its alt text without the `|300` size.
 
 ## [1.2.0] - 2026-11-19
 

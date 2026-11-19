@@ -84,6 +84,22 @@ fn obsidian_statuses() {
 }
 
 #[test]
+fn an_image_shown_as_its_alt_text_leaves_out_its_size() {
+    // No image sizes: each image shows its alt text in its place.
+    let d = build_with(
+        "A ![cat |300](a.png) B ![*big* dog|30x20](b.png) C ![plain|wide](c.png)\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        RenderOptions::builtin(ProfileId::Obsidian),
+        Sources::default(),
+    );
+    check(&d);
+    assert_eq!(text_of(&d.render, 0), "A cat B big dog C plain|wide");
+    // GitHub reads the alt text as written.
+    let d = gfm("A ![cat|300](a.png)\n");
+    assert_eq!(text_of(&d.render, 0), "A cat|300");
+}
+
+#[test]
 fn footnotes_are_numbered_and_collected_at_the_end() {
     let md = "Alpha[^b] beta[^a] and again[^b].\n\n[^a]: First def.\n[^unused]: Never.\n\n> [^b]: Second def.\n\nAfter.\n";
     let d = gfm(md);
