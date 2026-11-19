@@ -563,7 +563,8 @@ impl State {
             return None;
         };
         let info = content.images.get(i as usize)?;
-        let target = self.cache.targets.as_ref()?.get(&info.destination)?;
+        let key = gv_render_tree::image_key(&info.destination, info.from.as_deref());
+        let target = self.cache.targets.as_ref()?.get(&key)?;
         if !matches!(target, super::media::ImageTarget::Local { .. }) {
             return None;
         }
@@ -663,9 +664,14 @@ impl State {
         let doc = self.doc.as_ref()?;
         let content = doc.tree.item_inline(g.ix)?;
         match content.spans.get(piece)?.role {
-            InlineRole::FootnoteRef(i) => Some(FootnoteHit::Ref {
-                label: content.footnotes.get(i as usize)?.label.clone(),
-            }),
+            InlineRole::FootnoteRef(i) => {
+                let f = content.footnotes.get(i as usize)?;
+                // A note embed's footnote: listed at the embed's end, not
+                // in the document's footnote section.
+                (!f.embedded).then(|| FootnoteHit::Ref {
+                    label: f.label.clone(),
+                })
+            }
             InlineRole::FootnoteBackref(k) => {
                 let item = doc.tree.items().get(g.ix)?;
                 let label = item.context.iter().find_map(|f| match &f.kind {

@@ -469,7 +469,7 @@ pub(crate) fn load_image(job: &ImageJob) -> ImageResult {
             _ => return failed,
         }
     } else {
-        match crate::reader::media::image_target(destination, &resolver, &root) {
+        match crate::reader::media::image_target(destination, None, &resolver, &root) {
             crate::reader::media::ImageTarget::Local { path, probe: Ok(_) } => path,
             _ => return failed,
         }

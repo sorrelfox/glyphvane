@@ -1528,7 +1528,10 @@ impl ItemCache {
             0..node.source.len(),
         );
         let mut block = InlineBlock::new(Arc::new(b.build()));
-        let target = self.targets.as_ref().and_then(|t| t.get(url));
+        let target = self
+            .targets
+            .as_ref()
+            .and_then(|t| t.get(&gv_render_tree::image_key(url, p.from.as_deref())));
         let alt = p.alt.clone();
         self.show_image(target, &alt, item.id, 0, (w, h), &mut block, pending);
         Some(block)
@@ -1569,7 +1572,8 @@ impl ItemCache {
                     continue;
                 }
             }
-            let target = self.targets.as_ref().and_then(|t| t.get(&info.destination));
+            let key = gv_render_tree::image_key(&info.destination, info.from.as_deref());
+            let target = self.targets.as_ref().and_then(|t| t.get(&key));
             let size = (b.width, b.ascent + b.descent);
             self.show_image(target, &info.alt, id, ix, size, block, pending);
         }

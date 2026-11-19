@@ -606,7 +606,9 @@ impl Reader {
             links: &resolver,
             images: &sizes,
         };
-        let which = |t: &LinkTarget<'_>| t.image && dests.contains(t.destination);
+        let which = |t: &LinkTarget<'_>| {
+            t.image && dests.contains(&*gv_render_tree::image_key(t.destination, t.from))
+        };
         let changed = Arc::make_mut(&mut doc.tree)
             .refresh_where(&doc.syntax, &*doc.text, sources, &which)
             .changed;

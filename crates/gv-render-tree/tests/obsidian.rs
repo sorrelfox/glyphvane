@@ -277,11 +277,7 @@ fn note_embeds_show_the_note_section_or_block() {
     let d = ob_with("![[Other#^b1]]\n", &vault);
     assert_eq!(
         outline(&d.render),
-        [
-            "Other > ^b1 embed(0)",
-            "• item embed(0)",
-            "• child embed(0)"
-        ]
+        ["Other > ^b1 embed(0)", "item embed(0)", "child embed(0)"]
     );
     let d = ob_with("![[Other]]\n", &vault);
     let texts = outline(&d.render);
@@ -353,8 +349,8 @@ fn note_embeds_keep_inline_formatting_and_links_from_the_embedded_note() {
             "Host Here ",
             "Other embed(0)",
             "Top embed(0)",
-            "Intro bold Third rel Missing pic i.png embed(0)",
-            "\u{2022} see Top embed(0)"
+            "Intro bold Third rel Missing   embed(0)",
+            "see Top embed(0)"
         ]
     );
     // The paragraph: its links, from the embedded note, mapped to the
@@ -371,11 +367,20 @@ fn note_embeds_keep_inline_formatting_and_links_from_the_embedded_note() {
             ("Third", Some("Other.md"), LinkStatus::Exact),
             ("../x.md", Some("Other.md"), LinkStatus::Exact),
             ("Missing", Some("Other.md"), LinkStatus::Unresolved),
-            ("i.png", Some("Other.md"), LinkStatus::Exact),
         ]
     );
     assert!(c.links.iter().all(|l| l.source.is_empty()));
-    assert!(c.images.is_empty(), "embedded images are their description");
+    // Images are images, resolved from the embedded note.
+    let images: Vec<(&str, Option<&str>)> = c
+        .images
+        .iter()
+        .map(|i| (&*i.destination, i.from.as_deref()))
+        .collect();
+    assert_eq!(
+        images,
+        [("p.png", Some("Other.md")), ("i.png", Some("Other.md"))]
+    );
+    assert!(c.images.iter().all(|i| i.source.is_empty()));
     let end = rt.node_of(1).expect("the embed's line").source.end;
     assert_eq!(rt.node_of(3).expect("node").source, end..end);
     let para = &c.paragraph;
@@ -416,9 +421,9 @@ fn embed_cycles_and_depth_are_guarded() {
         [
             "A embed(0)",
             "A text embed(0)",
-            "\u{29c9} B embed(0)>embed(1)",
+            "B embed(0)>embed(1)",
             "B text embed(0)>embed(1)",
-            "\u{29c9} A embed(0)>embed(1)>embed(2)",
+            "A embed(0)>embed(1)>embed(2)",
             "Embed cycle: A \u{2192} B \u{2192} A embed(0)>embed(1)>embed(2)"
         ]
     );
@@ -575,4 +580,245 @@ fn markdown_images_take_a_size_from_their_alt_text() {
     let c = gfm.render.nodes()[0].inline().expect("inline");
     assert_eq!(&*c.images[0].alt, "cat|60");
     assert!(gfm.render.dump().contains("200x100"));
+}
+
+/// The kind of each node inside the outermost embed, with its innermost
+/// frame of interest.
+fn embedded_kinds(rt: &RenderTree) -> Vec<String> {
+    rt.nodes()
+        .iter()
+        .filter(|n| {
+            n.context
+                .iter()
+                .any(|f| matches!(f.kind, FrameKind::Embed { .. }))
+        })
+        .map(|n| {
+            let kind = match &n.kind {
+                NodeKind::Paragraph(_) => "paragraph".to_owned(),
+                NodeKind::Code(c) => format!("code({})", c.language.as_deref().unwrap_or("")),
+                NodeKind::Math(_) => "math".to_owned(),
+                NodeKind::Diagram(_) => "diagram".to_owned(),
+                NodeKind::Table(t) => format!("table({} rows)", t.rows.len()),
+                NodeKind::Html { .. } => "html".to_owned(),
+                NodeKind::CalloutTitle { fold, .. } => format!("callout-title({})", fold.name()),
+                NodeKind::ThematicBreak => "rule".to_owned(),
+                NodeKind::Live(_) => "live".to_owned(),
+                other => format!("{other:?}").chars().take(12).collect(),
+            };
+            let frame = n
+                .context
+                .iter()
+                .rev()
+                .find_map(|f| match &f.kind {
+                    FrameKind::Callout { .. } => Some("callout"),
+                    FrameKind::Details => Some("fold"),
+                    FrameKind::Item { .. } => Some("item"),
+                    FrameKind::Embed { .. } => Some("embed"),
+                    _ => None,
+                })
+                .unwrap_or("");
+            format!("{kind} {frame}")
+        })
+        .collect()
+}
+
+const RICH: &str = "# Rich\n\
+Text with a note[^n].\n\n\
+```rust\nfn main() {}\n```\n\n\
+\x20   indented\n\n\
+| a | b |\n|---|---|\n| 1 | 2 |\n\n\
+> [!tip]- Folded\n> Inside.\n\n\
+$$\nx^2\n$$\n\n\
+```mermaid\ngraph TD; A-->B\n```\n\n\
+<div>html</div>\n\n\
+![pic](img/p.png)\n\n\
+# Later\n\
+Not embedded[^m].\n\n\
+[^n]: The note.\n\
+[^m]: Another.\n";
+
+#[test]
+fn embedded_blocks_are_built_like_the_documents() {
+    let mut vault = Vault::default();
+    vault.notes.insert("Rich", RICH);
+    let mut opts = RenderOptions::builtin(ProfileId::Obsidian);
+    opts.mermaid = true;
+    let d = build_with(
+        "Host\n\n![[Rich#Rich]]\n\nAfter\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        opts,
+        Sources {
+            links: &vault,
+            images: &Images,
+        },
+    );
+    check(&d);
+    let rt = &d.render;
+    assert_eq!(
+        embedded_kinds(rt),
+        [
+            "paragraph embed",
+            "paragraph embed",
+            "paragraph embed",
+            "code(rust) embed",
+            "code() embed",
+            "table(2 rows) embed",
+            "callout-title(-) callout",
+            "paragraph fold",
+            "math embed",
+            "diagram embed",
+            "html embed",
+            "paragraph embed",
+            "rule embed",
+            "paragraph item",
+        ],
+        "{}",
+        rt.dump()
+    );
+    // Every node and item maps to the end of the embed's line; ids are
+    // synthetic; code lines and table rows map to the node's start.
+    let mut embedded: Vec<_> = rt
+        .nodes()
+        .iter()
+        .filter(|n| {
+            n.context
+                .iter()
+                .any(|f| matches!(f.kind, FrameKind::Embed { .. }))
+        })
+        .collect();
+    let end = embedded.remove(0).source.end;
+    for n in &embedded {
+        assert_eq!(n.source, end..end, "{n:?}");
+        assert!(n.id.0 & (1 << 63) != 0, "synthetic id");
+        match &n.kind {
+            NodeKind::Code(c) | NodeKind::Math(c) | NodeKind::Diagram(c) => {
+                assert!(c.lines.iter().all(|l| l.source.is_empty() && l.start == 0));
+            }
+            NodeKind::Table(t) => assert!(t.rows.iter().all(|r| r.source.is_empty())),
+            _ => {}
+        }
+    }
+    let first = rt
+        .items()
+        .iter()
+        .position(|it| it.source == (end..end))
+        .expect("embedded items");
+    assert!(
+        rt.items()[first..]
+            .iter()
+            .take_while(|it| it.source.start == end)
+            .count()
+            >= embedded.len()
+    );
+    // The callout folds: its body is in a fold frame with the title's id.
+    let title = embedded
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::CalloutTitle { .. }))
+        .expect("title");
+    let body = embedded
+        .iter()
+        .find(|n| n.context.iter().any(|f| f.kind == FrameKind::Details))
+        .expect("body");
+    assert!(
+        body.context
+            .iter()
+            .any(|f| f.kind == FrameKind::Details && f.id == title.id)
+    );
+    // The image resolves from the embedded note.
+    let image = embedded
+        .iter()
+        .filter_map(|n| n.inline())
+        .flat_map(|c| c.images.iter())
+        .next()
+        .expect("image");
+    assert_eq!(
+        (&*image.destination, image.from.as_deref()),
+        ("img/p.png", Some("Rich.md"))
+    );
+    // The footnote reference is numbered in the embed, and its definition
+    // (outside the embedded section) listed at the embed's end.
+    let note = embedded
+        .iter()
+        .filter_map(|n| n.inline())
+        .flat_map(|c| c.footnotes.iter())
+        .next()
+        .expect("footnote reference");
+    assert_eq!((&*note.label, note.number, note.embedded), ("n", 1, true));
+    let texts = outline(rt);
+    assert!(
+        texts.iter().any(|t| t == "The note. embed(0)"),
+        "{texts:#?}"
+    );
+    assert!(!texts.iter().any(|t| t.starts_with("Another")));
+    assert!(!texts.iter().any(|t| t.starts_with("Not embedded")));
+    // The document has no footnote section of its own.
+    assert_eq!(rt.footnote_section_start(), rt.items().len());
+    assert_eq!(texts.last().map(String::as_str), Some("After "));
+}
+
+#[test]
+fn embedded_blocks_follow_the_profile_switches() {
+    let mut vault = Vault::default();
+    vault.notes.insert("Rich", RICH);
+    let mut opts = RenderOptions::builtin(ProfileId::Obsidian);
+    opts.mermaid = false;
+    opts.math_fences = false;
+    let d = build_with(
+        "![[Rich]]\n",
+        ParseOptions::builtin(ProfileId::Obsidian),
+        opts,
+        Sources {
+            links: &vault,
+            images: &Images,
+        },
+    );
+    check(&d);
+    let kinds = embedded_kinds(&d.render);
+    assert!(
+        kinds.contains(&"code(mermaid) embed".to_owned()),
+        "{kinds:#?}"
+    );
+    assert!(!kinds.iter().any(|k| k.starts_with("diagram")));
+}
+
+#[test]
+fn embedded_blocks_keep_the_node_and_byte_budgets() {
+    let mut vault = Vault::default();
+    let many: &'static str = Box::leak(
+        (0..10_050)
+            .map(|i| format!("p{i}\n\n"))
+            .collect::<String>()
+            .into_boxed_str(),
+    );
+    vault.notes.insert("Many", many);
+    let d = ob_with("![[Many]]\n", &vault);
+    let texts = outline(&d.render);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("This embed has too many blocks to show them all.")),
+    );
+    assert!(d.render.nodes().len() <= 10_000 + 3);
+    let big: &'static str = Box::leak("x".repeat(3 << 20).into_boxed_str());
+    vault.notes.insert("Big", big);
+    let d = ob_with("![[Big]]\n", &vault);
+    assert_eq!(
+        outline(&d.render)[1],
+        "This embed is too large to show here. embed(0)"
+    );
+    // Code and tables inside nested embeds count once each.
+    vault
+        .notes
+        .insert("Outer", "```\ncode\n```\n\n![[Inner]]\n");
+    vault.notes.insert("Inner", "| a |\n|---|\n| 1 |\n");
+    let d = ob_with("![[Outer]]\n", &vault);
+    assert_eq!(
+        embedded_kinds(&d.render),
+        [
+            "paragraph embed",
+            "code() embed",
+            "paragraph embed",
+            "table(2 rows) embed"
+        ]
+    );
 }

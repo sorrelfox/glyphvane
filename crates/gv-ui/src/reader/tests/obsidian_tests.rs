@@ -106,7 +106,7 @@ fn a_note_embed_shows_the_note_and_stops_at_a_cycle(cx: &mut TestAppContext) {
             "A",
             "b",
             "B body.",
-            "\u{29c9} a",
+            "a",
             "Embed cycle: a \u{2192} b \u{2192} a",
             "After."
         ]
@@ -245,6 +245,93 @@ fn a_foldable_callout_folds_on_a_click(cx: &mut TestAppContext) {
     vcx.simulate_click(at, Modifiers::none());
     settle(&mut vcx);
     assert_eq!(painted(&reader, &mut vcx), ["Question?", "After."]);
+}
+
+/// The kind of node each painted item shows.
+fn painted_kinds(reader: &Entity<Reader>, vcx: &mut VisualTestContext) -> Vec<&'static str> {
+    let st = state(reader, vcx);
+    let st = st.borrow();
+    let tree = &st.doc.as_ref().expect("loaded").tree;
+    st.geometry
+        .items
+        .iter()
+        .map(|g| match tree.node_of(g.ix).map(|n| &n.kind) {
+            Some(NodeKind::Code(_)) => "code",
+            Some(NodeKind::Table(_)) => "table",
+            Some(NodeKind::CalloutTitle { .. }) => "callout",
+            Some(NodeKind::Paragraph(_)) => "paragraph",
+            Some(NodeKind::Heading { .. }) => "heading",
+            _ => "other",
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn blocks_inside_a_note_embed_are_drawn_and_a_callout_folds(cx: &mut TestAppContext) {
+    let dir = vault(&[
+        ("a.md", "# A\n\n![[b]]\n\nAfter.\n"),
+        (
+            "b.md",
+            "```rust\nfn main() {}\n```\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n\
+             > [!faq]- Question?\n> The answer.\n",
+        ),
+    ]);
+    let (window, workspace) = open(cx, &dir.path().join("a.md"));
+    let mut vcx = drawn(window, cx);
+    let reader = reader(&workspace, &mut vcx);
+    settle(&mut vcx);
+    // The code block and the table rows are drawn as such, in the embed;
+    // the callout is folded (`-`).
+    assert_eq!(
+        painted_kinds(&reader, &mut vcx),
+        [
+            "heading",
+            "paragraph",
+            "code",
+            "table",
+            "table",
+            "callout",
+            "paragraph"
+        ]
+    );
+    {
+        let st = state(&reader, &mut vcx);
+        let st = st.borrow();
+        let tree = &st.doc.as_ref().expect("loaded").tree;
+        for g in &st.geometry.items[2..6] {
+            assert!(
+                tree.items()[g.ix]
+                    .context
+                    .iter()
+                    .any(|f| matches!(f.kind, FrameKind::Embed { depth: 0 })),
+                "item {} is in the embed",
+                g.ix
+            );
+        }
+    }
+    let texts = painted(&reader, &mut vcx);
+    assert!(texts[2].contains("fn main() {}"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "The answer."), "{texts:?}");
+    let row = |vcx: &mut VisualTestContext| {
+        let st = state(&reader, vcx);
+        let st = st.borrow();
+        st.geometry
+            .controls
+            .iter()
+            .find(|c| matches!(c.kind, ControlKind::Details { .. }))
+            .map(|c| c.bounds.center())
+            .expect("the embedded callout's title row folds")
+    };
+    let at = row(&mut vcx);
+    vcx.simulate_click(at, Modifiers::none());
+    settle(&mut vcx);
+    let texts = painted(&reader, &mut vcx);
+    assert!(texts.iter().any(|t| t == "The answer."), "{texts:?}");
+    let at = row(&mut vcx);
+    vcx.simulate_click(at, Modifiers::none());
+    settle(&mut vcx);
+    let texts = painted(&reader, &mut vcx);
+    assert!(!texts.iter().any(|t| t == "The answer."), "{texts:?}");
 }
 
 #[gpui::test]

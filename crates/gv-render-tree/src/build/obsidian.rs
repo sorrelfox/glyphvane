@@ -8,12 +8,16 @@
 //! or `![[Note#^block]]`. Its own line stays (a link to the note, the
 //! embed's header) and the embedded blocks follow inside a
 //! [`FrameKind::Embed`] frame. The embedded note comes from the link
-//! source ([`crate::LinkStatusSource::embed`]). Its paragraphs and
-//! headings keep their inline formatting and links (headings their
-//! level, list items a bullet); its links resolve from the embedded note
-//! ([`crate::LinkInfo::from`]). Code, tables and HTML are plain text.
-//! Their sources are in another file: every embedded node maps to the
-//! end of the embed's line.
+//! source ([`crate::LinkStatusSource::embed`]). Its blocks are built by a
+//! builder of their own, like the document's: code with its language,
+//! tables, callouts (folding), display math, diagrams, HTML blocks, images
+//! and links resolved from the embedded note ([`crate::LinkInfo::from`],
+//! [`crate::ImageInfo::from`]); headings are paragraphs in a heading's
+//! type (not anchors of the document). Their sources are in another file:
+//! every embedded node, and everything in it, maps to the end of the
+//! embed's line, and every block gets a synthetic id. The footnotes the
+//! embedded part refers to are numbered from 1 and listed at the embed's
+//! end; inline footnotes show in place.
 //! Embeds inside the embedded note are shown the same way, up to the
 //! budgets: [`MAX_EMBED_DEPTH`] nested embeds, [`MAX_EMBED_NODES`] blocks
 //! and [`MAX_EMBED_BYTES`] of embedded text per outermost embed. A cycle
@@ -24,23 +28,22 @@
 //! ` ```base ` and ` ```query ` fences are live blocks too, counted
 //! against the depth limit.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
 use gv_model::{Anchoring, BlockMatch, DocModel, FragmentMatch};
-use gv_syntax::inline::{
-    InlineInput, InlineKind, InlineOptions, InlineTree, TextProjection, parse_inlines_with,
-};
-use gv_syntax::{
-    BlockId, CalloutFold, Container, ContainerKind, Leaf, LeafKind, SyntaxTree, Visitor,
-};
+use gv_syntax::inline::{InlineInput, InlineKind, InlineOptions, parse_inlines_with};
+use gv_syntax::{BlockId, CalloutFold, Container, ContainerKind, Leaf, SyntaxTree, Visitor};
 use gv_text::TextSource;
 
 use super::{NodeBuilder, Open};
+use crate::footnote::FootnoteIndex;
 use crate::inline::{self, is_image_path};
 use crate::live::{LiveBlock, LiveKind, split_embed};
 use crate::node::{
-    BlockNode, CalloutType, CodeBlock, CodeLine, Frame, FrameKind, NodeKind, default_callout_title,
+    BlockNode, CalloutType, CodeBlock, Context, Frame, FrameKind, ListMarker, NodeKind,
+    default_callout_title,
 };
 use crate::status::EmbedFetch;
 use crate::style::TextRole;
@@ -61,12 +64,26 @@ const SYNTHETIC: u64 = 1 << 63;
 
 /// What one outermost embed has used of the budgets.
 #[derive(Default)]
-struct Budget {
+pub(crate) struct Budget {
     nodes: usize,
     bytes: usize,
+    /// The node budget ran out (its notice is shown).
+    full: bool,
     /// Notes and sections embedded around the current one, outermost
     /// first: the key, the title and the anchor.
     chain: Vec<(Arc<str>, Arc<str>, Option<String>)>,
+}
+
+/// What a builder of an embedded note's blocks builds.
+pub(crate) struct EmbedCx {
+    /// The embedded note's key: its links and images resolve from it.
+    pub key: Arc<str>,
+    /// Where the part starts in the note.
+    pub at: usize,
+    /// Note embeds around this one (0: the outermost).
+    pub depth: usize,
+    /// The embedded part of the note.
+    pub range: Range<usize>,
 }
 
 impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
@@ -76,6 +93,14 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         let Some(marker) = c.marker.clone() else {
             return;
         };
+        if self
+            .embed
+            .as_ref()
+            .is_some_and(|e| marker.start < e.range.start)
+        {
+            // Around a note embed's part: not shown.
+            return;
+        }
         // A title is the rest of the marker's line.
         let mut line = Vec::new();
         let rest = self.text.line(marker.end, &mut line);
@@ -155,14 +180,23 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             return false;
         };
         if let Some(kind) = LiveKind::of_embed(split_embed(&inner).0) {
-            self.live_embed(leaf, kind, &inner);
+            if self.embed_too_deep() {
+                let n = self.embed_notice(leaf, &too_deep());
+                self.push(n, None);
+            } else {
+                self.live_embed(leaf, kind, &inner);
+            }
             return true;
         }
+        let outermost = self.embed.is_none();
+        let depth = self.embed.as_ref().map_or(0, |e| e.depth + 1);
         let frame = self.frames.len() < super::MAX_FRAMES;
         if frame {
             self.frames.push(Frame {
                 id: leaf.id,
-                kind: FrameKind::Embed { depth: 0 },
+                kind: FrameKind::Embed {
+                    depth: u16::try_from(depth).unwrap_or(u16::MAX),
+                },
             });
             self.ctx = None;
         }
@@ -173,11 +207,14 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             at = n.source.end;
             self.push(n, None);
         }
-        let mut budget = Budget::default();
-        if let Some((key, title)) = self.sources.links.document_key() {
-            budget.chain.push((key, title, None));
+        if outermost {
+            self.budget = Budget::default();
+            if let Some((key, title)) = self.sources.links.document_key() {
+                self.budget.chain.push((key, title, None));
+            }
         }
-        match self.sources.links.embed(&inner, None) {
+        let from = self.embed.as_ref().map(|e| Arc::clone(&e.key));
+        match self.sources.links.embed(&inner, from.as_deref()) {
             EmbedFetch::Note { key, title, text } => {
                 self.transclude(
                     &text,
@@ -185,10 +222,12 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
                     &key,
                     &title,
                     at,
-                    0,
+                    depth,
                     parse_opts,
-                    &mut budget,
                 );
+            }
+            EmbedFetch::Unavailable if !outermost => {
+                self.notice(&format!("\u{201c}{inner}\u{201d} cannot be shown."), at);
             }
             EmbedFetch::Unavailable | EmbedFetch::Pending => {}
         }
@@ -210,43 +249,66 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             _ => None,
         };
         let (path, anchor) = split_embed(inner);
+        let (host, depth) = self.live_host();
         node.kind = NodeKind::Live(Arc::new(LiveBlock::new(
             kind,
             Some(path.into()),
             anchor.map(Into::into),
             None,
             label,
-            None,
-            0,
+            host,
+            depth,
         )));
         self.push(node, None);
     }
 
-    /// A live block inside a note embed, mapped to `at`: its label is
-    /// `label`.
-    fn live_node(&mut self, live: LiveBlock, at: usize) {
-        self.synthetic += 1;
-        let id = BlockId(SYNTHETIC | self.synthetic);
-        let context = self.context();
-        self.push(
-            BlockNode {
-                id,
-                kind: NodeKind::Live(Arc::new(live)),
-                source: at..at,
-                context,
-                block: at..at,
-                top: at..at,
-                lookups: None,
-                table: false,
-            },
-            None,
-        );
+    /// Inside a note embed: whether a live block or another embed would be
+    /// nested too deep.
+    pub(super) fn embed_too_deep(&self) -> bool {
+        self.embed
+            .as_ref()
+            .is_some_and(|e| e.depth + 1 >= MAX_EMBED_DEPTH)
     }
 
-    /// The plain label of an embed inside a note embed.
-    fn plain_label(&mut self, text: &str, at: usize) -> Arc<crate::node::InlineContent> {
-        let cx = self.inline_cx(BlockId(SYNTHETIC | self.synthetic));
-        Arc::new(inline::build_plain(text, at..at, at, TextRole::Body, &cx))
+    /// The note a live block is in (`None`: the document) and the number
+    /// of note embeds around it.
+    pub(super) fn live_host(&self) -> (Option<Arc<str>>, u16) {
+        match &self.embed {
+            Some(e) => (
+                Some(Arc::clone(&e.key)),
+                u16::try_from(e.depth + 1).unwrap_or(u16::MAX),
+            ),
+            None => (None, 0),
+        }
+    }
+
+    /// Whether `leaf` is built: inside a note embed only the leaves of the
+    /// embedded part (and the footnote definitions it refers to).
+    pub(super) fn embed_wants(&self, leaf: &Leaf<'_>) -> bool {
+        match &self.embed {
+            None => true,
+            Some(e) => {
+                let s = leaf.range.start;
+                s == e.range.start || e.range.contains(&s) || !self.diverting.is_empty()
+            }
+        }
+    }
+
+    /// A notice in place of `leaf` (inside a note embed).
+    pub(super) fn embed_notice(&mut self, leaf: &Leaf<'_>, text: &str) -> BlockNode {
+        let at = leaf.range.start;
+        let cx = self.inline_cx(leaf.id);
+        let content = Arc::new(inline::build_plain(text, at..at, at, TextRole::Body, &cx));
+        BlockNode {
+            id: leaf.id,
+            kind: NodeKind::Paragraph(content),
+            source: at..at,
+            context: self.context(),
+            block: at..at,
+            top: at..at,
+            lookups: None,
+            table: false,
+        }
     }
 
     /// The embed of a paragraph that holds only a note embed (not an
@@ -291,7 +353,10 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
     }
 
     /// Pushes the blocks of the embedded `text` (the part `anchor` names)
-    /// at `at`, the embed's depth being `depth`.
+    /// at `at`, the embed's depth being `depth`: built like the
+    /// document's blocks (by a builder of their own over the embedded
+    /// note), then mapped to `at` with ids of their own, inside the frames
+    /// open here. The footnotes they refer to follow, numbered from 1.
     #[allow(clippy::too_many_arguments)]
     fn transclude(
         &mut self,
@@ -302,23 +367,27 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
         at: usize,
         depth: usize,
         parse_opts: gv_syntax::ParseOptions,
-        budget: &mut Budget,
     ) {
-        if let Some(i) = budget
+        if self.budget.full {
+            return;
+        }
+        if let Some(i) = self
+            .budget
             .chain
             .iter()
             .position(|(k, _, a)| k == key && a.as_deref() == anchor)
         {
-            let mut names: Vec<&str> = budget.chain[i..].iter().map(|(_, t, _)| &**t).collect();
+            let mut names: Vec<&str> = self.budget.chain[i..]
+                .iter()
+                .map(|(_, t, _)| &**t)
+                .collect();
             names.push(title);
-            self.notice(&format!("Embed cycle: {}", names.join(" \u{2192} ")), at);
+            let notice = format!("Embed cycle: {}", names.join(" \u{2192} "));
+            self.notice(&notice, at);
             return;
         }
         if depth >= MAX_EMBED_DEPTH {
-            self.notice(
-                &format!("Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown."),
-                at,
-            );
+            self.notice(&too_deep(), at);
             return;
         }
         let tree = SyntaxTree::parse_with(text, parse_opts);
@@ -328,155 +397,181 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             self.notice(&format!("\u{201c}{what}\u{201d} is not in {title}."), at);
             return;
         };
-        if budget.bytes + range.len() > MAX_EMBED_BYTES {
+        if self.budget.bytes + range.len() > MAX_EMBED_BYTES {
             self.notice("This embed is too large to show here.", at);
             return;
         }
-        budget.bytes += range.len();
-        budget.chain.push((
+        self.budget.bytes += range.len();
+        self.budget.chain.push((
             Arc::clone(key),
             Arc::clone(title),
             anchor.map(str::to_owned),
         ));
-        let mut blocks = Blocks {
+        let refs = tree.ref_map(text);
+        let mut sub = NodeBuilder::new(
             text,
-            tree: &tree,
-            out: Vec::new(),
-            items: 0,
-            first_in_item: false,
-            fences: self.opts.obsidian_fences,
+            Arc::clone(&refs),
+            self.opts,
+            self.inline_opts,
+            self.sources,
+            None,
+        );
+        sub.parse_opts = Some(parse_opts);
+        sub.footnotes = FootnoteIndex::scan_range(&tree, text, &refs, range.clone()).map(Arc::new);
+        sub.embed = Some(EmbedCx {
+            key: Arc::clone(key),
+            at: range.start,
+            depth,
+            range: range.clone(),
+        });
+        sub.budget = std::mem::take(&mut self.budget);
+        tree.walk_range(range.clone(), &mut sub);
+        if let Some(index) = sub.footnotes.clone() {
+            // Definitions outside the part that it refers to.
+            tree.walk(&mut OutsideDefinitions {
+                range: range.clone(),
+                text,
+                index: &index,
+                depth: 0,
+                inner: &mut sub,
+            });
+        }
+        self.budget = std::mem::take(&mut sub.budget);
+        let nodes = std::mem::take(&mut sub.nodes);
+        let sections = std::mem::take(&mut sub.sections);
+        drop(sub);
+        if self.splice(nodes, at) {
+            self.embed_footnotes(sections, at);
+        }
+        self.budget.chain.pop();
+    }
+
+    /// The footnote definitions of an embed (`sections`, numbered in the
+    /// embed) after its blocks, as a numbered list below a rule.
+    fn embed_footnotes(&mut self, sections: Vec<super::Section>, at: usize) {
+        let mut defs: Vec<super::Section> = sections
+            .into_iter()
+            .filter(|s| s.number.is_some())
+            .collect();
+        defs.sort_by_key(|s| s.number);
+        defs.dedup_by_key(|s| s.number);
+        if defs.is_empty() {
+            return;
+        }
+        self.synthetic += 1;
+        let context = self.context();
+        self.push(
+            BlockNode {
+                id: BlockId(SYNTHETIC | self.synthetic),
+                kind: NodeKind::ThematicBreak,
+                source: at..at,
+                context,
+                block: at..at,
+                top: at..at,
+                lookups: None,
+                table: false,
+            },
+            None,
+        );
+        // One list (its frame's id is mapped like the others, once).
+        let list = Frame {
+            id: BlockId(SYNTHETIC),
+            kind: FrameKind::List {
+                ordered: true,
+                tight: true,
+                marker: b'.',
+                start: 1,
+                depth: 0,
+            },
         };
-        tree.walk_range(range.clone(), &mut blocks);
-        for block in blocks.out {
-            if !range.contains(&block.start) && block.start != range.start {
-                continue;
-            }
-            budget.nodes += 1;
-            if budget.nodes > MAX_EMBED_NODES {
-                self.notice("This embed has too many blocks to show them all.", at);
-                break;
-            }
-            match block.kind {
-                Block::Text { role, text } => self.plain_node(&text, role, at),
-                Block::Inline { role, tree, bullet } => {
-                    self.inline_node(&tree, bullet, role, at, key);
-                }
-                Block::Fence { kind, code } => {
-                    if depth + 1 >= MAX_EMBED_DEPTH {
-                        self.notice(
-                            &format!(
-                                "Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown."
-                            ),
-                            at,
-                        );
-                        continue;
-                    }
-                    let live = LiveBlock::new(
-                        kind,
-                        None,
-                        None,
-                        Some(Arc::new(code)),
-                        None,
-                        Some(Arc::clone(key)),
-                        u16::try_from(depth + 1).unwrap_or(u16::MAX),
-                    );
-                    self.live_node(live, at);
-                }
-                Block::Embed { inner, .. }
-                    if LiveKind::of_embed(split_embed(&inner).0).is_some() =>
-                {
-                    // A canvas or base inside the embedded note: live too,
-                    // its `this` the embedded note, within the depth limit.
-                    if depth + 1 >= MAX_EMBED_DEPTH {
-                        self.notice(
-                            &format!(
-                                "Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown."
-                            ),
-                            at,
-                        );
-                        continue;
-                    }
-                    let (path, view) = split_embed(&inner);
-                    let kind = LiveKind::of_embed(path).unwrap_or(LiveKind::Canvas);
-                    let label = self.plain_label(&format!("\u{29c9} {inner}"), at);
-                    let live = LiveBlock::new(
-                        kind,
-                        Some(path.into()),
-                        view.map(Into::into),
-                        None,
-                        Some(label),
-                        Some(Arc::clone(key)),
-                        u16::try_from(depth + 1).unwrap_or(u16::MAX),
-                    );
-                    self.live_node(live, at);
-                }
-                Block::Embed { inner, anchor } => {
-                    let pushed = self.frames.len() < super::MAX_FRAMES;
-                    if pushed {
-                        self.synthetic += 1;
-                        self.frames.push(Frame {
-                            id: BlockId(SYNTHETIC | self.synthetic),
-                            kind: FrameKind::Embed {
-                                depth: u16::try_from(depth + 1).unwrap_or(u16::MAX),
-                            },
-                        });
-                        self.ctx = None;
-                    }
-                    self.plain_node(&format!("\u{29c9} {inner}"), TextRole::Body, at);
-                    match self.sources.links.embed(&inner, Some(key)) {
-                        EmbedFetch::Note {
-                            key: k,
-                            title: t,
-                            text: body,
-                        } => self.transclude(
-                            &body,
-                            anchor.as_deref(),
-                            &k,
-                            &t,
-                            at,
-                            depth + 1,
-                            parse_opts,
-                            budget,
-                        ),
-                        EmbedFetch::Unavailable => {
-                            self.notice(&format!("\u{201c}{inner}\u{201d} cannot be shown."), at);
-                        }
-                        EmbedFetch::Pending => {}
-                    }
-                    if pushed {
-                        self.frames.pop();
-                        self.ctx = None;
-                    }
-                }
+        let mut nodes = Vec::new();
+        for def in defs {
+            let item = Frame {
+                id: def.id,
+                kind: FrameKind::Item {
+                    marker: ListMarker::Ordered {
+                        number: u64::from(def.number.unwrap_or(0)),
+                        delimiter: b'.',
+                    },
+                },
+            };
+            for mut n in def.nodes {
+                let mut frames = vec![list.clone(), item.clone()];
+                frames.extend(n.context.iter().skip(1).cloned());
+                n.context = frames.into();
+                nodes.push(n);
             }
         }
-        budget.chain.pop();
+        self.splice(nodes, at);
+    }
+
+    /// Pushes the nodes of an embedded note (built by another builder)
+    /// inside the frames open here, every source mapped to `at` and every
+    /// block id replaced by a synthetic one. False when the node budget
+    /// ran out.
+    fn splice(&mut self, nodes: Vec<BlockNode>, at: usize) -> bool {
+        let mut ids: HashMap<BlockId, BlockId> = HashMap::new();
+        let mut contexts: HashMap<usize, Context> = HashMap::new();
+        let outer = self.frames.clone();
+        let mut synthetic = self.synthetic;
+        let mut map = |id: BlockId| {
+            *ids.entry(id).or_insert_with(|| {
+                synthetic += 1;
+                BlockId(SYNTHETIC | synthetic)
+            })
+        };
+        let mut ok = true;
+        for n in nodes {
+            // Nodes of the embedded note itself count (deeper embeds
+            // counted theirs).
+            if n.id.0 & SYNTHETIC == 0 {
+                self.budget.nodes += 1;
+                if self.budget.nodes > MAX_EMBED_NODES {
+                    ok = false;
+                    break;
+                }
+            }
+            let ptr = Arc::as_ptr(&n.context).cast::<Frame>() as usize;
+            let context = match contexts.get(&ptr) {
+                Some(c) => Arc::clone(c),
+                None => {
+                    let room = super::MAX_FRAMES.saturating_sub(outer.len());
+                    let mut frames = outer.clone();
+                    frames.extend(n.context.iter().take(room).map(|f| Frame {
+                        id: map(f.id),
+                        kind: f.kind.clone(),
+                    }));
+                    let c: Context = frames.into();
+                    contexts.insert(ptr, Arc::clone(&c));
+                    c
+                }
+            };
+            let node = BlockNode {
+                id: map(n.id),
+                kind: collapse(n.kind),
+                source: at..at,
+                context,
+                block: at..at,
+                top: at..at,
+                lookups: None,
+                table: n.table,
+            };
+            self.push(node, None);
+        }
+        self.synthetic = synthetic;
+        if !ok && !self.budget.full {
+            self.budget.full = true;
+            self.notice("This embed has too many blocks to show them all.", at);
+        }
+        ok
     }
 
     /// A notice in an embed (a cycle, a budget, a missing section).
     fn notice(&mut self, text: &str, at: usize) {
-        self.plain_node(text, TextRole::Body, at);
-    }
-
-    /// A paragraph or heading of the embedded note `key` (its inlines
-    /// `tree`, after a bullet for a list item's first block), mapped to
-    /// `at`.
-    fn inline_node(
-        &mut self,
-        tree: &InlineTree,
-        bullet: bool,
-        role: TextRole,
-        at: usize,
-        key: &Arc<str>,
-    ) {
         self.synthetic += 1;
         let id = BlockId(SYNTHETIC | self.synthetic);
-        let mut cx = self.inline_cx(id);
-        // The document's footnotes are not the embedded note's.
-        cx.footnotes = None;
-        cx.embed = Some((key, at));
-        let prefix = bullet.then_some("\u{2022} ");
-        let content = Arc::new(inline::build_embedded(tree, prefix, role, &cx));
+        let cx = self.inline_cx(id);
+        let content = Arc::new(inline::build_plain(text, at..at, at, TextRole::Body, &cx));
         let context = self.context();
         self.push(
             BlockNode {
@@ -492,30 +587,108 @@ impl<S: TextSource + ?Sized> NodeBuilder<'_, S> {
             None,
         );
     }
+}
 
-    /// A plain-text node of an embed, mapped to `at`.
-    fn plain_node(&mut self, text: &str, role: TextRole, at: usize) {
-        self.synthetic += 1;
-        let id = BlockId(SYNTHETIC | self.synthetic);
-        let cx = self.inline_cx(id);
-        let content = Arc::new(inline::build_plain(text, at..at, at, role, &cx));
-        // Headings too are paragraphs (in a heading's type): they are no
-        // anchors of this document.
-        let kind = NodeKind::Paragraph(content);
-        let context = self.context();
-        self.push(
-            BlockNode {
-                id,
-                kind,
-                source: at..at,
-                context,
-                block: at..at,
-                top: at..at,
-                lookups: None,
-                table: false,
-            },
-            None,
-        );
+/// The notice of embeds nested too deep.
+pub(super) fn too_deep() -> String {
+    format!("Embeds nested more than {MAX_EMBED_DEPTH} deep are not shown.")
+}
+
+/// A node of an embedded note as the document shows it: headings are
+/// paragraphs in a heading's type (no anchors of the document), and the
+/// lines of code, math, diagrams, HTML and table rows map to the node's
+/// start.
+fn collapse(kind: NodeKind) -> NodeKind {
+    match kind {
+        NodeKind::Heading { content, .. } => NodeKind::Paragraph(content),
+        NodeKind::Code(c) => NodeKind::Code(collapse_code(c)),
+        NodeKind::Math(c) => NodeKind::Math(collapse_code(c)),
+        NodeKind::Diagram(c) => NodeKind::Diagram(collapse_code(c)),
+        NodeKind::Html {
+            kind,
+            raw_html_pending,
+            code,
+        } => NodeKind::Html {
+            kind,
+            raw_html_pending,
+            code: collapse_code(code),
+        },
+        NodeKind::Table(t) => {
+            let mut t = (*t).clone();
+            for r in t.rows.iter_mut() {
+                r.source = 0..0;
+            }
+            NodeKind::Table(Arc::new(t))
+        }
+        NodeKind::Live(l) if l.code.is_some() => {
+            let mut l = (*l).clone();
+            l.code = l.code.map(collapse_code);
+            NodeKind::Live(Arc::new(l))
+        }
+        other => other,
+    }
+}
+
+fn collapse_code(code: Arc<CodeBlock>) -> Arc<CodeBlock> {
+    if code
+        .lines
+        .iter()
+        .all(|l| l.source == (0..0) && l.start == 0)
+    {
+        return code;
+    }
+    let mut c = (*code).clone();
+    for l in c.lines.iter_mut() {
+        l.source = 0..0;
+        l.start = 0;
+    }
+    Arc::new(c)
+}
+
+/// Feeds a builder the footnote definitions outside an embed's part that
+/// the part refers to.
+struct OutsideDefinitions<'b, 'a, 't> {
+    range: Range<usize>,
+    text: &'t str,
+    index: &'b FootnoteIndex,
+    /// Containers open inside the definition being fed.
+    depth: usize,
+    inner: &'b mut NodeBuilder<'a, str>,
+}
+
+impl Visitor for OutsideDefinitions<'_, '_, '_> {
+    fn enter(&mut self, c: &Container) {
+        if self.depth > 0 {
+            self.depth += 1;
+            self.inner.enter(c);
+            return;
+        }
+        if c.kind != ContainerKind::FootnoteDefinition
+            || (c.range.start < self.range.end && self.range.start < c.range.end)
+        {
+            return;
+        }
+        let label = c
+            .footnote_label()
+            .and_then(|l| self.text.get(l))
+            .map(gv_syntax::inline::normalize_label);
+        if label.is_some_and(|l| self.index.number(&l).is_some()) {
+            self.depth = 1;
+            self.inner.enter(c);
+        }
+    }
+
+    fn exit(&mut self, c: &Container) {
+        if self.depth > 0 {
+            self.depth -= 1;
+            self.inner.exit(c);
+        }
+    }
+
+    fn leaf(&mut self, leaf: &Leaf<'_>) {
+        if self.depth > 0 {
+            self.inner.leaf(leaf);
+        }
     }
 }
 
@@ -607,204 +780,4 @@ fn line_of(text: &str, offset: usize) -> usize {
         .iter()
         .filter(|&&b| b == b'\n')
         .count()
-}
-
-/// One embedded block.
-struct EmbeddedBlock {
-    start: usize,
-    kind: Block,
-}
-
-enum Block {
-    Text {
-        role: TextRole,
-        text: String,
-    },
-    /// A paragraph or heading: its inlines.
-    Inline {
-        role: TextRole,
-        tree: Arc<InlineTree>,
-        /// The first block of a list item.
-        bullet: bool,
-    },
-    Embed {
-        inner: String,
-        anchor: Option<String>,
-    },
-    /// A ` ```base ` or ` ```query ` fence (live where fences are).
-    Fence {
-        kind: LiveKind,
-        code: CodeBlock,
-    },
-}
-
-/// Collects the embedded blocks of a range as plain text.
-struct Blocks<'t> {
-    text: &'t str,
-    tree: &'t SyntaxTree,
-    out: Vec<EmbeddedBlock>,
-    /// Open list items.
-    items: usize,
-    /// The next leaf is the first of a list item.
-    first_in_item: bool,
-    /// ` ```base ` and ` ```query ` fences are live blocks.
-    fences: bool,
-}
-
-impl Visitor for Blocks<'_> {
-    fn enter(&mut self, c: &Container) {
-        if c.kind == ContainerKind::Item {
-            self.items += 1;
-            self.first_in_item = true;
-        }
-    }
-
-    fn exit(&mut self, c: &Container) {
-        if c.kind == ContainerKind::Item {
-            self.items = self.items.saturating_sub(1);
-        }
-    }
-
-    fn leaf(&mut self, leaf: &Leaf<'_>) {
-        let start = leaf.range.start;
-        let first = std::mem::take(&mut self.first_in_item);
-        let (role, mut text) = match leaf.kind {
-            LeafKind::Heading { level, .. } => {
-                self.inline(leaf, TextRole::heading(level), first);
-                return;
-            }
-            LeafKind::Paragraph | LeafKind::CalloutTitle => {
-                let lines: Vec<&str> = leaf
-                    .lines
-                    .iter()
-                    .filter(|l| l.has_content)
-                    .map(|l| self.text[l.content.clone()].trim())
-                    .collect();
-                if let [one] = lines[..]
-                    && one.starts_with("![[")
-                    && one.ends_with("]]")
-                    && !one[3..one.len() - 2].contains("]]")
-                {
-                    let inner = &one[3..one.len() - 2];
-                    let path = inner.split(['#', '|']).next().unwrap_or("");
-                    if !is_image_path(path.trim()) {
-                        let anchor = inner
-                            .split('|')
-                            .next()
-                            .and_then(|t| t.split_once('#'))
-                            .map(|(_, a)| a.to_owned());
-                        self.out.push(EmbeddedBlock {
-                            start,
-                            kind: Block::Embed {
-                                inner: inner.to_owned(),
-                                anchor,
-                            },
-                        });
-                        return;
-                    }
-                }
-                self.inline(leaf, TextRole::Body, first);
-                return;
-            }
-            LeafKind::FencedCode if self.fences && self.live_fence(leaf).is_some() => {
-                if let Some((kind, code)) = self.live_fence(leaf) {
-                    self.out.push(EmbeddedBlock {
-                        start,
-                        kind: Block::Fence { kind, code },
-                    });
-                }
-                return;
-            }
-            LeafKind::FencedCode
-            | LeafKind::IndentedCode
-            | LeafKind::MathBlock
-            | LeafKind::Html { .. } => {
-                let lines: Vec<&str> = leaf
-                    .lines
-                    .iter()
-                    .map(|l| &self.text[l.content.clone()])
-                    .collect();
-                (TextRole::Body, lines.join("\n"))
-            }
-            LeafKind::Table => {
-                let lines: Vec<&str> = leaf
-                    .lines
-                    .iter()
-                    .filter(|l| l.has_content && !l.marker)
-                    .map(|l| self.text[l.content.clone()].trim())
-                    .collect();
-                (TextRole::Body, lines.join("\n"))
-            }
-            LeafKind::ThematicBreak
-            | LeafKind::LinkRefDef
-            | LeafKind::FrontMatter { .. }
-            | LeafKind::Comment => return,
-        };
-        if text.trim().is_empty() {
-            return;
-        }
-        if first && self.items > 0 {
-            text = format!("\u{2022} {text}");
-        }
-        self.out.push(EmbeddedBlock {
-            start,
-            kind: Block::Text { role, text },
-        });
-    }
-}
-
-impl Blocks<'_> {
-    /// A ` ```base ` or ` ```query ` fence's kind and lines (mapped to
-    /// the embed's line, like the other embedded blocks).
-    fn live_fence(&self, leaf: &Leaf<'_>) -> Option<(LiveKind, CodeBlock)> {
-        let info = self.text.get(leaf.info.clone()?)?.trim();
-        let kind = LiveKind::of_fence(info.split_ascii_whitespace().next()?)?;
-        let mut text = String::new();
-        let mut lines = Vec::with_capacity(leaf.lines.len());
-        for (i, l) in leaf.lines.iter().enumerate() {
-            if i > 0 {
-                text.push('\n');
-            }
-            let start = text.len();
-            text.push_str(self.text.get(l.content.clone()).unwrap_or(""));
-            lines.push(CodeLine {
-                units: crate::inline::width_units(&text[start..]),
-                text: start..text.len(),
-                source: 0..0,
-                start: 0,
-                indent: 0,
-            });
-        }
-        Some((
-            kind,
-            CodeBlock {
-                fenced: true,
-                info: Some(info.into()),
-                language: Some(kind.name().into()),
-                text,
-                lines: lines.into_boxed_slice(),
-            },
-        ))
-    }
-
-    /// A paragraph or heading with text: its inlines. `first`: the first
-    /// leaf of a list item.
-    fn inline(&mut self, leaf: &Leaf<'_>, role: TextRole, first: bool) {
-        let tree = self.tree.inlines(leaf, self.text);
-        let mut s = String::new();
-        for n in tree.top_level() {
-            n.push_text(TextProjection::TextContent, &mut s);
-        }
-        if s.trim().is_empty() {
-            return;
-        }
-        self.out.push(EmbeddedBlock {
-            start: leaf.range.start,
-            kind: Block::Inline {
-                role,
-                tree,
-                bullet: first && self.items > 0,
-            },
-        });
-    }
 }

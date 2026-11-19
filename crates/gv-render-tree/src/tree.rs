@@ -512,7 +512,11 @@ impl RenderTree {
             let Some(c) = node.item_inline(&item.kind) else {
                 continue;
             };
-            for f in c.footnotes.iter().filter(|f| &*f.label == label) {
+            for f in c
+                .footnotes
+                .iter()
+                .filter(|f| !f.embedded && &*f.label == label)
+            {
                 out.push((
                     ix,
                     node.to_document(f.source.start)..node.to_document(f.source.end),

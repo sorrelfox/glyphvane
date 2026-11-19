@@ -396,6 +396,9 @@ pub struct Picture {
     pub fallback: Option<Arc<str>>,
     /// The `<img>`'s `alt`.
     pub alt: Arc<str>,
+    /// Inside a note embed: the embedded note's key, which the sources
+    /// resolve from ([`crate::image_key`]).
+    pub from: Option<Arc<str>>,
     /// The size of the image picked in a light and a dark scheme (asked of
     /// the [`ImageSizeSource`](crate::ImageSizeSource) when the block is
     /// built).
@@ -531,6 +534,10 @@ pub struct FootnoteRefInfo {
     pub number: u32,
     /// The `[^label]`, relative to the node's start.
     pub source: Range<usize>,
+    /// A reference inside a note embed: numbered within the embed, whose
+    /// footnotes are listed at the embed's end (not in the document's
+    /// footnote section).
+    pub embedded: bool,
 }
 
 /// What an inline box of a paragraph stands for, as encoded in its
@@ -653,6 +660,9 @@ pub struct ImageInfo {
     pub source: Range<usize>,
     /// The link around it.
     pub link: Option<u32>,
+    /// Inside a note embed: the embedded note's key, which the image
+    /// resolves from ([`crate::image_key`]). `None`: the document's.
+    pub from: Option<Arc<str>>,
 }
 
 /// The lines of a code block (also of HTML blocks and front matter).

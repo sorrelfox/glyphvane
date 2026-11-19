@@ -276,23 +276,32 @@ impl ImageTargets {
             .insert(destination.to_owned(), target);
     }
 
-    /// Resolves `destination` with `resolver` and probes a local file
-    /// (blocking; off the UI thread), once per destination.
-    fn resolve(&self, destination: &str, resolver: &Resolver) -> ImageTarget {
-        if let Some(t) = self.get(destination) {
+    /// Resolves `destination` (of the note `from` inside a note embed)
+    /// with `resolver` and probes a local file (blocking; off the UI
+    /// thread), once per destination. Kept by its
+    /// [`image_key`](gv_render_tree::image_key).
+    fn resolve(&self, destination: &str, from: Option<&str>, resolver: &Resolver) -> ImageTarget {
+        let key = gv_render_tree::image_key(destination, from);
+        if let Some(t) = self.get(&key) {
             return t;
         }
-        let target = image_target(destination, resolver, &self.root);
+        let target = image_target(destination, from, resolver, &self.root);
         self.map
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(destination.to_owned(), target.clone());
+            .insert(key.into_owned(), target.clone());
         target
     }
 }
 
-/// Resolves an image destination of a document (blocking).
-pub(crate) fn image_target(destination: &str, resolver: &Resolver, root: &Path) -> ImageTarget {
+/// Resolves an image destination of a document, or of the note `from`
+/// inside a note embed (blocking).
+pub(crate) fn image_target(
+    destination: &str,
+    from: Option<&str>,
+    resolver: &Resolver,
+    root: &Path,
+) -> ImageTarget {
     let bare = match scheme_only(destination) {
         Some(_) => destination.rsplit_once('#').map_or(destination, |(d, _)| d),
         None => destination,
@@ -310,7 +319,7 @@ pub(crate) fn image_target(destination: &str, resolver: &Resolver, root: &Path) 
         UrlClass::Relative(_) | UrlClass::Fragment(_) | UrlClass::LocalFile { .. } => {}
         _ => return ImageTarget::None,
     }
-    let res = resolver.resolve(gv_vault::LinkKind::Image, bare);
+    let res = resolver.resolve_from(gv_vault::LinkKind::Image, bare, from);
     let path = match (&res.target_path, res.target_kind) {
         (Some(p), Some(gv_vault::TargetKind::File)) if res.status.is_resolved() => {
             p.to_fs_path(resolver.root())
@@ -341,7 +350,10 @@ pub(crate) struct ImageSizes<'a> {
 
 impl ImageSizeSource for ImageSizes<'_> {
     fn size(&self, image: &LinkTarget<'_>) -> ImageSize {
-        match self.targets.resolve(image.destination, &self.resolver) {
+        match self
+            .targets
+            .resolve(image.destination, image.from, &self.resolver)
+        {
             ImageTarget::Local { probe: Ok(p), .. }
             | ImageTarget::Fetched { probe: Ok(p), .. }
             | ImageTarget::Data(Ok(DataImage { probe: Ok(p), .. }))
@@ -826,9 +838,14 @@ impl Reader {
         let ids: Vec<ItemId> = st.doc.as_ref().map_or_else(Vec::new, |doc| {
             (0..doc.tree.items().len())
                 .filter(|&ix| {
-                    doc.tree
-                        .item_inline(ix)
-                        .is_some_and(|c| c.images.iter().any(|i| dests.contains(&*i.destination)))
+                    doc.tree.item_inline(ix).is_some_and(|c| {
+                        c.images.iter().any(|i| {
+                            dests.contains(&*gv_render_tree::image_key(
+                                &i.destination,
+                                i.from.as_deref(),
+                            ))
+                        })
+                    })
                 })
                 .map(|ix| doc.tree.items()[ix].id)
                 .collect()

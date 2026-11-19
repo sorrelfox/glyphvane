@@ -718,7 +718,7 @@ impl Emitter<'_> {
             }
             NodeKind::Picture(p) => {
                 if let Some(src) = p.pick(false) {
-                    let src = src.to_owned();
+                    let src = crate::emit::embedded_image_src(self.opts, p.from.as_deref(), src);
                     self.image(&src, &p.alt, false);
                     self.out.push_str("\n\n");
                 }
@@ -1132,7 +1132,12 @@ impl Emitter<'_> {
                         want.push(Tag::Link(l));
                     }
                     self.set_tags(&mut open, &want, c);
-                    let (dest, alt) = (image.destination.to_string(), image.alt.to_string());
+                    let dest = crate::emit::embedded_image_src(
+                        self.opts,
+                        image.from.as_deref(),
+                        &image.destination,
+                    );
+                    let alt = image.alt.to_string();
                     self.image(&dest, &alt, true);
                 }
                 InlineRole::LinkSuffix
@@ -1178,6 +1183,12 @@ impl Emitter<'_> {
                         .collect();
                     self.set_tags(&mut open, &keep, c);
                     let n = f.number;
+                    if f.embedded {
+                        // A note embed's footnote: listed at the embed's
+                        // end.
+                        let _ = write!(self.out, "#super[#{};]", str_lit(&n.to_string()));
+                        continue;
+                    }
                     let fn_label = format!("gv-fn-{n}");
                     if self.referenced.insert(n) {
                         let body = self.footnotes.get(&n).cloned().unwrap_or_default();

@@ -60,7 +60,25 @@ impl FootnoteIndex {
         text: &S,
         refs: &RefMap,
     ) -> Option<FootnoteIndex> {
-        Self::scan_with_firsts(tree, text, refs).0
+        Self::scan_with_firsts(tree, text, refs, None).0
+    }
+
+    /// Numbers the footnotes referenced in `range` of `tree` (a note
+    /// embed's part of the embedded note) from 1, by first reference;
+    /// inline footnotes are not numbered (they show in place). `None` when
+    /// none is referenced there.
+    pub(crate) fn scan_range<S: TextSource + ?Sized>(
+        tree: &SyntaxTree,
+        text: &S,
+        refs: &RefMap,
+        range: Range<usize>,
+    ) -> Option<FootnoteIndex> {
+        if refs.footnote_count() == 0 {
+            return None;
+        }
+        Self::scan_with_firsts(tree, text, refs, Some(range))
+            .0
+            .filter(|i| !i.is_empty())
     }
 
     /// The footnotes of `tree` (the parse of `text`) in the order of their
@@ -72,15 +90,19 @@ impl FootnoteIndex {
         text: &S,
         refs: &RefMap,
     ) -> Vec<(usize, String)> {
-        Self::scan_with_firsts(tree, text, refs).1
+        Self::scan_with_firsts(tree, text, refs, None).1
     }
 
     fn scan_with_firsts<S: TextSource + ?Sized>(
         tree: &SyntaxTree,
         text: &S,
         refs: &RefMap,
+        range: Option<Range<usize>>,
     ) -> (Option<FootnoteIndex>, Vec<(usize, String)>) {
-        let opts = tree.options().inline();
+        let mut opts = tree.options().inline();
+        if range.is_some() {
+            opts.inline_footnotes = false;
+        }
         let defined = refs.footnote_count() > 0;
         if !defined && !opts.inline_footnotes {
             return (None, Vec::new());
@@ -213,7 +235,10 @@ impl FootnoteIndex {
             buf: Vec::new(),
             firsts: Vec::new(),
         };
-        gv_syntax::walk(tree, &mut scan);
+        match range {
+            Some(r) => gv_syntax::walk_range(tree, r, &mut scan),
+            None => gv_syntax::walk(tree, &mut scan),
+        }
         let firsts = std::mem::take(&mut scan.firsts);
         (
             (defined || !scan.index.inline.is_empty()).then_some(scan.index),

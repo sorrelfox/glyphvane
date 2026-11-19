@@ -164,6 +164,17 @@ impl<F: Fn(&LinkTarget<'_>) -> ImageSize> ImageSizeSource for F {
     }
 }
 
+/// The key an image is known by in a document: its destination, or for
+/// an image inside a note embed (`from`: the embedded note's key) the
+/// note and the destination, as the same destination may name another
+/// file there.
+pub fn image_key<'a>(destination: &'a str, from: Option<&str>) -> std::borrow::Cow<'a, str> {
+    match from {
+        None => std::borrow::Cow::Borrowed(destination),
+        Some(from) => std::borrow::Cow::Owned(format!("{from}\u{0}{destination}")),
+    }
+}
+
 /// Every image size is [`ImageSize::Pending`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoImageSizes;

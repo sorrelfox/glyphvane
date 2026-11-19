@@ -801,3 +801,84 @@ fn links_inside_note_embeds_resolve_from_the_embedded_note() {
     assert!(typ.contains("#link(\"https://example.com/a\")"), "{typ}");
     assert_eq!(typ.matches("#link(").count(), 1, "{typ}");
 }
+
+#[test]
+fn blocks_inside_note_embeds_export_like_the_documents() {
+    use gv_render_tree::{EmbedFetch, ImageSize, LinkStatus, LinkStatusSource, LinkTarget};
+    struct Vault;
+    impl LinkStatusSource for Vault {
+        fn status(&self, _: &LinkTarget<'_>) -> LinkStatus {
+            LinkStatus::Exact
+        }
+        fn embed(&self, destination: &str, _: Option<&str>) -> EmbedFetch {
+            if destination != "Rich" {
+                return EmbedFetch::Unavailable;
+            }
+            EmbedFetch::Note {
+                key: "sub/Rich.md".into(),
+                title: "Rich".into(),
+                text: "A note[^n].\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n\
+                       > [!tip]- Folded\n> Inside.\n\n![pic](img/p.png)\n\n[^n]: The note.\n"
+                    .into(),
+            }
+        }
+    }
+    let sizes = |_: &LinkTarget<'_>| ImageSize::Known {
+        width: 1.0,
+        height: 1.0,
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("sub/img")).expect("mkdir");
+    std::fs::copy(
+        fixtures().join("img/dot.png"),
+        dir.path().join("sub/img/p.png"),
+    )
+    .expect("png");
+    // The host has a footnote of the same number.
+    let src = "# Host\n\nHost note[^h].\n\n![[Rich]]\n\n[^h]: Host's.\n";
+    let id = ProfileId::Obsidian;
+    let syntax = gv_syntax::parse_with(src, ParseOptions::builtin(id));
+    let model = DocModel::build(&syntax, src);
+    let t = RenderTree::build(
+        &syntax,
+        &model,
+        src,
+        RenderOptions::builtin(id),
+        Sources {
+            links: &Vault,
+            images: &sizes,
+        },
+    );
+    let mut opts = options(&dir.path().join("doc.md"));
+    opts.root = Some(dir.path().to_path_buf());
+    let out = export_html(&t, &opts);
+    let html = &out.html;
+    for needle in [
+        "<div class=\"gv-embed\">",
+        "<table>",
+        "<pre",
+        "gv-callout gv-callout-tip",
+        "data:image/png;base64,",
+        "<sup class=\"gv-fnref\">1</sup>",
+        "The note.",
+    ] {
+        assert!(html.contains(needle), "missing {needle:?} in\n{html}");
+    }
+    // One linked reference (the host's); the embed's is not a link.
+    assert_eq!(
+        html.matches("href=\"#user-content-fn-1\"").count(),
+        1,
+        "{html}"
+    );
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+    // Copied beside the export: the image of the embedded note.
+    opts.images = ImageMode::Assets;
+    let out = export_html(&t, &opts);
+    assert_eq!(out.assets.len(), 1, "{:?}", out.notes);
+    assert!(out.assets[0].source.ends_with("sub/img/p.png"));
+    // PDF: the image is an asset, the embed's footnote a raised number.
+    let doc = gv_export::export_typst(&t, &opts, &gv_export::PageOptions::default());
+    assert!(doc.source.contains("gvimg("), "{}", doc.source);
+    assert!(doc.source.contains("#super[#\"1\";]"), "{}", doc.source);
+    assert!(doc.source.contains("#table("), "{}", doc.source);
+}

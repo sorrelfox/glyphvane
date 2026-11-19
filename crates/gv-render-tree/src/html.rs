@@ -224,6 +224,7 @@ pub(crate) fn picture(s: &str) -> Option<Picture> {
         sources: sources.into_boxed_slice(),
         fallback,
         alt: Arc::from(alt),
+        from: None,
         sizes: [ImageSize::Pending; 2],
     })
 }

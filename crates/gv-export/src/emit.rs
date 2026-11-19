@@ -492,8 +492,9 @@ impl Emitter<'_> {
             NodeKind::Picture(p) => {
                 // Exports are light: the light source, else the fallback.
                 if let Some(src) = p.pick(false) {
+                    let src = embedded_image_src(self.opts, p.from.as_deref(), src);
                     self.out.push_str("<p><img src=\"");
-                    esc(&mut self.out, src);
+                    esc(&mut self.out, &src);
                     self.out.push_str("\" alt=\"");
                     esc(&mut self.out, &p.alt);
                     self.out.push_str("\"></p>\n");
@@ -877,8 +878,10 @@ impl Emitter<'_> {
                         want.push(Tag::Link(l));
                     }
                     self.set_tags(&mut open, &want, c);
+                    let src =
+                        embedded_image_src(self.opts, image.from.as_deref(), &image.destination);
                     self.out.push_str("<img src=\"");
-                    esc(&mut self.out, &image.destination);
+                    esc(&mut self.out, &src);
                     self.out.push_str("\" alt=\"");
                     esc(&mut self.out, &image.alt);
                     self.out.push('"');
@@ -924,6 +927,13 @@ impl Emitter<'_> {
                         .collect();
                     self.set_tags(&mut open, &keep, c);
                     let n = f.number;
+                    if f.embedded {
+                        // A note embed's footnote: listed at the embed's
+                        // end, not in the document's footnotes.
+                        self.out
+                            .push_str(&format!("<sup class=\"gv-fnref\">{n}</sup>"));
+                        continue;
+                    }
                     let k = {
                         let count = self.fn_refs.entry(n).or_insert(0);
                         *count += 1;
@@ -1216,6 +1226,36 @@ fn note_href(mut rel: String, fragment: Option<String>) -> String {
         href.push_str(&f);
     }
     href
+}
+
+/// The address of image `dest` of the embedded note `from` (its key: a
+/// path below the vault root, or below the document's folder without one)
+/// seen from the exported document: a relative path goes through the
+/// note's folder; anything else, and an image of the document (`from`
+/// `None`), stays as written.
+pub(crate) fn embedded_image_src(opts: &ExportOptions, from: Option<&str>, dest: &str) -> String {
+    let Some(from) = from else {
+        return dest.to_owned();
+    };
+    let trimmed = dest.trim();
+    match gv_vault::url::classify(trimmed) {
+        gv_vault::url::UrlClass::Relative(path) if !path.starts_with('/') => {}
+        _ => return dest.to_owned(),
+    }
+    let Some(host) = opts.base_dir() else {
+        return dest.to_owned();
+    };
+    let note = opts.root.as_deref().unwrap_or(host).join(from);
+    let Some(note_dir) = note.parent() else {
+        return dest.to_owned();
+    };
+    if same_dir(host, note_dir) {
+        return trimmed.to_owned();
+    }
+    match relative_path(host, note_dir) {
+        Some(prefix) => format!("{prefix}/{trimmed}"),
+        None => dest.to_owned(),
+    }
 }
 
 /// Whether two folders are the same (after resolving links when they

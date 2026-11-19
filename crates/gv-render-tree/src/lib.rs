@@ -88,7 +88,7 @@ pub use node::{
 pub use properties::Property;
 pub use status::{
     AllPending, EmbedFetch, ImageSize, ImageSizeSource, LinkStatus, LinkStatusSource, LinkTarget,
-    NoImageSizes, Sources,
+    NoImageSizes, Sources, image_key,
 };
 pub use style::{
     ColorToken, Family, LinkDecor, LinkSuffix, StatusIcon, StyleSpec, StyleTable, TextRole,

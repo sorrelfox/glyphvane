@@ -131,6 +131,10 @@ pub(crate) struct NodeBuilder<'a, S: TextSource + ?Sized> {
     pub(crate) synthetic: u64,
     /// While a callout's title is built: its colour and icon gutter.
     pub(crate) title_cx: Option<(crate::style::ColorToken, f32)>,
+    /// Building the blocks of an embedded note (see [`obsidian`]).
+    pub(crate) embed: Option<obsidian::EmbedCx>,
+    /// What the outermost note embed being built has used of the budgets.
+    pub(crate) budget: obsidian::Budget,
 }
 
 impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
@@ -168,6 +172,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             backrefs: None,
             synthetic: 0,
             title_cx: None,
+            embed: None,
+            budget: obsidian::Budget::default(),
         }
     }
 
@@ -181,7 +187,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
             title: self.title_cx,
-            embed: None,
+            embed: self.embed.as_ref().map(|e| (&e.key, e.at)),
         }
     }
 
@@ -328,6 +334,10 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                 let live = lang
                     .filter(|_| self.opts.obsidian_fences)
                     .and_then(crate::live::LiveKind::of_fence);
+                if live.is_some() && self.embed_too_deep() {
+                    return Some(self.embed_notice(leaf, &obsidian::too_deep()));
+                }
+                let (host, depth) = self.live_host();
                 let kind = match (lang, live) {
                     (_, Some(kind)) => NodeKind::Live(Arc::new(crate::live::LiveBlock::new(
                         kind,
@@ -335,8 +345,8 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                         None,
                         Some(code),
                         None,
-                        None,
-                        0,
+                        host,
+                        depth,
                     ))),
                     (Some("math"), _) if self.opts.math_fences => NodeKind::Math(code),
                     (Some("mermaid"), _) if self.opts.mermaid => NodeKind::Diagram(code),
@@ -347,17 +357,19 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             LeafKind::Html { kind } => {
                 let code = Arc::new(self.code_block(leaf, range.start, false, false));
                 if let Some(mut p) = html::picture(&code.text) {
+                    p.from = self.embed.as_ref().map(|e| Arc::clone(&e.key));
                     self.size_picture(&mut p, leaf.id, range.clone());
                     (NodeKind::Picture(Arc::new(p)), range.start, None)
                 } else if let Some(m) = html::media(&code.text) {
+                    let (host, depth) = self.live_host();
                     let live = crate::live::LiveBlock::new(
                         m.kind,
                         Some(m.src.into()),
                         None,
                         Some(code),
                         None,
-                        None,
-                        0,
+                        host,
+                        depth,
                     )
                     .with_html(crate::live::HtmlMedia {
                         title: m.title.map(Into::into),
@@ -416,7 +428,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
                     title: None,
                     range: range.clone(),
                     block,
-                    from: None,
+                    from: p.from.as_deref(),
                 }),
                 None => ImageSize::Failed,
             };
@@ -432,6 +444,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
         let aligns = gv_syntax::table::delimiter_row(&self.scratch).unwrap_or_default();
         let columns = aligns.len();
         let footnotes = self.footnotes.clone();
+        let embed = self.embed.as_ref().map(|e| (Arc::clone(&e.key), e.at));
         let cx = InlineCx {
             styles: &self.opts.styles,
             metrics: &self.opts.metrics,
@@ -441,7 +454,7 @@ impl<'a, S: TextSource + ?Sized> NodeBuilder<'a, S> {
             soft_breaks: self.opts.soft_breaks,
             alt_sizes: self.opts.alt_sizes,
             title: None,
-            embed: None,
+            embed: embed.as_ref().map(|(k, at)| (k, *at)),
         };
         let mut rows = Vec::with_capacity(leaf.lines.len().saturating_sub(1));
         let mut labels: Vec<(Box<str>, Option<gv_syntax::inline::RefDef>)> = Vec::new();
@@ -847,7 +860,7 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
     }
 
     fn leaf(&mut self, leaf: &Leaf<'_>) {
-        if leaf.kind == LeafKind::LinkRefDef {
+        if leaf.kind == LeafKind::LinkRefDef || !self.embed_wants(leaf) {
             return;
         }
         // `<details>`: an HTML block that closes the innermost one here
