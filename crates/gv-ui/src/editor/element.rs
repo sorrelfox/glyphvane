@@ -35,6 +35,7 @@ use super::highlight::Underline;
 use super::input::Columns;
 use super::live_widgets::{WidgetClick, WidgetPaint};
 use super::rows::RowEnv;
+use super::source_a11y;
 use super::wrap::RowMap;
 use super::{EditorLayout, EditorView, Top};
 use crate::appearance::Appearance;
@@ -447,6 +448,15 @@ impl EditorView {
             ..Probe::default()
         };
         let row_top = |row: usize| columns.top + (geo.row_y(row) - scroll_y) as f32;
+        // Assistive technology: the rows as text runs, and where the
+        // primary selection's tail and head are in them.
+        let a11y_on = window.is_a11y_active() || cfg!(test);
+        let wanted = {
+            let primary = doc.editor.selections().primary();
+            [primary.tail(), primary.head()]
+        };
+        let mut a11y_runs: Vec<source_a11y::Run> = Vec::new();
+        let mut a11y_found: [Option<source_a11y::Pos>; 2] = [None, None];
 
         for (line_row, visual) in &visuals {
             let (line_row, line) = (*line_row, visual.first);
@@ -462,6 +472,26 @@ impl EditorView {
                 continue;
             };
             widest = widest.max(row.content_width());
+            if a11y_on {
+                let tops = |k: usize| row_top(line_row + k);
+                let env = source_a11y::LineEnv {
+                    text: &text,
+                    replace,
+                    line,
+                    range: visual.range.clone(),
+                    terminator: a11y_terminator(&text, visual),
+                    origin_x,
+                    tops: &tops,
+                    row_h: line_px,
+                };
+                let (runs, found) = source_a11y::line_runs(row, &env, &wanted);
+                for (slot, f) in a11y_found.iter_mut().zip(found) {
+                    if slot.is_none() {
+                        *slot = f.map(|(r, i)| (r + a11y_runs.len(), i));
+                    }
+                }
+                a11y_runs.extend(runs);
+            }
             #[cfg(test)]
             probe.row_texts.push((line, row.text.display.clone()));
             let local = |offset: usize| row.column_of(&text, replace, offset, Bias::Left);
@@ -884,6 +914,51 @@ impl EditorView {
                 ));
             }
         }
+        // The caret's line when it is off screen, so that the selection
+        // has a run to point into.
+        let head = wanted[1];
+        if a11y_on && a11y_found[1].is_none() && (head < visible.start || head > visible.end) {
+            let line = text.line_of_offset(head.min(text.len())).unwrap_or(0);
+            if let Some(visual) = VisualLine::new(&text, replace, line) {
+                let styled: Vec<usize> = visual.styled_lines().collect();
+                if let (Some(&a), Some(&b)) = (styled.iter().min(), styled.iter().max()) {
+                    doc.highlights.ensure(&doc.syntax, links, a..b + 1);
+                }
+                let line_row = map.first_row(visual.first);
+                let breaks = map.breaks(&visual);
+                let styles = visual.styles(&doc.highlights);
+                if let Some(row) = doc.rows.row(&visual, styles, breaks, env, window) {
+                    let tops = |k: usize| row_top(line_row + k);
+                    let env = source_a11y::LineEnv {
+                        text: &text,
+                        replace,
+                        line: visual.first,
+                        range: visual.range.clone(),
+                        terminator: a11y_terminator(&text, &visual),
+                        origin_x,
+                        tops: &tops,
+                        row_h: line_px,
+                    };
+                    let (runs, found) = source_a11y::line_runs(row, &env, &wanted);
+                    let before = head < visible.start;
+                    let shift = if before { 0 } else { a11y_runs.len() };
+                    let added = runs.len();
+                    if before {
+                        for (r, _) in a11y_found.iter_mut().flatten() {
+                            *r += added;
+                        }
+                        a11y_runs.splice(0..0, runs);
+                    } else {
+                        a11y_runs.extend(runs);
+                    }
+                    for (slot, f) in a11y_found.iter_mut().zip(found) {
+                        if let Some((r, i)) = f {
+                            *slot = Some((r + shift, i));
+                        }
+                    }
+                }
+            }
+        }
         doc.rows.end_frame();
         live.blocks_drawn = drawn_blocks
             .iter()
@@ -898,6 +973,16 @@ impl EditorView {
         }
         frame.blocks = drawn_blocks;
         self.widest = self.widest.max(widest);
+        if a11y_on {
+            let mut source = self.a11y.borrow_mut();
+            source.runs = a11y_runs;
+            let [tail, head] = a11y_found;
+            let tail = tail.or_else(|| source.locate(wanted[0]));
+            let head = head.or_else(|| source.locate(wanted[1]));
+            source.selection = tail.zip(head);
+            source.scale = window.scale_factor();
+            source.read_only = self.read_only;
+        }
         #[cfg(test)]
         {
             self.probe = probe;
@@ -1310,6 +1395,12 @@ fn paint_broken(window: &mut Window, bounds: Bounds<Pixels>, on: f32, off: f32, 
     }
 }
 
+/// The buffer range of the terminator of visual line `visual`, if any.
+fn a11y_terminator(text: &TextSnapshot, visual: &VisualLine) -> Option<Range<usize>> {
+    let ending = text.line_terminator(visual.last).ok().flatten()?;
+    Some(visual.range.end..visual.range.end + ending.byte_len())
+}
+
 /// The element of an [`EditorView`].
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
@@ -1337,8 +1428,6 @@ pub(crate) struct Prepaint {
     frame: Frame,
     /// The views of the Live Preview blocks on screen, prepainted.
     blocks: Vec<gpui::AnyElement>,
-    /// Those blocks for assistive technology: top and nodes.
-    a11y_blocks: Vec<(f32, Vec<crate::a11y::document::DocNode>)>,
 }
 
 impl Element for EditorElement {
@@ -1346,51 +1435,11 @@ impl Element for EditorElement {
     type PrepaintState = Prepaint;
 
     fn id(&self) -> Option<ElementId> {
-        // An id and a role make the text a node for assistive technology.
         Some("source-text".into())
     }
 
     fn source_location(&self) -> Option<&'static panic::Location<'static>> {
         None
-    }
-
-    fn a11y_role(&self) -> Option<gpui::Role> {
-        Some(gpui::Role::MultilineTextInput)
-    }
-
-    fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
-        node.set_label("Source");
-    }
-
-    /// The rows on screen as text runs, in order (best effort: AccessKit
-    /// has no rich-text editing model yet, NFR-A11Y-06).
-    fn a11y_synthetic_children(
-        &mut self,
-        prepaint: &mut Prepaint,
-        builder: &mut gpui::A11ySubtreeBuilder<'_>,
-    ) {
-        // Live Preview blocks among the rows, in order of their tops.
-        let mut blocks = std::mem::take(&mut prepaint.a11y_blocks)
-            .into_iter()
-            .peekable();
-        for (i, (row, origin)) in prepaint.frame.rows.iter().enumerate() {
-            while let Some((_, nodes)) = blocks.next_if(|(top, _)| *top <= f32::from(origin.y)) {
-                crate::a11y::document::push(&nodes, builder);
-            }
-            let mut run = gpui::accesskit::Node::new(gpui::Role::TextRun);
-            let text = row.text.to_string();
-            let lengths: Vec<u8> = text
-                .chars()
-                .map(|c| u8::try_from(c.len_utf8()).unwrap_or(4))
-                .collect();
-            run.set_value(text);
-            run.set_character_lengths(lengths);
-            let id = builder.synthetic_node_id(i);
-            builder.push_child(id, run);
-        }
-        for (_, nodes) in blocks {
-            crate::a11y::document::push(&nodes, builder);
-        }
     }
 
     fn request_layout(
@@ -1455,18 +1504,24 @@ impl Element for EditorElement {
             self.view
                 .update(cx, |view, cx| view.block_heights(heights, cx));
         }
-        let a11y_blocks = if window.is_a11y_active() && !frame.blocks.is_empty() {
-            self.view.read(cx).blocks_a11y(cx)
-        } else {
-            Vec::new()
-        };
+        // The text's runs are in the view's shared description already;
+        // the blocks among them go there too. The focused element around
+        // this one hangs them on its node.
+        if window.is_a11y_active() || cfg!(test) {
+            let view = self.view.read(cx);
+            let blocks = if frame.blocks.is_empty() {
+                Vec::new()
+            } else {
+                view.blocks_a11y(cx)
+            };
+            view.a11y.borrow_mut().blocks = blocks;
+        }
         Prepaint {
             hitbox,
             text_hitbox,
             pointer_hitboxes,
             frame,
             blocks,
-            a11y_blocks,
         }
     }
 

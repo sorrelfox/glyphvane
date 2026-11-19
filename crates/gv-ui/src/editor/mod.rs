@@ -135,6 +135,7 @@ mod paste;
 mod plain;
 mod rename;
 mod rows;
+mod source_a11y;
 mod spell;
 mod stats;
 mod syntax;
@@ -480,6 +481,8 @@ pub struct EditorView {
     rename: rename::RenameState,
     /// A Save As asked for while the document loaded.
     save_as_after_load: Option<file::SaveAsTarget>,
+    /// The text for assistive technology, as the last frame laid it out.
+    a11y: source_a11y::SharedSource,
     #[cfg(test)]
     probe: element::Probe,
     _load: Option<Task<()>>,
@@ -554,6 +557,7 @@ impl EditorView {
             autocomplete_placed: None,
             rename: rename::RenameState::default(),
             save_as_after_load: None,
+            a11y: source_a11y::SharedSource::default(),
             #[cfg(test)]
             probe: element::Probe::default(),
             _load: None,
@@ -988,6 +992,77 @@ impl EditorView {
             editor.selections().primary().head(),
             editor.text().revision(),
         ))
+    }
+
+    /// The focused element as a multi-line text input named "Source" for
+    /// assistive technology: the rows as text runs with the selection
+    /// ([`source_a11y`]); a screen reader's `SetTextSelection` moves the
+    /// selection, its `Focus` focuses the view (GPUI's own handling of the
+    /// focusable element).
+    fn a11y_node(
+        &self,
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use gpui::StatefulInteractiveElement as _;
+        let shared = self.a11y.clone();
+        let source = self.a11y.clone();
+        let view = cx.entity().downgrade();
+        root.role(gpui::Role::MultilineTextInput)
+            .aria_label("Source")
+            .a11y_synthetic_children(move |builder| source_a11y::push(&shared, builder))
+            .on_a11y_action(
+                gpui::accesskit::Action::SetTextSelection,
+                move |data, window, cx| {
+                    let Some(gpui::accesskit::ActionData::SetTextSelection(selection)) = data
+                    else {
+                        return;
+                    };
+                    let (anchor, focus) = {
+                        let source = source.borrow();
+                        (
+                            source.offset_of(selection.anchor),
+                            source.offset_of(selection.focus),
+                        )
+                    };
+                    if let (Some(anchor), Some(focus)) = (anchor, focus) {
+                        let _ = view.update(cx, |view, cx| {
+                            view.select_from_a11y(anchor, focus, window, cx);
+                        });
+                    }
+                },
+            )
+    }
+
+    /// Selects from `anchor` to `focus` (buffer offsets), as a screen
+    /// reader asks.
+    pub(crate) fn select_from_a11y(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let len = doc.editor.text().len();
+        doc.editor.unmark_text();
+        doc.editor.set_selections(
+            &[gv_editor::SelectionSpec::new(
+                anchor.min(len),
+                focus.min(len),
+            )],
+            0,
+        );
+        self.focus.focus(window, cx);
+        self.changed(window, cx);
+    }
+
+    /// The last frame's description for assistive technology.
+    #[cfg(test)]
+    pub(crate) fn a11y_source(&self) -> std::cell::Ref<'_, source_a11y::SourceA11y> {
+        self.a11y.borrow()
     }
 
     /// Puts the caret at `offset` and brings it into view.
@@ -1603,7 +1678,9 @@ impl Render for EditorView {
         };
         let root = root.relative().size_full().bg(theme.surface.page);
         let root = match &self.status {
-            EditorStatus::Ready => root.child(EditorElement::new(cx.entity())),
+            EditorStatus::Ready => self
+                .a11y_node(root, cx)
+                .child(EditorElement::new(cx.entity())),
             EditorStatus::Failed(err) => {
                 let name: SharedString = self
                     .path

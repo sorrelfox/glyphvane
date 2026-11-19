@@ -316,6 +316,13 @@ impl RowText {
         .min(self.content.len())
     }
 
+    /// Whether an expanded tab starts at `column`.
+    pub fn is_tab(&self, column: usize) -> bool {
+        self.tabs
+            .binary_search_by_key(&column, |tab| tab.start)
+            .is_ok()
+    }
+
     /// The start of the expanded tab that has `column` inside, or `column`.
     pub fn tab_start(&self, column: usize) -> usize {
         let index = self.tabs.partition_point(|tab| tab.start < column);
