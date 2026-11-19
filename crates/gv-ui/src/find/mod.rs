@@ -147,6 +147,8 @@ pub struct FindBar {
     replace: Entity<InputState>,
     options: FindOptions,
     status: FindStatus,
+    /// The host is still reading what it searches: the count says so.
+    searching: bool,
     /// The host edits text: the replace row can show and Alt+Enter selects
     /// every match.
     editing: bool,
@@ -198,6 +200,7 @@ impl FindBar {
             replace,
             options: FindOptions::default(),
             status: FindStatus::Empty,
+            searching: false,
             editing: false,
             replacing: false,
             _input_events: [find_events, replace_events],
@@ -301,6 +304,28 @@ impl FindBar {
             self.status = status;
             cx.notify();
         }
+    }
+
+    /// Whether the host is still reading what it searches (the PDF
+    /// viewer's pages): the match count adds " (searching…)".
+    pub fn set_searching(&mut self, searching: bool, cx: &mut Context<'_, Self>) {
+        if self.searching != searching {
+            self.searching = searching;
+            cx.notify();
+        }
+    }
+
+    /// The match count as shown and announced: the status's text, with
+    /// " (searching…)" while the host is still reading.
+    pub fn count_text(&self) -> Option<String> {
+        let text = self.status.text()?;
+        Some(
+            if self.searching && matches!(self.status, FindStatus::Matches { .. }) {
+                format!("{text} (searching\u{2026})")
+            } else {
+                text
+            },
+        )
     }
 
     /// Turns an option on or off, as its toggle does.
@@ -548,11 +573,12 @@ impl Render for FindBar {
                 .into_iter()
                 .map(|t| self.toggle_button(t, theme, cx).into_any_element()),
         );
+        let count_text = self.count_text();
         let count = div()
             .id("find-count")
             .role(Role::Status)
             .aria_label("Matches")
-            .when_some(self.status.text(), |d, t| d.aria_value(t))
+            .when_some(count_text.clone(), |d, t| d.aria_value(t))
             .accessible()
             .live(Live::Polite)
             .debug_selector(|| "find-count".into())
@@ -568,7 +594,7 @@ impl Render for FindBar {
             } else {
                 theme.text.secondary
             })
-            .children(self.status.text());
+            .children(count_text);
         let row = div()
             .h(px(CONTROL))
             .flex()

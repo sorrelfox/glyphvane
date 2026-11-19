@@ -37,6 +37,8 @@ zoom you left.
 | **Enter** / **Shift+Enter** (in the find field), **F3** / **Shift+F3** | Next / previous match |
 | **Esc** | Close find |
 | **Ctrl+A** | Select the text of the page shown |
+| Double-click / triple-click | Select a word / a line |
+| **Shift**+click | Extend the selection |
 | **Ctrl+C** | Copy the selected text |
 
 **Linking to a page.** A link to `file.pdf#page=5` opens the PDF viewer at
@@ -49,13 +51,20 @@ whole word, **.\*** regular expression); case is ignored unless you turn on
 **Aa**. The count shows the current match and the number of matches, for
 example "3 of 17". Glyphvane reads the text of the pages in the background,
 starting with the page you are on, so in a long PDF the count grows for a
-moment after you type. The current match is highlighted more strongly than
+moment after you type, and says "(searching…)" until every page has been
+read. The current match is highlighted more strongly than
 the others, and the PDF scrolls to it. A match cannot run from one page to
 the next.
 
 **Selecting and copying text.** Drag across text on a page to select it,
-then press **Ctrl+C** to copy it. **Ctrl+A** selects all the text of the
-page you are on. A selection stays on one page.
+then press **Ctrl+C** to copy it. Double-click to select a word, or
+triple-click to select a line; keep the button down and drag to select more
+whole words or lines. **Shift**+click moves the end of the selection to
+where you click. While you drag, move the pointer to the top or bottom edge
+of the view to scroll; the closer to the edge (or past it), the faster it
+scrolls.
+**Ctrl+A** selects all the text of the page you are on. A selection stays on
+one page: dragging past the page selects up to its first or last line.
 
 Text is read in the order the PDF draws it, which is usually reading order.
 Some PDFs draw text in another order, for example a page in two columns, so

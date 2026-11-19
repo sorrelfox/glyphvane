@@ -46,7 +46,8 @@
 //!   text read so far (on the UI thread: a regular expression over a few
 //!   KB a page); pages read later add their matches as they come, so the
 //!   count ("3 of 17", a polite status, as in the other find popovers)
-//!   grows while the text is read. At most 10,000 matches are
+//!   grows while the text is read, and says " (searching…)" until every
+//!   page has been read. At most 10,000 matches are
 //!   kept. The current match is the first at or after the place (the
 //!   current match, else the page shown); Enter and Shift+Enter in the
 //!   field, F3 and Shift+F3 anywhere in the viewer go to the next and
@@ -60,16 +61,25 @@
 //!   line, from the characters' boxes (0.2 em below the baseline to 0.8 em
 //!   above it).
 //! - **Selection.** Dragging on a page selects its text from the character
-//!   nearest the press to the one nearest the pointer (one page at a time,
-//!   no scrolling while dragging; the pointer is the text cursor over pages
-//!   whose text was read and has some); a click drops it. Ctrl+A selects the text of the page shown; Ctrl+C copies the
+//!   nearest the press to the one nearest the pointer (one page at a time;
+//!   the pointer is the text cursor over pages whose text was read and has
+//!   some); a click drops it. As in the Source view, a double click selects
+//!   the word (Unicode word boundaries within the line) and a triple click
+//!   the line, and dragging on from either grows the selection by words or
+//!   lines; Shift+click moves the selection's end on the same page (from
+//!   the page's start after Select all). While dragging, the pointer within
+//!   [`EDGE`] px of the view's top or bottom edge, or beyond it, scrolls the
+//!   view every [`AUTOSCROLL_TICK`] (faster the further in), the selection
+//!   following; past its page it stops at the page's first or last line.
+//!   Ctrl+A selects the text of the page shown; Ctrl+C copies the
 //!   selection as plain text.
 //! - **Accessibility.** The pages are a list named "Pages"; each page laid
 //!   out is an image named "Page N of M" with its position in the list.
 //!   The find popover's match count is announced (a polite status).
 //!
 //! Not designed (flagged): the toolbar, the page gap and frame, the
-//! per-page messages, the highlights' opacity over the page image.
+//! per-page messages, the highlights' opacity over the page image, the
+//! edge zone and speed of scrolling while selecting.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -77,12 +87,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, Entity,
-    FocusHandle, Focusable, FontWeight, Hsla, ImageSource, InteractiveElement as _, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
+    Entity, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, InteractiveElement as _,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
     ParentElement as _, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, Window,
     canvas, div, img, point, px,
@@ -144,6 +155,17 @@ pub(crate) const MAX_MATCHES: usize = 10_000;
 /// How opaque the match and selection highlights over a page are: the
 /// page is an image, so a highlight lets it show through (not designed).
 const MARK_OPACITY: f32 = 0.45;
+
+/// How near the view's top or bottom edge the pointer scrolls the view
+/// while dragging a selection, px (not designed).
+const EDGE: f32 = 32.0;
+
+/// How often the view scrolls while the pointer is near an edge.
+const AUTOSCROLL_TICK: Duration = Duration::from_millis(16);
+
+/// The least and the most one tick scrolls, px: half the distance into
+/// the edge zone (beyond the edge counts on), within these.
+const AUTOSCROLL_STEP: (f32, f32) = (2.0, 40.0);
 
 gpui::actions!(
     pdf_viewer,
@@ -307,15 +329,36 @@ struct PdfFind {
     _events: Option<Subscription>,
 }
 
+/// What a selection grows by: what the click that started it took.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Unit {
+    /// A press: characters.
+    #[default]
+    Char,
+    /// A double click: words.
+    Word,
+    /// A triple click: lines.
+    Line,
+}
+
 /// Selected text: on page `page`, from the character nearest `anchor` to
-/// the one nearest `head` (points from the page's top left), or all of it.
+/// the one nearest `head` (points from the page's top left), widened to
+/// whole words or lines by `unit`; or all of it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PdfSelection {
     page: usize,
     anchor: (f32, f32),
     head: (f32, f32),
+    unit: Unit,
     all: bool,
 }
+
+/// An anchor before the page's first character (Shift+click after
+/// Select all extends from the start).
+const PAGE_START: (f32, f32) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+/// Where a page was painted, window px, and the scroll offset then.
+type Painted = (Bounds<Pixels>, Point<Pixels>);
 
 /// Where the pages are, for one zoom and view size.
 #[derive(Debug, Clone, PartialEq)]
@@ -385,8 +428,16 @@ pub struct PdfViewer {
     selection: Option<PdfSelection>,
     /// The left button went down on a page and has not come up.
     dragging: bool,
-    /// Where each page laid out was painted last, window px.
-    page_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    /// Where the pointer was last while dragging, window px.
+    pointer: Option<Point<Pixels>>,
+    /// Scrolls the view while the pointer is near its top or bottom edge
+    /// during a drag.
+    autoscroll: Option<Task<()>>,
+    /// Where each page laid out was painted last, window px, and the
+    /// scroll offset then.
+    page_bounds: Rc<RefCell<HashMap<usize, Painted>>>,
+    /// The view of the pages (without the toolbar), window px.
+    view_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl std::fmt::Debug for PdfViewer {
@@ -476,7 +527,10 @@ impl PdfViewer {
             find: PdfFind::default(),
             selection: None,
             dragging: false,
+            pointer: None,
+            autoscroll: None,
             page_bounds: Rc::default(),
+            view_bounds: Rc::default(),
         }
     }
 
@@ -948,6 +1002,9 @@ impl PdfViewer {
             }
         }
         self.pump_text(cx);
+        if self.find.open {
+            self.show_status(cx);
+        }
         cx.notify();
     }
 
@@ -1011,10 +1068,11 @@ impl PdfViewer {
             self.read_all = true;
             self.read_from = self.current_page();
         }
+        // Reading first: the count says whether pages are still to come.
+        self.pump_text(cx);
         if prefill.is_some() || !was_open {
             self.search(cx);
         }
-        self.pump_text(cx);
         cx.notify();
     }
 
@@ -1160,9 +1218,20 @@ impl PdfViewer {
 
     fn show_status(&self, cx: &mut Context<'_, Self>) {
         let status = self.find.status;
+        let searching = self.is_searching();
         if let Some(bar) = &self.find.bar {
-            bar.update(cx, |bar, cx| bar.set_status(status, cx));
+            bar.update(cx, |bar, cx| {
+                bar.set_status(status, cx);
+                bar.set_searching(searching, cx);
+            });
         }
+    }
+
+    /// Whether find is looking for something and pages are still being
+    /// read for it (the count says so). While find is open every page
+    /// missing is read in turn, so a read under way means more to come.
+    pub fn is_searching(&self) -> bool {
+        self.find.open && self.find.finder.is_some() && self.reading.is_some()
     }
 
     /// Scrolls the current match into view, a third down the view, when
@@ -1203,12 +1272,26 @@ impl PdfViewer {
 
     // ----- selection ---------------------------------------------------------------------
 
+    /// Where page `page` is now, window px: where it was painted, moved
+    /// by the scrolling since.
+    fn page_rect(&self, page: usize) -> Option<Bounds<Pixels>> {
+        let (bounds, painted) = *self.page_bounds.borrow().get(&page)?;
+        let now = self.scroll.offset();
+        Some(Bounds {
+            origin: bounds.origin + (now - painted),
+            size: bounds.size,
+        })
+    }
+
     /// The page under `position` (window px), and the point on it in
     /// points from its top left.
     fn page_point(&self, position: Point<Pixels>) -> Option<(usize, (f32, f32))> {
-        let bounds = self.page_bounds.borrow();
-        let (page, b) = bounds.iter().find(|(_, b)| b.contains(&position))?;
-        Some((*page, self.point_on(b, position)))
+        let pages: Vec<usize> = self.page_bounds.borrow().keys().copied().collect();
+        pages.into_iter().find_map(|page| {
+            let b = self.page_rect(page)?;
+            b.contains(&position)
+                .then(|| (page, self.point_on(&b, position)))
+        })
     }
 
     /// `position` (window px) in points from the top left of a page
@@ -1227,10 +1310,22 @@ impl PdfViewer {
         let text = self.texts.get(sel.page)?.as_ref()?;
         let range = if sel.all {
             0..text.len()
-        } else {
+        } else if sel.unit == Unit::Char {
             let a = text.caret_at(sel.anchor.0, sel.anchor.1)?;
             let h = text.caret_at(sel.head.0, sel.head.1)?;
             a.min(h)..a.max(h)
+        } else {
+            // Both ends widened to the word or line they are in.
+            let span = |(x, y): (f32, f32)| {
+                let at = text.char_near(x, y)?;
+                Some(match sel.unit {
+                    Unit::Line => text.line_at(at),
+                    _ => text.word_at(at),
+                })
+            };
+            let a = span(sel.anchor)?;
+            let h = span(sel.head)?;
+            a.start.min(h.start)..a.end.max(h.end)
         };
         (!range.is_empty()).then_some((sel.page, range))
     }
@@ -1242,48 +1337,137 @@ impl PdfViewer {
         Some(text.slice(range).to_owned())
     }
 
-    /// The left button went down: a new selection starts on the page
-    /// under it (its text is read first if it is not yet).
+    /// The left button went down on a page: a click starts a selection
+    /// (its text is read first if it is not yet), a double click selects
+    /// the word, a triple click the line; Shift+click moves the end of the
+    /// selection on that page (as in the Source view).
     fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.focus.focus(window, cx);
-        self.selection = None;
         self.dragging = false;
-        if let Some((page, at)) = self.page_point(event.position) {
-            self.selection = Some(PdfSelection {
+        self.pointer = None;
+        self.autoscroll = None;
+        let Some((page, at)) = self.page_point(event.position) else {
+            self.selection = None;
+            cx.notify();
+            return;
+        };
+        let unit = match event.click_count {
+            0 | 1 => Unit::Char,
+            2 => Unit::Word,
+            _ => Unit::Line,
+        };
+        let extend = event.modifiers.shift && unit == Unit::Char;
+        self.selection = match self.selection {
+            Some(sel) if extend && sel.page == page => Some(PdfSelection {
+                anchor: if sel.all { PAGE_START } else { sel.anchor },
+                head: at,
+                all: false,
+                ..sel
+            }),
+            _ => Some(PdfSelection {
                 page,
                 anchor: at,
                 head: at,
+                unit,
                 all: false,
-            });
-            self.dragging = true;
-            if self.text_missing(page) {
-                self.read_first = Some(page);
-                self.pump_text(cx);
-            }
+            }),
+        };
+        self.dragging = true;
+        if self.text_missing(page) {
+            self.read_first = Some(page);
+            self.pump_text(cx);
         }
         cx.notify();
     }
 
+    /// The pointer moved while the button is down (anywhere in the
+    /// window): the selection follows it, and near the view's top or
+    /// bottom edge the view scrolls.
     fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<'_, Self>) {
         if !self.dragging {
             return;
         }
         if event.pressed_button != Some(MouseButton::Left) {
-            self.dragging = false;
+            self.release();
             return;
         }
-        let Some(page) = self.selection.map(|s| s.page) else {
+        self.pointer = Some(event.position);
+        self.follow_pointer(cx);
+        if self.edge_step() != 0.0 && self.autoscroll.is_none() {
+            self.autoscroll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                    let more = this
+                        .update(cx, |viewer, cx| viewer.autoscroll_tick(cx))
+                        .unwrap_or(false);
+                    if !more {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// The button came up: the drag ends.
+    fn release(&mut self) {
+        self.dragging = false;
+        self.pointer = None;
+        self.autoscroll = None;
+    }
+
+    /// Moves the selection's end to the pointer, on the selection's page
+    /// (above or below it: its first or last line).
+    fn follow_pointer(&mut self, cx: &mut Context<'_, Self>) {
+        let (Some(pointer), Some(page)) = (self.pointer, self.selection.map(|s| s.page)) else {
             return;
         };
-        let bounds = self.page_bounds.borrow().get(&page).copied();
-        if let Some(bounds) = bounds {
-            let at = self.point_on(&bounds, event.position);
-            if let Some(sel) = &mut self.selection {
-                sel.head = at;
-                sel.all = false;
-            }
+        let Some(bounds) = self.page_rect(page) else {
+            return;
+        };
+        let at = self.point_on(&bounds, pointer);
+        if let Some(sel) = &mut self.selection
+            && (sel.head != at || sel.all)
+        {
+            sel.head = at;
+            sel.all = false;
             cx.notify();
         }
+    }
+
+    /// How far one tick scrolls for the pointer's place, px: up (below
+    /// 0) near or above the view's top, down near or below its bottom, 0
+    /// elsewhere.
+    fn edge_step(&self) -> f32 {
+        let (Some(pointer), view) = (self.pointer, self.view_bounds.get()) else {
+            return 0.0;
+        };
+        if view.size.height <= px(2.0 * EDGE) {
+            return 0.0;
+        }
+        let y = f32::from(pointer.y);
+        let into_top = f32::from(view.top()) + EDGE - y;
+        let into_bottom = y - (f32::from(view.bottom()) - EDGE);
+        let step = |depth: f32| (depth / 2.0).clamp(AUTOSCROLL_STEP.0, AUTOSCROLL_STEP.1);
+        if into_top > 0.0 {
+            -step(into_top)
+        } else if into_bottom > 0.0 {
+            step(into_bottom)
+        } else {
+            0.0
+        }
+    }
+
+    /// One tick of scrolling while dragging near an edge; whether to go
+    /// on.
+    fn autoscroll_tick(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let step = self.edge_step();
+        if !self.dragging || step == 0.0 {
+            self.autoscroll = None;
+            return false;
+        }
+        self.scroll_by(step, cx);
+        self.follow_pointer(cx);
+        true
     }
 
     /// Ctrl+C: copies the selected text.
@@ -1301,6 +1485,7 @@ impl PdfViewer {
             page,
             anchor: (0.0, 0.0),
             head: (0.0, 0.0),
+            unit: Unit::Char,
             all: true,
         });
         if self.text_missing(page) {
@@ -1605,7 +1790,11 @@ impl Render for PdfViewer {
         }
 
         let mut pages = div().relative().w(px(layout.width)).h(px(layout.height));
-        self.page_bounds.borrow_mut().clear();
+        // The page a drag selects on stays known while it scrolls away.
+        let keep = self.selection.filter(|_| self.dragging).map(|s| s.page);
+        self.page_bounds
+            .borrow_mut()
+            .retain(|page, _| Some(*page) == keep);
         for page in from..=to.min(count.saturating_sub(1)) {
             let (w, h) = self.sizes[page];
             let (pw, ph) = (w * layout.ppt, h * layout.ppt);
@@ -1621,6 +1810,7 @@ impl Render for PdfViewer {
                 .and_then(Option::as_ref)
                 .is_some_and(|t| t.len() > 0);
             let bounds = Rc::clone(&self.page_bounds);
+            let scroll = self.scroll.clone();
             pages = pages.child(
                 div()
                     .id(("pdf-page", page))
@@ -1665,7 +1855,7 @@ impl Render for PdfViewer {
                         // Where the page is painted, for the mouse.
                         canvas(
                             move |b, _, _| {
-                                bounds.borrow_mut().insert(page, b);
+                                bounds.borrow_mut().insert(page, (b, scroll.offset()));
                             },
                             |_, _, _, _| {},
                         )
@@ -1705,11 +1895,6 @@ impl Render for PdfViewer {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| this.press(e, window, cx)),
-            )
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag(e, cx)))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false),
             )
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
@@ -1761,6 +1946,29 @@ impl Render for PdfViewer {
                 .right(px(find_spacing::INSET_RIGHT))
                 .child(bar)
         });
+        let view = Rc::clone(&self.view_bounds);
+        let weak = cx.entity().downgrade();
+        // Where the pages' view is, for scrolling near its edges, and the
+        // pointer anywhere in the window while dragging a selection.
+        let watch = canvas(
+            move |bounds, _, _| view.set(bounds),
+            move |_, _, window, _| {
+                let on_move = weak.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        on_move.update(cx, |this, cx| this.drag(e, cx)).ok();
+                    }
+                });
+                let on_up = weak.clone();
+                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                        on_up.update(cx, |this, _| this.release()).ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full();
         div()
             .key_context(DOCUMENT_CONTEXT)
             .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
@@ -1780,6 +1988,7 @@ impl Render for PdfViewer {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .child(watch)
                     .child(body.accessible())
                     .children(popover),
             )

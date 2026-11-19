@@ -4,15 +4,18 @@
 //! The PDF viewer in a headless window, with a PDF engine of its own
 //! ([`FakePdf`]): pages, drawing only what is in view, navigation, zoom,
 //! `#page=` and the error states, what assistive technology is told, and
-//! find and text selection over the pages' text.
+//! find and text selection over the pages' text (words, lines, Shift+click
+//! and scrolling near an edge while dragging).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use gpui::{
-    AnyWindowHandle, Bounds, Entity, Focusable as _, TestAppContext, VisualTestContext,
-    WindowBounds, WindowOptions, point, px, size,
+    AnyWindowHandle, Bounds, Entity, Focusable as _, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext, WindowBounds, WindowOptions,
+    point, px, size,
 };
 
 use super::pdf::{PX_PER_PT, PdfViewer, PdfZoom};
@@ -679,7 +682,7 @@ fn find_bar(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Entity<Find
 /// What the match count says (and what assistive technology hears).
 fn count(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Option<String> {
     let bar = find_bar(pdf, vcx);
-    bar.read_with(vcx, |b, _| b.status().text())
+    bar.read_with(vcx, |b, _| b.count_text())
 }
 
 fn current(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Option<(usize, String)> {
@@ -786,8 +789,14 @@ fn pages_read_later_add_their_matches_from_the_page_shown(cx: &mut TestAppContex
             cx.emit(crate::find::FindBarEvent::Changed);
         });
     });
-    assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("No results"));
+    // The count says the pages are still being read.
+    assert!(pdf.read_with(&vcx, |p, _| p.is_searching()));
+    assert_eq!(
+        count(&pdf, &mut vcx).as_deref(),
+        Some("No results (searching\u{2026})")
+    );
     draw(&mut vcx);
+    assert!(!pdf.read_with(&vcx, |p, _| p.is_searching()));
     // Read from the page shown on, then from the start; the first match
     // at or after the page shown is the current one.
     assert_eq!(engine.texted_pages(), [3, 4, 0, 1, 2]);
@@ -896,4 +905,208 @@ fn dragging_selects_text_that_ctrl_c_copies(cx: &mut TestAppContext) {
     let bar = find_bar(&pdf, &mut vcx);
     assert_eq!(bar.read_with(&vcx, |b, cx| b.query(cx)), "Hello");
     assert_eq!(count(&pdf, &mut vcx).as_deref(), Some("1 of 1"));
+}
+
+/// Points on page 1 as window pixels (inside its 1 px frame).
+fn page_at(
+    pdf: &Entity<PdfViewer>,
+    vcx: &mut VisualTestContext,
+) -> impl Fn(f32, f32) -> Point<Pixels> + use<> {
+    let page = vcx.debug_bounds("pdf-page-1").expect("page 1");
+    let ppt = pdf.read_with(vcx, |p, _| p.effective_zoom()) * PX_PER_PT;
+    move |x: f32, y: f32| {
+        point(
+            page.origin.x + px(1.0 + x * ppt),
+            page.origin.y + px(1.0 + y * ppt),
+        )
+    }
+}
+
+/// A press of the left button at `at`, the `clicks`th in a row.
+fn click(vcx: &mut VisualTestContext, at: Point<Pixels>, clicks: usize, modifiers: Modifiers) {
+    vcx.simulate_event(MouseDownEvent {
+        position: at,
+        button: MouseButton::Left,
+        modifiers,
+        click_count: clicks,
+        first_mouse: false,
+    });
+    vcx.simulate_event(MouseUpEvent {
+        position: at,
+        button: MouseButton::Left,
+        modifiers,
+        click_count: clicks,
+    });
+    draw(vcx);
+}
+
+fn selected(pdf: &Entity<PdfViewer>, vcx: &mut VisualTestContext) -> Option<String> {
+    pdf.read_with(vcx, |p, _| p.selected_text())
+}
+
+#[gpui::test]
+fn double_and_triple_clicks_select_a_word_and_a_line(cx: &mut TestAppContext) {
+    let (_dir, _engine, mut vcx, _viewer, pdf) =
+        open_text(cx, &["Hello wide world\nSecond line here"]);
+    let at = page_at(&pdf, &mut vcx);
+    // Character k of line l: its middle.
+    let ch = |k: f32, l: f32| at(72.0 + 6.0 * k + 3.0, 78.0 + 20.0 * l);
+    let none = Modifiers::none();
+
+    // A double click on "wide" (its "i") selects it.
+    click(&mut vcx, ch(7.0, 0.0), 1, none);
+    click(&mut vcx, ch(7.0, 0.0), 2, none);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("wide"));
+    assert!(vcx.debug_bounds("pdf-selection").is_some());
+
+    // A triple click selects the line, without its line end.
+    click(&mut vcx, ch(7.0, 0.0), 3, none);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("Hello wide world")
+    );
+
+    // Dragging on from a double click grows by whole words.
+    vcx.simulate_event(MouseDownEvent {
+        position: ch(7.0, 0.0),
+        button: MouseButton::Left,
+        modifiers: none,
+        click_count: 2,
+        first_mouse: false,
+    });
+    vcx.simulate_mouse_move(ch(1.0, 1.0), MouseButton::Left, none);
+    vcx.simulate_mouse_up(ch(1.0, 1.0), MouseButton::Left, none);
+    draw(&mut vcx);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("wide world\nSecond")
+    );
+
+    // Dragging on from a triple click grows by whole lines.
+    vcx.simulate_event(MouseDownEvent {
+        position: ch(2.0, 1.0),
+        button: MouseButton::Left,
+        modifiers: none,
+        click_count: 3,
+        first_mouse: false,
+    });
+    vcx.simulate_mouse_move(ch(13.0, 0.0), MouseButton::Left, none);
+    vcx.simulate_mouse_up(ch(13.0, 0.0), MouseButton::Left, none);
+    draw(&mut vcx);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("Hello wide world\nSecond line here")
+    );
+}
+
+#[gpui::test]
+fn shift_click_extends_the_selection(cx: &mut TestAppContext) {
+    let (_dir, _engine, mut vcx, _viewer, pdf) =
+        open_text(cx, &["Hello wide world\nSecond line here", "Page two"]);
+    let at = page_at(&pdf, &mut vcx);
+    let ch = |k: f32, l: f32| at(72.0 + 6.0 * k + 1.0, 78.0 + 20.0 * l);
+    let none = Modifiers::none();
+    let shift = Modifiers::shift();
+
+    // A click before "w" of "wide", then Shift+click before "w" of
+    // "world": the text between.
+    click(&mut vcx, ch(6.0, 0.0), 1, none);
+    assert_eq!(selected(&pdf, &mut vcx), None);
+    click(&mut vcx, ch(11.0, 0.0), 1, shift);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("wide "));
+    // Again, further on: the same start, a new end.
+    click(&mut vcx, ch(6.0, 1.0), 1, shift);
+    assert_eq!(
+        selected(&pdf, &mut vcx).as_deref(),
+        Some("wide world\nSecond")
+    );
+    // Back before the start: the other way.
+    click(&mut vcx, ch(0.0, 0.0), 1, shift);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("Hello "));
+
+    // A Shift+click extends a double-clicked word too, by words.
+    click(&mut vcx, ch(13.0, 0.0), 2, none);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("world"));
+    click(&mut vcx, ch(6.0, 0.0), 1, shift);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("wide world"));
+
+    // After Select all, from the start of the page.
+    press(&pdf, &mut vcx, "ctrl-a");
+    click(&mut vcx, ch(5.0, 0.0), 1, shift);
+    assert_eq!(selected(&pdf, &mut vcx).as_deref(), Some("Hello"));
+
+    // A plain click drops it.
+    click(&mut vcx, ch(3.0, 1.0), 1, none);
+    assert_eq!(selected(&pdf, &mut vcx), None);
+}
+
+#[gpui::test]
+fn dragging_near_an_edge_scrolls_the_view(cx: &mut TestAppContext) {
+    // Page 1 has 30 lines, taller than the view.
+    let lines: Vec<String> = (0..30).map(|k| format!("line {k:02}")).collect();
+    let text = lines.join("\n");
+    let (_dir, _engine, mut vcx, _viewer, pdf) = open_text(cx, &[text.as_str(), "Page two"]);
+    let at = page_at(&pdf, &mut vcx);
+    let view = vcx.debug_bounds("pdf-viewer-pages").expect("the pages");
+    let none = Modifiers::none();
+    // How far down the view is: the page at the top, then how far into it.
+    let top = |vcx: &mut VisualTestContext| {
+        pdf.read_with(vcx, |p, _| {
+            let place = p.place();
+            (place.page, place.into.unwrap_or(0.0))
+        })
+    };
+
+    // Press on the first line, then drag to the middle of the view: no
+    // scrolling.
+    let start = top(&mut vcx);
+    vcx.simulate_mouse_down(at(73.0, 78.0), MouseButton::Left, none);
+    // Right of the lines: up to their ends.
+    let middle = point(at(300.0, 78.0).x, view.center().y);
+    vcx.simulate_mouse_move(middle, MouseButton::Left, none);
+    vcx.executor().advance_clock(Duration::from_millis(200));
+    draw(&mut vcx);
+    assert_eq!(top(&mut vcx), start, "not near an edge");
+    let before = selected(&pdf, &mut vcx).expect("a selection");
+    assert!(before.starts_with("line 00") && !before.contains("line 29"));
+
+    // Near the bottom edge: the view scrolls while the pointer stays, and
+    // the selection follows down to the page's last line.
+    let near_bottom = point(middle.x, view.bottom() - px(4.0));
+    vcx.simulate_mouse_move(near_bottom, MouseButton::Left, none);
+    for _ in 0..20 {
+        vcx.executor().advance_clock(Duration::from_millis(100));
+        draw(&mut vcx);
+    }
+    let scrolled = top(&mut vcx);
+    assert!(scrolled > start, "{scrolled:?} > {start:?}");
+    let after = selected(&pdf, &mut vcx).expect("a selection");
+    assert!(
+        after.starts_with("line 00") && after.contains("line 29"),
+        "{after}"
+    );
+
+    // Released: the scrolling stops.
+    vcx.simulate_mouse_up(near_bottom, MouseButton::Left, none);
+    let stopped = top(&mut vcx);
+    vcx.executor().advance_clock(Duration::from_millis(500));
+    draw(&mut vcx);
+    assert_eq!(top(&mut vcx), stopped);
+
+    // Dragging near the top edge scrolls back up (from page 2: page 1 is
+    // out of view).
+    let page = vcx.debug_bounds("pdf-page-2").expect("page 2 shown");
+    let press_at = point(page.center().x, view.center().y);
+    vcx.simulate_mouse_down(press_at, MouseButton::Left, none);
+    vcx.simulate_mouse_move(
+        point(press_at.x, view.top() + px(4.0)),
+        MouseButton::Left,
+        none,
+    );
+    for _ in 0..5 {
+        vcx.executor().advance_clock(Duration::from_millis(100));
+        draw(&mut vcx);
+    }
+    assert!(top(&mut vcx) < stopped);
+    vcx.simulate_mouse_up(point(press_at.x, view.top()), MouseButton::Left, none);
 }

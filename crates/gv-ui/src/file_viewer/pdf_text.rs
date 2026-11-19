@@ -3,14 +3,15 @@
 
 //! The text of the PDF viewer's pages, as the engine read it
 //! ([`PdfPageText`]): matching a query across pages, the boxes to
-//! highlight for a run of characters, and the character nearest a point
-//! (selection). Positions are characters (`char`) of a page's text;
+//! highlight for a run of characters, the character nearest a point, and
+//! the word and line around a character (selection). Positions are characters (`char`) of a page's text;
 //! coordinates are PDF points from the page's top left.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use gv_render_tree::Finder;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::export::PdfPageText;
 
@@ -125,23 +126,73 @@ impl PageText {
         out
     }
 
+    /// The character nearest the point (`x`, `y`) and its box: the one
+    /// whose box holds the point, else the nearest (a point beside a line
+    /// is nearer that line than the next). Line ends and characters
+    /// without width are never it. `None` for a page without text.
+    fn nearest(&self, x: f32, y: f32) -> Option<(usize, [f32; 4])> {
+        let distance = |b: &[f32; 4]| {
+            let dx = (b[0] - x).max(x - b[2]).max(0.0);
+            let dy = (b[1] - y).max(y - b[3]).max(0.0);
+            dy * 4.0 + dx
+        };
+        self.boxes
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| b[2] > b[0] && !self.slice(*i..*i + 1).starts_with('\n'))
+            .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))
+            .map(|(i, b)| (i, *b))
+    }
+
     /// The caret nearest the point (`x`, `y`): before the character whose
     /// box holds the point or is the nearest, or after it when the point
     /// is in its right half. `None` for a page without text.
     pub fn caret_at(&self, x: f32, y: f32) -> Option<usize> {
-        let distance = |b: &[f32; 4]| {
-            let dx = (b[0] - x).max(x - b[2]).max(0.0);
-            let dy = (b[1] - y).max(y - b[3]).max(0.0);
-            // A point beside a line is nearer that line than the next.
-            dy * 4.0 + dx
-        };
-        let (i, b) = self
-            .boxes
-            .iter()
-            .enumerate()
-            .filter(|(i, b)| b[2] > b[0] && !self.slice(*i..*i + 1).starts_with('\n'))
-            .min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))?;
+        let (i, b) = self.nearest(x, y)?;
         Some(if x > (b[0] + b[2]) / 2.0 { i + 1 } else { i })
+    }
+
+    /// The character nearest the point (`x`, `y`), as [`Self::caret_at`]
+    /// finds it (a double or triple click).
+    pub fn char_near(&self, x: f32, y: f32) -> Option<usize> {
+        self.nearest(x, y).map(|(i, _)| i)
+    }
+
+    /// The line of character `at`: from the character after the previous
+    /// line end to the next line end (not included).
+    pub fn line_at(&self, at: usize) -> Range<usize> {
+        let Some(&byte) = self.starts.get(at.min(self.len())) else {
+            return 0..0;
+        };
+        let start = self.text[..byte].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.text[byte..]
+            .find('\n')
+            .map_or(self.text.len(), |i| byte + i);
+        self.char_of(start)..self.char_of(end)
+    }
+
+    /// The word, run of punctuation or run of spaces holding character
+    /// `at` (Unicode word boundaries within its line, as a double click in
+    /// the Source view finds it).
+    pub fn word_at(&self, at: usize) -> Range<usize> {
+        let line = self.line_at(at);
+        if at >= line.end {
+            return at.min(self.len())..at.min(self.len());
+        }
+        let from = self.starts[line.start];
+        let byte = self.starts[at];
+        let content = &self.text[from..self.starts[line.end]];
+        content
+            .split_word_bound_indices()
+            .map(|(i, w)| from + i..from + i + w.len())
+            .find(|r| r.contains(&byte))
+            .map_or(at..at + 1, |r| self.char_of(r.start)..self.char_of(r.end))
+    }
+
+    /// The character starting at byte offset `byte` (or the text's
+    /// length at its end).
+    fn char_of(&self, byte: usize) -> usize {
+        self.starts.partition_point(|s| *s < byte)
     }
 }
 
@@ -258,6 +309,26 @@ mod tests {
         // Below everything: the last line.
         assert_eq!(p.caret_at(11.0, 300.0), Some(5));
         assert_eq!(PageText::default().caret_at(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn words_and_lines_around_a_character() {
+        let p = PageText::new(page(&["Hello, wide world", "next line"]));
+        // A word, a run of punctuation, a run of spaces.
+        assert_eq!(p.slice(p.word_at(1)), "Hello");
+        assert_eq!(p.slice(p.word_at(5)), ",");
+        assert_eq!(p.slice(p.word_at(6)), " ");
+        assert_eq!(p.slice(p.word_at(14)), "world");
+        // The second line's first word: not across the line end.
+        assert_eq!(p.slice(p.word_at(18)), "next");
+        // Lines, without their line ends.
+        assert_eq!(p.slice(p.line_at(3)), "Hello, wide world");
+        assert_eq!(p.slice(p.line_at(20)), "next line");
+        // The character under a point: "w" of "wide", whichever half.
+        assert_eq!(p.char_near(53.0, 15.0), Some(7));
+        assert_eq!(p.char_near(57.0, 15.0), Some(7));
+        assert_eq!(PageText::default().char_near(0.0, 0.0), None);
+        assert_eq!(PageText::default().line_at(0), 0..0);
     }
 
     #[test]
