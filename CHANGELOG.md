@@ -95,6 +95,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   update the `href` of HTML links (`<a href="Note.md#Heading">`), written
   as a URL (`%20` for a space). As in Obsidian, they are still not counted
   as links in backlinks or the link checker.
+- Formulas in backlink context lines and search results use the math
+  macros (`\newcommand`, `\def`) their note defines before them.
 
 ## [1.2.0] - 2026-11-19
 

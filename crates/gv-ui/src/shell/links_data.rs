@@ -16,7 +16,7 @@ use gv_vault::content::{Backlink, ContentSnapshot, FileSource, Mention, file_ste
 use gv_vault::keys::fold_key;
 use gv_vault::resolve::Status;
 
-use crate::search_panel::excerpt;
+use crate::search_panel::{excerpt, macros};
 
 /// Characters kept before the link in a context line; more are cut at a
 /// word with "…".
@@ -249,20 +249,33 @@ pub(super) fn snippets(
         .iter()
         .map(|(path, spans)| {
             let text = snapshot.note_text(path, source);
-            spans
+            let mut lines: Vec<Option<Snippet>> = spans
                 .iter()
                 .map(|span| {
                     let text = text.as_deref()?;
                     snippet(text, span.clone(), link_text, options)
                 })
-                .collect()
+                .collect();
+            // The note's macros, only for a note with a formula in a line.
+            let formulas = lines.iter_mut().flatten().flat_map(|s| s.math.iter_mut());
+            let mut formulas = formulas.peekable();
+            if formulas.peek().is_some()
+                && let Some(macros) =
+                    macros::note_macros(snapshot, path, || text.as_deref().map(str::to_owned))
+            {
+                for f in formulas {
+                    f.macros = macros.at(f.src.clone());
+                }
+            }
+            lines
         })
         .collect()
 }
 
 /// The context line of `span` in `text`: its line without block markers
 /// and inline markup (as the profile of `options` reads it), shortened
-/// around the span, with the span shown as its link text.
+/// around the span, with the span shown as its link text. Its formulas'
+/// `src` are offsets of `text`; their macros are left to the caller.
 pub(super) fn snippet(
     text: &str,
     span: Range<usize>,
@@ -324,7 +337,9 @@ pub(super) fn snippet(
                 // Cut by the shortening, or across the link's edge.
                 return None;
             };
-            Some(excerpt::Formula { out, ..f })
+            // Its place in the note, for the note's macros.
+            let src = f.src.start + content..f.src.end + content;
+            Some(excerpt::Formula { out, src, ..f })
         })
         .collect();
     let out = format!("{before}{shown}{after}");

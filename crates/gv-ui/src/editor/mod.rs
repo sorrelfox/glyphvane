@@ -126,7 +126,7 @@ mod insert;
 mod layout;
 mod links;
 mod live_blocks;
-mod live_context;
+pub(crate) mod live_context;
 mod live_preview;
 mod live_widgets;
 mod markdown;

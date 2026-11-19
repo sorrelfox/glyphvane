@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{Styled as _, canvas, point, px};
-use gv_math::{MacroSet, MathLayout};
+use gv_math::MathLayout;
 
 use super::excerpt;
 use crate::metrics::{font, text};
@@ -45,10 +45,10 @@ pub(crate) enum Segment {
 /// Formulas are typeset through the Reading view's math engine and its
 /// layout cache (a formula is typeset once; later frames look it up), in
 /// text style: a row holds one line, so display math (`$$…$$`) is typeset
-/// at inline size too. The note's own macros are not known here: a formula
-/// that needs them, or does not typeset, stays as its TeX. A formula that
-/// a match touches stays as its TeX too, so the match is marked on the
-/// characters it matched.
+/// at inline size too, with the macros its note defines before it
+/// ([`excerpt::Formula::macros`]). A formula that does not typeset stays
+/// as its TeX. A formula that a match touches stays as its TeX too, so the
+/// match is marked on the characters it matched.
 pub(crate) fn segments(line: &Line) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -67,7 +67,6 @@ pub(crate) fn segments(line: &Line) -> Vec<Segment> {
             marks,
         });
     };
-    let empty = MacroSet::empty();
     for f in &line.math {
         let r = f.out.clone();
         let fits = r.start >= at
@@ -81,7 +80,7 @@ pub(crate) fn segments(line: &Line) -> Vec<Segment> {
         if !fits || marked {
             continue;
         }
-        let Ok(layout) = crate::reader::math_engine().render(&f.tex, false, &empty) else {
+        let Ok(layout) = crate::reader::math_engine().render(&f.tex, false, &f.macros) else {
             continue;
         };
         text(at..r.start, &mut out);

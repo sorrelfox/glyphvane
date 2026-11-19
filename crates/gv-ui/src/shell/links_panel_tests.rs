@@ -557,3 +557,32 @@ fn a_context_line_typesets_its_formulas(cx: &mut TestAppContext) {
     );
     assert!(f.has("backlink-line-1-0"));
 }
+
+#[gpui::test]
+fn a_context_line_typesets_with_the_source_notes_macros(cx: &mut TestAppContext) {
+    let files = vec![
+        ("Hub.md", "Hub.\n"),
+        (
+            "A.md",
+            "$\\Pln$ first, then $\\def\\Pln{\\mathbb{P}}$ defined.\n\nIn $\\Pln^2$ near [[Hub]] and $\\Pln$ [[Hub]].\n",
+        ),
+    ];
+    let mut f = fixture(cx, &files, Some("Hub.md"));
+    f.until("backlinks", |p| p.settled() && p.backlink_count() == 2);
+    let formulas = |item: usize| -> Vec<String> {
+        let line = f
+            .panel()
+            .read_with(&f.vcx, |p, _| p.backlink_line(0, item))
+            .expect("a line");
+        crate::search_panel::segments(&line)
+            .into_iter()
+            .filter_map(|r| match r {
+                crate::search_panel::Segment::Math { tex, .. } => Some(tex),
+                crate::search_panel::Segment::Text { .. } => None,
+            })
+            .collect()
+    };
+    // Defined before the line: typeset.
+    assert_eq!(formulas(0), ["\\Pln^2", "\\Pln"]);
+    assert_eq!(formulas(1), ["\\Pln^2", "\\Pln"]);
+}

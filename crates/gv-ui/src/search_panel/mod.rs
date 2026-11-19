@@ -39,6 +39,7 @@
 //! (text highlights cannot round their corners; the marks are square).
 
 pub(crate) mod excerpt;
+pub(crate) mod macros;
 mod model;
 #[cfg(test)]
 mod tests;
@@ -424,23 +425,27 @@ impl SearchPanel {
         let generation = self.generation;
         let options = self.options.clone();
         let total = content.note_count();
-        let source = VaultSource::new(
-            content.clone(),
-            Arc::new(DiskSource::new(root, content.options())),
-        );
-        let (batches, mut received) = futures::channel::mpsc::unbounded::<ResultBatch>();
+        let files = Arc::new(DiskSource::new(root, content.options()));
+        let source = VaultSource::new(content.clone(), files.clone());
+        let (batches, mut received) = futures::channel::mpsc::unbounded::<(
+            ResultBatch,
+            Vec<(gv_vault::VaultPath, Arc<macros::NoteMacros>)>,
+        )>();
         let scan = cx
             .background_executor()
             .spawn_with_priority(gpui::Priority::Low, async move {
                 gv_search::search(&query, &source, &options, &cancel, None, |batch| {
+                    // The macros of the notes with a formula in a line,
+                    // here off the UI thread.
+                    let macros = macros::for_results(&content, &*files, &batch.files);
                     // Fails only when the panel is gone.
-                    let _ = batches.unbounded_send(batch);
+                    let _ = batches.unbounded_send((batch, macros));
                 })
             });
         self.results.progress = Progress::Running { scanned: 0, total };
         self._search = Some(cx.spawn(async move |this, cx| {
-            while let Some(batch) = received.next().await {
-                let alive = this.update(cx, |p, cx| p.add_batch(generation, batch, cx));
+            while let Some((batch, macros)) = received.next().await {
+                let alive = this.update(cx, |p, cx| p.add_batch(generation, batch, macros, cx));
                 if alive.is_err() {
                     return;
                 }
@@ -467,13 +472,20 @@ impl SearchPanel {
         }
     }
 
-    fn add_batch(&mut self, generation: u64, batch: ResultBatch, cx: &mut Context<'_, Self>) {
+    fn add_batch(
+        &mut self,
+        generation: u64,
+        batch: ResultBatch,
+        macros: Vec<(gv_vault::VaultPath, Arc<macros::NoteMacros>)>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if generation != self.generation {
             return;
         }
         self.take_stale();
         let content = self.scope.as_ref().and_then(|s| s.content.clone());
         self.results.add(batch.files, content.as_ref());
+        self.results.add_macros(macros);
         self.results.progress = Progress::Running {
             scanned: batch.scanned,
             total: batch.total,
@@ -926,12 +938,18 @@ impl SearchPanel {
             .iter()
             .map(|r| r.start + shift..r.end + shift)
             .collect();
+        // The note's macros, at the formula's place in the note.
+        let macros = self.results.macros(f);
         let math = shown
             .math
             .into_iter()
-            .map(|f| excerpt::Formula {
-                out: f.out.start + shift..f.out.end + shift,
-                ..f
+            .map(|formula| excerpt::Formula {
+                out: formula.out.start + shift..formula.out.end + shift,
+                macros: macros.map_or_else(gv_math::MacroSet::empty, |m| {
+                    let at = snippet.range.start;
+                    m.at(at + formula.src.start..at + formula.src.end)
+                }),
+                ..formula
             })
             .collect();
         Some(Line {

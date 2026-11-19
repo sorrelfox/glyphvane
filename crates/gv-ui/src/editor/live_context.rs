@@ -186,16 +186,32 @@ impl Visitor for Collect<'_> {
 fn macro_commands(text: &TextSnapshot) -> Vec<usize> {
     let mut bytes = Vec::with_capacity(text.len());
     text.copy_range(0..text.len(), &mut bytes);
-    let mut out = Vec::new();
-    for (i, _) in bytes.iter().enumerate().filter(|(_, b)| **b == b'\\') {
-        let rest = &bytes[i..];
-        if MACRO_COMMANDS.iter().any(|c| {
-            rest.starts_with(c) && rest.get(c.len()).is_none_or(|b| !b.is_ascii_alphabetic())
-        }) {
-            out.push(i);
-        }
-    }
-    out
+    backslashes(&bytes)
+        .filter(|&i| is_macro_command(&bytes[i..]))
+        .collect()
+}
+
+/// Whether `rest` starts with a macro command.
+fn is_macro_command(rest: &[u8]) -> bool {
+    MACRO_COMMANDS
+        .iter()
+        .any(|c| rest.starts_with(c) && rest.get(c.len()).is_none_or(|b| !b.is_ascii_alphabetic()))
+}
+
+/// Whether `text` has a macro command anywhere (a quick test before a
+/// parse).
+pub(crate) fn has_macro_command(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    backslashes(bytes).any(|i| is_macro_command(&bytes[i..]))
+}
+
+/// The offsets of the backslashes of `bytes`.
+fn backslashes(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'\\')
+        .map(|(i, _)| i)
 }
 
 impl NoteContext {
@@ -236,6 +252,11 @@ impl NoteContext {
         out.firsts = numbers.then(|| FootnoteIndex::first_references(tree, text, &refs));
         out.refs = (!refs.is_empty() || footnotes).then_some(refs);
         out
+    }
+
+    /// Whether a formula of the note defines math macros.
+    pub fn has_macros(&self) -> bool {
+        !self.macros.is_empty()
     }
 
     /// The math macros an inline formula at `range` is rendered with: the

@@ -11,6 +11,8 @@ use gv_search::{FileResult, SearchSummary, rank};
 use gv_vault::VaultPath;
 use gv_vault::content::ContentSnapshot;
 
+use super::macros::NoteMacros;
+
 /// One row of the result list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Row {
@@ -48,6 +50,9 @@ pub(crate) struct Results {
     /// The heading path of each snippet, outermost first (" › " joined),
     /// by note.
     headings: HashMap<VaultPath, Vec<Option<Arc<str>>>>,
+    /// The math macros of the notes with a formula in a context line
+    /// (worked out with the search, off the UI thread).
+    macros: HashMap<VaultPath, Arc<NoteMacros>>,
     folded: HashSet<VaultPath>,
     selected: Option<RowKey>,
     rows: Vec<Row>,
@@ -59,6 +64,7 @@ impl Results {
     pub fn clear(&mut self) {
         self.files.clear();
         self.headings.clear();
+        self.macros.clear();
         self.rows.clear();
         self.progress = Progress::Idle;
     }
@@ -84,6 +90,16 @@ impl Results {
         self.files.extend(files);
         rank(&mut self.files);
         self.rebuild();
+    }
+
+    /// Adds the math macros of notes found (see [`super::macros`]).
+    pub fn add_macros(&mut self, macros: Vec<(VaultPath, Arc<NoteMacros>)>) {
+        self.macros.extend(macros);
+    }
+
+    /// The math macros of note `file`, when it defines any.
+    pub fn macros(&self, file: usize) -> Option<&Arc<NoteMacros>> {
+        self.macros.get(&self.files.get(file)?.path)
     }
 
     pub fn files(&self) -> &[FileResult] {

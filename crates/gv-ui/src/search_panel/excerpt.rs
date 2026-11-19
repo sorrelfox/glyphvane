@@ -28,10 +28,16 @@ pub(crate) struct Marked {
 pub(crate) struct Formula {
     /// The bytes of the excerpt's text that show the TeX.
     pub out: Range<usize>,
+    /// The formula with its delimiters in the source given to [`strip`]
+    /// (callers move it to the note's offsets).
+    pub src: Range<usize>,
     /// The TeX, without its delimiters.
     pub tex: String,
     /// Written as display math (`$$…$$`).
     pub display: bool,
+    /// The note's macros it is typeset with (see [`super::macros`]);
+    /// empty from [`strip`].
+    pub macros: gv_math::MacroSet,
 }
 
 /// A piece of the output: source bytes `src` shown as `out` (the same
@@ -150,8 +156,10 @@ pub(crate) fn strip(src: &str, marks: &[Range<usize>], options: InlineOptions) -
             let end = inside.map(|p| p.out.end).max()?;
             (!tex.trim().is_empty()).then_some(Formula {
                 out: start..end,
+                src: r,
                 tex,
                 display,
+                macros: gv_math::MacroSet::empty(),
             })
         })
         .collect();

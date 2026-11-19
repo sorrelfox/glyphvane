@@ -486,3 +486,31 @@ fn a_result_line_typesets_its_formulas(cx: &mut TestAppContext) {
     );
     assert!(p.vcx.debug_bounds("search-line-0-0").is_some());
 }
+
+#[gpui::test]
+fn a_result_line_typesets_with_the_notes_macros(cx: &mut TestAppContext) {
+    // Without the note's macros, `\Pln` is not known.
+    assert!(
+        crate::reader::math_engine()
+            .render("\\Pln^2", false, &gv_math::MacroSet::empty())
+            .is_err()
+    );
+    let mut p = panel(
+        cx,
+        &[(
+            "Plane.md",
+            "Let $\\newcommand{\\Pln}{\\mathbb{P}}$ be set.\n\nThe plane $\\Pln^2$ is flat.\n",
+        )],
+    );
+    p.search("plane");
+    let line = p
+        .panel
+        .read_with(&p.vcx, |p, _| p.line_parts(0, 0))
+        .expect("a line");
+    let runs = super::segments(&line);
+    assert!(
+        runs.iter()
+            .any(|r| matches!(r, super::Segment::Math { tex, .. } if tex == "\\Pln^2")),
+        "{runs:?}"
+    );
+}
