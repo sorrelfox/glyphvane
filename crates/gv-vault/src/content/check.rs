@@ -26,7 +26,8 @@
 //!
 //! Each finding carries the [`Fix`]es that apply: a letter-case fix, one
 //! rewrite per candidate of an ambiguous link, the alias's note for an
-//! alias hint, and *Create note* for an unresolved link.
+//! alias hint, and *Create note* for an unresolved link (a bare name
+//! where the vault's `newFileLocation` says).
 //! [`rewrite_link`] applies a rewrite to the link's text.
 
 use std::collections::HashMap;
@@ -46,6 +47,7 @@ use crate::fragment::FragmentKind;
 use crate::index::{IndexConfig, IndexError, PathIndex};
 use crate::keys::{fold_key, nfc_key};
 use crate::link::{DecodedTarget, LinkKind, LinkRef, decode};
+use crate::new_file::{NewFileLocation, place_bare_link_note};
 use crate::path::VaultPath;
 use crate::platform::PlatformRules;
 use crate::profile::{Anchoring, BaseStep, ProfileId, ProfileParams};
@@ -407,6 +409,7 @@ impl ContentSnapshot {
             params: &self.0.options.params,
             compare: None,
             aliases: OnceLock::new(),
+            new_file: OnceLock::new(),
         };
         let link = IndexedLink {
             kind,
@@ -453,6 +456,7 @@ impl ContentSnapshot {
             params: &self.0.options.params,
             compare: options.compare_with.map(ProfileParams::for_profile),
             aliases: OnceLock::new(),
+            new_file: OnceLock::new(),
         };
         let per_note = parallel_map(&notes, self.0.options.threads, cancel, |path| {
             let out = checker.note(path, source);
@@ -481,6 +485,8 @@ struct Checker<'a> {
     compare: Option<ProfileParams>,
     /// Folded alias → notes with it, built on first use.
     aliases: OnceLock<AliasMap>,
+    /// The vault's `newFileLocation`, read on first use.
+    new_file: OnceLock<Option<NewFileLocation>>,
 }
 
 impl Checker<'_> {
@@ -863,11 +869,22 @@ impl Checker<'_> {
     }
 
     /// *Create note* for an unresolved link: in the folder written in the
-    /// link, otherwise the source's folder; `.md` appended when the name
-    /// has no note extension. `None` when the name is not valid on every
+    /// link; for a bare name, where the vault's `newFileLocation` says,
+    /// otherwise the source's folder; `.md` appended when the name has no
+    /// note extension. `None` when the name is not valid on every
     /// platform, or the link is not a note link.
     fn create_fix(&self, link: &LinkRef, source: &VaultPath) -> Option<Fix> {
-        let path = note_path_for_link(link, self.params, source)?;
+        let mut path = note_path_for_link(link, self.params, source)?;
+        if let DecodedTarget::Path(written) = decode(link, self.params).target
+            && written.segments.len() == 1
+            && !written.absolute
+            && !written.is_dot_relative()
+        {
+            let location = self
+                .new_file
+                .get_or_init(|| NewFileLocation::read(self.paths.root()));
+            path = place_bare_link_note(location.as_ref(), path)?;
+        }
         Some(Fix {
             label: format!("Create {}", path.as_str()),
             action: FixAction::CreateNote { path },

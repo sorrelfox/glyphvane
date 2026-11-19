@@ -241,7 +241,7 @@ impl Workspace {
         let task = cx.background_spawn({
             let root = folder.clone();
             async move {
-                let rel = crate::reader::new_note_folder(&root, current.as_deref());
+                let rel = gv_vault::new_file::new_note_folder(&root, current.as_deref());
                 let folder = rel.split('/').fold(root, |path, part| path.join(part));
                 std::fs::create_dir_all(&folder)?;
                 create_note(&folder, NEW_NOTE_NAME)

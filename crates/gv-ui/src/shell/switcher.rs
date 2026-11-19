@@ -174,7 +174,7 @@ impl Workspace {
         let folder = if path.contains('/') {
             String::new()
         } else {
-            crate::reader::new_note_folder(&root, self.active_tab().path.as_deref())
+            gv_vault::new_file::new_note_folder(&root, self.active_tab().path.as_deref())
         };
         let rel = if folder.is_empty() {
             path.to_owned()

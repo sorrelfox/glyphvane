@@ -33,6 +33,7 @@
 //!   switcher's entries as queries.
 //! - [`refactor`]: file operations. Rename and move with link rewriting,
 //!   journaled and undoable; new folders, duplicates and the trash.
+//! - [`new_file`]: where new notes go (Obsidian's `newFileLocation`).
 //! - [`trust`]: what a folder holds that workspace trust decides about
 //!   (CSS snippets, Obsidian plugins and themes, shared settings).
 //! - [`watch`]: the vault watcher. Keeps a [`SharedPathIndex`] in step with
@@ -52,6 +53,7 @@ pub mod index;
 pub mod keys;
 pub mod link;
 pub mod model;
+pub mod new_file;
 pub mod path;
 pub mod platform;
 pub mod probe;

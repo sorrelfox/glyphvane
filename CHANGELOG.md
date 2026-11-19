@@ -49,6 +49,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   refresh.
 - Screen readers read a Live Preview task checkbox as `[ ]` or `[x]`
   instead of a space.
+- The link checker's *Create note* puts a note named by a bare link where
+  the vault's `newFileLocation` says, as following the link does.
 
 ## [1.2.0] - 2026-11-19
 

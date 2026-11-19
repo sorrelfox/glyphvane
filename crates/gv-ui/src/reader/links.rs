@@ -401,81 +401,6 @@ pub(crate) struct NewNote {
     pub rewrite: Option<String>,
 }
 
-/// Where Obsidian puts new notes (`.obsidian/app.json`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NewFileLocation {
-    Root,
-    Current,
-    Folder(String),
-}
-
-/// The vault's `newFileLocation` (and `newFileFolderPath`), when its
-/// `.obsidian/app.json` sets one.
-fn new_file_location(root: &Path) -> Option<NewFileLocation> {
-    let text = std::fs::read_to_string(root.join(".obsidian").join("app.json")).ok()?;
-    match json_string(&text, "newFileLocation")?.as_str() {
-        "root" => Some(NewFileLocation::Root),
-        "current" => Some(NewFileLocation::Current),
-        "folder" => Some(NewFileLocation::Folder(
-            json_string(&text, "newFileFolderPath").unwrap_or_default(),
-        )),
-        _ => None,
-    }
-}
-
-/// The vault folder a new note made from nothing but a name goes to (New
-/// note, the quick switcher), by the vault's `newFileLocation`: its root
-/// (also when unset), the folder of `current` (a file in the vault), or
-/// `newFileFolderPath`. Vault-relative and `/`-separated, empty for the
-/// root; a folder that would leave the vault is the root.
-pub(crate) fn new_note_folder(root: &Path, current: Option<&Path>) -> String {
-    let folder = match new_file_location(root) {
-        Some(NewFileLocation::Folder(f)) => f.trim_matches('/').to_owned(),
-        Some(NewFileLocation::Current) => current
-            .and_then(|file| file.parent()?.strip_prefix(root).ok())
-            .map(|rel| {
-                rel.components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            })
-            .unwrap_or_default(),
-        Some(NewFileLocation::Root) | None => String::new(),
-    };
-    if folder
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return String::new();
-    }
-    folder
-}
-
-/// The string value of `"key"` in a flat JSON object (enough for the two
-/// settings above: `\"`, `\\` and `\/` are unescaped, other escapes kept).
-fn json_string(text: &str, key: &str) -> Option<String> {
-    let quoted = format!("\"{key}\"");
-    let at = text.find(&quoted)? + quoted.len();
-    let rest = text[at..].trim_start().strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let mut out = String::new();
-    let mut chars = rest.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return Some(out),
-            '\\' => match chars.next()? {
-                c @ ('"' | '\\' | '/') => out.push(c),
-                c => {
-                    out.push('\\');
-                    out.push(c);
-                }
-            },
-            c => out.push(c),
-        }
-    }
-    None
-}
-
 /// The note an unresolved link of kind `kind` creates (09 § Unresolved):
 /// in the folder written in the link; for a bare name, where the vault's
 /// `newFileLocation` says, otherwise the source's folder. A name that is
@@ -493,17 +418,8 @@ pub(crate) fn new_note(resolver: &Resolver, kind: LinkKind, destination: &str) -
         if !bare {
             return Some(path);
         }
-        let name = path.as_str().rsplit('/').next()?.to_owned();
-        let folder = match new_file_location(resolver.root()) {
-            Some(NewFileLocation::Root) => String::new(),
-            Some(NewFileLocation::Folder(f)) => f.trim_matches('/').to_owned(),
-            Some(NewFileLocation::Current) | None => return Some(path),
-        };
-        if folder.is_empty() {
-            VaultPath::new(&name).ok()
-        } else {
-            VaultPath::new(&format!("{folder}/{name}")).ok()
-        }
+        let location = gv_vault::new_file::NewFileLocation::read(resolver.root());
+        gv_vault::new_file::place_bare_link_note(location.as_ref(), path)
     };
     let make = |path: VaultPath, rewrite: Option<String>| {
         let path = place(path)?;
@@ -848,18 +764,6 @@ mod tests {
         );
         // Nothing to create for a URL.
         assert_eq!(new_note(&r, LinkKind::Inline, "https://e.x/"), None);
-    }
-
-    #[test]
-    fn json_strings_are_read_from_flat_objects() {
-        let text = r#"{ "a": 1, "newFileLocation" : "current", "p": "x\"y" }"#;
-        assert_eq!(
-            json_string(text, "newFileLocation").as_deref(),
-            Some("current")
-        );
-        assert_eq!(json_string(text, "p").as_deref(), Some("x\"y"));
-        assert_eq!(json_string(text, "a"), None);
-        assert_eq!(json_string(text, "missing"), None);
     }
 
     #[test]

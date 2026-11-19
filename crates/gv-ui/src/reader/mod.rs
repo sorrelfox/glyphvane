@@ -120,7 +120,7 @@ pub use state::ReaderLayout;
 pub use bench::DEBUG_READER_BENCH_ENV;
 pub use expanded::{ExpandedEvent, ExpandedTable};
 pub use find::DEBUG_FIND_ENV;
-pub(crate) use links::{Navigation, NewNote, Resolver, navigation, new_note_folder, resolver_kind};
+pub(crate) use links::{Navigation, NewNote, Resolver, navigation, resolver_kind};
 
 /// Copy the selection as plain text (`editor.copy`) or as Markdown
 /// (`editor.copy_as_markdown`), and select the whole document

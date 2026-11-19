@@ -329,6 +329,46 @@ fn fixes_rewrite_links_and_create_notes() {
     );
 }
 
+/// *Create note* for a bare name follows the vault's `newFileLocation`;
+/// a folder written in the link stays.
+#[test]
+fn create_note_follows_new_file_location() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    obsidian_vault(root);
+    write(
+        root,
+        ".obsidian/app.json",
+        r#"{"newFileLocation": "folder", "newFileFolderPath": "Inbox"}"#,
+    );
+    write(root, "Sub/Source.md", "[[Plain]] [[Folder/New idea]]\n");
+    let snap = snapshot(root, ProfileId::Obsidian);
+    let creates = |snap: &ContentSnapshot, raw: &str| -> Vec<FixAction> {
+        check(root, snap, CheckScope::Note(vp("Sub/Source.md")))
+            .findings
+            .iter()
+            .find(|f| &*f.raw == raw && f.kind == FindingKind::Unresolved)
+            .map(|f| f.fixes.iter().map(|x| x.action.clone()).collect())
+            .unwrap_or_default()
+    };
+    let create = |p: &str| FixAction::CreateNote { path: vp(p) };
+    assert_eq!(creates(&snap, "Plain"), [create("Inbox/Plain.md")]);
+    assert_eq!(
+        creates(&snap, "Folder/New idea"),
+        [create("Folder/New idea.md")]
+    );
+    write(root, ".obsidian/app.json", r#"{"newFileLocation": "root"}"#);
+    let snap = snapshot(root, ProfileId::Obsidian);
+    assert_eq!(creates(&snap, "Plain"), [create("Plain.md")]);
+    write(
+        root,
+        ".obsidian/app.json",
+        r#"{"newFileLocation": "current"}"#,
+    );
+    let snap = snapshot(root, ProfileId::Obsidian);
+    assert_eq!(creates(&snap, "Plain"), [create("Sub/Plain.md")]);
+}
+
 /// One link, not indexed yet (under the pointer): the same findings and
 /// fixes as a check of its note, rewrites that do not fit the construct
 /// left out.
