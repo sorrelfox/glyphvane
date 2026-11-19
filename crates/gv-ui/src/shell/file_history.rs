@@ -17,7 +17,10 @@
 //! - Esc gives the keyboard back to the document.
 //!
 //! Renames and moves carry a file's history along
-//! ([`Workspace::carry_history`], called by the rename and move paths).
+//! ([`Workspace::carry_history`], called by the rename and move paths), and
+//! so do renames by other programs that the vault watcher reports, when
+//! the file is recognisably the same note
+//! ([`Workspace::carry_history_from_outside`]).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -171,6 +174,36 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         self.bookmarks_moved(moved, cx);
+        self.move_histories(root, moved, false, cx);
+    }
+
+    /// Files were renamed or moved inside the vault at `root` by another
+    /// program (the vault watcher's renames): a file's version history
+    /// follows it when the file still holds the text of its newest
+    /// version ([`HistoryStore::moved_from_outside`]), since a rename the
+    /// watcher matched by file identity may be another file that reused a
+    /// deleted one's identity.
+    ///
+    /// [`HistoryStore::moved_from_outside`]: gv_vault::files::history::HistoryStore::moved_from_outside
+    pub(super) fn carry_history_from_outside(
+        &mut self,
+        root: &std::path::Path,
+        moved: &[(VaultPath, VaultPath)],
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.move_histories(root, moved, true, cx);
+    }
+
+    /// Moves the histories of `moved` off the UI thread (checked against
+    /// the files' text when `outside`); the panel reads its list again
+    /// after.
+    fn move_histories(
+        &mut self,
+        root: &std::path::Path,
+        moved: &[(VaultPath, VaultPath)],
+        outside: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(store) = crate::history::store(cx) else {
             return;
         };
@@ -183,7 +216,12 @@ impl Workspace {
         }
         let task = cx.background_spawn(async move {
             for (from, to) in with_folder_contents(pairs) {
-                if let Err(err) = store.moved(&from, &to) {
+                let result = if outside {
+                    store.moved_from_outside(&from, &to).map(|_| ())
+                } else {
+                    store.moved(&from, &to)
+                };
+                if let Err(err) = result {
                     tracing::warn!(
                         "version history: cannot follow {} to {}: {err}",
                         from.display(),

@@ -4,7 +4,7 @@
 //! The File history panel in a window, in headless GPUI windows over a
 //! temporary folder: `file.history`, the panel following the active tab,
 //! Compare and Restore (queued until the Source view has loaded), Esc, and
-//! histories following renames and moves.
+//! histories following renames and moves (the app's and other programs').
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,8 +14,9 @@ use gpui::{
     AppContext as _, Bounds, Entity, TestAppContext, VisualTestContext, WindowBounds,
     WindowOptions, point, px, size,
 };
-use gv_vault::VaultPath;
 use gv_vault::files::history::{HistoryPolicy, HistoryStore};
+use gv_vault::watch::UpdateCause;
+use gv_vault::{Change, IndexConfig, PathIndex, VaultPath, WatchEvent};
 
 use super::panels::SidebarPanel;
 use super::{OpenTarget, ViewMode, Workspace};
@@ -223,4 +224,49 @@ fn histories_follow_renames_and_moved_folders(cx: &mut TestAppContext) {
     f.until("C's history", |_| count(&c) == 1);
     assert_eq!(count(&root.join("A.md")), 0);
     assert_eq!(count(&root.join("Dir").join("C.md")), 0);
+}
+
+#[gpui::test]
+fn histories_follow_renames_by_other_programs_only_with_their_text(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    let root = f.dir.path().to_path_buf();
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    for (name, text, kept) in [("N.md", "n\n", "n\n"), ("O.md", "o\n", "o old\n")] {
+        std::fs::write(root.join(name), text).expect("write");
+        store_in(&root)
+            .record(&root.join(name), kept.as_bytes(), t0)
+            .expect("kept");
+    }
+
+    // Another program renames both; the watcher reports the renames.
+    std::fs::rename(root.join("O.md"), root.join("O2.md")).expect("renamed");
+    std::fs::rename(root.join("N.md"), root.join("N2.md")).expect("renamed");
+    let vp = |s: &str| VaultPath::new(s).expect("vault path");
+    let (index, _) = PathIndex::build(&root, IndexConfig::default()).expect("index");
+    let event = WatchEvent::IndexUpdated {
+        index,
+        changes: vec![
+            Change::Rename {
+                from: vp("O.md"),
+                to: vp("O2.md"),
+            },
+            Change::Rename {
+                from: vp("N.md"),
+                to: vp("N2.md"),
+            },
+        ],
+        cause: UpdateCause::Events,
+        own_writes: Vec::new(),
+    };
+    f.workspace
+        .update(&mut f.vcx, |ws, cx| ws.watch_event(event, cx));
+
+    // N2 holds N's newest text: its history follows (after O's, which
+    // is looked at first).
+    let count = |path: &Path| store_in(&root).versions(path).map_or(0, |v| v.len());
+    f.until("N2's history", |_| count(&root.join("N2.md")) == 1);
+    assert_eq!(count(&root.join("N.md")), 0);
+    // O2 is not O's newest text: O's history stays where it was.
+    assert_eq!(count(&root.join("O.md")), 1);
+    assert_eq!(count(&root.join("O2.md")), 0);
 }

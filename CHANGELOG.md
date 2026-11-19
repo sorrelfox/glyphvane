@@ -42,6 +42,9 @@ Conventional Commits, and versions follow Semantic Versioning.
 
 ### Fixes
 
+- A note renamed or moved by another program (a file manager, `git mv`,
+  a sync client) keeps its version history when the vault watcher sees
+  the rename and the file still holds the note's last kept version.
 - New note (Ctrl+N) and notes created from the quick switcher go to the
   vault's default location for new notes (Obsidian's `newFileLocation`:
   the vault folder, the current note's folder, or a chosen folder).

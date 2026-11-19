@@ -280,15 +280,72 @@ impl HistoryStore {
         if old == new {
             return Ok(());
         }
-        let mut versions = read_log(&old)?;
+        let versions = read_log(&old)?;
+        self.move_log(&old, &new, versions)
+    }
+
+    /// Moves the history of `from` to `to` for a rename seen from outside
+    /// the app (the vault watcher's rename events, or a removed and a new
+    /// file with the same file identity), but only when the file now at
+    /// `to` holds the text of `from`'s newest version: file identities are
+    /// reused (a deleted file's inode goes to the next new file), so only
+    /// the text shows the file is the same note. Returns whether the
+    /// history moved.
+    pub fn moved_from_outside(&self, from: &Path, to: &Path) -> io::Result<bool> {
+        let _guard = self.write_lock();
+        let (old, new) = (self.log_path(from), self.log_path(to));
+        if old == new {
+            return Ok(false);
+        }
+        let versions = read_log(&old)?;
+        let Some(newest) = versions.last() else {
+            return Ok(false);
+        };
+        if !self.holds_version(to, newest)? {
+            return Ok(false);
+        }
+        self.move_log(&old, &new, versions)?;
+        Ok(true)
+    }
+
+    /// Whether the file at `path` holds the text of `version`: its bytes,
+    /// or the text they decode to (a BOM or another encoding; versions
+    /// keep the decoded text).
+    fn holds_version(&self, path: &Path, version: &Version) -> io::Result<bool> {
+        // UTF-16 and UTF-32 take up to four bytes per UTF-8 byte, plus a BOM.
+        let limit = version.size.saturating_mul(4).saturating_add(4);
+        let len = match fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta.len(),
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if len > limit {
+            return Ok(false);
+        }
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if ContentHash::of(&bytes) == version.hash {
+            return Ok(true);
+        }
+        Ok(gv_text::encoding::decode(&bytes)
+            .is_ok_and(|decoded| ContentHash::of(decoded.text.as_bytes()) == version.hash))
+    }
+
+    /// Moves the versions of log `old` (`versions`, read under the write
+    /// lock) into log `new`, beside the versions it already has.
+    fn move_log(&self, old: &Path, new: &Path, mut versions: Vec<Version>) -> io::Result<()> {
         if versions.is_empty() {
             return Ok(());
         }
-        versions.extend(read_log(&new)?);
+        versions.extend(read_log(new)?);
         versions.sort_by_key(|v| v.time);
         versions.dedup_by(|a, b| a.time == b.time && a.hash == b.hash);
-        write_log(&new, &versions)?;
-        remove_file(&old)?;
+        write_log(new, &versions)?;
+        remove_file(old)?;
         sync_dir(&self.dir.join(LOGS));
         Ok(())
     }
@@ -977,6 +1034,42 @@ mod tests {
         store.forget(b).expect("forget");
         assert!(store.versions(b).expect("versions").is_empty());
         assert_eq!(store.stored_bytes().expect("size"), 0);
+    }
+
+    #[test]
+    fn outside_renames_move_only_a_history_whose_text_is_there() {
+        let (dir, store) = store(HistoryPolicy::default());
+        let vault = dir.path().join("vault");
+        fs::create_dir(&vault).expect("vault folder");
+        let (a, b, c) = (vault.join("a.md"), vault.join("b.md"), vault.join("c.md"));
+        store.record(&a, b"one", t0()).expect("record");
+        store.record(&a, b"two", t0() + HOUR).expect("record");
+
+        // Another note took the old file's identity: nothing moves.
+        fs::write(&c, "something else").expect("write");
+        assert!(!store.moved_from_outside(&a, &c).expect("checked"));
+        assert_eq!(texts(&store, &a), vec!["two", "one"]);
+        assert!(store.versions(&c).expect("versions").is_empty());
+
+        // Nothing at the new path, or a folder there: nothing moves.
+        assert!(!store.moved_from_outside(&a, &b).expect("checked"));
+        fs::create_dir(&b).expect("folder");
+        assert!(!store.moved_from_outside(&a, &b).expect("checked"));
+        fs::remove_dir(&b).expect("folder removed");
+
+        // An older version's text is not enough either.
+        fs::write(&b, "one").expect("write");
+        assert!(!store.moved_from_outside(&a, &b).expect("checked"));
+
+        // The newest version's text, also with a BOM: the history moves.
+        fs::write(&b, b"\xEF\xBB\xBFtwo").expect("write");
+        assert!(store.moved_from_outside(&a, &b).expect("moved"));
+        assert!(store.versions(&a).expect("versions").is_empty());
+        assert_eq!(texts(&store, &b), vec!["two", "one"]);
+
+        // A path without a history has nothing to move.
+        assert!(!store.moved_from_outside(&a, &b).expect("checked"));
+        assert_eq!(texts(&store, &b), vec!["two", "one"]);
     }
 
     #[test]

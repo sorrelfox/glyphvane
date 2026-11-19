@@ -868,6 +868,22 @@ impl Workspace {
                 }
             }
             WatchEvent::IndexUpdated { index, changes, .. } => {
+                // Renames by other programs: version histories follow.
+                let moved: Vec<(gv_vault::VaultPath, gv_vault::VaultPath)> = changes
+                    .iter()
+                    .filter_map(|change| match change {
+                        gv_vault::Change::Rename { from, to } => Some((from.clone(), to.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                if !moved.is_empty() {
+                    // The vault's root, as the app's own renames use it.
+                    let root = self.vault.as_ref().map_or_else(
+                        || index.root().to_path_buf(),
+                        |vault| vault.read(cx).root().to_path_buf(),
+                    );
+                    self.carry_history_from_outside(&root, &moved, cx);
+                }
                 // Note embeds read changed notes again.
                 for change in &changes {
                     let paths = match change {
