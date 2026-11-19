@@ -310,5 +310,6 @@ jobs:
             --exclude-path target
             --exclude-path '(^|/)tests/'
             --exclude-path '(^|/)fuzz/'
+            --exclude 'docs/screenshots/.*\.png'
             './**/*.md'
           fail: true
