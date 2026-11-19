@@ -14,7 +14,9 @@
 //! block, the folder, the query or the URL). A note or folder that is not
 //! in the vault any more shows "missing". Click or Enter opens; the panel
 //! shares the file tree's keys. The lists are read off the UI thread when
-//! the panel is made, when the vault changes and after every write.
+//! the panel is made, when the vault changes and after every write, and
+//! again when Obsidian's file changes (its time and size are checked every
+//! [`WATCH_EVERY`]: the vault watcher leaves `.obsidian` out).
 
 use std::path::{Path, PathBuf};
 
@@ -116,6 +118,16 @@ struct Scope {
     own: Option<PathBuf>,
 }
 
+/// How often Obsidian's `bookmarks.json` is checked for changes.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The time and size of the file at `path`, `None` when it is not there.
+fn stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.modified().ok(), m.len()))
+}
+
 /// The Bookmarks panel of a window's sidebar.
 pub(crate) struct BookmarksPanel {
     focus: FocusHandle,
@@ -126,6 +138,8 @@ pub(crate) struct BookmarksPanel {
     selected: Option<usize>,
     revision: u64,
     _load: Option<Task<()>>,
+    /// Checks Obsidian's file for changes ([`WATCH_EVERY`]).
+    _watch: Option<Task<()>>,
     _revision: gpui::Subscription,
 }
 
@@ -148,6 +162,7 @@ impl BookmarksPanel {
             selected: None,
             revision,
             _load: None,
+            _watch: None,
             _revision: cx.observe_global::<BookmarksRevision>(|this, cx| {
                 let revision = cx.global::<BookmarksRevision>().0;
                 if revision != this.revision {
@@ -172,8 +187,40 @@ impl BookmarksPanel {
         if scope != self.scope || self.state == State::NoVault {
             self.scope = scope;
             self.reload(cx);
+            self.watch_obsidian(cx);
         }
         cx.notify();
+    }
+
+    /// Reads the lists again whenever Obsidian's file of the vault shown
+    /// changes (written by Obsidian, a sync client or by hand).
+    fn watch_obsidian(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(root) = self.scope.root.clone() else {
+            self._watch = None;
+            return;
+        };
+        let file = bookmarks::obsidian_file(&root);
+        self._watch = Some(cx.spawn(async move |this, cx| {
+            let first = file.clone();
+            let mut seen = cx.background_spawn(async move { stamp(&first) }).await;
+            loop {
+                cx.background_executor().timer(WATCH_EVERY).await;
+                let next = file.clone();
+                let now = cx.background_spawn(async move { stamp(&next) }).await;
+                let changed = now != seen;
+                seen = now;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if changed {
+                            this.reload(cx);
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Reads the lists again, off the UI thread.

@@ -189,6 +189,25 @@ fn the_panel_lists_obsidians_bookmarks_and_opens_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_change_to_obsidians_file_shows_in_the_panel(cx: &mut TestAppContext) {
+    let mut f = fixture(cx);
+    f.vcx.dispatch_action(commands::ShowBookmarks);
+    draw(&mut f.vcx);
+    f.until("the rows", |f| !f.labels().is_empty());
+    assert_eq!(f.labels()[0], "A › Second");
+    // Obsidian writes its list: one bookmark, of B.
+    std::fs::write(
+        f.root().join(".obsidian/bookmarks.json"),
+        r#"{"items": [{"type": "file", "ctime": 9, "path": "B.md", "title": "Bee"}]}"#,
+    )
+    .expect("write");
+    f.until("the new list", |f| {
+        f.vcx.executor().advance_clock(Duration::from_secs(3));
+        f.labels() == ["Bee"]
+    });
+}
+
+#[gpui::test]
 fn toggle_adds_and_removes_own_bookmarks_and_leaves_obsidians_file(cx: &mut TestAppContext) {
     let mut f = fixture(cx);
     f.vcx.dispatch_action(commands::ShowBookmarks);
