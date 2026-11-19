@@ -16,7 +16,8 @@
 //!   limit stopped it.
 //! - **Results**, grouped by note: a row with a chevron, the note's title
 //!   and its match count, then one line per match with the matched text
-//!   marked, cut with an ellipsis where the line goes on. A click on a
+//!   marked, cut with an ellipsis where the line goes on; inline markup is
+//!   removed and formulas are typeset ([`segments`]). A click on a
 //!   note's row folds it; a click on a line opens the note scrolled there
 //!   (Mod+click or a middle click: in a new tab). The heading path of a
 //!   line shows as its tooltip.
@@ -55,8 +56,9 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _,
     IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
-    Window, div, list, point, px,
+    Window, canvas, div, list, point, px,
 };
+use gv_math::{MacroSet, MathLayout};
 use gv_search::{CancelToken, Query, ResultBatch, SearchOptions, VaultSource};
 use gv_vault::content::{ContentSnapshot, DiskSource};
 
@@ -77,7 +79,116 @@ use model::{Results, grouped};
 struct Shown {
     text: String,
     marks: Vec<std::ops::Range<usize>>,
+    math: Vec<excerpt::Formula>,
     clipped_start: bool,
+}
+
+/// A context row as drawn: its text with the ellipses, its marks and its
+/// formulas (byte ranges of the text).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Line {
+    pub text: String,
+    pub marks: Vec<Range<usize>>,
+    pub math: Vec<excerpt::Formula>,
+}
+
+/// A run of a context row: text with its marks (byte ranges of the run),
+/// or a typeset formula.
+#[derive(Debug, Clone)]
+pub(crate) enum Segment {
+    Text {
+        text: String,
+        marks: Vec<Range<usize>>,
+    },
+    Math {
+        /// The formula's TeX (what the tests check).
+        #[cfg_attr(not(test), allow(dead_code))]
+        tex: String,
+        layout: Arc<MathLayout>,
+    },
+}
+
+/// `line` cut into text and typeset formulas, as the row draws it.
+///
+/// Formulas are typeset through the Reading view's math engine and its
+/// layout cache (a formula is typeset once; later frames look it up), in
+/// text style: a row holds one line, so display math (`$$…$$`) is typeset
+/// at inline size too. The note's own macros are not known here: a formula
+/// that needs them, or does not typeset, stays as its TeX. A formula that
+/// a match touches stays as its TeX too, so the match is marked on the
+/// characters it matched.
+pub(crate) fn segments(line: &Line) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    let text = |range: Range<usize>, out: &mut Vec<Segment>| {
+        if range.is_empty() {
+            return;
+        }
+        let marks = line
+            .marks
+            .iter()
+            .filter(|m| m.start < range.end && range.start < m.end)
+            .map(|m| m.start.max(range.start) - range.start..m.end.min(range.end) - range.start)
+            .collect();
+        out.push(Segment::Text {
+            text: line.text[range].to_owned(),
+            marks,
+        });
+    };
+    let empty = MacroSet::empty();
+    for f in &line.math {
+        let r = f.out.clone();
+        let fits = r.start >= at
+            && r.end <= line.text.len()
+            && line.text.is_char_boundary(r.start)
+            && line.text.is_char_boundary(r.end);
+        let marked = line
+            .marks
+            .iter()
+            .any(|m| m.start < r.end && r.start < m.end);
+        if !fits || marked {
+            continue;
+        }
+        let Ok(layout) = crate::reader::math_engine().render(&f.tex, false, &empty) else {
+            continue;
+        };
+        text(at..r.start, &mut out);
+        out.push(Segment::Math {
+            tex: f.tex.clone(),
+            layout,
+        });
+        at = r.end;
+    }
+    text(at..line.text.len(), &mut out);
+    out
+}
+
+/// A typeset formula in a context row: sized to the row's line as the
+/// editor's inline formulas are (the body text's baseline, scaled down
+/// when it would leave the row), in `color`.
+fn math_run(layout: Arc<MathLayout>, color: gpui::Hsla) -> gpui::Canvas<()> {
+    let (size, line) = (text::UI_SECTION.size, text::UI_SECTION.line);
+    let ink = (layout.height + layout.depth).max(f32::EPSILON);
+    let em = size.min(line * 0.9 / ink);
+    let natural = (line + size * 0.7) / 2.0;
+    let baseline = natural
+        .max(layout.height * em)
+        .min(line - layout.depth * em);
+    let width = (layout.width * em).max(1.0);
+    let text_font = gpui::font(font::SYSTEM_FALLBACK);
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, cx| {
+            let origin = point(
+                bounds.origin.x,
+                bounds.origin.y + px(baseline - layout.height * em),
+            );
+            crate::inline::paint_math(window, cx, &layout, origin, em, color, &text_font);
+        },
+    )
+    .flex_none()
+    .w(px(width))
+    .h(px(line))
 }
 
 /// The average character width of the interface font, in em, to count the
@@ -876,6 +987,7 @@ impl SearchPanel {
             clipped_start: snippet.clipped_start || cut,
             text: m.text,
             marks: m.marks,
+            math: m.math,
         }
     }
 
@@ -889,7 +1001,14 @@ impl SearchPanel {
 
     /// Context line `s` of note `f` as its row shows it, with an ellipsis
     /// where the line goes on, and its marks.
+    #[cfg(test)]
     pub(crate) fn line(&self, f: usize, s: usize) -> Option<(String, Vec<Range<usize>>)> {
+        self.line_parts(f, s).map(|l| (l.text, l.marks))
+    }
+
+    /// Context line `s` of note `f` as its row shows it: with an ellipsis
+    /// where the line goes on, its marks and its formulas.
+    pub(crate) fn line_parts(&self, f: usize, s: usize) -> Option<Line> {
         let snippet = self.results.files().get(f)?.snippets.get(s)?;
         let shown = self.excerpt(snippet, self.profile());
         const ELLIPSIS: &str = "…";
@@ -900,13 +1019,15 @@ impl SearchPanel {
         } else {
             0
         };
-        // Tabs and stray line breaks would break the one-line row.
-        line.extend(
-            shown
-                .text
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c }),
-        );
+        // Tabs and stray line breaks would break the one-line row (spaces
+        // of the same length keep the ranges in place).
+        for c in shown.text.chars() {
+            if c.is_control() {
+                line.extend(std::iter::repeat_n(' ', c.len_utf8()));
+            } else {
+                line.push(c);
+            }
+        }
         if snippet.clipped_end {
             line.push_str(ELLIPSIS);
         }
@@ -915,14 +1036,26 @@ impl SearchPanel {
             .iter()
             .map(|r| r.start + shift..r.end + shift)
             .collect();
-        Some((line, marks))
+        let math = shown
+            .math
+            .into_iter()
+            .map(|f| excerpt::Formula {
+                out: f.out.start + shift..f.out.end + shift,
+                ..f
+            })
+            .collect();
+        Some(Line {
+            text: line,
+            marks,
+            math,
+        })
     }
 
     /// A context line, its matches marked, cut with an ellipsis: inline
-    /// markup removed ([`excerpt`]), the start cut so the first match sits
-    /// near the middle of the row.
+    /// markup removed ([`excerpt`]), formulas typeset ([`segments`]), the
+    /// start cut so the first match sits near the middle of the row.
     fn render_line(&self, f: usize, s: usize, theme: &Theme) -> Div {
-        let Some((line, marks)) = self.line(f, s) else {
+        let Some(line) = self.line_parts(f, s) else {
             return div();
         };
         let mark = HighlightStyle {
@@ -930,8 +1063,49 @@ impl SearchPanel {
             background_color: Some(theme.accent.tint.into()),
             ..HighlightStyle::default()
         };
-        let highlights: Vec<(Range<usize>, HighlightStyle)> =
-            marks.into_iter().map(|r| (r, mark)).collect();
+        let styled = |text: String, marks: Vec<Range<usize>>| {
+            let highlights: Vec<(Range<usize>, HighlightStyle)> =
+                marks.into_iter().map(|r| (r, mark)).collect();
+            StyledText::new(text).with_highlights(highlights)
+        };
+        let mut runs = segments(&line);
+        let content = match runs.as_slice() {
+            [] | [Segment::Text { .. }] => {
+                let (text, marks) = match runs.pop() {
+                    Some(Segment::Text { text, marks }) => (text, marks),
+                    _ => (String::new(), Vec::new()),
+                };
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(styled(text, marks))
+            }
+            _ => {
+                // Text runs keep their width; the last one ends with an
+                // ellipsis when the row is full, and the row clips the rest.
+                let last = runs.len() - 1;
+                let color: gpui::Hsla = theme.text.secondary.into();
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .children(runs.into_iter().enumerate().map(|(ix, run)| {
+                        match run {
+                            Segment::Text { text, marks } => div()
+                                .when(ix < last, |d| d.flex_none().whitespace_nowrap())
+                                .when(ix == last, |d| d.flex_1().min_w_0().truncate())
+                                .child(styled(text, marks))
+                                .into_any_element(),
+                            Segment::Math { layout, .. } => {
+                                math_run(layout, color).into_any_element()
+                            }
+                        }
+                    }))
+            }
+        };
         div()
             .h(px(text::UI_SECTION.line))
             .flex()
@@ -941,13 +1115,7 @@ impl SearchPanel {
             .text_size(px(text::UI_SECTION.size))
             .line_height(px(text::UI_SECTION.line))
             .text_color(theme.text.secondary)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(StyledText::new(line).with_highlights(highlights)),
-            )
+            .child(content)
     }
 }
 

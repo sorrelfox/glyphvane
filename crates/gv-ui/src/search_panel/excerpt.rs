@@ -5,7 +5,8 @@
 //! backlinks): the inline markup of the profile is removed (emphasis and
 //! code markers, link destinations, math delimiters, comments, block ids;
 //! wikilinks read as their text), the marked ranges follow, and the start
-//! is cut so the first mark stays in view.
+//! is cut so the first mark stays in view. Formulas keep their TeX in the
+//! text, and where it is ([`Formula`]), so a row can typeset them.
 
 use std::ops::Range;
 
@@ -18,6 +19,19 @@ use gv_vault::ProfileId;
 pub(crate) struct Marked {
     pub text: String,
     pub marks: Vec<Range<usize>>,
+    /// The formulas (`$…$`, `$$…$$`, as the profile reads math), in order.
+    pub math: Vec<Formula>,
+}
+
+/// A formula of an excerpt: its TeX, shown at `out` while not typeset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Formula {
+    /// The bytes of the excerpt's text that show the TeX.
+    pub out: Range<usize>,
+    /// The TeX, without its delimiters.
+    pub tex: String,
+    /// Written as display math (`$$…$$`).
+    pub display: bool,
 }
 
 /// A piece of the output: source bytes `src` shown as `out` (the same
@@ -61,12 +75,20 @@ pub(crate) fn strip(src: &str, marks: &[Range<usize>], options: InlineOptions) -
         }
     };
     let mut skip_to = 0;
+    // Formulas: source range, TeX, display.
+    let mut formulas: Vec<(Range<usize>, String, bool)> = Vec::new();
     for node in tree.nodes() {
         let r = node.range();
         if r.start < skip_to || r.end > src.len() {
             continue;
         }
         match node.kind() {
+            // Its TeX follows as `MathText`, shown verbatim.
+            kind @ (InlineKind::InlineMath | InlineKind::DisplayMath) => {
+                if let Some(tex) = node.math() {
+                    formulas.push((r, tex.to_owned(), kind == InlineKind::DisplayMath));
+                }
+            }
             InlineKind::Wikilink | InlineKind::Embed => {
                 let label = link_label(&src[r.clone()]);
                 push(r.clone(), Some(&label), &mut text);
@@ -118,7 +140,22 @@ pub(crate) fn strip(src: &str, marks: &[Range<usize>], options: InlineOptions) -
             m.start < m.end && text.is_char_boundary(m.start) && text.is_char_boundary(m.end)
         })
         .collect();
-    Marked { text, marks }
+    let math = formulas
+        .into_iter()
+        .filter_map(|(r, tex, display)| {
+            let inside = pieces
+                .iter()
+                .filter(|p| p.src.start >= r.start && p.src.end <= r.end);
+            let start = inside.clone().map(|p| p.out.start).min()?;
+            let end = inside.map(|p| p.out.end).max()?;
+            (!tex.trim().is_empty()).then_some(Formula {
+                out: start..end,
+                tex,
+                display,
+            })
+        })
+        .collect();
+    Marked { text, marks, math }
 }
 
 /// A link construct as its text reads: `[[Note|shown]]` is "shown",
@@ -180,6 +217,11 @@ pub(crate) fn keep_lead(m: &mut Marked, lead: usize) -> bool {
         *r = r.start.saturating_sub(cut)..r.end.saturating_sub(cut);
     }
     m.marks.retain(|r| r.start < r.end);
+    // A formula cut into keeps what is left of its TeX as text.
+    m.math.retain(|f| f.out.start >= cut);
+    for f in &mut m.math {
+        f.out = f.out.start - cut..f.out.end - cut;
+    }
     true
 }
 
@@ -238,12 +280,52 @@ mod tests {
     }
 
     #[test]
+    fn formulas_are_found_as_the_profile_reads_math() {
+        let tex = |m: &Marked| -> Vec<(String, String, bool)> {
+            m.math
+                .iter()
+                .map(|f| (m.text[f.out.clone()].to_owned(), f.tex.clone(), f.display))
+                .collect()
+        };
+        let src = r"area $\pi r^2$ and $$e^x$$ grows";
+        let m = strip(src, &[], obsidian());
+        assert_eq!(m.text, r"area \pi r^2 and e^x grows");
+        assert_eq!(
+            tex(&m),
+            [
+                (r"\pi r^2".to_owned(), r"\pi r^2".to_owned(), false),
+                ("e^x".to_owned(), "e^x".to_owned(), true),
+            ]
+        );
+        // Currency and escaped dollars are text.
+        let m = strip("costs $5 and $6 today", &[], obsidian());
+        assert_eq!(m.text, "costs $5 and $6 today");
+        assert!(m.math.is_empty(), "{m:?}");
+        let m = strip(r"not \$y$ here", &[], obsidian());
+        assert_eq!(m.text, "not $y$ here");
+        assert!(m.math.is_empty(), "{m:?}");
+        // Without math in the profile, dollars are text.
+        let m = strip(src, &[], inline_options(ProfileId::CommonMark));
+        assert_eq!(m.text, src);
+        assert!(m.math.is_empty(), "{m:?}");
+        // A cut into a formula leaves its TeX as text; later ones move.
+        let src = "long text before $a+b$ then $c$ and the word";
+        let at = src.find("word").expect("word");
+        let mut m = strip(src, std::slice::from_ref(&(at..at + 4)), obsidian());
+        let cut = m.text.find("+b").expect("in text");
+        let lead = m.text[cut..m.marks[0].start].chars().count();
+        assert!(keep_lead(&mut m, lead));
+        assert_eq!(tex(&m), [("c".to_owned(), "c".to_owned(), false)]);
+    }
+
+    #[test]
     fn the_start_is_cut_to_keep_the_mark_in_view() {
         let text = "The station logs the water level every six minutes and fits a harmonic model";
         let at = text.find("harmonic").expect("word");
         let mut m = Marked {
             text: text.to_owned(),
             marks: std::iter::once(at..at + 8).collect(),
+            math: Vec::new(),
         };
         assert!(keep_lead(&mut m, 12));
         assert_eq!(m.text, "and fits a harmonic model");

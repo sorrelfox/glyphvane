@@ -419,3 +419,70 @@ fn a_result_line_reads_without_markup_around_its_match(cx: &mut TestAppContext) 
     assert!(!line.contains("**") && !line.contains('`'), "{line}");
     assert!(line.ends_with("record of the gauge."), "{line}");
 }
+
+#[gpui::test]
+fn a_result_line_typesets_its_formulas(cx: &mut TestAppContext) {
+    let mut p = panel(
+        cx,
+        &[(
+            "Circle.md",
+            "A circle of area $\\pi r^2$ and $x$ is drawn.\n\nThe circle costs $5 and $6 to paint.\n",
+        )],
+    );
+    p.search("circle");
+    let line = p
+        .panel
+        .read_with(&p.vcx, |p, _| p.line_parts(0, 0))
+        .expect("a line");
+    let runs = super::segments(&line);
+    let formulas: Vec<&str> = runs
+        .iter()
+        .filter_map(|r| match r {
+            super::Segment::Math { tex, .. } => Some(tex.as_str()),
+            super::Segment::Text { .. } => None,
+        })
+        .collect();
+    assert_eq!(formulas, ["\\pi r^2", "x"], "{runs:?}");
+    match &runs[0] {
+        super::Segment::Text { text, marks } => {
+            assert_eq!(&text[marks[0].clone()], "circle", "{runs:?}");
+        }
+        r @ super::Segment::Math { .. } => panic!("{r:?}"),
+    }
+    // Currency stays text.
+    let line = p
+        .panel
+        .read_with(&p.vcx, |p, _| p.line_parts(0, 1))
+        .expect("a second line");
+    assert!(line.math.is_empty(), "{line:?}");
+    assert!(
+        matches!(super::segments(&line).as_slice(),
+            [super::Segment::Text { text, .. }] if text.contains("costs $5 and $6 to paint")),
+        "{line:?}"
+    );
+    assert!(p.vcx.debug_bounds("search-line-0-0").is_some());
+
+    // A match inside a formula: that formula stays as its TeX, marked.
+    p.search("pi");
+    let line = p
+        .panel
+        .read_with(&p.vcx, |p, _| p.line_parts(0, 0))
+        .expect("a line");
+    let runs = super::segments(&line);
+    let marked: Vec<&str> = runs
+        .iter()
+        .flat_map(|r| match r {
+            super::Segment::Text { text, marks } => {
+                marks.iter().map(|m| &text[m.clone()]).collect::<Vec<_>>()
+            }
+            super::Segment::Math { .. } => Vec::new(),
+        })
+        .collect();
+    assert_eq!(marked, ["pi"], "{runs:?}");
+    assert!(
+        runs.iter()
+            .any(|r| matches!(r, super::Segment::Math { tex, .. } if tex == "x")),
+        "{runs:?}"
+    );
+    assert!(p.vcx.debug_bounds("search-line-0-0").is_some());
+}
