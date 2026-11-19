@@ -225,6 +225,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_quote_ends_only_its_own_tag() {
+        let html = r#"<a href="ok.md">a</a> <b title="open <a href='y.md'>y</a>"#;
+        assert_eq!(
+            values(html),
+            [("ok.md".to_owned(), "ok.md"), ("y.md".to_owned(), "y.md")]
+        );
+        // Searched to the end once per quote character at most: no later
+        // tag has that quote to search for.
+        let html = format!("<a href=\"{}", "<a href=y.md> ".repeat(100_000));
+        assert_eq!(values(&html).len(), 100_000);
+    }
+
+    #[test]
     fn character_references_are_decoded_and_ranges_offset() {
         let html = r#"<a href="Q&amp;A.md">q</a>"#;
         let found = a_hrefs(html, 10);
