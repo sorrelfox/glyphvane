@@ -46,6 +46,14 @@ Conventional Commits, and versions follow Semantic Versioning.
 - A note opened from a Search panel result shows the matches of that
   line highlighted, in the Reading view and in the editor (which scrolls
   to them in Edit mode), until the next click, Esc, edit or search.
+- Block link autocomplete lists the blocks of other notes (`[[Note#^`,
+  `[[Note^`) and of every note (`[[^^`): paragraphs, list items, tables,
+  code and math blocks, quotes and headings. Choosing a block that has no
+  ID adds a new one to that note where Obsidian puts it (at the end of the
+  line, or on its own line after a table, code block or quote): in its
+  tab when it is open, else in its file. A note with unsaved changes in
+  another window, or changed since its blocks were listed, is left
+  alone and the link is not written.
 
 ### Documentation
 

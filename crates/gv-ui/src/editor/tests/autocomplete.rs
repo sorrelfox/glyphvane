@@ -223,8 +223,15 @@ fn blocks_get_an_id_in_the_same_undo_step(cx: &mut TestAppContext) {
         ("Projects/Plan.md", PLAN),
     ]);
     let (view, mut vcx) = editor_in(cx, &v, "Home.md", ProfileId::Obsidian);
+    // Another note's blocks, once read: its headings, paragraphs (with
+    // their ids) and so on, not its front matter.
     type_text(&mut vcx, "[[Plan#^");
-    assert_eq!(labels(&view, &mut vcx), ["^abc123"]);
+    assert_eq!(
+        labels(&view, &mut vcx),
+        ["Intro", "Para one", "Details", "#project/alpha"]
+    );
+    type_text(&mut vcx, "para");
+    assert_eq!(labels(&view, &mut vcx)[0], "Para one");
     vcx.simulate_keystrokes("enter");
     assert_eq!(
         text_of(&view, &mut vcx),
@@ -240,7 +247,11 @@ fn blocks_get_an_id_in_the_same_undo_step(cx: &mut TestAppContext) {
         .and_then(|rest| rest.get(..6))
         .expect("an id was added")
         .to_owned();
-    assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{text}");
+    assert!(
+        id.chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+        "{text}"
+    );
     assert_eq!(
         text,
         format!("Some paragraph here. ^{id}\n\n[[Plan#^abc123]] [[#^{id}]]")

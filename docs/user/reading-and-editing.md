@@ -184,7 +184,10 @@ Suggestions appear as you type:
 |---|---|
 | `[[` or `![[` | Notes and other files (and their aliases) |
 | `[[#` | Headings of the note |
-| `[[^` | Blocks |
+| `[[^` | Blocks of the note |
+| `[[Note#` | Headings of another note |
+| `[[Note#^` or `[[Note^` | Blocks of another note |
+| `[[##`, `[[^^` | Headings, blocks of every note |
 | `](` | File paths |
 | `#` and a letter | Tags |
 | `:` and two letters | Emoji |
@@ -192,6 +195,17 @@ Suggestions appear as you type:
 | ` ``` ` | Code block languages |
 | `[^` | Footnotes |
 | Front matter | Property names and values |
+
+Blocks are paragraphs, list items, tables, code and math blocks, quotes and
+callouts, and headings. Choosing a block that has no block ID gives it a new
+one, as Obsidian does: `^` and six letters and digits at the end of its last
+line, or on a line of its own after a table, code block, math block or quote.
+A heading is linked by its text instead. When the block is in another note,
+the ID is added to that note: in its tab when it is open (saved if it had no
+unsaved changes), else to its file. If that note has unsaved changes in
+another window, or has changed since its blocks were listed, nothing is added,
+the link is taken back out, and the infobar says why. Undo removes the link
+but leaves the ID in the other note.
 
 Suggestions do not appear inside code, math or comments, or when you have more
 than one cursor. The **Emoji** setting chooses whether an emoji is inserted as

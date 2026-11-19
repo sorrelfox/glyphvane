@@ -12,13 +12,13 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use gv_syntax::{Leaf, LeafKind, SyntaxTree, Visitor};
-use gv_text::TextSnapshot;
+use gv_syntax::{Leaf, Visitor};
 use gv_vault::content::{ContentSnapshot, NoteData, PropertyValue};
 use gv_vault::{LinkKind, LinkRef, PathIndex, ProfileId, ProfileParams, VaultPath, resolve};
 
+use super::blocks::{BlockKind, BlockRef, NewId, NoteBlock, NoteBlocks, VaultBlocks, truncate};
 use super::context::{Kind, Scope, Trigger};
 use super::link::{Linker, heading_fragment, wiki_heading};
 use crate::switcher::model::{self, Entry, EntryKind};
@@ -64,12 +64,14 @@ pub(crate) enum Pick {
         file: Option<VaultPath>,
         text: String,
     },
-    /// A block of `file`, with its id; without one, a new id is added at
-    /// `create_at` (the current document only).
+    /// A block of `file`, with its id. Without one, a new id is added:
+    /// in the document being edited at `create`, in another note to the
+    /// block `target` names.
     Block {
         file: Option<VaultPath>,
         id: Option<String>,
-        create_at: Option<usize>,
+        create: Option<NewId>,
+        target: Option<BlockRef>,
     },
     /// A new footnote with this label and its definition.
     NewFootnote(String),
@@ -89,83 +91,12 @@ pub(crate) struct Item {
     pub pick: Pick,
 }
 
-/// A paragraph of the document being edited, for block links.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Paragraph {
-    /// Its first line, without a block id.
-    pub text: String,
-    /// The start of its first line.
-    pub start: usize,
-    /// The end of its last line's content, where a new id goes.
-    pub end: usize,
-    /// Its block id.
-    pub id: Option<String>,
-}
-
 /// A [`Visitor`] that calls a closure on every leaf.
 pub(crate) struct Leaves<F>(pub F);
 
 impl<F: FnMut(&Leaf<'_>)> Visitor for Leaves<F> {
     fn leaf(&mut self, leaf: &Leaf<'_>) {
         (self.0)(leaf);
-    }
-}
-
-/// The paragraphs of `text` (list items and quotes included).
-pub(crate) fn paragraphs(tree: &SyntaxTree, text: &TextSnapshot) -> Vec<Paragraph> {
-    let mut out = Vec::new();
-    tree.walk(&mut Leaves(|leaf: &Leaf<'_>| {
-        if leaf.kind != LeafKind::Paragraph {
-            return;
-        }
-        let lines: Vec<_> = leaf.lines.iter().filter(|l| l.has_content).collect();
-        let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
-            return;
-        };
-        let first_text = text
-            .text_for_range(first.content.clone())
-            .unwrap_or_default();
-        let last_text = text
-            .text_for_range(last.content.clone())
-            .unwrap_or_default();
-        let id = block_id_of(&last_text);
-        let mut label = first_text.trim().to_owned();
-        if lines.len() == 1
-            && let Some(id) = &id
-        {
-            label = label
-                .trim_end()
-                .strip_suffix(&format!("^{id}"))
-                .unwrap_or(&label)
-                .trim_end()
-                .to_owned();
-        }
-        out.push(Paragraph {
-            text: truncate(&label, 80),
-            start: first.content.start,
-            end: last.content.end,
-            id,
-        });
-    }));
-    out
-}
-
-/// The `^id` at the end of a paragraph's last line.
-fn block_id_of(line: &str) -> Option<String> {
-    let line = line.trim_end();
-    let caret = line.rfind('^')?;
-    let id = &line[caret + 1..];
-    let before = line[..caret].chars().next_back();
-    (!id.is_empty()
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        && before.is_none_or(char::is_whitespace))
-    .then(|| id.to_owned())
-}
-
-fn truncate(text: &str, chars: usize) -> String {
-    match text.char_indices().nth(chars) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_owned(),
     }
 }
 
@@ -187,8 +118,12 @@ pub(crate) struct Sources<'a> {
     pub profile: ProfileId,
     /// The document's headings, block ids, tags, footnotes, properties.
     pub current: &'a NoteData,
-    /// The document's paragraphs (for `[[^` only).
-    pub paragraphs: &'a [Paragraph],
+    /// The document's blocks (for `[[^` only).
+    pub blocks: &'a [NoteBlock],
+    /// The blocks of the note `[[Note#^` names, once read.
+    pub note_blocks: Option<&'a NoteBlocks>,
+    /// The blocks of every note (`[[^^`), once read.
+    pub vault_blocks: Option<&'a VaultBlocks>,
     /// The callout or alert types of the profile.
     pub callouts: &'static [&'static str],
 }
@@ -228,7 +163,10 @@ pub(crate) fn items(trigger: &Trigger, query: &str, s: &Sources<'_>) -> Vec<Item
         },
         Kind::WikiBlock(scope) => match scope {
             Scope::Current => current_blocks(query, s),
-            Scope::Vault => vault_sections(query, s, true),
+            Scope::Vault => match s.vault_blocks {
+                Some(vault) => vault_blocks(vault, query, s),
+                None => vault_sections(query, s, true),
+            },
             Scope::Note(name) => match s.resolve(LinkKind::Wikilink, name) {
                 Some(path) if s.is_current(&path) => current_blocks(query, s),
                 Some(path) => note_blocks(&path, query, s),
@@ -377,21 +315,107 @@ fn note_headings(path: &VaultPath, query: &str, s: &Sources<'_>) -> Vec<Item> {
 }
 
 fn current_blocks(query: &str, s: &Sources<'_>) -> Vec<Item> {
-    let labels: Vec<String> = s.paragraphs.iter().map(|p| p.text.clone()).collect();
-    ranked(&labels, query, s.paragraphs, |_, p| {
-        (
-            ItemIcon::Block,
-            p.id.as_ref().map(|id| format!("^{id}")).unwrap_or_default(),
-            Pick::Block {
-                file: None,
-                id: p.id.clone(),
-                create_at: p.id.is_none().then_some(p.end),
-            },
-        )
-    })
+    let labels: Vec<String> = s.blocks.iter().map(|b| b.text.clone()).collect();
+    model::rank_labels(&labels, query)
+        .into_iter()
+        .take(MAX_ITEMS)
+        .map(|i| {
+            let b = &s.blocks[i];
+            let pick = match b.kind {
+                BlockKind::Heading(n) => Pick::Heading {
+                    file: None,
+                    text: s
+                        .current
+                        .headings
+                        .get(n)
+                        .map_or_else(|| b.text.clone(), |h| h.text.to_string()),
+                },
+                _ => Pick::Block {
+                    file: None,
+                    id: b.id.clone(),
+                    create: b.new_id,
+                    target: None,
+                },
+            };
+            block_row(b, &labels[i], query, block_detail(b), pick)
+        })
+        .collect()
+}
+
+/// A row of block `b`.
+fn block_row(b: &NoteBlock, label: &str, query: &str, detail: String, pick: Pick) -> Item {
+    Item {
+        icon: match b.kind {
+            BlockKind::Heading(_) => ItemIcon::Heading,
+            _ => ItemIcon::Block,
+        },
+        label: label.to_owned(),
+        suffix: String::new(),
+        detail,
+        matched: model::highlight(label, query),
+        pick,
+    }
+}
+
+/// The right column of a block's row: its id, or the heading's level.
+fn block_detail(b: &NoteBlock) -> String {
+    match (&b.id, b.kind) {
+        (Some(id), _) => format!("^{id}"),
+        (None, BlockKind::Heading(_)) => "heading".to_owned(),
+        (None, _) => String::new(),
+    }
+}
+
+/// What accepting block `i` of another note `note` writes; `None` for a
+/// block that cannot be linked from here.
+fn other_pick(note: &NoteBlocks, i: usize, s: &Sources<'_>) -> Option<Pick> {
+    let b = note.blocks.get(i)?;
+    let file = Some(note.path.clone());
+    match (b.kind, &b.id) {
+        (BlockKind::Heading(n), _) => Some(Pick::Heading {
+            file,
+            text: note
+                .headings
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| b.text.clone()),
+        }),
+        (_, Some(id)) => Some(Pick::Block {
+            file,
+            id: Some(id.clone()),
+            create: None,
+            target: None,
+        }),
+        // A new id in the document itself goes through `[[^`, against
+        // its buffer.
+        (_, None) if s.is_current(&note.path) => None,
+        (_, None) => b.new_id.map(|_| Pick::Block {
+            file,
+            id: None,
+            create: None,
+            target: Some(BlockRef {
+                ordinal: i,
+                hash: b.hash,
+                taken: note.taken.clone(),
+            }),
+        }),
+    }
 }
 
 fn note_blocks(path: &VaultPath, query: &str, s: &Sources<'_>) -> Vec<Item> {
+    if let Some(note) = s.note_blocks.filter(|n| n.path == *path) {
+        let labels: Vec<String> = note.blocks.iter().map(|b| b.text.clone()).collect();
+        return model::rank_labels(&labels, query)
+            .into_iter()
+            .filter_map(|i| {
+                let b = &note.blocks[i];
+                let pick = other_pick(note, i, s)?;
+                Some(block_row(b, &labels[i], query, block_detail(b), pick))
+            })
+            .take(MAX_ITEMS)
+            .collect();
+    }
+    // Not read yet: the ids the index knows.
     let Some(record) = s.content.and_then(|c| c.note(path)) else {
         return Vec::new();
     };
@@ -414,10 +438,30 @@ fn note_blocks(path: &VaultPath, query: &str, s: &Sources<'_>) -> Vec<Item> {
             Pick::Block {
                 file: Some(path.clone()),
                 id: Some(id.clone()),
-                create_at: None,
+                create: None,
+                target: None,
             },
         )
     })
+}
+
+/// The blocks of every note (`[[^^`).
+fn vault_blocks(vault: &VaultBlocks, query: &str, s: &Sources<'_>) -> Vec<Item> {
+    model::rank_labels(&vault.labels, query)
+        .into_iter()
+        .filter_map(|i| {
+            let (n, b) = vault.at[i];
+            let note = &vault.notes[n];
+            let pick = other_pick(note, b, s)?;
+            let block = &note.blocks[b];
+            let detail = match &block.id {
+                Some(id) => format!("{} ^{id}", note.title),
+                None => note.title.clone(),
+            };
+            Some(block_row(block, &vault.labels[i], query, detail, pick))
+        })
+        .take(MAX_ITEMS)
+        .collect()
 }
 
 /// Headings or block ids across the vault.
@@ -432,7 +476,8 @@ fn vault_sections(query: &str, s: &Sources<'_>, blocks: bool) -> Vec<Item> {
                 Pick::Block {
                     file: Some(path),
                     id: Some(entry.label.trim_start_matches('^').to_owned()),
-                    create_at: None,
+                    create: None,
+                    target: None,
                 }
             } else {
                 Pick::Heading {
@@ -856,20 +901,23 @@ fn draft(t: &Trigger, item: &Item, env: &AcceptEnv<'_>) -> Draft {
             }
             let heading = wiki_heading(text);
             match (&t.kind, file) {
-                (Kind::WikiHeading(Scope::Vault), Some(file)) => Draft::one(
-                    t.inner..t.end,
-                    format!("{}#{heading}]]", env.wiki_path(file)),
-                ),
-                (Kind::WikiHeading(Scope::Vault), None) => {
+                (Kind::WikiHeading(Scope::Vault) | Kind::WikiBlock(Scope::Vault), Some(file)) => {
+                    Draft::one(
+                        t.inner..t.end,
+                        format!("{}#{heading}]]", env.wiki_path(file)),
+                    )
+                }
+                (Kind::WikiBlock(Scope::Note(name)), _) => {
+                    Draft::one(t.inner..t.end, format!("{name}#{heading}]]"))
+                }
+                (Kind::WikiHeading(Scope::Vault) | Kind::WikiBlock(_), None) => {
                     Draft::one(t.inner..t.end, format!("#{heading}]]"))
                 }
                 _ => Draft::one(t.query.start..t.end, format!("{heading}]]")),
             }
         }
         Pick::Block {
-            file,
-            id,
-            create_at,
+            file, id, create, ..
         } => {
             let id = id.clone().unwrap_or_else(|| env.new_block_id.clone());
             let done = if env.markdown() {
@@ -882,14 +930,14 @@ fn draft(t: &Trigger, item: &Item, env: &AcceptEnv<'_>) -> Draft {
                     (Kind::WikiBlock(Scope::Vault), Some(file)) => {
                         Draft::one(t.inner..t.end, format!("{}#^{id}]]", env.wiki_path(file)))
                     }
-                    (Kind::WikiBlock(Scope::Note(_)), _) => {
-                        Draft::one(t.query.start..t.end, format!("{id}]]"))
+                    (Kind::WikiBlock(Scope::Note(name)), _) => {
+                        Draft::one(t.inner..t.end, format!("{name}#^{id}]]"))
                     }
                     _ => Draft::one(t.inner..t.end, format!("#^{id}]]")),
                 }
             };
-            match create_at {
-                Some(at) => done.with((*at..*at, format!(" ^{id}")), false),
+            match create {
+                Some(new) => done.with((new.at..new.at, new.text(&id)), false),
                 None => done,
             }
         }
@@ -910,8 +958,9 @@ fn escape_text(text: &str) -> String {
     text.replace('[', "\\[").replace(']', "\\]")
 }
 
-/// A new 6-hex-digit block id that `taken` does not have.
-pub(crate) fn new_block_id(seed: u64, taken: &[Arc<str>]) -> String {
+/// A new block id of six lowercase letters and digits, as Obsidian makes
+/// them, that `taken` does not have (in any letter case).
+pub(crate) fn new_block_id<S: AsRef<str>>(seed: u64, taken: &[S]) -> String {
     let mut n = seed;
     loop {
         // splitmix64
@@ -920,8 +969,13 @@ pub(crate) fn new_block_id(seed: u64, taken: &[Arc<str>]) -> String {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
-        let id = format!("{:06x}", z & 0xFF_FFFF);
-        if !taken.iter().any(|t| **t == *id) {
+        let mut id = String::with_capacity(6);
+        for _ in 0..6 {
+            let digit = (z % 36) as u32;
+            z /= 36;
+            id.push(char::from_digit(digit, 36).unwrap_or('0'));
+        }
+        if !taken.iter().any(|t| t.as_ref().eq_ignore_ascii_case(&id)) {
             return id;
         }
     }
@@ -973,7 +1027,13 @@ mod tests {
             &item(Pick::Block {
                 file: None,
                 id: None,
-                create_at: Some(15),
+                create: Some(NewId {
+                    at: 15,
+                    own_line: false,
+                    crlf: false,
+                    gap_after: false,
+                }),
+                target: None,
             }),
             &env(),
         );
@@ -1058,13 +1118,55 @@ mod tests {
     }
 
     #[test]
-    fn block_ids_are_six_hex_digits_and_new() {
-        let id = new_block_id(1, &[]);
+    fn block_ids_are_six_lowercase_letters_or_digits_and_new() {
+        let id = new_block_id::<&str>(1, &[]);
         assert_eq!(id.len(), 6);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-        let taken: Vec<Arc<str>> = vec![Arc::from(id.as_str())];
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+            "{id}"
+        );
+        // Taken in any letter case.
+        let taken = [id.to_ascii_uppercase()];
         assert_ne!(new_block_id(1, &taken), id);
-        assert_eq!(block_id_of("text ^ab-1"), Some("ab-1".into()));
-        assert_eq!(block_id_of("x^ab"), None);
+        assert_eq!(
+            super::super::blocks::block_id_of("text ^ab-1"),
+            Some("ab-1".into())
+        );
+        assert_eq!(super::super::blocks::block_id_of("x^ab"), None);
+    }
+
+    #[test]
+    fn a_block_of_another_note_links_with_the_name_typed() {
+        // `[[Plan^pa]]` at 0..11 (query 7..9).
+        let t = trigger(Kind::WikiBlock(Scope::Note("Plan".into())), 0, 2, 7..9, 11);
+        let mut e = env();
+        e.new_block_id = "k3x9q0".into();
+        let done = complete(
+            &t,
+            &item(Pick::Block {
+                file: Some(VaultPath::new("Plan.md").expect("path")),
+                id: None,
+                create: None,
+                target: Some(BlockRef {
+                    ordinal: 0,
+                    hash: 0,
+                    taken: std::sync::Arc::from(Vec::new()),
+                }),
+            }),
+            &e,
+        );
+        // Only the link: the id goes to the other note.
+        assert_eq!(done.edits, vec![(2..11, "Plan#^k3x9q0]]".to_owned())]);
+        // A heading listed among the blocks links by its text.
+        let done = complete(
+            &t,
+            &item(Pick::Heading {
+                file: Some(VaultPath::new("Plan.md").expect("path")),
+                text: "Details".into(),
+            }),
+            &env(),
+        );
+        assert_eq!(done.edits, vec![(2..11, "Plan#Details]]".to_owned())]);
     }
 }

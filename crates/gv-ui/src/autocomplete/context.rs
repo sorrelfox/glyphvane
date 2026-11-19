@@ -51,7 +51,7 @@ pub(crate) enum Scope {
     Current,
     /// Every note of the vault (`[[##`, `[[^^`).
     Vault,
-    /// The note written before the `#` (`[[Note#`, `[[Note#^`).
+    /// The note written before the `#` (`[[Note#`, `[[Note#^`, `[[Note^`).
     Note(String),
 }
 
@@ -62,7 +62,7 @@ pub(crate) enum Kind {
     WikiFile,
     /// `[[#`, `[[##`, `[[Note#`: headings.
     WikiHeading(Scope),
-    /// `[[^`, `[[^^`, `[[#^`, `[[Note#^`: blocks.
+    /// `[[^`, `[[^^`, `[[#^`, `[[Note#^`, `[[Note^`: blocks.
     WikiBlock(Scope),
     /// `](` and `![…](`: a path.
     LinkPath,
@@ -212,6 +212,13 @@ fn wiki(before: &str, after: &str, features: Features) -> Option<Trigger> {
         } else {
             (Kind::WikiHeading(Scope::Note(note)), inner_start + hash + 1)
         }
+    } else if let Some(caret) = inner.find('^') {
+        // `[[Note^`: Obsidian's short form of `[[Note#^`.
+        let note = inner[..caret].to_owned();
+        if inner[caret + 1..].contains('^') {
+            return None;
+        }
+        (Kind::WikiBlock(Scope::Note(note)), inner_start + caret + 1)
     } else {
         (Kind::WikiFile, inner_start)
     };
@@ -507,6 +514,9 @@ mod tests {
         let t = prose("[[Note#^ab", "").expect("trigger");
         assert_eq!(t.kind, Kind::WikiBlock(Scope::Note("Note".into())));
         assert_eq!(query("[[Note#^ab", &t), "ab");
+        let t = prose("[[Note^ab", "").expect("trigger");
+        assert_eq!(t.kind, Kind::WikiBlock(Scope::Note("Note".into())));
+        assert_eq!(query("[[Note^ab", &t), "ab");
         // Display text, closed links.
         assert_eq!(kind("[[Note|Al"), None);
         assert_eq!(kind("[[Note]] and"), None);

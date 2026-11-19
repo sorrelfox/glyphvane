@@ -2,29 +2,34 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! The Source view's side of autocomplete ([`crate::autocomplete`]): when
-//! the popover opens and closes, the vault it lists from, its keys, and
-//! the accepted edit.
+//! the popover opens and closes, the vault it lists from, its keys, the
+//! accepted edit, and the new block ids it asks the window to add to
+//! other notes.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Stateful, Window, anchored, deferred,
+    AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Stateful, Task, Window, anchored, deferred,
 };
 use gv_editor::EditKind;
 use gv_syntax::LeafKind;
 use gv_text::Revision;
 use gv_vault::content::{ContentSnapshot, NoteData};
-use gv_vault::{PathIndex, ProfileParams, VaultPath};
+use gv_vault::{LinkKind, LinkRef, PathIndex, ProfileParams, VaultPath, resolve};
 
+use super::DocEvent;
 use super::markdown::current_syntax;
 use super::{Cancel, EditorView, MoveDown, MoveUp};
 use crate::appearance::Appearance;
 use crate::autocomplete::{
-    self, AcceptEnv, Block, Item, Kind, LinkStyle, Linker, Scope, Sources, Trigger,
+    self, AcceptEnv, Block, BlockIdRequest, BlockJob, Item, Kind, LinkStyle, Linker, Pick, Scope,
+    Sources, Trigger,
 };
+use crate::files::notice::Notice;
 use crate::keymap::actions::editor as commands;
 use crate::settings::AppSettings;
 
@@ -33,6 +38,26 @@ use crate::settings::AppSettings;
 pub(super) struct CurrentNote {
     at: Option<Revision>,
     data: Arc<NoteData>,
+}
+
+/// Reading other notes' blocks, and the new block ids asked of the
+/// window ([`crate::autocomplete`]'s blocks).
+#[derive(Default)]
+pub(super) struct BlockIds {
+    /// The read running.
+    task: Option<Task<()>>,
+    /// A new id for another note, until the window takes it.
+    request: Option<BlockIdRequest>,
+    /// The last id asked for, and what takes its link back out.
+    sent: Option<Sent>,
+}
+
+struct Sent {
+    id: String,
+    /// The text right after the link was written.
+    after: String,
+    /// The edits that take the link back out (in `after`'s offsets).
+    revert: Vec<(Range<usize>, String)>,
 }
 
 /// The vault as autocomplete sees it from this document.
@@ -176,7 +201,7 @@ impl EditorView {
 
     /// After every change: typing opens the popover where a trigger is;
     /// other changes keep an open one in step, or close it.
-    pub(super) fn update_autocomplete(&mut self) {
+    pub(super) fn update_autocomplete(&mut self, cx: &mut Context<'_, Self>) {
         let typed = std::mem::take(&mut self.autocomplete.typed);
         if self.plain.is_some() {
             return;
@@ -200,14 +225,38 @@ impl EditorView {
             self.autocomplete.close();
             return;
         }
-        let items = self.completion_items(&trigger);
+        let (items, job) = self.completion_items(&trigger);
         self.autocomplete.show(trigger, items);
+        if let Some(job) = job {
+            self.read_blocks(job, cx);
+        }
     }
 
-    /// The items of `trigger`.
-    fn completion_items(&mut self, trigger: &Trigger) -> Vec<Item> {
+    /// Reads other notes' blocks off the UI thread, then lists them when
+    /// a block link is still being typed.
+    fn read_blocks(&mut self, job: BlockJob, cx: &mut Context<'_, Self>) {
+        let task = cx.background_spawn(async move { job.run() });
+        self.block_ids.task = Some(cx.spawn(async move |this, cx| {
+            let done = task.await;
+            let _ = this.update(cx, |view, cx| {
+                view.autocomplete.blocks.finish(done);
+                let typing_blocks = view
+                    .find_trigger()
+                    .is_some_and(|t| matches!(t.kind, Kind::WikiBlock(_)));
+                if typing_blocks {
+                    view.autocomplete.typed = true;
+                    view.update_autocomplete(cx);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// The items of `trigger`, and the read of other notes' blocks it
+    /// needs.
+    fn completion_items(&mut self, trigger: &Trigger) -> (Vec<Item>, Option<BlockJob>) {
         let Some(doc) = self.doc.as_ref() else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let text = doc.editor.text();
         let query = text
@@ -217,13 +266,13 @@ impl EditorView {
             trigger.kind,
             Kind::WikiBlock(Scope::Current | Scope::Note(_))
         );
-        let paragraphs = if wants_paragraphs {
+        let blocks = if wants_paragraphs {
             let caret = trigger.query.end;
             let mut found = current_syntax(doc)
-                .map(|s| autocomplete::paragraphs(s.tree, s.text))
+                .map(|s| autocomplete::blocks(s.tree, s.text))
                 .unwrap_or_default();
-            // Not the paragraph the link is being typed in.
-            found.retain(|p| !(p.start..=p.end).contains(&caret));
+            // Not the block the link is being typed in.
+            found.retain(|b| !(b.start..=b.end).contains(&caret));
             found
         } else {
             Vec::new()
@@ -253,6 +302,36 @@ impl EditorView {
             }
             _ => Arc::default(),
         };
+        let profile = self.links.profile();
+        let mut job = None;
+        let note_blocks = match (&trigger.kind, vault.root.as_deref(), vault.content.as_ref()) {
+            (Kind::WikiBlock(Scope::Note(name)), Some(root), Some(content)) => {
+                let target = match (vault.index.as_ref(), vault.source.as_ref()) {
+                    (Some(index), Some(source)) => {
+                        let link = LinkRef::new(LinkKind::Wikilink, name, source.clone(), profile);
+                        resolve(index, &link, &vault.params)
+                            .target_path
+                            .filter(|p| p != source)
+                    }
+                    _ => None,
+                };
+                target.and_then(|path| {
+                    let (blocks, read) =
+                        self.autocomplete.blocks.note(root, content, &path, profile);
+                    job = read;
+                    blocks
+                })
+            }
+            _ => None,
+        };
+        let vault_blocks = match (&trigger.kind, vault.root.as_deref(), vault.content.as_ref()) {
+            (Kind::WikiBlock(Scope::Vault), Some(root), Some(content)) => {
+                let (blocks, read) = self.autocomplete.blocks.vault(root, content, profile);
+                job = read;
+                blocks
+            }
+            _ => None,
+        };
         let sources = Sources {
             content: vault.content.as_ref(),
             root: vault.root.as_deref(),
@@ -263,10 +342,12 @@ impl EditorView {
             params: &vault.params,
             profile: self.links.profile(),
             current: &current,
-            paragraphs: &paragraphs,
+            blocks: &blocks,
+            note_blocks: note_blocks.as_deref(),
+            vault_blocks: vault_blocks.as_deref(),
             callouts: self.autocomplete.callouts,
         };
-        autocomplete::items(trigger, &query, &sources)
+        (autocomplete::items(trigger, &query, &sources), job)
     }
 
     /// Accepts row `index` of the open popover: one transaction, one undo
@@ -289,8 +370,25 @@ impl EditorView {
             .try_global::<AppSettings>()
             .map(|s| s.settings().links.clone());
         let style = LinkStyle::for_vault(vault.root.as_deref(), settings.as_ref());
-        let current = self.current_note();
-        let taken: Vec<_> = current.block_ids.iter().map(|b| b.id.clone()).collect();
+        // A block of another note: its id is new there.
+        let target = match &item.pick {
+            Pick::Block {
+                file: Some(file),
+                id: None,
+                target: Some(target),
+                ..
+            } => Some((file.clone(), target.clone())),
+            _ => None,
+        };
+        let taken: Vec<String> = match &target {
+            Some((_, target)) => target.taken.to_vec(),
+            None => self
+                .current_note()
+                .block_ids
+                .iter()
+                .map(|b| b.id.to_string())
+                .collect(),
+        };
         let Some(doc) = self.doc.as_ref() else {
             return;
         };
@@ -319,12 +417,111 @@ impl EditorView {
             new_block_id: autocomplete::new_block_id(seed, &taken),
         };
         let completion = autocomplete::complete(&open.trigger, item, &env);
+        let request = match (target, vault.root) {
+            (Some((note, block)), Some(root)) => Some(BlockIdRequest {
+                file: note.to_fs_path(&root),
+                root,
+                note,
+                block,
+                id: env.new_block_id.clone(),
+                profile,
+            }),
+            _ => None,
+        };
+        let revert = request
+            .as_ref()
+            .map(|_| revert_edits(text, &completion.edits));
+        let mut done = false;
         self.with_editor(window, cx, |editor, _| {
             match editor.edit(completion.edits, EditKind::Command) {
-                Ok(_) => editor.set_cursor(completion.caret),
+                Ok(_) => {
+                    editor.set_cursor(completion.caret);
+                    done = true;
+                }
                 Err(err) => tracing::warn!("cannot insert the completion: {err:?}"),
             }
         });
+        if let (true, Some(request), Some(revert)) = (done, request, revert) {
+            self.block_ids.sent = Some(Sent {
+                id: request.id.clone(),
+                after: self.whole_text().unwrap_or_default(),
+                revert,
+            });
+            self.block_ids.request = Some(request);
+            cx.emit(DocEvent::BlockIdRequested);
+        }
+    }
+
+    /// The document's text.
+    fn whole_text(&self) -> Option<String> {
+        let text = self.doc.as_ref()?.editor.text();
+        text.text_for_range(0..text.len()).ok()
+    }
+
+    /// The new block id the window should add to another note
+    /// ([`DocEvent::BlockIdRequested`]).
+    pub(crate) fn take_block_id_request(&mut self) -> Option<BlockIdRequest> {
+        self.block_ids.request.take()
+    }
+
+    /// Adds the id of `request` to this document, where Obsidian puts it,
+    /// as one undo step; saved when the document had no unsaved changes.
+    pub(crate) fn add_block_id(
+        &mut self,
+        request: &BlockIdRequest,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), String> {
+        if self.read_only {
+            return Err("it is read-only".to_owned());
+        }
+        let text = self.whole_text().ok_or("it is not loaded")?;
+        let (at, insert) =
+            autocomplete::insertion(&text, request.profile, &request.block, &request.id)?;
+        let Some(doc) = self.doc.as_mut() else {
+            return Err("it is not loaded".to_owned());
+        };
+        let was_modified = doc.editor.is_modified();
+        match doc.editor.edit([(at..at, insert)], EditKind::Command) {
+            Ok(Some(_)) => {}
+            _ => return Err("it could not be edited".to_owned()),
+        }
+        self.input_changed(cx);
+        if !was_modified {
+            self.save(cx);
+        }
+        Ok(())
+    }
+
+    /// The window added the id `id` to its note, or could not: then the
+    /// link goes back out (when the text is still as it left it) and the
+    /// infobar says why.
+    pub(crate) fn block_id_done(
+        &mut self,
+        id: &str,
+        note: &str,
+        result: Result<(), String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let sent = self.block_ids.sent.take_if(|s| s.id == id);
+        let Err(reason) = result else {
+            return;
+        };
+        if let Some(sent) = sent
+            && self.whole_text().as_deref() == Some(sent.after.as_str())
+            && let Some(doc) = self.doc.as_mut()
+        {
+            if let Err(err) = doc.editor.edit(sent.revert, EditKind::Command) {
+                tracing::warn!("cannot take the block link back: {err:?}");
+            }
+            self.input_changed(cx);
+        }
+        self.show_doc_notice(
+            Some(Notice::file_op_failed(
+                "Block ID not added.",
+                &format!("“{note}”: {reason}"),
+            )),
+            cx,
+        );
     }
 
     /// While the popover is open: its keys, taken before the editor's
@@ -425,6 +622,24 @@ impl EditorView {
             open.selected,
         ))
     }
+}
+
+/// The edits that undo `edits` (sorted, in `text`'s offsets), in the
+/// offsets of the text after them.
+fn revert_edits(
+    text: &gv_text::TextSnapshot,
+    edits: &[(Range<usize>, String)],
+) -> Vec<(Range<usize>, String)> {
+    let mut shift = 0isize;
+    edits
+        .iter()
+        .map(|(range, new)| {
+            let start = range.start.saturating_add_signed(shift);
+            shift += new.len() as isize - range.len() as isize;
+            let old = text.text_for_range(range.clone()).unwrap_or_default();
+            (start..start + new.len(), old)
+        })
+        .collect()
 }
 
 /// The end of `line`'s text, before its line break.

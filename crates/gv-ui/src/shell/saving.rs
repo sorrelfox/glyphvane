@@ -465,6 +465,7 @@ impl Workspace {
                 })
                 .detach();
             }
+            DocEvent::BlockIdRequested => self.add_block_id(editor, cx),
             DocEvent::ModifiedChanged | DocEvent::NoticeChanged | DocEvent::Saved => {}
         }
         cx.notify();

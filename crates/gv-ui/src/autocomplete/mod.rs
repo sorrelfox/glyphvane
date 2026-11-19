@@ -13,8 +13,8 @@
 //! |---|---|---|
 //! | `[[`, `![[` | Notes and other files by fuzzy name and path; aliases as "Alias → Note" | wikilinks, embeds |
 //! | `[[#`, `[[##` | Headings of this note, of every note | wikilinks |
-//! | `[[^`, `[[#^`, `[[^^` | Blocks of this note (paragraphs, a new id when one has none), block ids of every note | wikilinks |
-//! | `[[Note#`, `[[Note#^` | Headings or block ids of that note | wikilinks |
+//! | `[[^`, `[[#^`, `[[^^` | Blocks of this note, of every note ([`blocks`]) | wikilinks |
+//! | `[[Note#`, `[[Note#^`, `[[Note^` | Headings or blocks of that note | wikilinks |
 //! | `](`, `![…](` | Paths of the vault's files, then after `#` the headings of the file | all |
 //! | `#` and a letter | Tags of the vault and of this note | tags |
 //! | `:` and two letters | gemoji shortcodes | emoji |
@@ -44,7 +44,12 @@
 //! (`]]`, `]`, `:`) in one transaction, one undo step, with links written
 //! in the vault's link style ([`link`]): with Markdown links, `[[` becomes
 //! `[Title](path.md)`. An alias writes `[[Target|Alias]]`. A block without
-//! an id gets a new 6-hex-digit id at its end in the same step. A new
+//! an id gets a new id (six lowercase letters and digits) where Obsidian
+//! puts one ([`blocks`]): in this note in the same step; in another note
+//! through the window, which edits that note's buffer when it is open,
+//! else its file (saved through the refactor journal), and takes the
+//! link back out when it cannot. A heading listed among the blocks links
+//! by its text. A new
 //! footnote gets its definition at the end of the document, with the caret
 //! there. A Markdown path keeps the caret before `)`, so `#` goes on to
 //! the file's headings; an empty `[]` gets the note's title.
@@ -63,6 +68,9 @@
 //! callouts, languages, footnotes, properties) with their icons and right
 //! column, and the footer of triggers other than `[[`.
 
+mod blocks;
+#[cfg(test)]
+mod blocks_tests;
 mod context;
 mod items;
 mod link;
@@ -74,10 +82,9 @@ use std::sync::Arc;
 use gv_vault::PathIndex;
 use gv_vault::content::ContentSnapshot;
 
+pub(crate) use blocks::{BlockIdRequest, Job as BlockJob, blocks, insertion, write_block_id};
 pub(crate) use context::{Block, Features, Kind, Scope, Trigger, detect};
-pub(crate) use items::{
-    AcceptEnv, Item, Leaves, Sources, complete, items, new_block_id, paragraphs,
-};
+pub(crate) use items::{AcceptEnv, Item, Leaves, Pick, Sources, complete, items, new_block_id};
 pub(crate) use link::{
     LinkStyle, Linker, encode as encode_segment, heading_fragment, is_note, json_string,
     wiki_heading,
@@ -120,6 +127,8 @@ pub(crate) struct State {
     sections: Option<(PathBuf, u64, bool, Arc<Vec<Entry>>)>,
     /// Wheel rows not scrolled yet (a fraction of a row).
     wheel: f32,
+    /// The blocks of other notes read so far.
+    pub blocks: blocks::Cache,
 }
 
 impl State {

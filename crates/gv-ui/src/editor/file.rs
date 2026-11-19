@@ -99,6 +99,10 @@ pub enum DocEvent {
     /// Mod+click or a middle click on a link: the window follows the link
     /// [`EditorView::take_clicked_link`] gives.
     FollowLink(crate::reader::Disposition),
+    /// An accepted block link names a block of another note that has no
+    /// id: the window adds the id
+    /// [`EditorView::take_block_id_request`] gives to that note.
+    BlockIdRequested,
 }
 
 /// A loaded document, before it gets an editor.

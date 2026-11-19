@@ -475,6 +475,8 @@ pub struct EditorView {
     autocomplete: crate::autocomplete::State,
     /// The document's index record, for autocomplete.
     note_record: autocomplete::CurrentNote,
+    /// Reading other notes' blocks, and new block ids for them.
+    block_ids: autocomplete::BlockIds,
     /// Where the autocomplete popover was last placed.
     autocomplete_placed: Option<Bounds<Pixels>>,
     /// Rename heading or block ID: the last rename, for its Undo.
@@ -554,6 +556,7 @@ impl EditorView {
             find: find::FindState::default(),
             autocomplete: autocomplete_state(gv_profile::ProfileId::CommonMark),
             note_record: autocomplete::CurrentNote::default(),
+            block_ids: autocomplete::BlockIds::default(),
             autocomplete_placed: None,
             rename: rename::RenameState::default(),
             save_as_after_load: None,
@@ -1224,7 +1227,7 @@ impl EditorView {
         crate::latency::handled();
         self.spell_after_change();
         self.pump_syntax(cx);
-        self.update_autocomplete();
+        self.update_autocomplete(cx);
         self.after_edit(cx);
         self.autoscroll = true;
         cx.notify();

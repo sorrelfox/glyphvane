@@ -9,6 +9,9 @@ mod base_panel_tests;
 mod bases_tabs;
 #[cfg(test)]
 mod bases_tabs_tests;
+mod block_ids;
+#[cfg(test)]
+mod block_ids_tests;
 mod bookmarks;
 mod bookmarks_panel;
 #[cfg(test)]
