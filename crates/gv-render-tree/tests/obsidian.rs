@@ -147,6 +147,20 @@ fn callouts_without_a_title_show_their_type() {
 }
 
 #[test]
+fn callout_metadata_after_a_bar_is_not_part_of_the_type() {
+    let d = ob("> [!tip|wide]\n> x\n\n> [!warning|no-icon]- Mine\n> y\n");
+    assert_eq!(
+        outline(&d.render),
+        [
+            "Tip callout(tip)",
+            "x callout(tip)",
+            "Mine callout(warning-)",
+            "y callout(warning-)>fold"
+        ]
+    );
+}
+
+#[test]
 fn nested_callouts() {
     let d = ob("> [!note] Outer\n> > [!warning]- Inner\n> > text\n");
     assert_eq!(

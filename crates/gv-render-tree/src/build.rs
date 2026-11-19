@@ -744,11 +744,12 @@ impl<S: TextSource + ?Sized> Visitor for NodeBuilder<'_, S> {
                 if let Some(t) = c.callout_type() {
                     self.text.copy_range(t, &mut self.scratch);
                 }
+                // `[!type|meta]`: the metadata after `|` is for CSS
+                // snippets; the type is what comes before it.
+                let written = String::from_utf8_lossy(&self.scratch);
+                let name = written.split('|').next().unwrap_or_default();
                 FrameKind::Callout {
-                    name: String::from_utf8_lossy(&self.scratch)
-                        .trim()
-                        .to_lowercase()
-                        .into(),
+                    name: name.trim().to_lowercase().into(),
                     fold,
                 }
             }

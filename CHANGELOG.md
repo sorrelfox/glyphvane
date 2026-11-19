@@ -40,6 +40,8 @@ Conventional Commits, and versions follow Semantic Versioning.
   vault's default location for new notes (Obsidian's `newFileLocation`:
   the vault folder, the current note's folder, or a chosen folder).
 - The Files panel's sort order is kept with the session.
+- A callout written `[!type|meta]` shows as its type; the metadata is no
+  longer part of its name or title.
 
 ## [1.2.0] - 2026-11-19
 
