@@ -55,7 +55,7 @@ fn snapshot_data() -> IndexData {
                 mtime: Some(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i as u64 * 60),
                 ),
-                created: None,
+                created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
                 identity: None,
             },
         )
@@ -94,6 +94,7 @@ fn files_and_properties_from_the_index() {
     assert_eq!(alpha.embeds.len(), 1);
     assert_eq!(alpha.embeds[0].target.as_deref(), Some("diagram.png"));
     assert!(alpha.mtime_ms.is_some());
+    assert_eq!(alpha.ctime_ms, Some(1_600_000_000_000));
     assert_eq!(data.backlinks("Projects/Alpha.md").len(), 2);
     assert_eq!(
         data.resolve_link("Beta", "Dashboard.md").as_deref(),

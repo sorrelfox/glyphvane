@@ -31,28 +31,31 @@ impl IndexData {
     #[must_use]
     pub fn new(snapshot: ContentSnapshot, utc_offset_minutes: i32) -> Self {
         let mut files: HashMap<Arc<str>, Arc<FileInfo>> = HashMap::new();
-        let mut paths: Vec<(VaultPath, u64, Option<i64>)> = Vec::new();
+        let mut paths: Vec<(VaultPath, u64, Option<i64>, Option<i64>)> = Vec::new();
         if let Some(index) = snapshot.path_index() {
             for entry in index.iter() {
                 if entry.kind == EntryKind::File {
-                    let mtime = entry.meta.mtime.and_then(|t| {
+                    let ms = |t: std::time::SystemTime| {
                         t.duration_since(UNIX_EPOCH)
                             .ok()
                             .and_then(|d| i64::try_from(d.as_millis()).ok())
-                    });
-                    paths.push((entry.path.clone(), entry.meta.size, mtime));
+                    };
+                    let mtime = entry.meta.mtime.and_then(ms);
+                    let ctime = entry.meta.created.and_then(ms);
+                    paths.push((entry.path.clone(), entry.meta.size, mtime, ctime));
                 }
             }
         }
         // Notes the path index does not list yet (unsaved new buffers).
         let listed: std::collections::HashSet<VaultPath> =
-            paths.iter().map(|(p, _, _)| p.clone()).collect();
+            paths.iter().map(|(p, _, _, _)| p.clone()).collect();
         for note in snapshot.notes() {
             if !listed.contains(&note.path) {
                 paths.push((
                     note.path.clone(),
                     note.stamp.size,
                     note.stamp.mtime_ns.map(|ns| ns / 1_000_000),
+                    None,
                 ));
             }
         }
@@ -60,10 +63,11 @@ impl IndexData {
             snapshot,
             files: HashMap::new(),
         };
-        for (path, size, mtime) in paths {
+        for (path, size, mtime, ctime) in paths {
             let mut info = FileInfo::new(path.as_str());
             info.size = Some(size);
             info.mtime_ms = mtime;
+            info.ctime_ms = ctime;
             if let Some(note) = data.snapshot.note(&path) {
                 data.fill_note(&mut info, note, utc_offset_minutes);
             }
