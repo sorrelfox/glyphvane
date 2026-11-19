@@ -513,6 +513,30 @@ impl PdfViewer {
         cx.notify();
     }
 
+    /// Shows `place`: its zoom, its page at the top and as far down it,
+    /// once the view is laid out (a page past the end is the last page).
+    pub fn go_to_place(&mut self, place: PdfPlace, cx: &mut Context<'_, Self>) {
+        let last = self.sizes.len().saturating_sub(1);
+        let (page, into) = if place.page > last {
+            (last, None)
+        } else {
+            (place.page, place.into)
+        };
+        self.zoom = place.zoom;
+        let (aw, _) = self.view_size();
+        if aw <= 0.0 {
+            self.pending = Some((page, into));
+        } else {
+            let layout = self.layout();
+            if let Some(top) = Self::top_of(&layout, page, into) {
+                self.set_top(top);
+            }
+            self.current = page;
+            self.pending = None;
+        }
+        cx.notify();
+    }
+
     fn step_page(&mut self, forward: bool, cx: &mut Context<'_, Self>) {
         let at = self.current_page();
         let to = if forward {

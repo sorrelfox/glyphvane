@@ -6,12 +6,13 @@
 //! reopened.
 //!
 //! An entry is a place: a file, the view mode and where the Reading view
-//! was scrolled. Following a link (also inside one document) and jumping
+//! was scrolled (in a PDF, the page, how far down it and the zoom). Following a link (also inside one document) and jumping
 //! from the outline push the place being left. Scrolling does not.
 
 use std::path::PathBuf;
 
 use super::ViewMode;
+use crate::file_viewer::PdfPlace;
 use crate::reader::ScrollTarget;
 
 /// Most entries a tab's back stack keeps.
@@ -28,6 +29,8 @@ pub struct HistoryEntry {
     /// Where the Reading view was scrolled: the start of the block at the
     /// top, never pixels.
     pub scroll: Option<ScrollTarget>,
+    /// Where the PDF viewer was, in a PDF.
+    pub pdf: Option<PdfPlace>,
 }
 
 /// A tab's back and forward stacks, most recent last.
@@ -125,6 +128,7 @@ mod tests {
             path: PathBuf::from(name),
             mode: ViewMode::Preview,
             scroll: Some(ScrollTarget::Offset(offset)),
+            pdf: None,
         }
     }
 

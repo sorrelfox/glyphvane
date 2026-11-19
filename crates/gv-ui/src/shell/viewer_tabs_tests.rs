@@ -421,3 +421,132 @@ fn a_pdf_link_opens_the_pdf_viewer_at_its_page(cx: &mut TestAppContext) {
         "the same tab"
     );
 }
+
+/// Back and Forward bring a PDF back where it was left (page, offset,
+/// zoom), not at its start nor at the page a link named; a jump within
+/// the PDF goes back too.
+#[gpui::test]
+fn back_returns_to_the_pdf_where_it_was_left(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+
+    use crate::file_viewer::PdfZoom;
+    use crate::file_viewer::pdf_tests::FakePdf;
+
+    let dir = temp(&[
+        ("note.md", b"# Note\n\n[p](paper.pdf)\n"),
+        ("other.md", b"# Other\n"),
+        ("paper.pdf", b"%PDF-1.7\n%%EOF\n"),
+        ("second.pdf", b"%PDF-1.7\n%%EOF\n"),
+    ]);
+    let note = dir.path().join("note.md");
+    let (window, workspace) = open(cx, &note);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 8]));
+    vcx.update(|_, cx| {
+        crate::export::set_pdf_engine(cx, Some(engine as Arc<dyn crate::export::PdfEngine>));
+    });
+    draw(&mut vcx);
+    let follow = |destination: &str, vcx: &mut VisualTestContext| {
+        let link = LinkAt {
+            file: note.clone(),
+            kind: LinkKind::Inline,
+            image: false,
+            destination: destination.into(),
+            range: None,
+            construct: None,
+            profile: gv_vault::ProfileId::CommonMark,
+        };
+        vcx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.follow_link_at(ws.active, link, Disposition::InPlace, false, window, cx);
+            });
+        });
+        draw(vcx);
+    };
+    let back = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| workspace.update(cx, |ws, cx| ws.go_back(window, cx)));
+        draw(vcx);
+    };
+    let forward = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| workspace.update(cx, |ws, cx| ws.go_forward(window, cx)));
+        draw(vcx);
+    };
+    // The PDF shown now, once read: its page and zoom.
+    let shown = |vcx: &mut VisualTestContext| {
+        let viewer = workspace.read_with(vcx, |ws, _| ws.active_tab().viewer().cloned())?;
+        viewer.read_with(vcx, |v, cx| {
+            let pdf = v.pdf()?.read(cx);
+            Some((
+                v.path().file_name()?.to_string_lossy().into_owned(),
+                pdf.current_page(),
+                pdf.zoom(),
+            ))
+        })
+    };
+
+    follow("paper.pdf", &mut vcx);
+    until(&mut vcx, "the PDF", |vcx| shown(vcx).is_some());
+    let pdf = workspace
+        .read_with(&vcx, |ws, cx| {
+            ws.active_tab()
+                .viewer()
+                .and_then(|v| v.read(cx).pdf().cloned())
+        })
+        .expect("the PDF viewer");
+    pdf.update(&mut vcx, |p, cx| {
+        p.set_zoom(PdfZoom::Scale(1.5), cx);
+        p.go_to(4, cx);
+    });
+    draw(&mut vcx);
+    let left = pdf.read_with(&vcx, |p, _| p.place());
+    assert_eq!(left.page, 4);
+
+    let at_page_5 = Some(("paper.pdf".to_owned(), 4, PdfZoom::Scale(1.5)));
+    follow("other.md", &mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "other.md");
+    back(&mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "paper.pdf");
+    until(&mut vcx, "page 5 again", |vcx| shown(vcx) == at_page_5);
+    let place = workspace
+        .read_with(&vcx, |ws, cx| {
+            ws.active_tab()
+                .viewer()
+                .and_then(|v| v.read(cx).pdf_place(cx))
+        })
+        .expect("a place");
+    assert_eq!(place.page, left.page);
+    assert!(
+        (place.into.unwrap_or(0.0) - left.into.unwrap_or(0.0)).abs() < 0.5,
+        "{place:?} vs {left:?}"
+    );
+
+    // Forward to the note and Back again: still page 5.
+    forward(&mut vcx);
+    assert_eq!(file_of(&workspace, &mut vcx), "other.md");
+    back(&mut vcx);
+    until(&mut vcx, "page 5 once more", |vcx| shown(vcx) == at_page_5);
+
+    // Another PDF in the same tab, then Back: the first one's place.
+    follow("second.pdf", &mut vcx);
+    until(&mut vcx, "the second PDF", |vcx| {
+        shown(vcx).is_some_and(|(name, page, _)| name == "second.pdf" && page == 0)
+    });
+    back(&mut vcx);
+    until(&mut vcx, "the first PDF at page 5", |vcx| {
+        shown(vcx) == at_page_5
+    });
+
+    // A jump within the PDF (a link to a page): Back returns where it was.
+    follow("paper.pdf#page=2", &mut vcx);
+    until(&mut vcx, "page 2", |vcx| {
+        shown(vcx).is_some_and(|(_, page, _)| page == 1)
+    });
+    back(&mut vcx);
+    until(&mut vcx, "page 5 after the jump", |vcx| {
+        shown(vcx) == at_page_5
+    });
+    forward(&mut vcx);
+    until(&mut vcx, "page 2 again", |vcx| {
+        shown(vcx).is_some_and(|(_, page, _)| page == 1)
+    });
+}

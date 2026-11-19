@@ -621,6 +621,20 @@ impl FileViewer {
         self.pdf_restore = Some(place);
     }
 
+    /// Shows the PDF at `place` (going back to where it was left): now
+    /// when it is read, else once it is.
+    pub fn show_pdf_place(&mut self, place: PdfPlace, cx: &mut Context<'_, Self>) {
+        match (&self.status, &self.pdf) {
+            (ViewerStatus::Pdf { .. }, Some(pdf)) => {
+                pdf.update(cx, |v, cx| v.go_to_place(place, cx));
+            }
+            _ => {
+                self.pdf_page = None;
+                self.pdf_restore = Some(place);
+            }
+        }
+    }
+
     /// Where the PDF is read: the PDF viewer's place, else the place it
     /// will be shown at once read. `None` for other files.
     pub fn pdf_place(&self, cx: &App) -> Option<PdfPlace> {

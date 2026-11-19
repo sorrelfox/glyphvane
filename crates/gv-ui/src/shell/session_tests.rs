@@ -20,6 +20,7 @@ fn place(path: &str, offset: usize) -> HistoryEntry {
         path: PathBuf::from(path),
         mode: ViewMode::Preview,
         scroll: Some(ScrollTarget::Offset(offset)),
+        pdf: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn sample() -> Session {
                         path: PathBuf::from("/n/a.md"),
                         mode: ViewMode::Preview,
                         anchor: Some(Anchor::Line(3)),
+                        pdf: None,
                     }],
                     ..tab("/n/b.md")
                 },
@@ -1181,4 +1183,95 @@ fn a_tab_viewer_mode_comes_back(cx: &mut TestAppContext) {
     assert!(!on(&mut vcx));
     vcx.update(|_, cx| save_now(cx));
     assert_eq!(memory.last().windows[0].tabs[0].viewer_mode, Some(false));
+}
+
+/// A PDF in a tab's history keeps its place in the session: Back from a
+/// restored tab shows it there, and it is saved again.
+#[gpui::test]
+fn a_pdf_in_the_history_comes_back_at_its_page(cx: &mut TestAppContext) {
+    use crate::file_viewer::pdf_tests::FakePdf;
+    use crate::file_viewer::{PdfPlace, PdfZoom};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let paper = dir.path().join("paper.pdf");
+    std::fs::write(&paper, b"%PDF-1.7\n%%EOF\n").expect("write");
+    let note = dir.path().join("note.md");
+    std::fs::write(&note, "# Note\n").expect("write");
+    let left = PdfPlace {
+        page: 5,
+        into: Some(40.0),
+        zoom: PdfZoom::Scale(1.25),
+    };
+    let stored = Session {
+        windows: vec![WindowState {
+            bounds: None,
+            tabs: vec![TabState {
+                back: vec![Place {
+                    path: paper.clone(),
+                    mode: ViewMode::Preview,
+                    anchor: None,
+                    pdf: Some(left),
+                }],
+                ..tab(note.to_str().expect("utf-8"))
+            }],
+            active_tab: 0,
+            sidebar_open: false,
+            panel_open: false,
+            sidebar_panel: None,
+            vault: None,
+            base: None,
+        }],
+        ..Session::default()
+    };
+    let memory = Arc::new(Memory::default());
+    start(cx, stored, &memory);
+    let engine = Arc::new(FakePdf::pages(&[(612.0, 792.0); 8]));
+    cx.update(|cx| {
+        crate::export::set_pdf_engine(cx, Some(engine as Arc<dyn crate::export::PdfEngine>));
+    });
+    cx.update(restore).expect("restores").expect("a window");
+    let (window, workspace) = front(cx);
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    draw(&mut vcx);
+    vcx.update(|window, cx| workspace.update(cx, |ws, cx| ws.go_back(window, cx)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let pdf = loop {
+        draw(&mut vcx);
+        let viewer = workspace.read_with(&vcx, |ws, _| ws.active_tab().viewer().cloned());
+        if let Some(pdf) = viewer.and_then(|v| v.read_with(&vcx, |v, _| v.pdf().cloned())) {
+            break pdf;
+        }
+        assert!(std::time::Instant::now() < deadline, "the PDF viewer shows");
+    };
+    draw(&mut vcx);
+    pdf.read_with(&vcx, |p, _| {
+        assert_eq!(p.current_page(), 5);
+        assert_eq!(p.zoom(), PdfZoom::Scale(1.25));
+    });
+
+    // Forward to the note: the PDF's place is saved with the way back.
+    vcx.update(|window, cx| workspace.update(cx, |ws, cx| ws.go_forward(window, cx)));
+    draw(&mut vcx);
+    vcx.update(|_, cx| save_now(cx));
+    let saved = memory.last().windows[0].tabs[0].clone();
+    assert_eq!(saved.path, note);
+    let way_back = saved.back.last().expect("the way back");
+    assert_eq!(way_back.path, paper);
+    let kept = way_back.pdf.expect("the PDF's place is kept");
+    assert_eq!(kept.page, 5);
+    assert_eq!(kept.zoom, PdfZoom::Scale(1.25));
+    assert!(
+        (kept.into.expect("an offset") - 40.0).abs() < 0.5,
+        "{kept:?}"
+    );
+}
+
+#[test]
+fn a_history_place_without_a_pdf_place_still_reads() {
+    let json = r#"{"path":"/n/b.md","back":[{"path":"/n/p.pdf","mode":"preview"}]}"#;
+    let tab: TabState = serde_json::from_str(json).expect("reads");
+    assert_eq!(tab.back.len(), 1);
+    assert_eq!(tab.back[0].pdf, None);
+    let back = serde_json::to_string(&tab).expect("json");
+    assert!(!back.contains("pdf\":"), "{back}");
 }

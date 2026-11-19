@@ -18,7 +18,8 @@
 //! `<details>`, by kind, first source line and repeat, so they survive
 //! edits elsewhere; [`crate::reader::fold_state`]), viewer mode when
 //! switched for the tab, and, in a PDF, the page at the top, how far down
-//! it and the zoom (a page past the end comes back as the last page).
+//! it and the zoom (a page past the end comes back as the last page); a
+//! PDF in the back and forward history keeps its place the same way.
 //! Closed tabs are not kept.
 //!
 //! Every window that is not created for a file is a session window, so
@@ -285,6 +286,9 @@ pub struct Place {
     pub mode: ViewMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
+    /// Where the PDF viewer was, for a PDF read past its start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<PdfPlace>,
 }
 
 /// Where a document was scrolled.
@@ -321,6 +325,7 @@ impl Place {
             path: entry.path.clone(),
             mode: entry.mode,
             anchor: entry.scroll.as_ref().and_then(Anchor::from_target),
+            pdf: entry.pdf.filter(|p| !p.is_start()),
         })
     }
 
@@ -329,6 +334,7 @@ impl Place {
             path: self.path.clone(),
             mode: self.mode,
             scroll: self.anchor.map(Anchor::target),
+            pdf: self.pdf.map(PdfPlace::sanitized),
         }
     }
 }

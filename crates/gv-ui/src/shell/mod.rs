@@ -1788,10 +1788,12 @@ impl Workspace {
         let scroll = scroll
             .or_else(|| tab.scroll.clone())
             .or_else(|| tab.position.map(|p| ScrollTarget::Line(p.line)));
+        let pdf = tab.pdf_place(cx);
         Some(HistoryEntry {
             path,
             mode: tab.mode,
             scroll,
+            pdf,
         })
     }
 
@@ -1924,8 +1926,23 @@ impl Workspace {
             // The Reading view that shows the target takes the note.
             follow::begin(cause);
         }
-        let scroll = to.scroll.or(Some(ScrollTarget::Offset(0)));
-        self.show_in_tab(index, to.path, scroll, window, cx);
+        // A PDF goes back to where it was left, not to a page a link named.
+        let pdf = to.pdf;
+        let scroll = match pdf {
+            Some(_) => Some(ScrollTarget::Offset(0)),
+            None => to.scroll.or(Some(ScrollTarget::Offset(0))),
+        };
+        if let Some(place) = pdf {
+            self.tabs[index].pdf_place = Some((to.path.clone(), place));
+        }
+        self.show_in_tab(index, to.path.clone(), scroll, window, cx);
+        // The viewer already showed that PDF (a jump within it): it moves.
+        if let Some(place) = pdf
+            && let Some(viewer) = self.tabs[index].viewer.clone()
+            && viewer.read(cx).path() == to.path.as_path()
+        {
+            viewer.update(cx, |v, cx| v.show_pdf_place(place, cx));
+        }
         true
     }
 
