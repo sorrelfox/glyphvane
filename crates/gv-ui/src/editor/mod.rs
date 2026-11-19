@@ -1010,8 +1010,10 @@ impl EditorView {
     /// ([`source_a11y`]); a screen reader's `SetTextSelection` moves the
     /// selection, its `Focus` focuses the view (GPUI's own handling of the
     /// focusable element), its `ScrollUp`/`ScrollDown` scroll by a line or
-    /// a page. Runs take `ScrollIntoView` and `ScrollToPoint` (registered
-    /// by the element when it paints, by their node ids).
+    /// a page, `ScrollLeft`/`ScrollRight` sideways (without soft wrap), and
+    /// `SetScrollOffset` to a point. Runs take `ScrollIntoView` and
+    /// `ScrollToPoint` (registered by the element when it paints, by their
+    /// node ids).
     fn a11y_node(
         &self,
         root: gpui::Stateful<gpui::Div>,
@@ -1023,6 +1025,9 @@ impl EditorView {
         let view = cx.entity().downgrade();
         let up = view.clone();
         let down = view.clone();
+        let left = view.clone();
+        let right = view.clone();
+        let offset = view.clone();
         root.role(gpui::Role::MultilineTextInput)
             .aria_label("Source")
             .a11y_synthetic_children(move |builder| source_a11y::push(&shared, builder))
@@ -1053,6 +1058,61 @@ impl EditorView {
             .on_a11y_action(gpui::accesskit::Action::ScrollDown, move |data, _, cx| {
                 let _ = down.update(cx, |view, cx| view.scroll_from_a11y(false, data, cx));
             })
+            .on_a11y_action(gpui::accesskit::Action::ScrollLeft, move |data, _, cx| {
+                let _ = left.update(cx, |view, cx| {
+                    view.scroll_sideways_from_a11y(true, data, cx)
+                });
+            })
+            .on_a11y_action(gpui::accesskit::Action::ScrollRight, move |data, _, cx| {
+                let _ = right.update(cx, |view, cx| {
+                    view.scroll_sideways_from_a11y(false, data, cx);
+                });
+            })
+            .on_a11y_action(
+                gpui::accesskit::Action::SetScrollOffset,
+                move |data, _, cx| {
+                    if let Some(gpui::accesskit::ActionData::SetScrollOffset(to)) = data {
+                        let to = *to;
+                        let _ = offset.update(cx, |view, cx| view.set_scroll_from_a11y(to, cx));
+                    }
+                },
+            )
+    }
+
+    /// Scrolls sideways (left when `left`) by a line height or
+    /// (`ScrollUnit::Page`) the text column's width less a line, as a
+    /// screen reader asks. Nothing moves while lines wrap.
+    pub(crate) fn scroll_sideways_from_a11y(
+        &mut self,
+        left: bool,
+        data: Option<&gpui::accesskit::ActionData>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let line = self.metrics.line;
+        let step = match data {
+            Some(gpui::accesskit::ActionData::ScrollUnit(gpui::accesskit::ScrollUnit::Page)) => {
+                self.bounds
+                    .map_or(line, |b| (f32::from(b.size.width) - line).max(line))
+            }
+            _ => line,
+        };
+        // The next frame keeps it within the widest line.
+        self.scroll_x = (self.scroll_x + if left { -step } else { step }).max(0.0);
+        cx.notify();
+    }
+
+    /// Scrolls to `to` (px from the content's top left), as a screen
+    /// reader asks; the next frame keeps it within the content.
+    pub(crate) fn set_scroll_from_a11y(
+        &mut self,
+        to: gpui::accesskit::Point,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.scroll_y = to.y.max(0.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let x = to.x.max(0.0) as f32;
+        self.scroll_x = x;
+        cx.notify();
     }
 
     /// Scrolls up or down by a line or (`ScrollUnit::Page`) a screen, as a

@@ -32,7 +32,9 @@ Windows).
 - **The Reading view** exposes the document's structure: headings with their
   level, paragraphs, lists, links (with their destination and whether they
   resolve), images by their alt text, tables, code, math and embedded blocks.
-- **The editor** exposes its text, the cursor and the selection.
+- **The editor** exposes its text, the cursor and the selection, and
+  scrolls when a screen reader asks: up and down, sideways on long lines
+  without soft wrap, or to a position.
 - **Canvases** expose their cards as a list.
 - **Announcements:** information bars are announced when they appear
   (warnings and errors at once, other bars politely), and so are the number

@@ -607,3 +607,47 @@ fn offsets_are_located_in_the_runs_and_clamped_outside_them() {
     let empty = crate::editor::source_a11y::SourceA11y::default();
     assert_eq!(empty.locate(0), None);
 }
+
+#[gpui::test]
+fn scroll_actions_move_sideways_and_to_an_offset(cx: &mut TestAppContext) {
+    let long = "x".repeat(400);
+    let text: String = (0..200).map(|i| format!("{long} {i}\n")).collect();
+    let (view, mut vcx) = editor(cx, &text);
+    view.update(&mut vcx, |v, cx| v.set_soft_wrap(false, cx));
+    draw(&mut vcx);
+    let scroll = |vcx: &mut VisualTestContext| view.read_with(vcx, |v, _| (v.scroll_x, v.scroll_y));
+    assert_eq!(scroll(&mut vcx), (0.0, 0.0));
+    // Right by a line, and by a page; left again.
+    view.update(&mut vcx, |v, cx| {
+        v.scroll_sideways_from_a11y(false, None, cx)
+    });
+    draw(&mut vcx);
+    let (x, _) = scroll(&mut vcx);
+    assert!(x > 0.0, "{x}");
+    let page = gpui::accesskit::ActionData::ScrollUnit(gpui::accesskit::ScrollUnit::Page);
+    view.update(&mut vcx, |v, cx| {
+        v.scroll_sideways_from_a11y(false, Some(&page), cx)
+    });
+    draw(&mut vcx);
+    let (paged, _) = scroll(&mut vcx);
+    assert!(paged > 4.0 * x, "{paged} after {x}");
+    view.update(&mut vcx, |v, cx| {
+        v.scroll_sideways_from_a11y(true, Some(&page), cx)
+    });
+    view.update(&mut vcx, |v, cx| {
+        v.scroll_sideways_from_a11y(true, None, cx)
+    });
+    draw(&mut vcx);
+    assert_eq!(scroll(&mut vcx).0, 0.0);
+    // To a point, kept within the content.
+    let to = gpui::accesskit::Point::new(30.0, 500.0);
+    view.update(&mut vcx, |v, cx| v.set_scroll_from_a11y(to, cx));
+    draw(&mut vcx);
+    assert_eq!(scroll(&mut vcx), (30.0, 500.0));
+    let far = gpui::accesskit::Point::new(1.0e9, 1.0e12);
+    view.update(&mut vcx, |v, cx| v.set_scroll_from_a11y(far, cx));
+    draw(&mut vcx);
+    let (x, y) = scroll(&mut vcx);
+    assert!(x > 30.0 && x < 1.0e9, "{x}");
+    assert!(y > 500.0 && y < 1.0e12, "{y}");
+}

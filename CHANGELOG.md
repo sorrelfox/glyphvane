@@ -61,6 +61,7 @@ Conventional Commits, and versions follow Semantic Versioning.
 - Moving or renaming a folder updates `file.inFolder("…")` in bases.
 - Renaming a note keeps the front matter valid YAML: a new name with `'`
   in a single-quoted link is written `''` (and escaped in double quotes).
+- Screen readers can scroll the editor sideways and to a position.
 
 ## [1.2.0] - 2026-11-19
 
