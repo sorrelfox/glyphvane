@@ -33,6 +33,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use super::fold::{self, VisualLine};
 use super::highlight::Underline;
 use super::input::Columns;
+use super::links::source_click_disposition;
 use super::live_widgets::{WidgetClick, WidgetPaint};
 use super::rows::RowEnv;
 use super::source_a11y;
@@ -1215,12 +1216,11 @@ impl EditorView {
             cx.notify();
             return;
         }
-        // Mod+Click on a link follows it (a plain click never does).
-        if e.modifiers.secondary(cx)
-            && !e.modifiers.shift
-            && !e.modifiers.alt
+        // Mod+Click on a link follows it (a plain click never does);
+        // Mod+Alt+Shift+Click opens it in a new window.
+        if let Some(disposition) = source_click_disposition(&e.modifiers, cx)
             && e.click_count <= 1
-            && self.click_link(e.position, crate::reader::Disposition::InPlace, window, cx)
+            && self.click_link(e.position, disposition, window, cx)
         {
             return;
         }

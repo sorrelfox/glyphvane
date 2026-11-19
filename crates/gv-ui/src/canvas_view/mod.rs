@@ -708,6 +708,7 @@ impl CanvasView {
                     disposition,
                     range: None,
                     from: None,
+                    at: None,
                 }));
             }
             _ => {}
@@ -792,12 +793,7 @@ impl CanvasView {
             return;
         };
         if !d.moved {
-            let disposition = if e.modifiers.secondary(cx) {
-                Disposition::NewTab
-            } else {
-                Disposition::InPlace
-            };
-            self.click(e.position, disposition, cx);
+            self.click(e.position, Disposition::for_click(&e.modifiers, cx), cx);
         }
     }
 

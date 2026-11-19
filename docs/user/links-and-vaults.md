@@ -64,10 +64,13 @@ settings (Privacy and security).
 
 ### Following links
 
-| Where | Click | Ctrl+click | Middle click |
-|---|---|---|---|
-| Reading view | Opens the link in this tab | Opens it in a new tab | Opens it in a background tab |
-| Editor | Places the cursor | Opens the link in this tab | Opens it in a background tab |
+| Where | Click | Ctrl+click | Ctrl+Alt+Shift+click | Middle click |
+|---|---|---|---|---|
+| Reading view | Opens the link in this tab | Opens it in a new tab | Opens it in a new window | Opens it in a background tab |
+| Editor | Places the cursor | Opens the link in this tab | Opens it in a new window | Opens it in a background tab |
+
+**Ctrl+Alt+Shift+click** opens a new window the same way on canvas cards,
+rows and links in bases, search results, query blocks and hover previews.
 
 From the keyboard, put the cursor on a link and press **Alt+Enter** to follow
 it, or **Ctrl+Alt+Enter** to open it in a new tab. A right-click on a link
@@ -139,8 +142,10 @@ change in one step.
 
 To rename a heading or a block ID and update every link to it, put the cursor
 on it in the editor and run **Rename heading or block ID** from the command
-palette. Links in other notes, embeds and canvas cards are updated the same
-way, with a preview and **Undo**.
+palette. Links in other notes, embeds, canvas cards and `link("Note#Heading")`
+in bases are updated the same way, with a preview and **Undo**. A heading
+written over several lines (underlined with `===` or `---`) becomes one
+line.
 
 Files with unsaved changes cannot be renamed or moved; save them first.
 

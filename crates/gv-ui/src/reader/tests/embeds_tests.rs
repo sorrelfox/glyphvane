@@ -378,6 +378,19 @@ fn a_query_lists_its_results_and_opens_them(cx: &mut TestAppContext) {
     let followed = v.followed();
     assert_eq!(followed.len(), 1, "{followed:?}");
     assert_eq!(&*followed[0].destination, first);
+    assert_eq!(followed[0].at, None);
+    // A click on its context line opens it at that line.
+    assert_eq!(q.rows[1], crate::reader::embeds::QueryRow::Line(0, 0));
+    let at = point(
+        px(450.0),
+        px(top + 2.0 * line + 2.0 * crate::reader::embeds::PAD + line / 2.0),
+    );
+    v.vcx.simulate_click(at, Modifiers::none());
+    v.settle();
+    let followed = v.followed();
+    assert_eq!(followed.len(), 2, "{followed:?}");
+    assert_eq!(&*followed[1].destination, first);
+    assert_eq!(followed[1].at, Some(q.files[0].snippets[0].range.start));
     // Find in page sees the query.
     let text = v
         .reader
@@ -784,4 +797,37 @@ fn html_audio_inside_a_note_embed_resolves_next_to_the_embedded_note(cx: &mut Te
     // Beside the embedded note, not beside the document.
     assert_eq!(memo.title, "memo.ogg");
     assert_eq!(memo.detail, "OGG audio \u{b7} 3 bytes");
+}
+
+#[gpui::test]
+fn a_live_block_inside_a_note_embed_opens_from_the_embedded_note(cx: &mut TestAppContext) {
+    let dir = vault(&[
+        ("Doc.md", "![[notes/b]]\n"),
+        ("notes/b.md", "![[Plan.canvas]]\n"),
+        ("notes/Plan.canvas", CANVAS),
+    ]);
+    let mut v = View::open(
+        cx,
+        &dir.path().join("Doc.md"),
+        gv_profile::ProfileId::Obsidian,
+    );
+    v.settle();
+    let st = v.st();
+    let st = st.borrow();
+    let doc = st.doc.as_ref().expect("loaded");
+    let live = doc
+        .tree
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.kind {
+            NodeKind::Live(l) => Some(Arc::clone(l)),
+            _ => None,
+        })
+        .expect("the embedded canvas block");
+    assert_eq!(live.host.as_deref(), Some("notes/b.md"));
+    let request = crate::reader::embeds::open_request(&live, None, None, Disposition::InPlace)
+        .expect("a request");
+    assert_eq!(&*request.destination, "Plan.canvas");
+    // Followed from the embedded note, where the canvas is.
+    assert_eq!(request.from.as_deref(), Some("notes/b.md"));
 }

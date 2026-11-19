@@ -291,6 +291,7 @@ impl Fixture {
             disposition: Disposition::InPlace,
             range: None,
             from: None,
+            at: None,
         };
         reader.update(&mut self.vcx, |_, cx| {
             cx.emit(ReaderEvent::FollowLink(request))

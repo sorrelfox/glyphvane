@@ -187,6 +187,25 @@ pub enum Disposition {
     NewTab,
     /// In a new tab behind the active one (middle click).
     Background,
+    /// In a new window (Mod+Alt+Shift-click).
+    NewWindow,
+}
+
+impl Disposition {
+    /// Where a left click with `modifiers` opens a link: Mod+Alt+Shift for
+    /// a new window, Mod for a new tab, else in place.
+    pub fn for_click(modifiers: &gpui::Modifiers, cx: &gpui::App) -> Self {
+        Self::from_mod_click(modifiers.secondary(cx), modifiers.alt, modifiers.shift)
+    }
+
+    /// [`Self::for_click`] from the state of the keys: Mod, Alt and Shift.
+    pub fn from_mod_click(secondary: bool, alt: bool, shift: bool) -> Self {
+        match (secondary, alt, shift) {
+            (true, true, true) => Self::NewWindow,
+            (true, ..) => Self::NewTab,
+            _ => Self::InPlace,
+        }
+    }
 }
 
 /// A link the user followed.
@@ -203,6 +222,10 @@ pub struct LinkRequest {
     /// which the link is followed from ([`Reader::link_file`]); `None`: a
     /// link of the document.
     pub from: Option<Arc<str>>,
+    /// A byte offset of the target note to show: a query block's context
+    /// line, whose `destination` is the note's vault path. `None`: where
+    /// the destination says.
+    pub at: Option<usize>,
 }
 
 /// What the Reading view asks of its window.

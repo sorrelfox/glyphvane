@@ -130,6 +130,23 @@ pub fn open_file_window(cx: &mut App, target: Option<OpenTarget>) -> Result<AnyW
     open_workspace_window(cx, target).map(|w| w.window)
 }
 
+/// Opens a followed link's target `path` in a new window (Mod+Alt+Shift+
+/// click), as [`open_file_window`] does, scrolled to `scroll`; in Edit mode
+/// when `edit` (a note just created for the link).
+pub(crate) fn open_link_window(
+    cx: &mut App,
+    path: std::path::PathBuf,
+    scroll: Option<reader::ScrollTarget>,
+    edit: bool,
+) -> Result<()> {
+    let window = open_workspace_window(cx, Some(OpenTarget::new(path)))?;
+    let workspace = window.workspace.clone();
+    cx.update_window(window.window, |_, w, cx| {
+        workspace.update(cx, |ws, cx| ws.show_opened_link(scroll, edit, w, cx))
+    })??;
+    Ok(())
+}
+
 fn open_workspace_window(cx: &mut App, target: Option<OpenTarget>) -> Result<WorkspaceWindow> {
     let title = shell::FileLabel::new(target.as_ref().map(|t| t.path.as_path())).window_title();
     let options = main_window_options(WindowChrome::current(), title.into(), cx);

@@ -86,6 +86,9 @@ impl Workspace {
                         let activate = disposition == Disposition::NewTab;
                         self.insert_tab(OpenTarget::new(path), scroll, activate, window, cx);
                     }
+                    Disposition::NewWindow => {
+                        self.open_link_target(self.active, path, scroll, disposition, window, cx);
+                    }
                 }
             }
             SearchPanelEvent::Dismiss => self.focus_document(window, cx),

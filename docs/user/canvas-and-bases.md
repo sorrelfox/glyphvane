@@ -47,9 +47,9 @@ left lists them.
 | Drag, mouse wheel or trackpad | Pan |
 | **Ctrl+wheel** or pinch | Zoom at the pointer |
 | Click a card | Select it |
-| Click a file card | Open the file (**Ctrl+click** for a new tab, middle click for a background tab) |
+| Click a file card | Open the file (**Ctrl+click** for a new tab, **Ctrl+Alt+Shift+click** for a new window, middle click for a background tab) |
 | Click a link card | Open the web address |
-| Click a note or row in a query or base, or a media card | Open it (**Ctrl+click** for a new tab) |
+| Click a note or row in a query or base, or a media card | Open it (**Ctrl+click** for a new tab, **Ctrl+Alt+Shift+click** for a new window) |
 
 | Key | What it does |
 |---|---|
@@ -93,7 +93,8 @@ A base can appear:
 
 Press **]** and **[** to switch to the next or previous view of the base.
 Click a link, a file or a web address in a cell to open it (**Ctrl+click**
-for a new tab, middle click for a background tab).
+for a new tab, **Ctrl+Alt+Shift+click** for a new window, middle click for a
+background tab).
 
 ### What is supported
 

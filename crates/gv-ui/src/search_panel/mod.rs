@@ -780,11 +780,7 @@ impl SearchPanel {
                 r.tooltip(move |_, cx| cx.new(|_| Tooltip(tip.clone())).into())
             })
             .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
-                let disposition = if e.modifiers().secondary(cx) {
-                    Disposition::NewTab
-                } else {
-                    Disposition::InPlace
-                };
+                let disposition = Disposition::for_click(&e.modifiers(), cx);
                 this.click_row(ix, disposition, window, cx);
             }))
             .on_mouse_up(

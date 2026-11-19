@@ -179,11 +179,13 @@ pub(crate) enum ControlKind {
 }
 
 /// What a click on a live block opens: the block's node, and the result
-/// row of a query block (`None`: the block's own file).
+/// row of a query block (`None`: the block's own file) with the context
+/// line of that note (`None`: the note's title).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LiveTarget {
     pub node: usize,
     pub row: Option<usize>,
+    pub line: Option<usize>,
 }
 
 /// A footnote reference or backreference under the pointer.

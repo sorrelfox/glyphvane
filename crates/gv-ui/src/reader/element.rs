@@ -2188,7 +2188,11 @@ impl ReaderElement {
                 match e.button {
                     MouseButton::Left => {
                         focus.focus(window, cx);
-                        press_left(&mut st, e);
+                        // Mod+Alt+Shift: a link to a new window, not a
+                        // selection extended with Shift.
+                        let extend = e.modifiers.shift
+                            && Disposition::for_click(&e.modifiers, cx) != Disposition::NewWindow;
+                        press_left(&mut st, e, extend);
                     }
                     MouseButton::Middle => {
                         if let Some(link) = st.target_at(e.position) {
@@ -2307,11 +2311,7 @@ impl ReaderElement {
                                     open_file = st.geometry.external.get(slot).cloned();
                                 }
                                 ControlKind::Live { slot } => {
-                                    let disposition = if e.modifiers.secondary(cx) {
-                                        Disposition::NewTab
-                                    } else {
-                                        Disposition::InPlace
-                                    };
+                                    let disposition = Disposition::for_click(&e.modifiers, cx);
                                     follow = live_request(&st, slot, disposition);
                                 }
                             }
@@ -2359,10 +2359,9 @@ impl ReaderElement {
                             st.selection = None;
                             // An image opens in the image viewer, in a tab
                             // of its own.
-                            let disposition = if e.modifiers.secondary(cx) || link.image {
-                                Disposition::NewTab
-                            } else {
-                                Disposition::InPlace
+                            let disposition = match Disposition::for_click(&e.modifiers, cx) {
+                                Disposition::InPlace if link.image => Disposition::NewTab,
+                                d => d,
                             };
                             follow = Some(request(&link, disposition));
                         }
@@ -2560,12 +2559,14 @@ fn request(link: &LinkHit, disposition: Disposition) -> LinkRequest {
         disposition,
         range: link.range.clone(),
         from: link.from.clone(),
+        at: None,
     }
 }
 
 /// A left press: the scrollbar, a code button, or the start of a
 /// selection (or a link click).
-fn press_left(st: &mut State, e: &MouseDownEvent) {
+/// A left press; `extend`: Shift extends the selection.
+fn press_left(st: &mut State, e: &MouseDownEvent, extend: bool) {
     let pos = e.position;
     if let (Some(track), Some(thumb)) = (st.geometry.track, st.geometry.thumb)
         && track.contains(&pos)
@@ -2603,21 +2604,15 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
         st.press = Press::Control(control);
         return;
     }
-    if !e.modifiers.shift
-        && let Some(hit) = st.footnote_at(pos)
-    {
+    if !extend && let Some(hit) = st.footnote_at(pos) {
         st.press = Press::Footnote(hit);
         return;
     }
     let Some(offset) = st.offset_at(pos) else {
         return;
     };
-    let link = if e.modifiers.shift {
-        None
-    } else {
-        st.target_at(pos)
-    };
-    st.selection = match (st.selection, e.modifiers.shift) {
+    let link = if extend { None } else { st.target_at(pos) };
+    st.selection = match (st.selection, extend) {
         (Some(s), true) => Some(Selection {
             anchor: s.anchor,
             head: offset,
@@ -2629,7 +2624,7 @@ fn press_left(st: &mut State, e: &MouseDownEvent) {
     };
     st.press = Press::Select {
         origin: pos,
-        moved: e.modifiers.shift,
+        moved: extend,
         link,
     };
 }
@@ -2845,7 +2840,8 @@ fn live_request(st: &State, slot: usize, disposition: Disposition) -> Option<Lin
     let gv_render_tree::NodeKind::Live(live) = &doc.tree.nodes().get(target.node)?.kind else {
         return None;
     };
-    super::embeds::open_request(live, st.cache.live.get(live.key), target.row, disposition)
+    let row = target.row.map(|i| (i, target.line));
+    super::embeds::open_request(live, st.cache.live.get(live.key), row, disposition)
 }
 
 /// Draws a live block in `place.area` (its box, header and content) and
@@ -2946,26 +2942,28 @@ fn paint_live(
         line_height: px(line),
     });
     // A control: hovered, it gets the hover fill.
-    let control = |o: &mut LiveOut<'_>, bounds: Bounds<Pixels>, row: Option<usize>| {
-        let c = Control {
-            bounds,
-            kind: ControlKind::Live {
-                slot: o.geometry.live.len(),
-            },
-        };
-        o.geometry.live.push(super::state::LiveTarget {
-            node: place.node,
-            row,
-        });
-        if *o.hover == Hover::Control(c) {
-            o.out.under.push(Op::Rect {
+    let control =
+        |o: &mut LiveOut<'_>, bounds: Bounds<Pixels>, row: Option<(usize, Option<usize>)>| {
+            let c = Control {
                 bounds,
-                color: color(Token::StateHover),
-                radius: px(radius::SMALL_CONTROL),
+                kind: ControlKind::Live {
+                    slot: o.geometry.live.len(),
+                },
+            };
+            o.geometry.live.push(super::state::LiveTarget {
+                node: place.node,
+                row: row.map(|(i, _)| i),
+                line: row.and_then(|(_, j)| j),
             });
-        }
-        o.geometry.controls.push(c);
-    };
+            if *o.hover == Hover::Control(c) {
+                o.out.under.push(Op::Rect {
+                    bounds,
+                    color: color(Token::StateHover),
+                    radius: px(radius::SMALL_CONTROL),
+                });
+            }
+            o.geometry.controls.push(c);
+        };
     if live.kind.is_media() {
         // The whole card follows its action.
         match &shown {
@@ -3113,7 +3111,7 @@ fn paint_live(
                         control(
                             o,
                             bounds_of(x + s.border, row_y, w - 2.0 * s.border, line),
-                            Some(i),
+                            Some((i, None)),
                         );
                         text_line(
                             o,
@@ -3127,6 +3125,12 @@ fn paint_live(
                         let Some(snip) = q.files.get(i).and_then(|f| f.snippets.get(j)) else {
                             continue;
                         };
+                        // A context line opens the note there.
+                        control(
+                            o,
+                            bounds_of(x + s.border, row_y, w - 2.0 * s.border, line),
+                            Some((i, Some(j))),
+                        );
                         let mut text = String::new();
                         if snip.clipped_start {
                             text.push('\u{2026}');

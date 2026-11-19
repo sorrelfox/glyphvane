@@ -744,6 +744,7 @@ impl BasesView {
             disposition,
             range: None,
             from: None,
+            at: None,
         }));
     }
 

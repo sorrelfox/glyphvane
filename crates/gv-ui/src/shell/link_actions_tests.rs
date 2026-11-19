@@ -26,8 +26,8 @@ use crate::editor::EditorView;
 use crate::files::notice::{NoticeAction, Topic};
 use crate::keymap::actions::links as commands;
 use crate::menu::ContextMenu;
-use crate::reader::Reader;
 use crate::reader::link_info::TOOLTIP_DELAY;
+use crate::reader::{Disposition, LinkRequest, Reader, ReaderEvent, ScrollTarget};
 use crate::{AppSettings, ThemeChoice, TogglePanel};
 
 struct Fixture {
@@ -788,6 +788,89 @@ fn open_in_new_window_opens_a_window_for_the_target(cx: &mut TestAppContext) {
     f.draw();
     let after = f.vcx.update(|_, cx| cx.windows().len());
     assert_eq!(after, before + 1);
+}
+
+/// The file of the active tab of each main window but `f`'s.
+fn other_windows(f: &mut Fixture) -> Vec<Option<PathBuf>> {
+    let own = f.vcx.update(|window, _| window.window_handle());
+    f.vcx.update(|_, cx| {
+        super::main_windows(cx)
+            .into_iter()
+            .filter(|w| w.window != own)
+            .filter_map(|w| w.workspace.upgrade())
+            .map(|ws| ws.read(cx).active_tab().path().map(Path::to_path_buf))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn mod_alt_shift_click_opens_the_link_in_a_new_window(cx: &mut TestAppContext) {
+    assert_eq!(
+        Disposition::from_mod_click(true, true, true),
+        Disposition::NewWindow
+    );
+    assert_eq!(
+        Disposition::from_mod_click(true, false, false),
+        Disposition::NewTab
+    );
+    assert_eq!(
+        Disposition::from_mod_click(false, true, true),
+        Disposition::InPlace
+    );
+    let mut f = fixture(cx, &vault_files(), "Hub.md", true);
+    f.resolved();
+    let chord = f.vcx.update(|_, cx| Modifiers {
+        alt: true,
+        shift: true,
+        ..Modifiers::secondary_key(cx)
+    });
+
+    // The Reading view: the window keeps its tab; a new one shows A.md.
+    let at = f.link_point("[[A]]");
+    f.vcx.simulate_click(at, chord);
+    f.draw();
+    assert_eq!(f.active_path(), Some(f.path("Hub.md")));
+    assert_eq!(f.workspace.read_with(&f.vcx, |ws, _| ws.tabs().len()), 1);
+    assert_eq!(other_windows(&mut f), [Some(f.path("A.md"))]);
+
+    // The Source view: the same chord.
+    let editor = f.edit();
+    let offset = HUB.find("[[A]]").expect("link") + 2;
+    let at = f.editor_point(&editor, offset);
+    f.vcx.simulate_click(at, chord);
+    f.draw();
+    assert_eq!(f.active_path(), Some(f.path("Hub.md")));
+    assert_eq!(
+        other_windows(&mut f),
+        [Some(f.path("A.md")), Some(f.path("A.md"))]
+    );
+}
+
+#[gpui::test]
+fn a_query_context_line_opens_its_note_there(cx: &mut TestAppContext) {
+    let long: String = (0..60)
+        .map(|i| format!("Paragraph {i} of a long note.\n\n"))
+        .collect();
+    let mut files = vault_files();
+    files.push(("Long.md", &long));
+    let mut f = fixture(cx, &files, "Hub.md", true);
+    f.resolved();
+    let at = long.find("Paragraph 40").expect("paragraph");
+    let reader = f.reader();
+    reader.update(&mut f.vcx, |_, cx| {
+        cx.emit(ReaderEvent::FollowLink(LinkRequest {
+            destination: "Long.md".into(),
+            kind: gv_model::LinkKind::Wikilink,
+            disposition: Disposition::InPlace,
+            range: None,
+            from: None,
+            at: Some(at),
+        }));
+    });
+    f.draw();
+    assert_eq!(f.active_path(), Some(f.path("Long.md")));
+    let top = f.reader().read_with(&f.vcx, |r, _| r.position());
+    assert_eq!(top, Some(ScrollTarget::Offset(at)));
 }
 
 // ----- the Source view ---------------------------------------------------------------------

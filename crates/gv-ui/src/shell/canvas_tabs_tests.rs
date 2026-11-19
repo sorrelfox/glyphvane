@@ -163,6 +163,7 @@ fn a_link_to_a_canvas_opens_it_in_a_tab(cx: &mut TestAppContext) {
             disposition: Disposition::InPlace,
             range: None,
             from: None,
+            at: None,
         }));
     });
     draw(&mut vcx);

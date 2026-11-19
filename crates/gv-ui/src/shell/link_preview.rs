@@ -874,11 +874,7 @@ impl Workspace {
                 )
             })
             .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
-                let disposition = if e.modifiers().secondary(cx) {
-                    Disposition::NewTab
-                } else {
-                    Disposition::InPlace
-                };
+                let disposition = Disposition::for_click(&e.modifiers(), cx);
                 this.open_previewed(level, disposition, window, cx);
             }));
         let body = self.render_preview_body(level, preview, theme, cx);

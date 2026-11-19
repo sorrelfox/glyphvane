@@ -185,6 +185,7 @@ fn a_file_value_opens_its_note_and_back_returns_to_the_base(cx: &mut TestAppCont
             disposition: Disposition::NewTab,
             range: None,
             from: None,
+            at: None,
         }));
     });
     draw(&mut vcx);
@@ -208,6 +209,7 @@ fn a_link_or_file_open_to_a_base_opens_it_in_a_tab(cx: &mut TestAppContext) {
             disposition: Disposition::InPlace,
             range: None,
             from: None,
+            at: None,
         }));
     });
     draw(&mut vcx);

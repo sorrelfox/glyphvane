@@ -122,6 +122,7 @@ fn follow(
         disposition,
         range: None,
         from: None,
+        at: None,
     };
     reader.update(vcx, |_, cx| cx.emit(ReaderEvent::FollowLink(request)));
     draw(vcx);

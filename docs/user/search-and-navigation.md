@@ -11,7 +11,8 @@ the sidebar. If you have selected text on one line, it becomes the query.
   then notes with the most matches for their size, then the most recently
   changed.
 - Click a match to open the note there. **Ctrl+click** opens it in a new tab,
-  a middle click in a background tab.
+  **Ctrl+Alt+Shift+click** in a new window, a middle click in a background
+  tab.
 - From the keyboard: **Up** and **Down** move, **Enter** opens, **Ctrl+Enter**
   opens in a new tab, **Left** and **Right** fold and unfold a note's matches,
   and **Esc** returns to the document.
@@ -64,6 +65,10 @@ More details:
 - Tags inside code are never found.
 - The query never fails: an unclosed bracket or quote runs to the end of the
   query.
+
+A ` ```query ` code block in a note lists the notes its query finds, each
+with its matching lines, in the Reading view. Click a note to open it, or
+one of its lines to open the note at that line.
 
 ## Quick switcher
 

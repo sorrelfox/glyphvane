@@ -445,6 +445,29 @@ impl Workspace {
                     .iter()
                     .rposition(|t| t.path.as_deref() == Some(path.as_path()))
             }
+            Disposition::NewWindow => {
+                open_in_window(path, scroll, false, cx);
+                None
+            }
+        }
+    }
+
+    /// In a window just opened for a followed link: scrolls its tab to
+    /// `scroll`, and puts it in Edit mode when `edit`.
+    pub(crate) fn show_opened_link(
+        &mut self,
+        scroll: Option<ScrollTarget>,
+        edit: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(scroll) = scroll
+            && let Some(path) = self.tabs[self.active].path.clone()
+        {
+            self.show_in_tab(self.active, path, Some(scroll), window, cx);
+        }
+        if edit {
+            self.edit_active_tab(None, window, cx);
         }
     }
 
@@ -610,6 +633,7 @@ impl Workspace {
                             Disposition::NewTab | Disposition::Background => {
                                 ws.open_tab_for_edit(OpenTarget::new(path), None, window, cx);
                             }
+                            Disposition::NewWindow => open_in_window(path, None, true, cx),
                         }
                     }
                     Err(err) => {
@@ -1231,6 +1255,16 @@ fn button(id: &'static str, label: &'static str, primary: bool, cx: &App) -> Sta
 }
 
 /// `path` below the vault root, for a row.
+/// Opens a followed link's target in a new window once the current update
+/// is done (see [`crate::open_link_window`]).
+fn open_in_window(path: PathBuf, scroll: Option<ScrollTarget>, edit: bool, cx: &mut App) {
+    cx.defer(move |cx| {
+        if let Err(err) = crate::open_link_window(cx, path, scroll, edit) {
+            tracing::warn!("cannot open a window: {err:#}");
+        }
+    });
+}
+
 fn shown_path(path: &Path, root: Option<&Path>) -> String {
     root.and_then(|r| path.strip_prefix(r).ok())
         .unwrap_or(path)

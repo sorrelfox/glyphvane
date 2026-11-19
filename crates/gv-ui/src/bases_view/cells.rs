@@ -102,13 +102,9 @@ pub(crate) fn tooltip(
     }
 }
 
-/// How a click opens: Mod for a new tab.
+/// How a click opens: Mod for a new tab, Mod+Alt+Shift for a new window.
 fn disposition(e: &ClickEvent, cx: &App) -> Disposition {
-    if e.modifiers().secondary(cx) {
-        Disposition::NewTab
-    } else {
-        Disposition::InPlace
-    }
+    Disposition::for_click(&e.modifiers(), cx)
 }
 
 /// What a click on a value does.

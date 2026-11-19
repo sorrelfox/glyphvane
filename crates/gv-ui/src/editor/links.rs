@@ -3,8 +3,9 @@
 
 //! Links in the Source view (09 § Interaction model):
 //!
-//! - **Mod+Click** on a link follows it (in place); a middle click opens
-//!   it in a background tab. A plain click never navigates. The view
+//! - **Mod+Click** on a link follows it (in place), Mod+Alt+Shift+Click
+//!   opens it in a new window; a middle click opens it in a background
+//!   tab. A plain click never navigates. The view
 //!   records the link and asks the window ([`DocEvent::FollowLink`]).
 //! - **Right-click** on a link opens the link menu instead of the
 //!   editor's, about that link; the context menu key does the same with
@@ -51,6 +52,25 @@ fn follow_hint() -> &'static str {
         "Cmd+click"
     } else {
         "Ctrl+click"
+    }
+}
+
+/// How a left click with `modifiers` follows a link in the Source view:
+/// Mod alone in place, Mod+Alt+Shift in a new window; `None`: the click
+/// does not follow a link (it edits, or extends the selection).
+pub(super) fn source_click_disposition(
+    modifiers: &gpui::Modifiers,
+    cx: &gpui::App,
+) -> Option<Disposition> {
+    source_click(modifiers.secondary(cx), modifiers.alt, modifiers.shift)
+}
+
+/// [`source_click_disposition`] from the state of Mod, Alt and Shift.
+pub(super) fn source_click(secondary: bool, alt: bool, shift: bool) -> Option<Disposition> {
+    match (secondary, alt, shift) {
+        (true, false, false) => Some(Disposition::InPlace),
+        (true, true, true) => Some(Disposition::NewWindow),
+        _ => None,
     }
 }
 

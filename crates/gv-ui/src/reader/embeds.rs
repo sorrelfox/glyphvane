@@ -644,6 +644,7 @@ impl Reader {
                     disposition: *disposition,
                     range: None,
                     from: None,
+                    at: None,
                 }),
                 BasesEvent::FollowLink(request) => Some(request.clone()),
             };
@@ -729,22 +730,33 @@ impl Reader {
 /// snapshot while the window gives none (a window without a vault).
 pub(crate) const CONTENT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The link a click on a live block (or on its result `row`) follows.
+/// The link a click on a live block (or on its result `row`: a note, and
+/// one of its context lines) follows. A context line opens the note there.
+/// A block inside a note embed follows its link from the embedded note.
 pub(crate) fn open_request(
     block: &LiveBlock,
     shown: Option<&Shown>,
-    row: Option<usize>,
+    row: Option<(usize, Option<usize>)>,
     disposition: Disposition,
 ) -> Option<LinkRequest> {
     if block.kind.is_media() {
         return match (row, shown) {
-            (None, Some(shown)) => shown.card()?.request(disposition),
+            (None, Some(shown)) => shown.card()?.request(disposition).map(|r| LinkRequest {
+                from: block.host.clone(),
+                ..r
+            }),
             _ => None,
         };
     }
-    let destination: Arc<str> = match (row, shown) {
-        (Some(i), Some(Shown::Query(q))) => q.files.get(i)?.path.as_str().into(),
-        (None, _) => block.target.clone()?,
+    let (destination, at): (Arc<str>, _) = match (row, shown) {
+        (Some((i, line)), Some(Shown::Query(q))) => {
+            let file = q.files.get(i)?;
+            let at = line
+                .and_then(|j| file.snippets.get(j))
+                .map(|s| s.range.start);
+            (file.path.as_str().into(), at)
+        }
+        (None, _) => (block.target.clone()?, None),
         _ => return None,
     };
     Some(LinkRequest {
@@ -752,6 +764,7 @@ pub(crate) fn open_request(
         kind: gv_model::LinkKind::Wikilink,
         disposition,
         range: None,
-        from: None,
+        from: block.host.clone(),
+        at,
     })
 }

@@ -1739,6 +1739,16 @@ impl Workspace {
         else {
             return;
         };
+        // A query block's context line: its note (a vault path), there.
+        if let Some(at) = request.at
+            && let Some(root) = self.link_vault_root(cx)
+            && let Ok(note) = gv_vault::VaultPath::new(&request.destination)
+        {
+            let scroll = Some(ScrollTarget::Offset(at));
+            let path = note.to_fs_path(&root);
+            self.open_link_target(index, path, scroll, request.disposition, window, cx);
+            return;
+        }
         let r = reader.read(cx);
         // A link inside a note embed is followed from the embedded note.
         let file = match request.from.as_deref() {

@@ -533,12 +533,7 @@ impl BasesView {
                 move |s| s.border_color(hover)
             })
             .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                let d = if e.modifiers().secondary(cx) {
-                    Disposition::NewTab
-                } else {
-                    Disposition::InPlace
-                };
-                this.open_file(&path, d, cx);
+                this.open_file(&path, Disposition::for_click(&e.modifiers(), cx), cx);
             }))
             .on_mouse_up(
                 MouseButton::Middle,
