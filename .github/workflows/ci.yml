@@ -301,6 +301,8 @@ jobs:
 
       # Offline mode: checks relative links and anchors between repository
       # files; remote URLs are skipped so the job does not flake on the network.
+      # The sample vault uses Obsidian wikilinks and embeds, which are not
+      # Markdown links; Glyphvane's own link checker covers it.
       - uses: lycheeverse/lychee-action@v2
         with:
           args: >-
@@ -310,5 +312,6 @@ jobs:
             --exclude-path target
             --exclude-path '(^|/)tests/'
             --exclude-path '(^|/)fuzz/'
+            --exclude-path 'docs/sample-vault/'
             './**/*.md'
           fail: true
