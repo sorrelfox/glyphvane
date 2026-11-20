@@ -378,6 +378,10 @@ jobs:
           files="$RUNNER_TEMP/build-dir/files"
           appstreamcli validate --no-net --explain "$files/share/metainfo/$APP_ID.metainfo.xml"
           desktop-file-validate "$files/share/applications/$APP_ID.desktop"
+          # The AppStream catalogue that the bundle header and the repository
+          # carry; without it software centres show no metadata.
+          zgrep -q '<project_license>' "$files/share/app-info/xmls/$APP_ID.xml.gz"
+          ls "$files/share/app-info/icons/flatpak/128x128/$APP_ID.png"
 
       # The bundle carries the Flatpak repository's URL and public key, so
       # installing it adds a remote that `flatpak update` uses. Flatpak then

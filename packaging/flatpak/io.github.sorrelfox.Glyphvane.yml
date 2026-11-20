@@ -31,9 +31,10 @@ runtime: org.freedesktop.Platform
 runtime-version: "26.08"
 sdk: org.freedesktop.Sdk
 command: glyphvane
-# A bundle file needs no AppStream catalogue (that is for repositories such
-# as Flathub). The metainfo is still validated in the release workflow.
-appstream-compose: false
+# flatpak-builder composes the AppStream catalogue (share/app-info) from the
+# metainfo, desktop file and icons. The bundle carries it in its header and
+# the repository's appstream branch is made from it: software centres show
+# the name, summary, licence, links, screenshots and icon from it.
 
 finish-args:
   # Windows: Wayland, with X11 where there is no Wayland.

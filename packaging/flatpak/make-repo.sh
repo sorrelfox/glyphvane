@@ -68,6 +68,14 @@ flatpak build-update-repo --gpg-sign="$fingerprint" --gpg-homedir="$GPG_HOMEDIR"
   --comment="Glyphvane, a Markdown reader and editor" \
   --generate-static-deltas --prune "$repo"
 
+# Software centres read the app's name, licence, links and icon from the
+# appstream branches, which are made from the AppStream catalogue in each
+# bundle's commit (flatpak-builder's compose step).
+for ref in $(ostree refs --repo="$repo" | grep '^appstream2/'); do
+  ostree cat --repo="$repo" "$ref" /appstream.xml | grep "<id>$APP_ID</id>" > /dev/null ||
+    die "$ref has no AppStream data for $APP_ID (was the bundle built without appstream-compose?)"
+done
+
 # The branch the bundles carry (flatpak-builder's default, master).
 branch=$(ostree refs --repo="$repo" | awk -F/ -v id="$APP_ID" '$1 == "app" && $2 == id { print $4; exit }')
 [ -n "$branch" ] || die "the bundles do not contain app/$APP_ID"
