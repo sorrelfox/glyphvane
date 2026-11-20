@@ -102,6 +102,11 @@
   <content_rating type="oars-1.1"/>
   <!-- Add an entry for every release, newest first. -->
   <releases>
+    <release version="1.3.1" date="2026-11-20">
+      <description>
+        <p>Software centres show Glyphvane's name, description, licence, screenshots, links and icon when installing the Flatpak.</p>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-11-19">
       <description>
         <p>PDF text selection across pages, reading order for two-column pages, and find across lines, pages and hyphenated words.</p>
