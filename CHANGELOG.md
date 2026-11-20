@@ -3,6 +3,14 @@
 All notable changes to Glyphvane are listed here. The format follows
 Conventional Commits, and versions follow Semantic Versioning.
 
+## [Unreleased]
+
+### Changes
+
+- The editor's context menu is shorter: the table commands are grouped in
+  a Table submenu. Point at Table or press Right to open it, and Left or
+  Esc to go back.
+
 ## [1.3.1] - 2026-11-20
 
 ### Fixes

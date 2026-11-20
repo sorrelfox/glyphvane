@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Glyphvane contributors
 
 //! Context menus and side panels in headless windows: the tab menu, More
-//! actions, right-clicks in the views, the context menu key, keeping a
-//! menu inside the window, and the sidebar switcher.
+//! actions, right-clicks in the views, the context menu key, the editor
+//! menu's Table submenu, keeping a menu inside the window, and the sidebar
+//! switcher.
 
 use std::path::{Path, PathBuf};
 
@@ -135,6 +136,52 @@ impl Fixture {
             .workspace
             .read_with(&self.vcx, |ws, _| ws.context_menu().clone());
         popover.read_with(&self.vcx, |p, _| p.highlighted())
+    }
+
+    /// The submenu shown.
+    fn submenu(&mut self) -> Option<&'static str> {
+        let popover = self
+            .workspace
+            .read_with(&self.vcx, |ws, _| ws.context_menu().clone());
+        popover.read_with(&self.vcx, |p, _| p.submenu())
+    }
+
+    /// The highlighted submenu row, while nothing in its submenu is.
+    fn highlighted_submenu(&mut self) -> Option<&'static str> {
+        let popover = self
+            .workspace
+            .read_with(&self.vcx, |ws, _| ws.context_menu().clone());
+        popover.read_with(&self.vcx, |p, _| p.highlighted_submenu())
+    }
+
+    fn move_to(&mut self, selector: &str) {
+        let at = self
+            .bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+            .center();
+        self.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        draw(&mut self.vcx);
+    }
+
+    /// Opens the editor menu at `at`, as a right-click in the editor does.
+    fn editor_menu_at(&mut self, at: Point<Pixels>) {
+        self.vcx
+            .update(|window, cx| show_context_menu(ContextMenu::Editor, at, window, cx));
+        draw(&mut self.vcx);
+        assert_eq!(self.menu(), Some(ContextMenu::Editor));
+    }
+
+    fn editor(&mut self) -> Entity<crate::editor::EditorView> {
+        self.workspace
+            .read_with(&self.vcx, |ws, _| ws.active_tab().editor().cloned())
+            .expect("an editor")
+    }
+
+    fn editor_text(&mut self) -> String {
+        let editor = self.editor();
+        editor.read_with(&self.vcx, |e, _| {
+            e.editor().map(|e| e.text().to_string()).unwrap_or_default()
+        })
     }
 
     fn tabs(&mut self) -> Vec<String> {
@@ -377,39 +424,245 @@ fn the_editor_menu_opens_on_right_click_and_shift_f10(cx: &mut TestAppContext) {
     assert!(f.editor_focused());
 }
 
-/// The editor menu's table items run at the caret's cell, and are
-/// disabled outside a table (but Format table, which inserts one).
-#[gpui::test]
-fn the_editor_menu_runs_table_commands(cx: &mut TestAppContext) {
-    let text = "Words.\n\n| a | b |\n|---|---|\n| c | d |\n";
-    let mut f = fixture_sized(cx, text, WIDTH, HEIGHT);
+const TABLE: &str = "Words.\n\n| a | b |\n|---|---|\n| c | d |\n";
+const TABLE_WITH_ROW: &str =
+    "Words.\n\n| a   | b   |\n| --- | --- |\n| c   | d   |\n|     |     |\n";
+
+/// A window on [`TABLE`] in the Source view, the caret in the cell `c`
+/// when `in_cell`.
+fn table_fixture(cx: &mut TestAppContext, width: f32, height: f32, in_cell: bool) -> Fixture {
+    let mut f = fixture_sized(cx, TABLE, width, height);
     f.dispatch(ToggleEditMode);
     assert!(f.editor_focused());
+    if in_cell {
+        let editor = f.editor();
+        editor.update(&mut f.vcx, |e, cx| e.set_cursor(30, cx));
+        draw(&mut f.vcx);
+    }
+    f
+}
+
+/// The editor menu's table items are in its Table submenu. They run at the
+/// caret's cell, and are disabled outside a table (but Format table, which
+/// inserts one, so Table is enabled).
+#[gpui::test]
+fn the_editor_menu_runs_table_commands(cx: &mut TestAppContext) {
+    let mut f = table_fixture(cx, WIDTH, HEIGHT, false);
     f.keys("shift-f10");
     assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    assert!(f.has("context-menu-submenu-row:Table"));
+    assert!(!f.has("context-menu-submenu-disabled:Table"));
+    assert!(!f.has("context-menu-item:editor.table"), "not listed flat");
+    f.click("context-menu-submenu-row:Table");
+    assert_eq!(f.submenu(), Some("Table"));
     assert!(f.has("context-menu-disabled:editor.table_insert_row_below"));
     assert!(!f.has("context-menu-disabled:editor.table"));
     f.keys("escape");
+    f.keys("escape");
+    assert_eq!(f.menu(), None);
     // In the cell `c`.
-    let editor = f
-        .workspace
-        .read_with(&f.vcx, |ws, _| ws.active_tab().editor().cloned())
-        .expect("an editor");
+    let editor = f.editor();
     editor.update(&mut f.vcx, |e, cx| e.set_cursor(30, cx));
     draw(&mut f.vcx);
     f.keys("shift-f10");
     assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    f.click("context-menu-submenu-row:Table");
     assert!(!f.has("context-menu-disabled:editor.table_insert_row_below"));
     f.click("context-menu-item:editor.table_insert_row_below");
     assert_eq!(f.menu(), None);
-    let now = editor.read_with(&f.vcx, |e, _| {
-        e.editor().map(|e| e.text().to_string()).unwrap_or_default()
-    });
-    assert_eq!(
-        now,
-        "Words.\n\n| a   | b   |\n| --- | --- |\n| c   | d   |\n|     |     |\n"
-    );
+    assert_eq!(f.editor_text(), TABLE_WITH_ROW);
     assert!(f.editor_focused());
+}
+
+/// Right or Enter opens the Table submenu with its first enabled item
+/// highlighted; the arrow keys then move in it, skipping disabled items;
+/// Left or Esc goes back to its row, Esc there closes the menu, and Enter
+/// on an item runs it and closes the whole menu.
+#[gpui::test]
+fn the_table_submenu_from_the_keyboard(cx: &mut TestAppContext) {
+    let mut f = table_fixture(cx, WIDTH, HEIGHT, false);
+    f.keys("shift-f10");
+    assert_eq!(f.highlighted(), Some("editor.cut"));
+    // Up wraps to the last enabled row, Table (the spelling items are
+    // disabled off a misspelled word).
+    f.keys("up");
+    assert_eq!(f.highlighted(), None);
+    assert_eq!(f.highlighted_submenu(), Some("Table"));
+    assert_eq!(f.submenu(), None);
+    f.keys("right");
+    assert_eq!(f.submenu(), Some("Table"));
+    assert_eq!(f.highlighted(), Some("editor.table"));
+    // Outside a table only Format table is enabled.
+    f.keys("down");
+    assert_eq!(f.highlighted(), Some("editor.table"));
+    f.keys("left");
+    assert_eq!(f.submenu(), None);
+    assert_eq!(f.highlighted_submenu(), Some("Table"));
+    assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    // Back in the menu, Down wraps to Cut.
+    f.keys("down");
+    assert_eq!(f.highlighted(), Some("editor.cut"));
+    f.keys("up enter");
+    assert_eq!(f.submenu(), Some("Table"));
+    assert_eq!(f.highlighted(), Some("editor.table"));
+    f.keys("escape");
+    assert_eq!(f.submenu(), None);
+    assert_eq!(f.highlighted_submenu(), Some("Table"));
+    assert_eq!(f.menu(), Some(ContextMenu::Editor));
+    f.keys("escape");
+    assert_eq!(f.menu(), None);
+    assert!(f.editor_focused());
+
+    // In a cell every item is enabled: Down from Format table is Insert
+    // row above, Up from it wraps to Sort by column.
+    let editor = f.editor();
+    editor.update(&mut f.vcx, |e, cx| e.set_cursor(30, cx));
+    draw(&mut f.vcx);
+    f.keys("shift-f10 up right down");
+    assert_eq!(f.highlighted(), Some("editor.table_insert_row_above"));
+    f.keys("up up");
+    assert_eq!(f.highlighted(), Some("editor.table_sort_by_column"));
+    f.keys("home down down");
+    assert_eq!(f.highlighted(), Some("editor.table_insert_row_below"));
+    f.keys("enter");
+    assert_eq!(f.menu(), None);
+    assert_eq!(f.editor_text(), TABLE_WITH_ROW);
+    assert!(f.editor_focused());
+}
+
+/// Pointing at the Table row shows the submenu at the menu's right, its
+/// first item level with the row; it stays open while the pointer moves
+/// into it, and pointing at another row of the menu closes it.
+#[gpui::test]
+fn the_table_submenu_follows_the_pointer(cx: &mut TestAppContext) {
+    let mut f = table_fixture(cx, WIDTH, HEIGHT, false);
+    f.editor_menu_at(point(px(100.0), px(60.0)));
+    f.move_to("context-menu-submenu-row:Table");
+    assert_eq!(f.submenu(), Some("Table"));
+    assert_eq!(f.highlighted_submenu(), Some("Table"));
+    let menu = f.bounds("context-menu").expect("menu drawn");
+    let row = f
+        .bounds("context-menu-submenu-row:Table")
+        .expect("row drawn");
+    let submenu = f.bounds("context-menu-submenu").expect("submenu drawn");
+    assert_eq!(submenu.left(), menu.right() + px(spacing::SUBMENU_GAP));
+    assert_eq!(submenu.size.width, px(MENU_WIDTH));
+    let first = f.bounds("context-menu-item:editor.table").expect("drawn");
+    assert_eq!(first.top(), row.top());
+
+    f.move_to("context-menu-item:editor.table");
+    assert_eq!(f.submenu(), Some("Table"));
+    assert_eq!(f.highlighted(), Some("editor.table"));
+    // A disabled item is not highlighted.
+    f.move_to("context-menu-item:editor.table_delete_row");
+    assert_eq!(f.highlighted(), Some("editor.table"));
+
+    f.move_to("context-menu-item:editor.copy");
+    assert_eq!(f.submenu(), None);
+    assert!(!f.has("context-menu-submenu"));
+    assert_eq!(f.highlighted(), Some("editor.copy"));
+
+    // A click on the row shows it too; running an item from it closes the
+    // whole menu.
+    f.click("context-menu-submenu-row:Table");
+    assert_eq!(f.submenu(), Some("Table"));
+    f.click("context-menu-item:editor.table");
+    assert_eq!(f.menu(), None);
+    assert!(f.editor_focused());
+}
+
+/// Without room at the menu's right the submenu opens at its left; in a
+/// short window it moves up, keeps the margins and scrolls to the
+/// highlighted item.
+#[gpui::test]
+fn the_table_submenu_stays_inside_the_window(cx: &mut TestAppContext) {
+    let (width, height) = (640.0, 300.0);
+    let mut f = table_fixture(cx, width, height, true);
+    f.editor_menu_at(point(px(width - MENU_WIDTH - 40.0), px(20.0)));
+    f.keys("up right");
+    assert_eq!(f.submenu(), Some("Table"));
+    let menu = f.bounds("context-menu").expect("menu drawn");
+    let submenu = f.bounds("context-menu-submenu").expect("submenu drawn");
+    assert_eq!(submenu.right(), menu.left() - px(spacing::SUBMENU_GAP));
+    assert!(
+        (f32::from(submenu.size.height) - (height - 2.0 * spacing::EDGE)).abs() < 0.5,
+        "{submenu:?}"
+    );
+    assert!(
+        (f32::from(submenu.top()) - spacing::EDGE).abs() < 0.5,
+        "{submenu:?}"
+    );
+    let shown = |f: &mut Fixture| {
+        let submenu = f.bounds("context-menu-submenu").expect("submenu drawn");
+        let command = f.highlighted().expect("an item is highlighted");
+        let item = f
+            .bounds(&format!("context-menu-item:{command}"))
+            .expect("item drawn");
+        assert!(
+            item.top() >= submenu.top() && item.bottom() <= submenu.bottom(),
+            "{command}: {item:?} in {submenu:?}"
+        );
+    };
+    let last = f
+        .bounds("context-menu-item:editor.table_sort_by_column")
+        .expect("drawn");
+    assert!(last.top() >= submenu.bottom(), "Sort starts out of view");
+    f.keys("end");
+    assert_eq!(f.highlighted(), Some("editor.table_sort_by_column"));
+    shown(&mut f);
+    f.keys("home");
+    assert_eq!(f.highlighted(), Some("editor.table"));
+    shown(&mut f);
+}
+
+/// The Table row is a menu item that tells assistive technology whether
+/// its submenu is shown; the submenu is a menu named Table.
+#[gpui::test]
+fn the_table_submenu_is_accessible(cx: &mut TestAppContext) {
+    use crate::a11y::{Role, testing};
+    let mut f = table_fixture(cx, WIDTH, HEIGHT, false);
+    f.keys("shift-f10");
+    let table_row = |f: &mut Fixture| {
+        let rows: Vec<_> = testing::with_role(&mut f.vcx, Role::MenuItem)
+            .into_iter()
+            .filter(|n| n.label.as_deref() == Some("Table"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        rows.into_iter().next().expect("checked")
+    };
+    let menus = |f: &mut Fixture| {
+        testing::with_role(&mut f.vcx, Role::Menu)
+            .into_iter()
+            .filter(|n| n.label.as_deref() == Some("Table"))
+            .count()
+    };
+    let row = table_row(&mut f);
+    assert_eq!(row.expanded, Some(false));
+    assert!(!row.disabled);
+    assert_eq!(menus(&mut f), 0);
+    f.keys("up right");
+    assert_eq!(table_row(&mut f).expanded, Some(true));
+    assert_eq!(menus(&mut f), 1);
+    f.keys("left");
+    assert_eq!(table_row(&mut f).expanded, Some(false));
+    assert_eq!(menus(&mut f), 0);
+}
+
+/// Where no table command can run (the editor's menu opened while Preview
+/// has the keyboard), the Table row is dimmed and does not open.
+#[gpui::test]
+fn a_disabled_submenu_does_not_open(cx: &mut TestAppContext) {
+    let mut f = fixture_sized(cx, TABLE, WIDTH, HEIGHT);
+    assert!(f.reader_focused());
+    f.editor_menu_at(point(px(100.0), px(60.0)));
+    assert!(f.has("context-menu-submenu-disabled:Table"));
+    f.move_to("context-menu-submenu-row:Table");
+    assert_eq!(f.submenu(), None);
+    f.click("context-menu-submenu-row:Table");
+    assert_eq!(f.submenu(), None);
+    f.keys("end right enter");
+    assert_eq!(f.submenu(), None);
+    assert_eq!(f.highlighted_submenu(), None);
 }
 
 /// In Preview a right-click on a link opens the link menu; elsewhere it

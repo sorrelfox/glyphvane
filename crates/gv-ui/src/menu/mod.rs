@@ -17,9 +17,10 @@
 //!   it from the keyboard; arrow keys move and open, Enter runs, Esc closes;
 //!   the shortcut labels come from the keymap. A submenu taller than the
 //!   room below its row moves up, and scrolls when taller than the window.
-//! - **Context menus** (link, editor, file tree, tab, More actions): one
+//! - **Context menus** (link, editor, file tree, tab, More actions): a
 //!   panel at the pointer, a button or the caret, drawn the same way
-//!   ([`context`]).
+//!   ([`context`]). A row can open a submenu beside it, as the application
+//!   menu's rows do (the editor menu's Table).
 //!
 //! The menu's contents, the submenu layout and every context menu but the
 //! link menu are not designed.
@@ -54,7 +55,8 @@ gpui::actions!(
         SelectFirst,
         /// Highlight the last item.
         SelectLast,
-        /// Open the highlighted menu, or the next menu from a submenu.
+        /// Open the highlighted menu, or the next menu from a submenu (in a
+        /// context menu, open the highlighted submenu).
         OpenSubmenu,
         /// Go back from a submenu to the menus.
         CloseSubmenu,
@@ -121,6 +123,11 @@ fn native_item(entry: &Entry) -> Option<gpui::MenuItem> {
     Some(match *entry {
         Entry::Separator => gpui::MenuItem::separator(),
         Entry::Suggestion(_) => return None,
+        Entry::Submenu(submenu) => gpui::MenuItem::submenu(gpui::Menu {
+            name: submenu.title.into(),
+            items: submenu.entries.iter().filter_map(native_item).collect(),
+            disabled: false,
+        }),
         Entry::Command(item) => gpui::MenuItem::Action {
             name: item.title.into(),
             action: action_for(item.command)?,

@@ -435,18 +435,19 @@ pub(super) fn item_enabled(
 }
 
 /// The height of a panel holding `entries`: its border and padding, 24 per
-/// item and 9 per separator. The system's own entries are not drawn.
+/// row and 9 per separator. The system's own entries are not drawn.
 pub(crate) fn panel_height(entries: &[Entry]) -> f32 {
-    let separator = HAIRLINE + 2.0 * spacing::SEPARATOR_MARGIN_Y;
-    entries
-        .iter()
-        .map(|entry| match entry {
-            Entry::Command(_) | Entry::Suggestion(_) => MENU_ROW,
-            Entry::Separator => separator,
-            Entry::System(_) => 0.0,
-        })
-        .sum::<f32>()
-        + 2.0 * (HAIRLINE + spacing::PAD)
+    entries.iter().map(entry_height).sum::<f32>() + 2.0 * (HAIRLINE + spacing::PAD)
+}
+
+/// The height of `entry`'s row in a panel: 24, 9 for a separator, nothing
+/// for the system's own entries.
+pub(super) fn entry_height(entry: &Entry) -> f32 {
+    match entry {
+        Entry::Command(_) | Entry::Submenu(_) | Entry::Suggestion(_) => MENU_ROW,
+        Entry::Separator => HAIRLINE + 2.0 * spacing::SEPARATOR_MARGIN_Y,
+        Entry::System(_) => 0.0,
+    }
 }
 
 /// Where a panel `height` high that would start at `top` goes in a window
@@ -595,8 +596,16 @@ pub(crate) fn row(theme: &Theme, highlighted: bool) -> Div {
         .when(highlighted, |row| row.bg(theme.accent.tint))
 }
 
-fn label(title: &'static str) -> Div {
+pub(super) fn label(title: &'static str) -> Div {
     div().flex_1().min_w_0().truncate().child(title)
+}
+
+/// The chevron at the end of a row that opens a submenu.
+pub(super) fn chevron(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_color(theme.text.secondary)
+        .child(Icon::Submenu.sized(icon::CHEVRON))
 }
 
 /// A separator: 1 px `border.default`, margin `4 8`.
@@ -636,12 +645,7 @@ impl MenuPopover {
                 this.open_submenu(index, false, window, cx);
             }))
             .child(label(title))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(theme.text.secondary)
-                    .child(Icon::Submenu.sized(icon::CHEVRON)),
-            )
+            .child(chevron(theme))
             .into_any_element()
     }
 
@@ -701,7 +705,8 @@ impl MenuPopover {
             .filter_map(|(index, entry)| match *entry {
                 Entry::Separator => Some(separator(theme).into_any_element()),
                 Entry::Command(item) => Some(self.item_row(index, item, checks, theme, window, cx)),
-                Entry::System(_) | Entry::Suggestion(_) => None,
+                // The application menus have no submenus of their own.
+                Entry::System(_) | Entry::Suggestion(_) | Entry::Submenu(_) => None,
             })
             .collect();
         let origin = f32::from(origin);

@@ -279,7 +279,8 @@ fn the_context_menus_hold_their_commands() {
             "spell.ignore",
         ]
     );
-    // Every table command, Insert or format table first.
+    // Every table command, Insert or format table first (in the Table
+    // submenu).
     let registry = CommandRegistry::builtin();
     let tables: Vec<&str> = registry
         .iter()
@@ -332,6 +333,87 @@ fn the_context_menus_hold_their_commands() {
     );
 }
 
+/// What a panel shows: a command's title, `-` for a separator, a submenu's
+/// title and `>`.
+fn rows(entries: &[Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Command(item) => Some(item.title.to_owned()),
+            Entry::Separator => Some("-".to_owned()),
+            Entry::Submenu(submenu) => Some(format!("{} >", submenu.title)),
+            Entry::System(_) | Entry::Suggestion(_) => None,
+        })
+        .collect()
+}
+
+/// The editor menu ends with one Table submenu holding the table commands
+/// in groups, instead of listing them.
+#[test]
+fn the_editor_menu_groups_the_table_commands() {
+    let menu = context_menu(ContextMenu::Editor);
+    assert_eq!(
+        rows(&menu.entries),
+        [
+            "Cut",
+            "Copy",
+            "Copy as Markdown",
+            "Paste",
+            "Paste as plain text",
+            "-",
+            "Add to dictionary",
+            "Add to vault dictionary",
+            "Ignore",
+            "-",
+            "Table >",
+        ]
+    );
+    let Some(Entry::Submenu(table)) = menu.entries.last() else {
+        panic!("the menu ends with a submenu");
+    };
+    assert_eq!(
+        rows(table.entries),
+        [
+            "Format table",
+            "-",
+            "Insert row above",
+            "Insert row below",
+            "Insert column left",
+            "Insert column right",
+            "-",
+            "Delete row",
+            "Delete column",
+            "-",
+            "Move row up",
+            "Move row down",
+            "Move column left",
+            "Move column right",
+            "-",
+            "Align column left",
+            "Center column",
+            "Align column right",
+            "Remove column alignment",
+            "-",
+            "Sort by column",
+        ]
+    );
+}
+
+/// Only the context menus have submenus: the application menu's popover
+/// draws one level of submenus, and the system menu bar is not given more.
+#[test]
+fn only_context_menus_have_submenus() {
+    for platform in Platform::ALL {
+        for menu in app_menus(platform) {
+            assert!(
+                !menu.entries.iter().any(|e| matches!(e, Entry::Submenu(_))),
+                "{}",
+                menu.title
+            );
+        }
+    }
+}
+
 /// Every menu on every platform, and every context menu.
 fn all_menus() -> Vec<super::model::Menu> {
     let mut menus: Vec<_> = Platform::ALL.into_iter().flat_map(app_menus).collect();
@@ -359,15 +441,32 @@ fn every_item_names_a_command() {
             assert!(action_for(item.command).is_some(), "{}", item.command);
             assert!(seen.insert(item.command), "{} twice", item.command);
         }
-        // No separator at either end or twice in a row.
-        let separators: Vec<bool> = menu
-            .entries
-            .iter()
-            .map(|e| matches!(e, Entry::Separator))
-            .collect();
-        assert!(!separators.first().copied().unwrap_or(true));
-        assert!(!separators.last().copied().unwrap_or(true));
-        assert!(!separators.windows(2).any(|w| w[0] && w[1]));
+        // No separator at either end or twice in a row, in the menu and
+        // in its submenus; a submenu has no submenus.
+        let mut panels = vec![&menu.entries[..]];
+        for entry in &menu.entries {
+            if let Entry::Submenu(submenu) = entry {
+                assert!(!submenu.entries.is_empty(), "{}", submenu.title);
+                assert!(
+                    !submenu
+                        .entries
+                        .iter()
+                        .any(|e| matches!(e, Entry::Submenu(_))),
+                    "{}",
+                    submenu.title
+                );
+                panels.push(submenu.entries);
+            }
+        }
+        for entries in panels {
+            let separators: Vec<bool> = entries
+                .iter()
+                .map(|e| matches!(e, Entry::Separator))
+                .collect();
+            assert!(!separators.first().copied().unwrap_or(true));
+            assert!(!separators.last().copied().unwrap_or(true));
+            assert!(!separators.windows(2).any(|w| w[0] && w[1]));
+        }
     }
 }
 

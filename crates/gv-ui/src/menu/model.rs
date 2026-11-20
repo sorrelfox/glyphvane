@@ -15,6 +15,10 @@
 //! (strikethrough, highlight and task boxes in CommonMark) or at the carets
 //! (bold in a code block). In viewer mode Edit and Split are disabled, and
 //! so is everything that edits.
+//!
+//! A context menu can group items in a submenu (the editor menu's Table):
+//! a row that shows them in a panel beside the menu, enabled while one of
+//! them is.
 
 use gv_settings::keymap::Platform;
 
@@ -36,18 +40,37 @@ impl Menu {
         }
     }
 
-    /// The command items, in order.
+    /// The command items, in order, with those of its submenus where the
+    /// submenus are.
     pub fn items(&self) -> impl Iterator<Item = &Item> {
-        self.entries.iter().filter_map(|e| match e {
-            Entry::Command(item) => Some(item),
-            Entry::Separator | Entry::System(_) | Entry::Suggestion(_) => None,
-        })
+        let mut items = Vec::new();
+        collect_items(&self.entries, &mut items);
+        items.into_iter()
     }
 
-    /// Whether some item shows a check mark.
+    /// Whether some item of the menu's own panel shows a check mark.
     pub fn has_checks(&self) -> bool {
-        self.items().any(|i| i.mode.is_some() || i.toggle.is_some())
+        has_checks(&self.entries)
     }
+}
+
+fn collect_items<'a>(entries: &'a [Entry], items: &mut Vec<&'a Item>) {
+    for entry in entries {
+        match entry {
+            Entry::Command(item) => items.push(item),
+            Entry::Submenu(submenu) => collect_items(submenu.entries, items),
+            Entry::Separator | Entry::System(_) | Entry::Suggestion(_) => {}
+        }
+    }
+}
+
+/// Whether some command of `entries` (not of their submenus) shows a check
+/// mark, so that their panel gives every row a check slot.
+pub fn has_checks(entries: &[Entry]) -> bool {
+    entries.iter().any(|e| match e {
+        Entry::Command(i) => i.mode.is_some() || i.toggle.is_some(),
+        _ => false,
+    })
 }
 
 /// One entry of a menu.
@@ -56,11 +79,22 @@ pub enum Entry {
     /// Runs a command.
     Command(Item),
     Separator,
+    /// A row that shows more entries in a panel beside its menu. Only the
+    /// context menus have them.
+    Submenu(Submenu),
     /// An entry of the system's own (macOS).
     System(SystemEntry),
     /// Spelling suggestion `n` of the word the editor's menu was opened on
     /// (only in that menu: the suggestions come with it).
     Suggestion(usize),
+}
+
+/// A submenu: its row's title and the entries it shows. They are commands
+/// and separators (a submenu has no submenus of its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Submenu {
+    pub title: &'static str,
+    pub entries: &'static [Entry],
 }
 
 /// A menu item that runs a command.
@@ -247,6 +281,34 @@ const fn with_role(command: &'static str, title: &'static str, role: Role) -> En
 }
 
 const SEPARATOR: Entry = Entry::Separator;
+
+/// The editor menu's table commands.
+const TABLE: Submenu = Submenu {
+    title: "Table",
+    entries: &[
+        item("editor.table", "Format table"),
+        SEPARATOR,
+        item("editor.table_insert_row_above", "Insert row above"),
+        item("editor.table_insert_row_below", "Insert row below"),
+        item("editor.table_insert_column_left", "Insert column left"),
+        item("editor.table_insert_column_right", "Insert column right"),
+        SEPARATOR,
+        item("editor.table_delete_row", "Delete row"),
+        item("editor.table_delete_column", "Delete column"),
+        SEPARATOR,
+        item("editor.table_move_row_up", "Move row up"),
+        item("editor.table_move_row_down", "Move row down"),
+        item("editor.table_move_column_left", "Move column left"),
+        item("editor.table_move_column_right", "Move column right"),
+        SEPARATOR,
+        item("editor.table_align_left", "Align column left"),
+        item("editor.table_align_center", "Center column"),
+        item("editor.table_align_right", "Align column right"),
+        item("editor.table_align_none", "Remove column alignment"),
+        SEPARATOR,
+        item("editor.table_sort_by_column", "Sort by column"),
+    ],
+};
 
 /// The application's menus on `platform`, in menu bar order. On macOS the
 /// application menu comes first and holds About, Check for updates,
@@ -494,8 +556,9 @@ pub enum ContextMenu {
     /// On a link, in Preview and in the editor.
     Link,
     /// In the editor, off a link. The spelling items apply to a misspelled
-    /// word (its suggestions come first, added when the menu opens on one)
-    /// and the table items inside a table.
+    /// word (its suggestions come first, added when the menu opens on one),
+    /// and the items of the Table submenu inside a table (but Format table,
+    /// which also inserts one).
     Editor,
     /// On an entry of the file tree.
     FileTree,
@@ -549,22 +612,7 @@ pub fn context_menu(kind: ContextMenu) -> Menu {
                 ),
                 requiring("spell.ignore", "Ignore", Requirement::Misspelled),
                 SEPARATOR,
-                item("editor.table", "Format table"),
-                item("editor.table_insert_row_above", "Insert row above"),
-                item("editor.table_insert_row_below", "Insert row below"),
-                item("editor.table_insert_column_left", "Insert column left"),
-                item("editor.table_insert_column_right", "Insert column right"),
-                item("editor.table_delete_row", "Delete row"),
-                item("editor.table_delete_column", "Delete column"),
-                item("editor.table_move_row_up", "Move row up"),
-                item("editor.table_move_row_down", "Move row down"),
-                item("editor.table_move_column_left", "Move column left"),
-                item("editor.table_move_column_right", "Move column right"),
-                item("editor.table_align_left", "Align column left"),
-                item("editor.table_align_center", "Center column"),
-                item("editor.table_align_right", "Align column right"),
-                item("editor.table_align_none", "Remove column alignment"),
-                item("editor.table_sort_by_column", "Sort by column"),
+                Entry::Submenu(TABLE),
             ],
         ),
         ContextMenu::FileTree => Menu::new(
