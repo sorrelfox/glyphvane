@@ -96,7 +96,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 # Conformance tooling: the comrak differential oracle (dev-only, exact pin so
 # recorded divergences stay valid; bump deliberately) and spec fixtures.
-comrak = { version = "=0.59.0", default-features = false }
+comrak = { version = "=1.1.0", default-features = false }
 serde_json = "1.0.145"
 # Vault: path index and link resolver (gv-vault). Unicode caseless matching
 # (full case folding, Unicode 16) and normalization for path keys, the
@@ -119,7 +119,7 @@ toml_edit = "0.25.19"
 # App: the settings file watcher (debounced; re-exports `notify`) and the
 # channel that hands reloaded settings to the UI thread.
 futures = "0.3.34"
-notify-debouncer-full = "0.7.0"
+notify-debouncer-full = "0.8.0"
 # App: single instance. `rustix` gives the user id and the Unix socket's peer
 # credentials without `unsafe`; `interprocess` is the Windows named pipe.
 interprocess = { version = "2.4.6", default-features = false }
@@ -127,7 +127,7 @@ rustix = { version = "1.1.6", features = ["net", "process"] }
 # App: the native message box shown when the GPU cannot be used (Windows
 # `MessageBoxW`, macOS `NSAlert`). Default features only add Linux backends,
 # which use zenity and kdialog directly instead.
-rfd = { version = "0.17.2", default-features = false }
+rfd = { version = "0.18.0", default-features = false }
 # Settings and save pipeline (gv-settings): `ReplaceFileW` for atomic saves on
 # Windows. The version the tree already has (tempfile, rustix and others use
 # it; MIT OR Apache-2.0).
@@ -157,8 +157,8 @@ zed-test-util = { path = "third_party/zed/test-shims/util" }
 # line diff behind reloads and 3-way merges (the `similar` version GPUI
 # already pulls in; Apache-2.0).
 crc32fast = "1.5.5"
-sha2 = "0.10.9"
-similar = "2.7.0"
+sha2 = "0.11.1"
+similar = "3.2.1"
 # File operations (gv-vault `refactor`): Delete moves files to the OS
 # trash: the freedesktop trash on Linux and the BSDs, NSFileManager on
 # macOS, the shell's recycle bin on Windows (MIT; checked 2026-11-17).
@@ -181,18 +181,18 @@ ammonia = "=4.2.5"
 # already pulls in; MIT OR Apache-2.0). RaTeX has one maintainer and releases often: exact pins, bump
 # together after the math golden tests pass. Never add `ratex-font-loader`
 # or `ratex-unicode-font` (they scan system fonts and log to stderr).
-ratex-katex-fonts = "=0.1.15"
+ratex-katex-fonts = "=0.1.16"
 ratex-layout = "=0.1.15"
 ratex-parser = "=0.1.15"
-ratex-types = "=0.1.15"
-skrifa = "0.44.0"
+ratex-types = "=0.1.16"
+skrifa = "0.49.0"
 # Math golden tests: CPU rasterizer (the version GPUI already pulls in;
 # BSD-3-Clause).
-tiny-skia = "0.11.4"
+tiny-skia = "0.12.0"
 # App (gv-app, Linux): the font database GPUI's text stack already uses
 # (same version and default features; MIT), to find the installed colour
 # emoji font and decide whether the bundled one is needed (R-22).
-fontdb = "0.23.0"
+fontdb = "0.24.0"
 # App (gv-app): the clipboard's HTML flavor for smart paste, which GPUI's
 # clipboard does not carry (MIT OR Apache-2.0). Without the default
 # `image-data` feature: no image decoder. gv-app adds Wayland data-control.
@@ -222,15 +222,15 @@ merman = { version = "=0.10.0", default-features = false, features = [
 # SVG rasterizer (gv-media). The 0.47 line merman's font context already
 # pulls in, so the tree has one usvg next to GPUI's own (MIT OR Apache-2.0).
 # No system-font scanning: callers hand in a font database.
-usvg = { version = "0.47.0", default-features = false, features = ["text"] }
-resvg = { version = "0.47.0", default-features = false, features = ["text", "raster-images"] }
+usvg = { version = "0.50.0", default-features = false, features = ["text"] }
+resvg = { version = "0.50.0", default-features = false, features = ["text", "raster-images"] }
 # Images (gv-media, ADR-019): pure-Rust decoders through `image` (MIT OR
 # Apache-2.0), only the formats the plan lists; no rayon, no AVIF (that goes
 # through the helper), no TIFF unless gv-media's `tiff` feature is on.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # ICC to sRGB (gv-media): the moxcms version `image` already uses
 # (BSD-3-Clause OR Apache-2.0).
-moxcms = "0.8.1"
+moxcms = "0.9.2"
 # Downscaling decoded images to display size (gv-media): pure Rust with SIMD
 # paths, alpha-correct (MIT OR Apache-2.0). Only the RGBA8 pixel type is
 # compiled in.
@@ -275,7 +275,7 @@ ureq = { version = "=3.5.2", default-features = false, features = ["rustls-no-pr
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Image dimensions (gv-export: the PDF pre-flight), the version usvg already
 # pulls in (MIT).
-imagesize = "0.14.0"
+imagesize = "0.15.0"
 # PDF export (gv-helper, the `glyphvane-helper` executable only): Typst as
 # a library over generated source (Apache-2.0; typst-pdf writes through
 # krilla, MIT OR Apache-2.0). Without typst-assets' bundled fonts: fonts
@@ -291,7 +291,7 @@ postcard = { version = "1.1.3", default-features = false, features = ["use-std"]
 lopdf = { version = "=0.47.0", default-features = false }
 # Print (gv-app, Linux): the xdg-desktop-portal Print interface, through the
 # ashpd line GPUI already uses (MIT), on the async-io runtime GPUI uses.
-ashpd = { version = "0.13.13", default-features = false, features = [
+ashpd = { version = "0.14.1", default-features = false, features = [
   "async-io",
   "print",
   "raw_handle",
